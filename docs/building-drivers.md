@@ -69,7 +69,7 @@ It verifies an initially private draft's complete assets before making an engine
 
 ## Install a downloaded HAR
 
-Open the official [GitHub Releases page](https://github.com/OrcaSQL-Workbench/ArkDB/releases). The first public HAR release has not been published yet; a local build is not a public download. Once a release is available, download the HAR, its matching checksum and manifest from that same version. Verify the SHA-256 before importing it:
+The first downloadable engineering preview is [mysql-v1.0.1](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.1). Download its [HAR](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.har), matching [checksum](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.har.sha256), and [manifest](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.manifest.json) from that same version. Verify the SHA-256 before importing it:
 
 ```powershell
 Get-FileHash -Algorithm SHA256 .\arkdb-mysql-1.0.1.har
@@ -77,6 +77,8 @@ Get-Content .\arkdb-mysql-1.0.1.har.sha256
 ```
 
 The hashes must match exactly. The artifact must also target the consumer's supported HarmonyOS SDK; the current package is an API-24 bytecode HAR using normalized OHM URLs.
+
+For the immutable 1.0.1 HAR, the published SHA-256 is `5bbf36425405392c4b18b3d11a8a891c8be765d9d9ef4f292e8a310863ae884e` (114,127 bytes). Its source commit is `27d4095575ca56ff4f1b9d38221e610034f3a049`; later main-branch documentation/maintenance fixes do not replace those release bytes.
 
 From the consuming application's module directory, for example `entry`:
 

@@ -22,7 +22,8 @@ export function createGitHubClient(root, { execFileSync = execute } = {}) {
         '--header', 'X-GitHub-Api-Version: 2022-11-28'];
       const input = body === undefined ? undefined : binary ? body : Buffer.from(JSON.stringify(body));
       if (input !== undefined) {
-        args.push('--header', `Content-Type: ${binary ? 'application/octet-stream' : 'application/json'}`, '--input', '-');
+        args.push('--header', `Content-Type: ${binary ? 'application/octet-stream' : 'application/json'}`,
+          '--header', `Content-Length: ${input.length}`, '--input', '-');
       }
       let output;
       try {

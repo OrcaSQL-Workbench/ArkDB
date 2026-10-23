@@ -6,7 +6,7 @@ Native ArkTS database drivers for HarmonyOS, distributed as headless Harmony Arc
 
 | Package | Status | Platform |
 | --- | --- | --- |
-| [`@arkdb/mysql`](mysql/README.md) | Engineering-preview candidate; no public HAR release or OHPM publication yet | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
+| [`@arkdb/mysql`](mysql/README.md) | [1.0.1 engineering preview](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.1); downloadable HAR, not published to OHPM | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
 
 The current driver supports the MySQL text protocol, authentication, TCP/TLS, bounded streamed results, transactions, metadata, cancellation primitives, and server metrics. MariaDB is experimental. Prepared statements, parameter binding, pooling, and an automatically managed Worker are not implemented. Read the [usage and execution contract](mysql/README.md) before integrating it.
 
@@ -14,13 +14,15 @@ The [package guide](mysql/README.md) includes configuration defaults and example
 
 ## Download and use
 
-Versioned HAR downloads are distributed through [GitHub Releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases), independently of OHPM. **The first public download is not published yet.** When a reviewed release is available, download its HAR, matching `.har.sha256`, and manifest, verify the checksum, then install the HAR from the consuming application's module directory:
+The [1.0.1 engineering preview](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.1) is available through GitHub Releases, independently of OHPM. Download the [HAR](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.har), matching [SHA-256](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.har.sha256), and [manifest](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.manifest.json), verify the checksum, then install the HAR from the consuming application's module directory:
 
 ```powershell
 ohpm install C:\Downloads\arkdb-mysql-1.0.1.har
 ```
 
 Import from `@arkdb/mysql`, not internal source paths. Users need a compatible HarmonyOS project/toolchain to build their application, but do not need ArkDB's source, maintenance dependencies, or an OHPM publisher account. See the [download/install guide](docs/building-drivers.md).
+
+The actual public HAR was downloaded, checksum-verified, installed and compiled in a fresh independent sample, including its eight packaged README examples and six local sample cases. Real-device networking/TLS/cancellation evidence remains unverified; this is not a production certification.
 
 ## Build an individual driver
 

@@ -4,6 +4,24 @@
 
 ArkDB is independent of OrcaSQL Workbench. The initial supported release module is `mysql` / `@arkdb/mysql`, targeting HarmonyOS 6.1.1 / API 24, tablet and 2in1, as a bytecode HAR with normalized OHM URLs. PostgreSQL is not implemented. Real-device networking, TLS/authentication and cancellation evidence remain deferred, so the initial release is an **engineering preview**, not a production certification.
 
+## Published engineering preview
+
+The first public HAR release is [mysql-v1.0.1](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.1), published on 2026-10-23. The earlier local `mysql-v1.0.0` candidate tag was not rewritten, pushed, or published.
+
+| Identity / check | Recorded result |
+| --- | --- |
+| Source commit | `27d4095575ca56ff4f1b9d38221e610034f3a049` |
+| Annotated tag object | `dfdf0952c9b22206cac5e1e84a6710c8752153ac` |
+| HAR | [arkdb-mysql-1.0.1.har](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.har), 114,127 bytes |
+| HAR SHA-256 | `5bbf36425405392c4b18b3d11a8a891c8be765d9d9ef4f292e8a310863ae884e` |
+| Sealed identities | [release-set.json](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/release-set.json) |
+| Clean local preparation | 94 tooling cases, 183 local driver cases, eight packaged README modules, six local sample cases and OHPM prepublish passed |
+| SDK-free hosted source checks | [Run 39882217929](https://github.com/OrcaSQL-Workbench/ArkDB/actions/runs/39882217929) succeeded at the release source commit |
+| Actual public download acceptance | Downloaded all six real assets, verified their source/tag/digests, installed the remote HAR and compiled the independent sample/README examples; six local sample cases passed |
+| Not established | OHPM registry publication and real-device networking/TLS/cancellation |
+
+The real download verifier completed on 2026-10-23 at 01:14 UTC. Its local receipt is `dist\mysql-v1.0.1.download.json`; the immutable Release's preparation records are deliberately not replaced by this later receipt. Future code or documentation changes on `main` do not move this tag or rebuild/overwrite its assets.
+
 ## Prerequisites and source identity
 
 - Use Node.js >=22.19.0 and the installed compatible DevEco Studio / HarmonyOS API-24 toolchain. Explicit Hvigor/OHPM/SDK paths are supported as described in the [root README](../README.md).
@@ -88,7 +106,7 @@ An identical complete release can be verified/reused without remote writes. For 
 
 On a timeout or uncertain creation/upload/publication response, the tool reads live state once before deciding whether that write completed. If it cannot confirm the result, it stops and asks you to inspect the existing draft/release. Do not repeatedly publish blindly, rebuild the HAR to fit an existing version, or overwrite a conflicting asset. Existing identical local receipts can be reused; a conflicting local receipt is preserved.
 
-The release scripts currently verify these contracts with synthetic GitHub responses. No actual public release is implied until the owner-authorized command has succeeded against GitHub and returned a real receipt.
+Contract tests cover these paths with synthetic GitHub responses; the 1.0.1 publication and download acceptance above additionally exercised the real service. The first live upload returned HTTP 400 `Bad Content-Length` with no asset created. After inspecting the empty draft, upload resumed with the required byte length through the transport dependency seam, without changing the sealed source/tag/HAR. The normal GitHub CLI adapter now sets `Content-Length` from the exact stdin bytes and has a regression covering UTF-8 JSON and binary payloads.
 
 ## Verify the public download
 

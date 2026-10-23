@@ -22,6 +22,21 @@ test('GitHub transport sends JSON and original upload bytes through argv/stdin w
   assert.equal(calls[0].options.shell, undefined);
 });
 
+test('stdin requests set the exact payload byte length required by release uploads', async () => {
+  const calls = [];
+  const client = createGitHubClient('root', {
+    execFileSync(_command, args, options) {
+      calls.push({ args, options });
+      return 'HTTP/2.0 201 Created\r\n\r\n{"id":17}\n';
+    }
+  });
+  await client.request('POST', '/repos/OrcaSQL-Workbench/ArkDB/releases', { name: '\u00e9' });
+  await client.request('POST', 'https://uploads.github.com/repos/OrcaSQL-Workbench/ArkDB/releases/17/assets?name=test.har',
+    Buffer.from([0, 255, 10]));
+  assert.ok(calls[0].args.includes('Content-Length: 13'));
+  assert.ok(calls[1].args.includes('Content-Length: 3'));
+});
+
 test('an HTTP failure remains distinguishable from missing transport output without echoing secrets', async () => {
   const client = createGitHubClient('root', {
     execFileSync() {

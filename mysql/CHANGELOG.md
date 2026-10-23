@@ -1,6 +1,11 @@
 # Changelog
 
-## 1.0.0 - 2026-10-23 (engineering preview)
+## 1.0.1 - 2026-10-23 (engineering preview)
+
+- Preserve the strict runner's checked native verdict across release clean-build cleanup; preparation no longer rereads a raw SDK report that packaging has removed.
+- Publish the first downloadable preview under a fresh version without rewriting the earlier unpublished local candidate tag.
+
+## 1.0.0 - Internal candidate (not published)
 
 - Extract the existing headless MySQL HAR into the independent ArkDB repository.
 - Preserve the `@arkdb/mysql` import name, protocol behavior, bounded execution, optional providers, and Hypium regression suites.

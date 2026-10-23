@@ -11,7 +11,7 @@
   "notes": [
     "Driver-only source snapshot; no application code, credentials, operational evidence, generated files or private Git history were imported.",
     "The unpublished ArkDB interface is intentionally cleaned after extraction: ArkDbError/ArkDbErrorKind, driver-only connection options, and ArkDB logging tags replace the Workbench-facing surface without compatibility aliases.",
-    "The standalone candidate retains version 1.0.0 to satisfy the installed SDK's package-version validator. This is not evidence of registry publication or production certification.",
+    "The extraction initially retained version 1.0.0; the first downloadable preview uses 1.0.1 after a release-preparation fix, without rewriting the unpublished local candidate tag. Version numbering is not evidence of registry publication or production certification.",
     "The repository and driver use Apache-2.0 by the owner's explicit choice. Adapted mysql/mysql2 MIT notices are retained."
   ]
 }

@@ -8,7 +8,6 @@ import { extractExamples } from './doc-examples.mjs';
 import { packageStem } from './driver-packages.mjs';
 import { inspectHar, sha256, sourceFingerprint } from './package-har.mjs';
 import { sampleFingerprint } from './test-consumer.mjs';
-import { parseHypiumResults } from './run-ohos-tests.mjs';
 import {
   gitReader, jsonBytes, MAX_RELEASE_ASSET_BYTES, plainPath, releaseArguments, releaseAssetNames,
   releaseFile, releaseIdentity, RELEASE_REPOSITORY, validateEvidence, validateReleaseSet
@@ -39,12 +38,21 @@ async function verifyLocally(root, id) {
   const npm = process.env.npm_execpath ?? join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
   if (!existsSync(npm)) throw new Error('Run preparation through npm run release:prepare to locate the npm CLI.');
   const result = spawnSync(process.execPath, [npm, 'run', 'verify'], {
-    cwd: root, windowsHide: true, stdio: 'inherit'
+    cwd: root, windowsHide: true, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe']
   });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
   if (result.error) throw new Error('Could not execute local release verification.', { cause: result.error });
   if (result.status !== 0) throw new Error('Local release verification failed; no release bundle was prepared.');
-  const report = join(root, id, '.test', 'default', 'intermediates', 'test', 'coverage_data', 'test_result.txt');
-  return { driverTestsPassed: parseHypiumResults(readFileSync(report, 'utf8')).passed };
+  // The strict runner checks native results before printing this verdict; later clean packaging removes its raw report.
+  const verdicts = [...(result.stdout ?? '').replace(/\r\n/g, '\n')
+    .matchAll(/^PASSED mysql \(([1-9]\d*) native cases\)$/gm)];
+  const passed = Number(verdicts[0]?.[1]);
+  if (verdicts.length !== 1 || !Number.isSafeInteger(passed) || passed <= 0) {
+    throw new Error('Local driver verification has no unique checked native verdict.');
+  }
+  return { driverTestsPassed: passed };
 }
 
 export async function prepareHarRelease({ root = ROOT, driver: id = 'mysql', tag, destination }, dependencies = {}) {

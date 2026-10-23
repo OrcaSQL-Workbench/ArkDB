@@ -2,14 +2,14 @@
 
 A headless, pure-ArkTS MySQL driver for HarmonyOS. This is a Harmony Archive (HAR), not a separately running system driver. It requires HarmonyOS networking and crypto Kits; it does not run in Node.js or a browser.
 
-**Status:** `1.0.0` engineering preview, distributed as a versioned GitHub HAR independently of optional OHPM publication. Consult the [official releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases) for published downloads; a local build does not establish publication. The build target is HarmonyOS 6.1.1 / API 24 on tablet and 2in1. MariaDB is experimental; neither extraction nor mocked tests establishes live compatibility. The existing version is retained to satisfy this SDK's package-version validator; it is not a production certification.
+**Status:** `1.0.1` engineering preview, distributed as a versioned GitHub HAR independently of optional OHPM publication. Consult the [official releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases) for published downloads; a local build does not establish publication. The build target is HarmonyOS 6.1.1 / API 24 on tablet and 2in1. MariaDB is experimental; neither extraction nor mocked tests establishes live compatibility. The existing version is retained to satisfy this SDK's package-version validator; it is not a production certification.
 
 ## Install
 
 Download the HAR, matching `.har.sha256`, and manifest from the same reviewed version on [GitHub Releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases), verify the checksum, and install the downloaded file from your application's module directory. If a version has no published assets yet, build it locally with the commands below rather than assuming its download exists:
 
 ```powershell
-ohpm install C:\Downloads\arkdb-mysql-1.0.0.har
+ohpm install C:\Downloads\arkdb-mysql-1.0.1.har
 ```
 
 To build that file from an ArkDB source checkout with the documented API-24 toolchain, run:
@@ -20,16 +20,16 @@ npm run restore
 npm run pack -- --driver mysql
 ```
 
-Outputs are `dist\arkdb-mysql-1.0.0.har`, `dist\arkdb-mysql-1.0.0.har.sha256`, and the matching `.manifest.json`. Compare `Get-FileHash -Algorithm SHA256` with the checksum before installing a downloaded archive. The HAR is a distribution artifact; OHPM publication is not required for local-file installation.
+Outputs are `dist\arkdb-mysql-1.0.1.har`, `dist\arkdb-mysql-1.0.1.har.sha256`, and the matching `.manifest.json`. Compare `Get-FileHash -Algorithm SHA256` with the checksum before installing a downloaded archive. The HAR is a distribution artifact; OHPM publication is not required for local-file installation.
 
 Maintainers build on their existing development computer, then separately authorize upload of the verified bytes to GitHub Releases. A version tag does not trigger a cloud build, and GitHub Actions does not install a HarmonyOS SDK. Ordinary consumers install the HAR in a compatible HarmonyOS project without cloning ArkDB or copying its driver source.
 
-For a project-local archive at `MyApp\libs\arkdb-mysql-1.0.0.har`, `MyApp\entry\oh-package.json5` can declare:
+For a project-local archive at `MyApp\libs\arkdb-mysql-1.0.1.har`, `MyApp\entry\oh-package.json5` can declare:
 
 ```json5
 {
   "dependencies": {
-    "@arkdb/mysql": "file:../libs/arkdb-mysql-1.0.0.har"
+    "@arkdb/mysql": "file:../libs/arkdb-mysql-1.0.1.har"
   }
 }
 ```
@@ -39,7 +39,7 @@ The path is relative to the module's package manifest. Restore dependencies and 
 After this exact version has actually been published and verified in OHPM:
 
 ```powershell
-ohpm install @arkdb/mysql@1.0.0
+ohpm install @arkdb/mysql@1.0.1
 ```
 
 The release is a **bytecode HAR**, compiled for API 24 with normalized OHM URLs; use the documented compatible consumer toolchain, not an assumed older SDK. Import from `@arkdb/mysql`, never from internal source paths. The driver declares `ohos.permission.INTERNET`; verify it exists in the final application's merged declarations. This is not a runtime permission prompt. The application owns credential storage and any permissions required to obtain its TLS certificate files.
@@ -411,7 +411,7 @@ The factory also exposes capability flags and metadata/server-metrics providers.
 
 ## Verification limits
 
-The repository builds and tests the module independently and includes an isolated consumer of the release HAR. Maintainers can run `npm run release:verify-download -- --driver mysql --tag mysql-v1.0.0` only after a real public release exists: it downloads and checks that exact HAR before installing/compiling it in a fresh sample. A failed remote download cannot fall back to local driver source or `dist`.
+The repository builds and tests the module independently and includes an isolated consumer of the release HAR. Maintainers can run `npm run release:verify-download -- --driver mysql --tag mysql-v1.0.1` only after a real public release exists: it downloads and checks that exact HAR before installing/compiling it in a fresh sample. A failed remote download cannot fall back to local driver source or `dist`.
 
 Network, certificate and crypto replacements used by local Hypium tests are not real-device tests. Local preparation, public GitHub download availability, OHPM registry availability, and actual device interoperability are separate states.
 

@@ -2,6 +2,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { create } from 'tar';
+import JSON5 from 'json5';
 import { checkPackage, ROOT } from '../check-package.mjs';
 import { sha256, sourceFingerprint } from '../package-har.mjs';
 import { sampleFingerprint } from '../test-consumer.mjs';
@@ -21,6 +22,10 @@ export async function releaseFixture(t) {
     'hvigorfile.ts', 'oh-package.json5', 'LICENSE']) {
     await cp(join(ROOT, name), join(root, name), { recursive: true, filter: (file) => !ignored.has(basename(file)) });
   }
+  const fixtureManifestPath = join(root, 'mysql', 'oh-package.json5');
+  const fixtureManifest = JSON5.parse(await readFile(fixtureManifestPath, 'utf8'));
+  fixtureManifest.version = '1.0.0';
+  await writeFile(fixtureManifestPath, `${JSON.stringify(fixtureManifest, null, 2)}\n`);
   const { manifest, exports, driver } = checkPackage(root);
   const staging = join(root, 'build', 'fixture');
   const files = {

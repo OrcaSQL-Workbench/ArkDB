@@ -1,6 +1,6 @@
 {
   "name": "@arkdb/mysql",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Native ArkTS MySQL driver for HarmonyOS. Headless HAR; MariaDB compatibility is experimental.",
   "main": "Index.ets",
   "author": "OrcaSQL Workbench",

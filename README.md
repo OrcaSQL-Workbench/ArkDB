@@ -17,7 +17,7 @@ The [package guide](mysql/README.md) includes configuration defaults and example
 Versioned HAR downloads are distributed through [GitHub Releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases), independently of OHPM. **The first public download is not published yet.** When a reviewed release is available, download its HAR, matching `.har.sha256`, and manifest, verify the checksum, then install the HAR from the consuming application's module directory:
 
 ```powershell
-ohpm install C:\Downloads\arkdb-mysql-1.0.0.har
+ohpm install C:\Downloads\arkdb-mysql-1.0.1.har
 ```
 
 Import from `@arkdb/mysql`, not internal source paths. Users need a compatible HarmonyOS project/toolchain to build their application, but do not need ArkDB's source, maintenance dependencies, or an OHPM publisher account. See the [download/install guide](docs/building-drivers.md).
@@ -31,7 +31,7 @@ npm run drivers
 npm run pack -- --driver mysql
 ```
 
-The selector reads actual registered HAR modules and their source directories; it does not invent a PostgreSQL implementation. MySQL produces `dist\arkdb-mysql-1.0.0.har`, its `.sha256`, and a package/source manifest.
+The selector reads actual registered HAR modules and their source directories; it does not invent a PostgreSQL implementation. MySQL produces `dist\arkdb-mysql-1.0.1.har`, its `.sha256`, and a package/source manifest.
 
 ## Develop
 
@@ -58,9 +58,9 @@ npm run verify
 | `npm run release:check` | Validate current archive/sample/guide evidence and run nonpublishing OHPM checks |
 | `npm run verify:registry` | After publication, restore an exact registry version into a fresh sample and verify acquisition |
 | `npm run verify` | Local tooling + driver tests + HAR packaging + sample/README tests + nonpublishing preflight; never publishes |
-| `npm run release:prepare -- --driver mysql --tag mysql-v1.0.0` | Build and seal a local release bundle from clean source and an existing matching annotated tag |
-| `npm run release:publish -- --driver mysql --tag mysql-v1.0.0 --confirm-publish` | After owner approval, upload the sealed bundle as a GitHub prerelease without rebuilding |
-| `npm run release:verify-download -- --driver mysql --tag mysql-v1.0.0` | Download an actual published release and install/compile its HAR in an independent consumer |
+| `npm run release:prepare -- --driver mysql --tag mysql-v1.0.1` | Build and seal a local release bundle from clean source and an existing matching annotated tag |
+| `npm run release:publish -- --driver mysql --tag mysql-v1.0.1 --confirm-publish` | After owner approval, upload the sealed bundle as a GitHub prerelease without rebuilding |
+| `npm run release:verify-download -- --driver mysql --tag mysql-v1.0.1` | Download an actual published release and install/compile its HAR in an independent consumer |
 
 **Release route: build locally, distribute through GitHub Releases.** Maintainers use their existing DevEco/CLI installation; there is no dedicated server, self-hosted runner, or SDK installation in GitHub Actions. A tag identifies the reviewed source version; it does not trigger HAR compilation. Hosted CI runs `check` only. The [official-toolchain investigation](docs/hosted-toolchain.md) is historical background, not a prerequisite for this local route.
 

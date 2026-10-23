@@ -1,0 +1,13 @@
+{
+  "module": {
+    "name": "mysql",
+    "type": "har",
+    "requestPermissions": [
+      { "name": "ohos.permission.INTERNET" }
+    ],
+    "deviceTypes": [
+      "tablet",
+      "2in1"
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+ArkDB
+Copyright 2026 OrcaSQL Workbench
+
+Licensed under the Apache License, Version 2.0.
+The MySQL protocol port also includes MIT-licensed adaptations.
+See mysql/README.OpenSource for complete upstream attribution and license texts.

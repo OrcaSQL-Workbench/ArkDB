@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "sourceRepository": "ShawnXxy/OrcaSQLWorkbench",
+  "sourceCommit": "8deb14d01514758f8e556f7503097a753e06999e",
+  "sourceDirectory": "orcasql_core",
+  "sourceTree": "7d5ae4b91c479a30013c696b6fc02a41bcf36b00",
+  "destinationDirectory": "mysql",
+  "originalPublicEntrySha256": "7794695e6e80194f20f730fe8646107a1c91624785b51d2b4abaadfc9d28dd66",
+  "originalPackageName": "@arkdb/mysql",
+  "originalPackageVersion": "1.0.0",
+  "notes": [
+    "Driver-only source snapshot; no application code, credentials, operational evidence, generated files or private Git history were imported.",
+    "The unpublished ArkDB interface is intentionally cleaned after extraction: ArkDbError/ArkDbErrorKind, driver-only connection options, and ArkDB logging tags replace the Workbench-facing surface without compatibility aliases.",
+    "The standalone candidate retains version 1.0.0 to satisfy the installed SDK's package-version validator. This is not evidence of registry publication or production certification.",
+    "The repository and driver use Apache-2.0 by the owner's explicit choice. Adapted mysql/mysql2 MIT notices are retained."
+  ]
+}

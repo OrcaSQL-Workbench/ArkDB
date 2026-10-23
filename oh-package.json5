@@ -1,0 +1,8 @@
+{
+  "modelVersion": "6.1.1",
+  "description": "ArkDB standalone HarmonyOS database drivers",
+  "dependencies": {},
+  "devDependencies": {
+    "@ohos/hypium": "1.0.25"
+  }
+}

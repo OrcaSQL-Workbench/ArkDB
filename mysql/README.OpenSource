@@ -1,0 +1,61 @@
+ArkDB MySQL driver - third-party notices
+Copyright 2026 OrcaSQL Workbench
+
+Licensed under the Apache License, Version 2.0; see LICENSE.
+
+This distribution extracts the headless driver from OrcaSQL Workbench.
+The standalone interface, error/logging names, connection options, package
+metadata, documentation, tooling, and additional interface tests are maintained
+in ArkDB. The protocol behavior and its upstream-derived fixtures are retained.
+
+Portions of the MySQL protocol/authentication implementation and fixtures
+are adapted from the following MIT-licensed projects. These notices apply
+to those portions and do not modify their original license terms.
+
+mysqljs/mysql
+Revision: dc9c152a87ec51a1f647447268917243d2eab1fd
+https://github.com/mysqljs/mysql/tree/dc9c152a87ec51a1f647447268917243d2eab1fd
+
+Copyright (c) 2012 Felix Geisendörfer (felix@debuggable.com) and contributors
+
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+
+sidorares/node-mysql2
+Revision: 928c3c511a0316713966ade2cf27e47285feb878
+https://github.com/sidorares/node-mysql2/tree/928c3c511a0316713966ade2cf27e47285feb878
+
+Copyright (c) 2016 Andrey Sidorov (sidorares@yandex.ru) and contributors
+
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.

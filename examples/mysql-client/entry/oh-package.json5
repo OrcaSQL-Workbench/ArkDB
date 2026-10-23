@@ -1,0 +1,9 @@
+{
+  "name": "arkdb-mysql-example",
+  "version": "1.0.0",
+  "description": "Worker-based MySQL sample application",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@arkdb/mysql": "file:../dependency/mysql.har"
+  }
+}

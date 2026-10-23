@@ -1,0 +1,25 @@
+import authenticationTest from './auth/Authentication.test';
+import connectionDiagnosticsTest from './connection/ConnectionDiagnostics.test';
+import connectionOpeningTest from './connection/ConnectionOpening.test';
+import connectionStateTest from './connection/ConnectionState.test';
+import mySqlExecutionControllerTest from './execution/MySqlExecutionController.test';
+import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';
+import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
+import queryStreamTest from './command/QueryStream.test';
+import packetChannelTest from './protocol/PacketChannel.test';
+import packetCodecTest from './protocol/PacketCodec.test';
+import typeMapperTest from './value/TypeMapper.test';
+
+export default function testsuite(): void {
+  authenticationTest();
+  connectionDiagnosticsTest();
+  connectionOpeningTest();
+  connectionStateTest();
+  mySqlExecutionControllerTest();
+  mySqlServerMetricsProviderTest();
+  mySqlMetadataProviderTest();
+  queryStreamTest();
+  packetChannelTest();
+  packetCodecTest();
+  typeMapperTest();
+}

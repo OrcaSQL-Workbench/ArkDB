@@ -1,0 +1,20 @@
+{
+  "@kit.NetworkKit": {
+    "source": "src/mock/NetworkKit.mock.ets"
+  },
+  "@ohos.net.socket": {
+    "source": "src/mock/NetworkKit.mock.ets"
+  },
+  "@kit.DeviceCertificateKit": {
+    "source": "src/mock/DeviceCertificateKit.mock.ets"
+  },
+  "@ohos.security.cert": {
+    "source": "src/mock/DeviceCertificateKit.mock.ets"
+  },
+  "@kit.CryptoArchitectureKit": {
+    "source": "src/mock/CryptoArchitectureKit.mock.ets"
+  },
+  "@ohos.security.cryptoFramework": {
+    "source": "src/mock/CryptoArchitectureKit.mock.ets"
+  }
+}

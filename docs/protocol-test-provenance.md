@@ -56,6 +56,35 @@ sections. A future command caller must emit `new_params_bound_flag=1` for
 nonempty bindings. These local codec fixtures establish no live-server,
 SQL-mode, or target-device behavior.
 
+## Shared text and binary result fixtures
+
+The internal `MySqlRowDecoder.decode(payload, columns)` seam separates row values
+from the shared result-event, chunk, multi-result and synchronization-drain
+pipeline. `TextRowDecoder` retains the text mapping used by `parseQueryStream()`
+and `parseResultSet()`. `BinaryRowDecoder` consumes binary rows using the actual
+columns of each result, without retaining prepare-time metadata. These internal
+adapters do not send prepared commands, add public exports or enable a factory
+capability; public query entry points remain text-protocol operations.
+
+Binary fixtures use independent wire literals for the `00` row header, the NULL
+bitmap's two-bit offset, signed/unsigned integer widths, floating-point values
+and length-encoded fields. Fixed expectations include unsigned BIGINT
+`18446744073709551615n`, DECIMAL `"12345678901234567890.1234567890"` and TIME
+`"-838:59:59.000001"`. BIT and binary-collation fields remain bytes; JSON and
+DECIMAL remain strings even with binary metadata. Temporal fixtures cover zero
+values, date-only and wall-clock timestamp bodies, negative multi-day TIME and
+fractional precision 0 through 6, without `Date` or timezone conversion.
+Malformed lengths, truncated fields, unsupported type codes, trailing binary
+bytes and fractional values inconsistent with metadata fail with `Protocol`.
+
+Stream fixtures cover classic/deprecated EOF, `fe`-prefixed text data, changing
+metadata, mixed OK/row results, row/decoded-byte/chunk/result-set/drain budgets,
+1317 interruption status, callback error identity and receive overflow during a
+pending acknowledgement. Both adapters share the existing defaults and awaited
+callbacks; they do not change transport or logical-packet bounds. These local
+protocol fixtures do not establish live prepared execution or device/server
+interoperability.
+
 ## Fixed authentication vectors
 
 Expected bytes were calculated outside the ArkTS implementation with Node.js `node:crypto` SHA-1/SHA-256 digests and byte-wise XOR. Password columns contain UTF-8 bytes, not credentials. An empty expected value is a zero-length response.

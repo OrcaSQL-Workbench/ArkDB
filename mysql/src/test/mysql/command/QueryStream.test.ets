@@ -4,7 +4,9 @@ import {
   QueryResultSummary, QueryRowChunk, QueryTruncation, ArkDbError, ArkDbErrorKind
 } from '@arkdb/core';
 import { parseQueryStream, parseResultSet } from '../../../main/ets/mysql/command/Query';
-import { Capabilities, ColumnType, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
+import { parseBufferedResultStream, parseResultStream } from '../../../main/ets/mysql/command/ResultStream';
+import { BinaryRowDecoder } from '../../../main/ets/mysql/value/BinaryRowDecoder';
+import { Capabilities, ColumnType, FieldFlag, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
 import { MysqlPacket, MysqlPacketSource, PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
@@ -184,6 +186,20 @@ class CancelledRowsSink extends RecordingSink {
   onRows(chunk: QueryRowChunk): Promise<void> {
     this.chunks.push(chunk);
     return Promise.reject(ArkDbError.cancelled('Synthetic consumer cancellation'));
+  }
+}
+
+class FailingRowsSink extends RecordingSink {
+  failure: ArkDbError;
+
+  constructor(failure: ArkDbError) {
+    super();
+    this.failure = failure;
+  }
+
+  onRows(chunk: QueryRowChunk): Promise<void> {
+    this.chunks.push(chunk);
+    return Promise.reject(this.failure);
   }
 }
 
@@ -833,6 +849,340 @@ export default function queryStreamTest() {
       expect(copy.autocommit).assertFalse();
       expect(copy.inTransaction).assertTrue();
     });
+
+    it('streamsBinaryRowsWithClassicAndDeprecatedEof', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const packets = [packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG)];
+        if (mode === 0) packets.push(eofPacket(StatusFlags.AUTOCOMMIT, 0));
+        packets.push(binaryIntRow(42));
+        packets.push(mode === 0 ? eofPacket(StatusFlags.AUTOCOMMIT, 2) :
+          okPacket(0xfe, StatusFlags.AUTOCOMMIT, 2));
+        const source = new FixtureSource(packets);
+        const sink = new RecordingSink();
+        const capabilities = Capabilities.PROTOCOL_41 | (mode === 1 ? Capabilities.DEPRECATE_EOF : 0);
+        const execution = await parseResultStream(source, capabilities, new QueryOptions(),
+          sink, new BinaryRowDecoder());
+        expect(sink.starts.length).assertEqual(1);
+        expect(sink.starts[0].hasRows).assertTrue();
+        expect(sink.chunks.length).assertEqual(1);
+        expect(sink.chunks[0].rows[0][0]).assertEqual(42);
+        expect(sink.ends[0].warningCount).assertEqual(2);
+        expect(execution.loadedRowCount).assertEqual(1);
+        expect(execution.rowCount).assertEqual(1);
+        expect(execution.statusKnown).assertTrue();
+        expect(source.packets.length).assertEqual(0);
+      }
+    });
+
+    it('decodesEveryBinaryResultUsingItsActualMetadata', 0, async () => {
+      const decoder = new BinaryRowDecoder();
+      const source = new FixtureSource([
+        packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+        eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(-1),
+        eofPacket(StatusFlags.AUTOCOMMIT | StatusFlags.MORE_RESULTS_EXISTS, 0),
+        packet(bytes(1)), columnPacket('value', 63, ColumnType.LONGLONG, FieldFlag.UNSIGNED),
+        eofPacket(StatusFlags.AUTOCOMMIT, 0),
+        packet(bytes(0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff)),
+        eofPacket(StatusFlags.AUTOCOMMIT, 0)
+      ]);
+      const sink = new RecordingSink();
+      const execution = await parseResultStream(source, Capabilities.PROTOCOL_41,
+        new QueryOptions(), sink, decoder);
+      expect(execution.resultSetCount).assertEqual(2);
+      expect(sink.chunks[0].rows[0][0]).assertEqual(-1);
+      expect(sink.chunks[1].rows[0][0] === 18446744073709551615n).assertTrue();
+      expect(sink.starts[1].columns[0].nativeTypeName).assertEqual('BIGINT');
+      const changed = await parseBufferedResultStream(new FixtureSource([
+        packet(bytes(1)), columnPacket('value'), eofPacket(StatusFlags.AUTOCOMMIT, 0),
+        binaryStringRow('after DDL'), eofPacket(StatusFlags.AUTOCOMMIT, 0)
+      ]), Capabilities.PROTOCOL_41, decoder);
+      expect(changed.rows[0][0]).assertEqual('after DDL');
+      expect(changed.columns[0].type).assertEqual(ColumnType.VAR_STRING);
+      expect(source.packets.length).assertEqual(0);
+    });
+
+    it('buffersMixedBinaryAndOkResultsWithoutChangingNativeDefaults', 0, async () => {
+      const result = await parseBufferedResultStream(new FixtureSource([
+        okPacket(0, StatusFlags.AUTOCOMMIT | StatusFlags.MORE_RESULTS_EXISTS, 1),
+        packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+        eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(42),
+        eofPacket(StatusFlags.AUTOCOMMIT | StatusFlags.MORE_RESULTS_EXISTS, 2),
+        okPacket(0, StatusFlags.AUTOCOMMIT, 3)
+      ]), Capabilities.PROTOCOL_41, new BinaryRowDecoder());
+      expect(result.rows.length).assertEqual(0);
+      expect(result.lastInsertId === 0n).assertTrue();
+      expect(result.warningCount).assertEqual(1);
+      expect(result.additionalResults.length).assertEqual(2);
+      expect(result.additionalResults[0].rows[0][0]).assertEqual(42);
+      expect(result.additionalResults[0].lastInsertId === 0n).assertTrue();
+      expect(result.additionalResults[0].warningCount).assertEqual(2);
+      expect(result.additionalResults[1].warningCount).assertEqual(3);
+      expect(result.autocommit).assertTrue();
+    });
+
+    it('keepsFeLengthEncodedTextDataDistinctFromTerminators', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const packets = [packet(bytes(1)), columnPacket('value')];
+        if (mode === 0) packets.push(eofPacket(StatusFlags.AUTOCOMMIT, 0));
+        packets.push(packet(bytes(0xfe, 1, 0, 0, 0, 0, 0, 0, 0, 0x78)));
+        packets.push(mode === 0 ? eofPacket(StatusFlags.AUTOCOMMIT, 0) :
+          okPacket(0xfe, StatusFlags.AUTOCOMMIT, 0));
+        const result = await parseResultSet(new FixtureSource(packets),
+          Capabilities.PROTOCOL_41 | (mode === 1 ? Capabilities.DEPRECATE_EOF : 0));
+        expect(result.rows.length).assertEqual(1);
+        expect(result.rows[0][0]).assertEqual('x');
+      }
+    });
+
+    it('sharesBinaryRowAndDecodedByteBudgetsAcrossResultDraining', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const source = new TimeoutTrackingSource([
+          packet(bytes(1)), columnPacket('first', 45, ColumnType.LONG),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(42), binaryIntRow(43),
+          eofPacket(StatusFlags.AUTOCOMMIT | StatusFlags.MORE_RESULTS_EXISTS, 0),
+          packet(bytes(1)), columnPacket('second'), eofPacket(StatusFlags.AUTOCOMMIT, 0),
+          binaryStringRow('drained'), eofPacket(StatusFlags.AUTOCOMMIT, 0)
+        ]);
+        const options = new QueryOptions();
+        if (mode === 0) options.maxRows = 1;
+        else options.maxResultBytes = 8;
+        const sink = new RecordingSink();
+        const execution = await parseResultStream(source, Capabilities.PROTOCOL_41,
+          options, sink, new BinaryRowDecoder());
+        expect(execution.resultSetCount).assertEqual(2);
+        expect(execution.rowCount).assertEqual(3);
+        expect(execution.loadedRowCount).assertEqual(1);
+        expect(execution.loadedBytes).assertEqual(8);
+        expect(sink.chunks.length).assertEqual(1);
+        expect(sink.chunks[0].rows[0][0]).assertEqual(42);
+        expect(sink.ends[0].truncationReason).assertEqual(mode === 0 ? 'rowLimit' : 'resultBytes');
+        expect(sink.ends[1].truncated).assertTrue();
+        expect(sink.ends[1].loadedRowCount).assertEqual(0);
+        expect(sink.truncations.length).assertEqual(1);
+        expect(source.packets.length).assertEqual(0);
+        for (let index = 0; index < source.timeouts.length; index += 1) {
+          if (index < 5) expect(source.timeouts[index]).assertEqual(0);
+          else {
+            expect(source.timeouts[index] > 0).assertTrue();
+            expect(source.timeouts[index] <= options.maxDrainTimeMs).assertTrue();
+          }
+        }
+      }
+    });
+
+    it('boundsBinaryChunksUsingWirePayloadBytes', 0, async () => {
+      for (let mode = 0; mode < 3; mode += 1) {
+        const options = new QueryOptions();
+        options.maxChunkRows = mode === 0 ? 2 : 100;
+        options.maxChunkBytes = mode === 0 ? 100 : mode === 1 ? 12 : 11;
+        const sink = new RecordingSink();
+        await parseResultStream(new FixtureSource([
+          packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(1), binaryIntRow(2), binaryIntRow(3),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0)
+        ]), Capabilities.PROTOCOL_41, options, sink, new BinaryRowDecoder());
+        expect(sink.chunks.length).assertEqual(mode === 2 ? 3 : 2);
+        expect(sink.chunks[0].rowOffset).assertEqual(0);
+        expect(sink.chunks[0].encodedBytes).assertEqual(mode === 2 ? 6 : 12);
+        expect(sink.chunks[0].rows.length).assertEqual(mode === 2 ? 1 : 2);
+        expect(sink.chunks[1].rowOffset).assertEqual(mode === 2 ? 1 : 2);
+        expect(sink.chunks[1].encodedBytes).assertEqual(6);
+        if (mode === 2) {
+          expect(sink.chunks[2].rowOffset).assertEqual(2);
+          expect(sink.chunks[2].encodedBytes).assertEqual(6);
+        }
+        expect(sink.ends[0].loadedBytes).assertEqual(24);
+      }
+    });
+
+    it('rejectsBinaryResultSetAndDrainByteOverflows', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const options = new QueryOptions();
+        const packets = [
+          packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(1)
+        ];
+        if (mode === 0) {
+          options.maxResultSets = 1;
+          packets.push(eofPacket(StatusFlags.AUTOCOMMIT | StatusFlags.MORE_RESULTS_EXISTS, 0));
+          packets.push(okPacket(0, StatusFlags.AUTOCOMMIT, 0));
+        } else {
+          options.maxRows = 1;
+          options.maxDrainBytes = 10;
+          packets.push(binaryIntRow(2));
+          packets.push(eofPacket(StatusFlags.AUTOCOMMIT, 0));
+        }
+        const source = new FixtureSource(packets);
+        let caught: ArkDbError | null = null;
+        try {
+          await parseResultStream(source, Capabilities.PROTOCOL_41,
+            options, new RecordingSink(), new BinaryRowDecoder());
+        } catch (error) {
+          caught = error as ArkDbError;
+        }
+        expect(caught !== null).assertTrue();
+        expect(caught!.kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect(caught!.message).assertEqual(mode === 0 ? 'Result-set count exceeds configured limit 1' :
+          'Truncated result exceeded synchronization drain budget');
+        if (mode === 0) expect(source.packets.length).assertEqual(1);
+      }
+    });
+
+    it('preservesBinaryTruncation1317FallbackStatus', 0, async () => {
+      const source = new FixtureSource([
+        packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+        eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(1), binaryIntRow(2),
+        errorPacket(1317, '70100', 'Query execution was interrupted')
+      ]);
+      const options = new QueryOptions();
+      options.maxRows = 1;
+      const status = new DatabaseSessionStatus();
+      status.autocommit = false;
+      status.inTransaction = true;
+      const sink = new RecordingSink();
+      sink.cancelOnTruncation = true;
+      const execution = await parseResultStream(source, Capabilities.PROTOCOL_41,
+        options, sink, new BinaryRowDecoder(), status);
+      expect(sink.chunks[0].rows[0][0]).assertEqual(1);
+      expect(sink.ends.length).assertEqual(1);
+      expect(sink.ends[0].rowCountKnown).assertFalse();
+      expect(execution.rowCountKnown).assertFalse();
+      expect(execution.statusKnown).assertFalse();
+      expect(execution.status.autocommit).assertFalse();
+      expect(execution.status.inTransaction).assertTrue();
+      expect(execution.truncationInterrupted).assertTrue();
+      expect(execution.synchronizationDeadlineMs > 0).assertTrue();
+      expect(source.packets.length).assertEqual(0);
+    });
+
+    it('doesNotSwallowBinaryConsumerServerOrCancellationErrors', 0, async () => {
+      const failures: ArkDbError[] = [
+        ArkDbError.server('Consumer failure, not a server packet', 1317, '70100'),
+        ArkDbError.cancelled('Consumer cancellation')
+      ];
+      for (const failure of failures) {
+        const source = new FixtureSource([
+          packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(1), binaryIntRow(2),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0)
+        ]);
+        const options = new QueryOptions();
+        options.maxChunkRows = 1;
+        const sink = new FailingRowsSink(failure);
+        const caught = await parseResultStream(source, Capabilities.PROTOCOL_41,
+          options, sink, new BinaryRowDecoder()).then((): Object | null => null,
+          (error: Object): Object | null => error);
+        expect(caught === failure).assertTrue();
+        expect(sink.ends.length).assertEqual(0);
+        expect(source.packets.length).assertEqual(1);
+      }
+    });
+
+    it('failsBinaryPendingAckOnReceiveOverflowWithoutLateSuccess', 0, async () => {
+      const transport = new TcpTransport(null, 1024);
+      await transport.connect('synthetic.invalid', 3306, 1000);
+      const peer = socket.latestTcp!;
+      const sink = new WithheldAckSink();
+      const outcome = new StreamOutcome();
+      const query = parseResultStream(new PacketChannel(transport), Capabilities.PROTOCOL_41,
+        new QueryOptions(), sink, new BinaryRowDecoder()).then((): void => {
+        outcome.completed = true;
+      }, (error: Object): void => {
+        outcome.error = error as ArkDbError;
+      });
+      try {
+        deliverPackets(peer, [
+          packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(42), eofPacket(StatusFlags.AUTOCOMMIT, 0)
+        ]);
+        await nextTask();
+        expect(sink.chunks.length).assertEqual(1);
+        peer.emitMessage(new Uint8Array(1025));
+        await query;
+        expect(outcome.error !== null).assertTrue();
+        expect(outcome.error!.kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect(outcome.completed).assertFalse();
+        expect(peer.closeCalls).assertEqual(1);
+        sink.acknowledge();
+        await nextTask();
+        expect(sink.ends.length).assertEqual(0);
+        expect(sink.chunks.length).assertEqual(1);
+      } finally {
+        sink.acknowledge();
+        await transport.close();
+        await query;
+      }
+    });
+
+    it('boundsBinaryTruncationControlAndFinalAckByDrainTime', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const options = new QueryOptions();
+        options.maxRows = 1;
+        options.maxDrainTimeMs = 40;
+        const sink: RecordingSink = mode === 0 ? new HangingTruncationSink() : new HangingRowsSink();
+        let caught: ArkDbError | null = null;
+        try {
+          await parseResultStream(new FixtureSource([
+            packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+            eofPacket(StatusFlags.AUTOCOMMIT, 0), binaryIntRow(1), binaryIntRow(2),
+            eofPacket(StatusFlags.AUTOCOMMIT, 0)
+          ]), Capabilities.PROTOCOL_41, options, sink, new BinaryRowDecoder());
+        } catch (error) {
+          caught = error as ArkDbError;
+        }
+        expect(caught !== null).assertTrue();
+        expect(caught!.kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect(caught!.message).assertEqual('Truncated result exceeded synchronization drain time budget');
+        expect(sink.ends.length).assertEqual(0);
+      }
+    });
+
+    it('rejectsMalformedBinaryRowsWithoutEmittingASuccessEnd', 0, async () => {
+      const sink = new RecordingSink();
+      let caught: ArkDbError | null = null;
+      try {
+        await parseResultStream(new FixtureSource([
+          packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0), packet(bytes(0, 0, 1)),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0)
+        ]), Capabilities.PROTOCOL_41, new QueryOptions(), sink, new BinaryRowDecoder());
+      } catch (error) {
+        caught = error as ArkDbError;
+      }
+      expect(caught !== null).assertTrue();
+      expect(caught!.kind).assertEqual(ArkDbErrorKind.Protocol);
+      expect(sink.chunks.length).assertEqual(0);
+      expect(sink.ends.length).assertEqual(0);
+    });
+
+    it('retainsBinaryServerNativeCodeAndSqlState', 0, async () => {
+      let caught: ArkDbError | null = null;
+      try {
+        await parseResultStream(new FixtureSource([
+          packet(bytes(1)), columnPacket('value', 45, ColumnType.LONG),
+          eofPacket(StatusFlags.AUTOCOMMIT, 0), errorPacket(1064, '42000', 'synthetic syntax failure')
+        ]), Capabilities.PROTOCOL_41, new QueryOptions(), new RecordingSink(), new BinaryRowDecoder());
+      } catch (error) {
+        caught = error as ArkDbError;
+      }
+      expect(caught !== null).assertTrue();
+      expect(caught!.kind).assertEqual(ArkDbErrorKind.Server);
+      expect(caught!.nativeCode).assertEqual(1064);
+      expect(caught!.code).assertEqual(1064);
+      expect(caught!.sqlState).assertEqual('42000');
+    });
+
+    it('preservesSharedResultBudgetDefaults', 0, () => {
+      const options = new QueryOptions();
+      expect(options.statementTimeoutMs).assertEqual(0);
+      expect(options.maxRows).assertEqual(0);
+      expect(options.maxChunkRows).assertEqual(200);
+      expect(options.maxChunkBytes).assertEqual(262144);
+      expect(options.maxResultBytes).assertEqual(33554432);
+      expect(options.maxResultSets).assertEqual(64);
+      expect(options.maxDrainBytes).assertEqual(33554432);
+      expect(options.maxDrainTimeMs).assertEqual(5000);
+    });
   });
 }
 
@@ -863,7 +1213,8 @@ function bytes(...values: number[]): Uint8Array {
   return new Uint8Array(values);
 }
 
-function columnPacket(name: string, charset: number = 45): MysqlPacket {
+function columnPacket(name: string, charset: number = 45,
+  type: number = ColumnType.VAR_STRING, flags: number = 0, decimals: number = 0): MysqlPacket {
   const writer = new PacketWriter();
   writer.writeLenEncString('def');
   writer.writeLenEncString('schema');
@@ -874,9 +1225,9 @@ function columnPacket(name: string, charset: number = 45): MysqlPacket {
   writer.writeLenEncInt(12);
   writer.writeUInt16(charset);
   writer.writeUInt32(255);
-  writer.writeUInt8(ColumnType.VAR_STRING);
-  writer.writeUInt16(0);
-  writer.writeUInt8(0);
+  writer.writeUInt8(type);
+  writer.writeUInt16(flags);
+  writer.writeUInt8(decimals);
   writer.writeUInt16(0);
   return packet(writer.toUint8Array());
 }
@@ -926,4 +1277,12 @@ function binaryRow(...value: number[]): MysqlPacket {
     payload[index + 1] = value[index];
   }
   return packet(payload);
+}
+
+function binaryIntRow(value: number): MysqlPacket {
+  return packet(new PacketWriter().writeUInt8(0).writeUInt8(0).writeInt32(value).toUint8Array());
+}
+
+function binaryStringRow(value: string): MysqlPacket {
+  return packet(new PacketWriter().writeUInt8(0).writeUInt8(0).writeLenEncString(value).toUint8Array());
 }

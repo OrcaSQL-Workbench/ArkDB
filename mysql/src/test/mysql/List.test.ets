@@ -13,6 +13,7 @@ import packetCodecTest from './protocol/PacketCodec.test';
 import mySqlSqlHelpersTest from './value/MySqlSqlHelpers.test';
 import typeMapperTest from './value/TypeMapper.test';
 import binaryParameterEncoderTest from './value/BinaryParameterEncoder.test';
+import binaryRowDecoderTest from './value/BinaryRowDecoder.test';
 
 export default function testsuite(): void {
   authenticationTest();
@@ -30,4 +31,5 @@ export default function testsuite(): void {
   mySqlSqlHelpersTest();
   typeMapperTest();
   binaryParameterEncoderTest();
+  binaryRowDecoderTest();
 }

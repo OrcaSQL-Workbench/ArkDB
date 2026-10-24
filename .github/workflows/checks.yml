@@ -1,4 +1,10 @@
-name: Package checks
+name: Validate ArkDB
+run-name: >-
+  ${{ github.event_name == 'pull_request'
+      && format('PR #{0} | Validate | ArkDB Source', github.event.pull_request.number)
+      || github.ref_type == 'tag'
+      && format('Tag {0} | Validate | ArkDB Source', github.ref_name)
+      || format('Push {0} | Validate | ArkDB Source', github.ref_name) }}
 
 on:
   push:
@@ -9,12 +15,18 @@ permissions:
 
 jobs:
   tooling:
+    # Preserve the required-check name until the main ruleset is migrated.
+    name: tooling
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check Out Source
+        uses: actions/checkout@v4
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-      - run: npm ci --ignore-scripts
-      - run: npm run check
+      - name: Install Tooling Dependencies
+        run: npm ci --ignore-scripts
+      - name: Validate ArkDB Source
+        run: npm run check

@@ -89,6 +89,8 @@ npm run verify
 
 **Release route: build locally, distribute through GitHub Releases.** Maintainers use their existing DevEco/CLI installation; there is no dedicated server, self-hosted runner, or SDK installation in GitHub Actions. A tag identifies the reviewed source version; it does not trigger HAR compilation. Hosted CI runs `check` only. The [official-toolchain investigation](docs/hosted-toolchain.md) is historical background, not a prerequisite for this local route.
 
+See [automation naming rules](docs/automation-naming.md) for workflow/run titles and stable required-check names.
+
 Read the [release procedure](docs/releasing.md) before preparing or uploading a bundle. Preparation never commits, pushes, creates tags, or publishes. The separate publish command performs remote writes only with `--confirm-publish` after explicit owner authorization.
 
 ## Source and distribution

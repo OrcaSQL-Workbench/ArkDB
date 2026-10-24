@@ -28,26 +28,31 @@ export class PacketReader {
   }
 
   peekUInt8(): number {
+    this.requireBytes(1);
     return this.view.getUint8(this.pos);
   }
 
   skip(n: number): void {
+    this.requireBytes(n);
     this.pos += n;
   }
 
   readUInt8(): number {
+    this.requireBytes(1);
     const v = this.view.getUint8(this.pos);
     this.pos += 1;
     return v;
   }
 
   readUInt16(): number {
+    this.requireBytes(2);
     const v = this.view.getUint16(this.pos, true);
     this.pos += 2;
     return v;
   }
 
   readUInt24(): number {
+    this.requireBytes(3);
     const b0 = this.buf[this.pos];
     const b1 = this.buf[this.pos + 1];
     const b2 = this.buf[this.pos + 2];
@@ -56,16 +61,58 @@ export class PacketReader {
   }
 
   readUInt32(): number {
+    this.requireBytes(4);
     const v = this.view.getUint32(this.pos, true);
     this.pos += 4;
     return v;
   }
 
   readUInt64(): bigint {
+    this.requireBytes(8);
     const lo = BigInt(this.view.getUint32(this.pos, true));
     const hi = BigInt(this.view.getUint32(this.pos + 4, true));
     this.pos += 8;
     return lo | (hi << 32n);
+  }
+
+  readInt8(): number {
+    this.requireBytes(1);
+    const v = this.view.getInt8(this.pos);
+    this.pos += 1;
+    return v;
+  }
+
+  readInt16(): number {
+    this.requireBytes(2);
+    const v = this.view.getInt16(this.pos, true);
+    this.pos += 2;
+    return v;
+  }
+
+  readInt32(): number {
+    this.requireBytes(4);
+    const v = this.view.getInt32(this.pos, true);
+    this.pos += 4;
+    return v;
+  }
+
+  readInt64(): bigint {
+    const v = this.readUInt64();
+    return v >= 0x8000000000000000n ? v - 0x10000000000000000n : v;
+  }
+
+  readFloat32(): number {
+    this.requireBytes(4);
+    const v = this.view.getFloat32(this.pos, true);
+    this.pos += 4;
+    return v;
+  }
+
+  readFloat64(): number {
+    this.requireBytes(8);
+    const v = this.view.getFloat64(this.pos, true);
+    this.pos += 8;
+    return v;
   }
 
   /** Length-encoded integer. Returns null only for the 0xfb NULL sentinel. */
@@ -95,10 +142,14 @@ export class PacketReader {
     if (v === null) {
       throw ArkDbError.protocol('Unexpected NULL length-encoded integer');
     }
+    if (v > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw ArkDbError.protocol('Length-encoded integer exceeds the safe number range');
+    }
     return Number(v);
   }
 
   readBytes(n: number): Uint8Array {
+    this.requireBytes(n);
     const out = this.buf.subarray(this.pos, this.pos + n);
     this.pos += n;
     return out;
@@ -109,6 +160,9 @@ export class PacketReader {
     const len = this.readLenEncInt();
     if (len === null) {
       return null;
+    }
+    if (len > BigInt(this.remaining)) {
+      throw ArkDbError.protocol('Length-encoded bytes exceed the remaining packet');
     }
     return this.readBytes(Number(len));
   }
@@ -123,6 +177,9 @@ export class PacketReader {
     let end = this.pos;
     while (end < this.buf.length && this.buf[end] !== 0x00) {
       end += 1;
+    }
+    if (end === this.buf.length) {
+      throw ArkDbError.protocol('Missing NUL string terminator');
     }
     const s = utf8Decode(this.buf.subarray(this.pos, end));
     this.pos = end + 1;
@@ -139,5 +196,11 @@ export class PacketReader {
     const s = utf8Decode(this.buf.subarray(this.pos));
     this.pos = this.buf.length;
     return s;
+  }
+
+  private requireBytes(n: number): void {
+    if (!Number.isSafeInteger(n) || n < 0 || n > this.remaining) {
+      throw ArkDbError.protocol('Invalid or truncated packet read of ' + n + ' bytes');
+    }
   }
 }

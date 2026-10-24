@@ -1,3 +1,4 @@
+import { ArkDbError } from '@arkdb/core';
 import { utf8Encode } from './Charsets';
 
 /**
@@ -35,6 +36,41 @@ export class PacketWriter {
     this.bytes.push((v >>> 16) & 0xff);
     this.bytes.push((v >>> 24) & 0xff);
     return this;
+  }
+
+  writeInt32(v: number): PacketWriter {
+    if (!Number.isInteger(v) || v < -2147483648 || v > 2147483647) {
+      throw ArkDbError.validation('Int32 must be an integer in the signed 32-bit range');
+    }
+    return this.writeUInt32(v);
+  }
+
+  writeInt64(v: bigint): PacketWriter {
+    if (typeof v !== 'bigint' || v < -9223372036854775808n || v > 9223372036854775807n) {
+      throw ArkDbError.validation('Int64 must be a bigint in the signed 64-bit range');
+    }
+    return this.writeUInt64(v < 0n ? v + 0x10000000000000000n : v);
+  }
+
+  writeUInt64(v: bigint): PacketWriter {
+    if (typeof v !== 'bigint' || v < 0n || v > 18446744073709551615n) {
+      throw ArkDbError.validation('UInt64 must be a bigint in the unsigned 64-bit range');
+    }
+    let remaining = v;
+    for (let index = 0; index < 8; index += 1) {
+      this.bytes.push(Number(remaining & 0xffn));
+      remaining >>= 8n;
+    }
+    return this;
+  }
+
+  writeFloat64(v: number): PacketWriter {
+    if (!Number.isFinite(v)) {
+      throw ArkDbError.validation('Float64 must be finite');
+    }
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setFloat64(0, v, true);
+    return this.writeBytes(bytes);
   }
 
   /** Fill n zero bytes (e.g. the 23-byte filler in HandshakeResponse41). */

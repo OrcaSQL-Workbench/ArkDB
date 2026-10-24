@@ -9,6 +9,7 @@ import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
 import queryStreamTest from './command/QueryStream.test';
 import packetChannelTest from './protocol/PacketChannel.test';
 import packetCodecTest from './protocol/PacketCodec.test';
+import mySqlSqlHelpersTest from './value/MySqlSqlHelpers.test';
 import typeMapperTest from './value/TypeMapper.test';
 
 export default function testsuite(): void {
@@ -23,5 +24,6 @@ export default function testsuite(): void {
   queryStreamTest();
   packetChannelTest();
   packetCodecTest();
+  mySqlSqlHelpersTest();
   typeMapperTest();
 }

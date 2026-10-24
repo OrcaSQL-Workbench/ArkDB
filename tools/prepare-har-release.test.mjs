@@ -1,15 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { ROOT } from './check-package.mjs';
 import test from 'node:test';
-import { prepareHarRelease, readReleaseBundle } from './prepare-har-release.mjs';
-import { releaseFixture, STEM, TAG, COMMIT, TAG_OBJECT } from './test-fixtures/har-release.mjs';
+import { prepareHarRelease, readReleaseBundle, verifyLocally } from './prepare-har-release.mjs';
+import { releaseFixture, LOCAL_STEM, STEM, TAG, COMMIT, TAG_OBJECT } from './test-fixtures/har-release.mjs';
 
 test('prepares only exact verified assets and binds them to the clean annotated tag', async (t) => {
   const fixture = await releaseFixture(t);
-  await writeFile(join(fixture.dist, `${STEM}.compile.json`), '{"stale":true}');
+  await writeFile(join(fixture.evidence, `${LOCAL_STEM}.compile.json`), '{"stale":true}');
   await writeFile(join(fixture.dist, 'private-signing.p12'), 'Must never be distributed');
   const prepared = await prepareHarRelease(fixture.options, fixture.dependencies);
   assert.equal(prepared.releaseSet.sourceCommit, COMMIT);
@@ -82,13 +80,13 @@ test('requires successful current runtime evidence, not compile-only or stale re
 
 test('refuses mismatched checksums, absent required assets and existing output without overwriting it', async (t) => {
   const fixture = await releaseFixture(t);
-  await writeFile(join(fixture.dist, `${STEM}.har.sha256`), `${'0'.repeat(64)}  ${STEM}.har\n`);
+  await writeFile(join(fixture.dist, `${LOCAL_STEM}.har.sha256`), `${'0'.repeat(64)}  ${LOCAL_STEM}.har\n`);
   await assert.rejects(prepareHarRelease(fixture.options, fixture.dependencies), /checksum/i);
   const second = await releaseFixture(t);
-  await rm(join(second.dist, `${STEM}.readiness.json`));
+  await rm(join(second.evidence, `${LOCAL_STEM}.readiness.json`));
   await assert.rejects(prepareHarRelease(second.options, second.dependencies), /ENOENT|missing/i);
   const third = await releaseFixture(t);
-  const target = join(third.dist, 'releases', TAG);
+  const target = join(third.root, 'dist', TAG);
   await mkdir(target, { recursive: true });
   await writeFile(join(target, 'owner-file'), 'keep');
   await assert.rejects(prepareHarRelease(third.options, third.dependencies), /exists|occupied/i);
@@ -99,7 +97,8 @@ test('does not write through linked output parents or arbitrary destinations', a
   const fixture = await releaseFixture(t);
   const outside = join(fixture.root, 'outside');
   await mkdir(outside);
-  await symlink(outside, join(fixture.dist, 'releases'), process.platform === 'win32' ? 'junction' : 'dir');
+  await rmdir(join(fixture.root, 'dist'));
+  await symlink(outside, join(fixture.root, 'dist'), process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(prepareHarRelease(fixture.options, fixture.dependencies), /link|directory/i);
   assert.deepEqual(await readdir(outside), []);
   const second = await releaseFixture(t);
@@ -118,40 +117,29 @@ test('a modified bundle file or an extra secret invalidates the sealed release s
   await assert.rejects(readReleaseBundle(other.bundleDirectory), /unexpected|allowlist/i);
 });
 
-test('the real verification command preserves checked native results after clean packaging removes its report', async (t) => {
+test('verification binds the declared driver to checked native verdicts without rereading cleaned reports', async (t) => {
   const f = await releaseFixture(t);
-  await installVerificationCommand(f.root);
-  const prepared = await prepareHarRelease(f.options, { git: f.git });
-  assert.equal(prepared.releaseSet.verification.driverTestsPassed, 1);
+  const verdict = await verifyLocally(f.root, 'mysql', {
+    npm: process.execPath,
+    output: { write() {} },
+    spawnSync(command, args, options) {
+      assert.equal(command, process.execPath);
+      assert.deepEqual(args.slice(1), ['run', 'verify', '--', '--driver', 'mysql']);
+      assert.equal(options.cwd, f.root);
+      return { status: 0, stdout: 'PASSED mysql (1 native cases)\n', stderr: '' };
+    }
+  });
+  assert.equal(verdict.driverTestsPassed, 1);
+  assert.deepEqual(verdict.nativeModules, [{ module: 'mysql', passed: 1 }]);
   await assert.rejects(readFile(join(f.root, 'mysql', '.test', 'default', 'intermediates',
     'test', 'coverage_data', 'test_result.txt')), /ENOENT/);
 });
 
-test('a zero-exit verification command without a checked driver verdict cannot seal a release', async (t) => {
+test('a zero-exit verifier without a unique checked module verdict is rejected', async (t) => {
   const f = await releaseFixture(t);
-  await installVerificationCommand(f.root, { verdict: false });
-  await assert.rejects(prepareHarRelease(f.options, { git: f.git }), /native.*verdict|driver.*verification/i);
+  for (const stdout of ['', 'PASSED mysql (1 native cases)\nPASSED mysql (1 native cases)\n']) {
+    await assert.rejects(verifyLocally(f.root, 'mysql', {
+      npm: process.execPath, output: { write() {} }, spawnSync: () => ({ status: 0, stdout, stderr: '' })
+    }), /native.*verdict|driver.*verification/i);
+  }
 });
-
-async function installVerificationCommand(root, { verdict = true } = {}) {
-  const runner = pathToFileURL(join(ROOT, 'tools', 'run-ohos-tests.mjs')).href;
-  await mkdir(join(root, 'tools'), { recursive: true });
-  await writeFile(join(root, 'package.json'), JSON.stringify({
-    name: 'synthetic-release-verification', private: true, type: 'module',
-    scripts: { verify: 'node tools/verify-fixture.mjs' }
-  }));
-  await writeFile(join(root, 'tools', 'verify-fixture.mjs'), `
-    import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
-    import { join, dirname } from 'node:path';
-    import { parseHypiumResults } from ${JSON.stringify(runner)};
-    const report = join(process.cwd(), 'mysql', '.test', 'default', 'intermediates',
-      'test', 'coverage_data', 'test_result.txt');
-    mkdirSync(dirname(report), {recursive:true});
-    writeFileSync(report, 'class=Synthetic\\ntest=local\\nresult=Success\\n' +
-      'Tests run: 1, Failure: 0, Error: 0, Pass: 1, Ignore: 0\\n');
-    const result = parseHypiumResults(readFileSync(report, 'utf8'));
-    if (${JSON.stringify(verdict)}) console.log('PASSED mysql (' + result.passed + ' native cases)');
-    rmSync(join(process.cwd(), 'mysql', '.test'), {recursive:true});
-    console.log('Clean release packaging and remaining verification completed.');
-  `);
-}

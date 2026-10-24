@@ -1,12 +1,12 @@
-import { DbConnection } from '../../core/connection/DbConnection';
-import { DbExecutionController } from '../../core/execution/DbExecutionController';
-import { ArkDbError, ArkDbErrorKind } from '../../core/model/ArkDbError';
+import { DbConnection, ArkDbError, ArkDbErrorKind, CancellationOutcome } from '@arkdb/core';
+import { MySqlDbExecutionController } from '../driver/MySqlContracts';
 
 const MAX_MYSQL_CONNECTION_ID: bigint = 4294967295n;
 const ER_NO_SUCH_THREAD: number = 1094;
 const ER_QUERY_INTERRUPTED: number = 1317;
 
-export class MySqlExecutionController implements DbExecutionController {
+/** Native handle-based primitive; the connection owns the generic cancellation lifecycle. */
+export class MySqlExecutionController implements MySqlDbExecutionController {
   private controlConnection: DbConnection;
 
   constructor(controlConnection: DbConnection) {
@@ -14,13 +14,18 @@ export class MySqlExecutionController implements DbExecutionController {
   }
 
   async cancel(connectionHandle: string): Promise<void> {
+    await this.requestCancellation(connectionHandle);
+  }
+
+  async requestCancellation(connectionHandle: string): Promise<CancellationOutcome> {
     const query = mysqlKillQueryForHandle(connectionHandle);
     try {
       await this.controlConnection.query(query);
+      return CancellationOutcome.Requested;
     } catch (error) {
       if (error instanceof ArkDbError && error.kind === ArkDbErrorKind.Server &&
         error.code === ER_NO_SUCH_THREAD) {
-        return;
+        return CancellationOutcome.NotRunning;
       }
       throw error as Error;
     }

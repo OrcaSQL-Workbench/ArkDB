@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { ColumnDef } from '../../../main/ets/core/model/QueryResult';
+import { MySqlColumnDef as ColumnDef } from '../../../main/ets/mysql/model/MySqlQueryResult';
 import { Collation, ColumnType } from '../../../main/ets/mysql/protocol/Constants';
 import { mapDecodedTextValue, mapTextValue } from '../../../main/ets/mysql/value/TypeMapper';
 

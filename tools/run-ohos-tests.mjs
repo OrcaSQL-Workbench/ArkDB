@@ -3,6 +3,7 @@ import { readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runHvigor } from './run-hvigor.mjs';
+import { driverVerification, resolvePackage } from './driver-packages.mjs';
 
 export function parseHypiumResults(text) {
   const normalized = text.replace(/\r\n?/g, '\n');
@@ -21,11 +22,11 @@ export function parseHypiumResults(text) {
 
 function main() {
   const modules = process.argv.slice(2);
-  if (modules.length === 0) modules.push('mysql');
+  if (modules.length === 0) modules.push(...driverVerification(process.cwd()).nativeModules);
   let failed = false;
   for (const module of modules) {
-    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(module)) throw new Error(`Invalid module name: ${module}`);
-    const workspace = join(process.cwd(), module, '.test');
+    if (!/^[a-z][a-z0-9_-]*$/.test(module)) throw new Error(`Invalid module name: ${module}`);
+    const workspace = join(resolvePackage(process.cwd(), module).directory, '.test');
     const report = join(workspace, 'default', 'intermediates',
       'test', 'coverage_data', 'test_result.txt');
     // Cached mock record IDs include the package version; stale IDs can hang the SDK previewer.
@@ -33,6 +34,16 @@ function main() {
     process.stdout.write(`\n== ${module}: ArkTS unit tests ==\n`);
     let result;
     try {
+      const profile = runHvigor([
+        '--mode', 'module', '-p', `module=${module}@default`, '-p', 'product=default',
+        'GenerateBuildProfile', '--no-daemon'
+      ]);
+      if (profile.status !== 0 || /hvigor ERROR/.test(profile.output) ||
+        !/BUILD SUCCESSFUL/.test(profile.output)) {
+        failed = true;
+        console.error(`FAILED ${module} (HAR BuildProfile generation failed)`);
+        continue;
+      }
       result = runHvigor([
         '--mode', 'module', '-p', `module=${module}@default`, '-p', 'product=default',
         'test', '--no-daemon'

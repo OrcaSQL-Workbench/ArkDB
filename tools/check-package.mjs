@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { discoverDrivers, driverArgument, readJson5, resolveDriver, ROOT } from './driver-packages.mjs';
+import { dependencyClosure, discoverPackages, driverArgument, readJson5, resolvePackage, ROOT } from './driver-packages.mjs';
 
 export { readJson5, ROOT } from './driver-packages.mjs';
 
@@ -39,7 +39,7 @@ function within(parent, path) {
 }
 
 export function checkPackage(root = ROOT, id = 'mysql') {
-  const driver = resolveDriver(root, id);
+  const driver = resolvePackage(root, id);
   const moduleRoot = driver.directory;
   const manifest = readJson5(join(moduleRoot, 'oh-package.json5'));
   if (!/^@arkdb\/[a-z][a-z0-9-]*$/.test(manifest.name ?? '') || manifest.main !== 'Index.ets' ||
@@ -58,8 +58,16 @@ export function checkPackage(root = ROOT, id = 'mysql') {
   }
 
   const module = driver.definition;
-  const core = join(moduleRoot, 'src', 'main', 'ets', 'core');
-  const implementation = join(moduleRoot, 'src', 'main', 'ets');
+  const dependencies = dependencyClosure(root, id).filter((entry) => entry.id !== id);
+  const dependencyNames = new Set(dependencies.map((entry) => entry.packageName));
+  if (dependencies.length > 0) {
+    const overrides = readJson5(join(root, 'oh-package.json5')).overrides ?? {};
+    for (const dependency of dependencies) {
+      if (![ `file:./${dependency.sourcePath}`, `@module:${dependency.id}` ].includes(overrides[dependency.packageName])) {
+        throw new Error(`Workspace dependency override must select registered source: ${dependency.packageName}.`);
+      }
+    }
+  }
   const files = [join(moduleRoot, 'Index.ets'),
     ...listFiles(join(moduleRoot, 'src', 'main', 'ets')).filter((file) => file.endsWith('.ets'))];
   const available = new Set(files.map((file) => resolve(file)));
@@ -73,16 +81,13 @@ export function checkPackage(root = ROOT, id = 'mysql') {
         if (!within(moduleRoot, target) || (!available.has(target) && !generatedProfile)) {
           throw new Error(`Unresolved or non-package import in ${relative(root, file)}: ${specifier}`);
         }
-        if (within(core, file) && within(implementation, target) && !within(core, target)) {
-          throw new Error(`Core must not depend on a driver implementation: ${relative(root, file)}`);
-        }
-        if (usesNetwork && !module.requestPermissions?.some((permission) => permission.name === 'ohos.permission.INTERNET')) {
-          throw new Error(`The ${id} HAR uses networking and must declare INTERNET.`);
-        }
       } else if (!specifier.startsWith('@kit.') && !specifier.startsWith('@ohos.')) {
-        if (!Object.hasOwn(manifest.dependencies ?? {}, specifier)) {
+        if (!Object.hasOwn(manifest.dependencies ?? {}, specifier) || !dependencyNames.has(specifier)) {
           throw new Error(`Undeclared runtime dependency in ${relative(root, file)}: ${specifier}`);
         }
+      }
+      if (usesNetwork && !module.requestPermissions?.some((permission) => permission.name === 'ohos.permission.INTERNET')) {
+        throw new Error(`The ${id} HAR uses networking and must declare INTERNET.`);
       }
     }
   }
@@ -118,7 +123,7 @@ export function checkPackage(root = ROOT, id = 'mysql') {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const args = process.argv.slice(2);
-    const drivers = args.length === 0 ? discoverDrivers().map((driver) => driver.id) : [driverArgument(args)];
+    const drivers = args.length === 0 ? discoverPackages().map((driver) => driver.id) : [driverArgument(args)];
     for (const id of drivers) {
       const result = checkPackage(ROOT, id);
       console.log(`Checked ${result.manifest.name}@${result.manifest.version}: ` +

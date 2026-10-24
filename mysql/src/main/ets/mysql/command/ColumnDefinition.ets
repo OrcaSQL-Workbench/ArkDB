@@ -1,5 +1,6 @@
 import { PacketReader } from '../protocol/PacketReader';
-import { ColumnDef, DbValueKind } from '../../core/model/QueryResult';
+import { MySqlColumnDef as ColumnDef } from '../model/MySqlQueryResult';
+import { DbValueKind } from '@arkdb/core';
 import { ColumnType, Collation, FieldFlag } from '../protocol/Constants';
 
 /** Parse a ColumnDefinition41 packet into a ColumnDef. */
@@ -23,6 +24,7 @@ export function parseColumnDef(payload: Uint8Array): ColumnDef {
   col.name = name !== null ? name : '';
   col.table = table !== null ? table : '';
   col.sourceSchema = schema !== null ? schema : '';
+  col.sourceCatalog = col.sourceSchema;
   col.sourceTable = col.table;
   col.nativeTypeId = String(type);
   col.nativeTypeName = mysqlTypeName(type);

@@ -2,17 +2,27 @@
 
 A headless, pure-ArkTS MySQL driver for HarmonyOS. This is a Harmony Archive (HAR), not a separately running system driver. It requires HarmonyOS networking and crypto Kits; it does not run in Node.js or a browser.
 
-**Status:** `1.0.1` engineering preview, distributed as a versioned GitHub HAR independently of optional OHPM publication. Consult the [official releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases) for published downloads; a local build does not establish publication. The build target is HarmonyOS 6.1.1 / API 24 on tablet and 2in1. MariaDB is experimental; neither extraction nor mocked tests establishes live compatibility. The existing version is retained to satisfy this SDK's package-version validator; it is not a production certification.
+**Source status:** `1.0.2` is engineering-preview release source. Core 1.0.0 remains independently maintained in source and is compiled into **one self-contained MySQL HAR**; users do not install a core HAR. ArkTS/native contracts and exact-archive consumption have separate local gates below. Device interoperability remains unverified. The published `1.0.1` engineering preview remains unchanged. Consult [official releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases) for actual downloads; a source version is not publication. The target remains HarmonyOS 6.1.1 / API 24, tablet and 2in1. MariaDB is experimental.
+
+The public entry retains the 1.0.1 MySQL connection/factory interface and native data shapes. Shared core does not require existing callers to adopt a generic factory or replace native calls with feature lookups. See [shared contracts](../docs/driver-contracts.md) for the distinct `Core...` interfaces and additive optional features. The examples below describe 1.0.2, not retroactive changes to the packaged 1.0.1 guide.
 
 ## Install
 
-Download the HAR, matching `.har.sha256`, and manifest from the same reviewed version on [GitHub Releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases), verify the checksum, and install the downloaded file from your application's module directory. If a version has no published assets yet, build it locally with the commands below rather than assuming its download exists:
+For 1.0.2, select `arkdb-mysql-1.0.2.har` and its matching checksum/manifest from
+the official releases above. After checking the checksum, install it from your
+application's module directory:
+
+```powershell
+ohpm install C:\Downloads\arkdb-mysql-1.0.2.har
+```
+
+For the existing **standalone 1.0.1** preview, download its HAR, checksum and manifest from the same reviewed release, verify the checksum, and install it from your application's module directory:
 
 ```powershell
 ohpm install C:\Downloads\arkdb-mysql-1.0.1.har
 ```
 
-To build that file from an ArkDB source checkout with the documented API-24 toolchain, run:
+This source does not rebuild or overwrite that version. Build local candidates with the documented API-24 toolchain:
 
 ```powershell
 npm ci --ignore-scripts
@@ -20,29 +30,44 @@ npm run restore
 npm run pack -- --driver mysql
 ```
 
-Outputs are `dist\arkdb-mysql-1.0.1.har`, `dist\arkdb-mysql-1.0.1.har.sha256`, and the matching `.manifest.json`. Compare `Get-FileHash -Algorithm SHA256` with the checksum before installing a downloaded archive. The HAR is a distribution artifact; OHPM publication is not required for local-file installation.
+The local output is `build\mysql-v1.0.2\arkdb-mysql-1.0.2-local.har`, with `.har.sha256` and `.manifest.json`. Compare the SHA-256 before installing. `-local` labels the filename, not the package version or import: the HAR contains `@arkdb/mysql@1.0.2`. The manifest records the local artifact channel, original source dependencies and embedded source fingerprints; the HAR itself has no external core dependency. OHPM registry publication is not required for local-file installation.
 
 Maintainers build on their existing development computer, then separately authorize upload of the verified bytes to GitHub Releases. A version tag does not trigger a cloud build, and GitHub Actions does not install a HarmonyOS SDK. Ordinary consumers install the HAR in a compatible HarmonyOS project without cloning ArkDB or copying its driver source.
 
-For a project-local archive at `MyApp\libs\arkdb-mysql-1.0.1.har`, `MyApp\entry\oh-package.json5` can declare:
+Put that one HAR under `MyApp\libs`. The `MyApp\entry\oh-package.json5` configuration is:
 
 ```json5
 {
   "dependencies": {
-    "@arkdb/mysql": "file:../libs/arkdb-mysql-1.0.1.har"
+    "@arkdb/mysql": "file:../libs/arkdb-mysql-1.0.2-local.har"
   }
 }
 ```
 
-The path is relative to the module's package manifest. Restore dependencies and rebuild the application after an upgrade; replace the version/checksum together rather than mixing artifacts from different releases. Do not register ArkDB's source HAR module in your own application workspace.
+Paths are relative to the module manifest. No core dependency or project-level core override is needed. Restore dependencies and rebuild after an upgrade; replace the deliberately selected HAR and matching checksum together. Do not register ArkDB source modules in the application.
 
-After this exact version has actually been published and verified in OHPM:
+The distribution is an API-24 **bytecode HAR** with normalized OHM URLs. Import implementation, shared contracts and errors from `@arkdb/mysql`, never internal source paths. `@arkdb/core` is a source-workspace interface, not a required consumer import. The driver declares `ohos.permission.INTERNET`; verify it in the final merged application. The host owns credential storage and certificate access. Registry installation is separate and requires actual publication.
 
-```powershell
-ohpm install @arkdb/mysql@1.0.1
-```
+## Public MySQL compatibility
 
-The release is a **bytecode HAR**, compiled for API 24 with normalized OHM URLs; use the documented compatible consumer toolchain, not an assumed older SDK. Import from `@arkdb/mysql`, never from internal source paths. The driver declares `ohos.permission.INTERNET`; verify it exists in the final application's merged declarations. This is not a runtime permission prompt. The application owns credential storage and any permissions required to obtain its TLS certificate files.
+`DbConnection` retains `ping`, `queryStream`, context changes, autocommit,
+commit/rollback and native session/server information. The non-generic
+`DbDriverFactory` retains `createConnection(config, password)` and provider
+creation; `DbExecutionController` retains handle-based `cancel(handle)`.
+Existing provider implementations do not acquire new required methods.
+
+`SqlValue`, column metadata, buffered results and streaming callbacks retain
+their MySQL types. Native stream summaries keep the established numeric warning
+and bigint insert-id defaults; zero alone is not proof that a server reported an
+identifier. The portable `features.streaming` interface instead preserves
+unreported observations as optional fields. Shared errors keep one constructor:
+`code` remains numeric, while `nativeCode` can retain numeric or textual codes.
+New fields on existing data shapes are optional.
+
+Use `CoreDbConnection`, `CoreDbDriverFactory`, `CoreQueryResultSink` and the other
+`Core...` exports when writing portable integrations. Core remains engine-neutral.
+The reserved `ServerFamily.PostgreSQL` value is retained only for source
+compatibility; it does not mean a PostgreSQL driver exists.
 
 ## Connect, query, close
 
@@ -51,7 +76,7 @@ Run connection work in a host-owned Worker, not in an ArkUI callback. This funct
 <!-- arkts-example: quickstart -->
 ```typescript
 import {
-  ConnectionConfig, DbConnection, MySqlDriverFactory,
+  ConnectionConfig, DbConnection, DbDriverFactory, MySqlDriverFactory,
   QueryResult, SslMode
 } from '@arkdb/mysql';
 
@@ -66,7 +91,8 @@ export async function readVersion(host: string, user: string, password: string):
     throw issues[0];
   }
 
-  const connection: DbConnection = new MySqlDriverFactory().createConnection(config, password);
+  const factory: DbDriverFactory = new MySqlDriverFactory();
+  const connection: DbConnection = factory.createConnection(config, password);
   try {
     await connection.connect();
     return await connection.query('SELECT VERSION() AS version');
@@ -155,7 +181,7 @@ export function displayRow(result: QueryResult, rowIndex: number): string[] {
 }
 ```
 
-Check `result.truncated` / `truncationReason` before treating loaded rows as complete. `additionalResults` contains subsequent result sets; `affectedRows`, `lastInsertId`, `warningCount`, `autocommit`, and `inTransaction` describe execution/session state. Bound any additional presentation layer separately; converting a whole result to a giant string defeats streaming.
+Check `result.truncated` / `truncationReason` before treating loaded rows as complete. `additionalResults` contains subsequent result sets; `affectedRows`, `lastInsertId` and `warningCount` describe execution. Portable streaming summaries leave `lastInsertId` absent when an EOF row terminator reports no identifier and preserve the value when an OK packet reports one. The native buffered result retains its historical zero default. Use session flags only when `statusKnown` / `sessionStatus.known` is true. Bound presentation separately; converting a whole result to a giant string defeats streaming. Historical MySQL `ColumnDef`/`ServerInfo` imports retain native subclasses; portable versions live in core.
 
 ## Errors and diagnostics
 
@@ -176,7 +202,7 @@ export function publicErrorText(error: Object): string {
 }
 ```
 
-Kinds are `Network`, `Tls`, `Auth`, `Protocol`, `Server`, `Timeout`, `Cancelled`, and `Validation`. An ordinary server SQL error can leave a connection usable; transport/protocol failure, unknown status, or forced termination must not be treated as safe reuse. Check `connection.state` and the operation's outcome. Do not replay writes.
+Kinds include `Network`, `Tls`, `Auth`, `Protocol`, `Server`, `Timeout`, `Cancelled`, `Validation` and `Unsupported`. MySQL retains numeric `code` values; the same shared error's `nativeCode` also preserves textual codes for other adapters, independently of SQLSTATE. An ordinary SQL error can leave the connection open but its session status unknown. Check lifecycle, known status and execution outcome before reuse. Do not replay writes.
 
 `Logger.setLevel(LogLevel.OFF)` disables driver logging; custom `LogSink` implementations are opt-in per thread. Built-in identifier tokens are pseudonymous, not anonymization, and passwords/authentication material must never be passed to a logger.
 
@@ -217,7 +243,7 @@ Use an awaited sink to process each chunk without retaining every row. Omitting 
 <!-- arkts-example: streaming -->
 ```typescript
 import {
-  ArkDbError, DbConnection, QueryExecutionSummary, QueryOptions,
+  ArkDbError, DbStreamingConnection, QueryExecutionSummary, QueryOptions,
   QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk
 } from '@arkdb/mysql';
 
@@ -234,7 +260,7 @@ export class CountingSink implements QueryResultSink {
   }
 }
 
-export async function countBoundedRows(connection: DbConnection, trustedSql: string,
+export async function countBoundedRows(connection: DbStreamingConnection, trustedSql: string,
   sink: CountingSink): Promise<QueryExecutionSummary> {
   const options = new QueryOptions();
   options.maxRows = 10000;
@@ -316,13 +342,13 @@ If a commit response is lost, a rollback attempt does not prove the commit did n
 
 ## Cancellation and deadlines
 
-Cancellation uses an independently opened control connection to the same server, with permission to cancel the query session. Do not put its command behind the query connection's queue. Attach a rejection handler to the running query immediately and await **both** the cancellation command and the original query before considering reuse.
+The generic `features.cancellation` interface is bound to this connection's current execution. MySQL owns a separate control connection to the same server and its cleanup; another driver need not use SQL control sessions. Attach a rejection handler immediately and await **both** the request and the original query. A `Requested` result is not proof of interruption or reusable session state.
 
 This finite `SLEEP(10)` demonstration cancels one read. A race can complete normally rather than report interruption. Unexpected query or cancellation errors retain both failure paths instead of being converted into successful cancellation.
 
 <!-- arkts-example: cancellation -->
 ```typescript
-import { ArkDbError, ConnectionState, DbConnection, MySqlDriverFactory } from '@arkdb/mysql';
+import { ArkDbError, ConnectionState, DbConnection } from '@arkdb/mysql';
 
 export class CancellationFailure extends Error {
   queryFailure: Object | null;
@@ -339,13 +365,10 @@ export class QueryObservation {
   failure: Object | null = null;
 }
 
-export async function demonstrateCancellation(queryConnection: DbConnection,
-  controlConnection: DbConnection): Promise<string> {
-  if (queryConnection === controlConnection || queryConnection.state !== ConnectionState.Ready ||
-    controlConnection.state !== ConnectionState.Ready) {
-    throw ArkDbError.validation('Cancellation needs two distinct, ready connections to the same server.');
-  }
-  const controller = new MySqlDriverFactory().createExecutionController(controlConnection);
+export async function demonstrateCancellation(queryConnection: DbConnection): Promise<string> {
+  if (queryConnection.state !== ConnectionState.Ready) throw ArkDbError.validation('Connection is not ready.');
+  const controller = queryConnection.features?.cancellation;
+  if (controller === undefined) throw ArkDbError.unsupported('Cancellation is not available.');
   const query = new QueryObservation();
   let controlFailure: Object | null = null;
   const observed = queryConnection.query('SELECT SLEEP(10)').then(
@@ -353,7 +376,7 @@ export async function demonstrateCancellation(queryConnection: DbConnection,
     (error: Object): void => { query.failure = error; }
   );
   try {
-    await controller.cancel(queryConnection.serverInfo.connectionHandle);
+    await controller.cancel();
   } catch (error) {
     controlFailure = error as Object;
   }
@@ -367,7 +390,9 @@ export async function demonstrateCancellation(queryConnection: DbConnection,
 }
 ```
 
-`connectionHandle` is opaque; do not build `KILL QUERY` by concatenating user input. A cancellation failure may leave the original query running. Production statement deadlines need a host-owned timer plus cancellation/forced-close orchestration; `Promise.race` alone only stops awaiting and does not stop execution. Forced socket or Worker closure leaves the outcome unknown. These live races remain unverified.
+The returned `QueryCancellationResult` distinguishes not running/requested and reports not-ready/ready/awaiting-completion/requires-synchronization/closed reuse state. Inspect the final connection/session state after the original query settles; MySQL can refresh invalidated status with `ping()`. While a request is pending, a later command is rejected. If a dispatched `KILL` times out or loses its outcome, the target connection is closed and permanently retired before that guard is released: closing only the control socket cannot rule out a delayed server-side `KILL`. Create a new connection instance rather than reopening the retired one, and never replay writes automatically. A definite server rejection of `KILL` does not retire an otherwise usable target.
+
+The native `createExecutionController(controlConnection).cancel(connectionHandle)` helper is retained for callers explicitly managing their own control session and execution lifetime. Handles are opaque; never concatenate untrusted input into `KILL QUERY`. Control failures may leave a query running. Host timers and forced cleanup remain necessary for statement deadlines; `Promise.race` alone does not cancel server execution. These live races remain unverified.
 
 ## Metadata, metrics, and database context
 
@@ -393,7 +418,7 @@ export async function readMetrics(connection: DbConnection):
 }
 ```
 
-Use `changeContext(context)` to switch the MySQL default database; `ping()` checks the current session. Do not assume these semantics apply to future engines.
+MySQL also exposes these through `features.metadata` and `features.metrics`; generic metrics return named measurements, not InnoDB models. The MySQL `ServerMetricsProvider` compatibility alias remains vendor-specific. Context features explicitly declare that catalog/schema are aliases: either selects the database, but conflicting values are rejected. Other engines can require reconnection for a catalog change and permit independent schema changes.
 
 ## Execution contract
 
@@ -402,8 +427,8 @@ Use `changeContext(context)` to switch the MySQL default database; `ping()` chec
 - **Bounded results.** `query()` uses the bounded streaming implementation and exposes `truncated`, `truncationReason`, and `additionalResults`. It is not an unlimited collector.
 - **Streaming.** `queryStream(sql, options, sink)` awaits each `QueryResultSink` callback. Set row/chunk/result/drain budgets in `QueryOptions`, handle truncation and unknown status explicitly, and avoid accumulating every chunk. Awaiting a sink does not pause socket delivery; the separate receive queue remains bounded and fails closed on overflow.
 - **Timeouts.** `connectTimeoutMs` covers connection opening. The low-level driver validates `QueryOptions.statementTimeoutMs` but does **not** start a statement-cancellation timer. Callers must own statement deadlines, cancellation orchestration, and cleanup; `Promise.race` alone does not cancel server execution.
-- **Transactions.** Use `setAutocommit`, `commit`, `rollback`, and `sessionStatus`. A transport failure or interrupted cancellation can leave the execution outcome unknown. Do not automatically replay writes.
-- **Cancellation.** `MySqlDriverFactory.createExecutionController` supplies MySQL cancellation primitives over a separate control connection; it does not create or manage that connection for you. Do not issue another command on the query connection until the original operation has settled and its state is usable.
+- **Transactions.** Generic features expose `begin`, `commit`, `rollback` and known session status. MySQL also retains native `setAutocommit`. Failure can invalidate status or leave an unknown execution outcome; never replay writes.
+- **Cancellation.** The generic connection feature owns its MySQL control-session lifetime. The retained handle-based factory helper does not. Await the original query and request, then inspect reuse/status before another command.
 - **Errors.** `ArkDbError` and `ArkDbErrorKind` expose common categories and server error code/SQLSTATE. No Workbench-name compatibility aliases are exported. Server messages can contain sensitive data; do not copy them into public logs.
 - **Logging.** `Logger`, `LogSink`, and the five `ArkDB.*` subsystem tags describe driver activity only. Host UI, storage, and RPC logging stay outside the driver. File output remains an explicit opt-in convenience.
 
@@ -411,7 +436,9 @@ The factory also exposes capability flags and metadata/server-metrics providers.
 
 ## Verification limits
 
-The repository builds and tests the module independently and includes an isolated consumer of the release HAR. Maintainers can run `npm run release:verify-download -- --driver mysql --tag mysql-v1.0.1` only after a real public release exists: it downloads and checks that exact HAR before installing/compiling it in a fresh sample. A failed remote download cannot fall back to local driver source or `dist`.
+Local validation includes actual ArkTS compilation and the core/MySQL native contract suites, including deterministic protocol, cancellation and metrics fixtures. The exact-archive consumer gate restores one HAR with no core file, source override or available registry, then compiles the packaged examples and unsigned sample HAP. It separately restores test-only dependencies and executes offline lifecycle/error-identity cases. SDK-free fakes are separate tooling evidence, not substitutes for native checks. Candidate manifests and consumer records bind results to exact bytes and source fingerprints.
+
+The historical published 1.0.1 verification remains recorded in [releasing](../docs/releasing.md), not as evidence for 1.0.2/core. A future release verifier must consume its exact single-HAR download and cannot fall back to local source or stale `dist`.
 
 Network, certificate and crypto replacements used by local Hypium tests are not real-device tests. Local preparation, public GitHub download availability, OHPM registry availability, and actual device interoperability are separate states.
 

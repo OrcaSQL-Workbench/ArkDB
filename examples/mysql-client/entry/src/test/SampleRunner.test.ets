@@ -1,16 +1,25 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
-  ArkDbError, ArkDbErrorKind, ColumnDef, ConnectionConfig, ConnectionState,
-  DatabaseContext, DatabaseSessionStatus, DbConnection, DbDriverFactory,
-  DbExecutionController, DriverCapabilities, MetadataProvider, MySqlDriverFactory,
-  QueryExecutionSummary, QueryOptions, QueryResult, QueryResultMeta, QueryResultSink,
-  QueryResultSummary, QueryRowChunk, ServerInfo, ServerMetricsProvider, SslMode
+  ArkDbError, ArkDbErrorKind, ColumnDef, ConnectionConfig, ConnectionState, DatabaseContext,
+  DatabaseSessionStatus, DbConnection, DriverCapabilities, MySqlDriverFactory, QueryExecutionSummary, QueryOptions,
+  QueryResult, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk, ServerInfo, SslMode
 } from '@arkdb/mysql';
 import { SampleRequest } from '../main/ets/sample/Messages';
-import { describeSampleError, SampleRunner } from '../main/ets/sample/SampleRunner';
+import {
+  describeSampleError, SampleConnection, SampleConnectionFactory, SampleRunner
+} from '../main/ets/sample/SampleRunner';
 
 export default function sampleRunnerTest(): void {
   describe('Worker sample lifecycle', () => {
+    it('retainsTheEmbeddedCanonicalErrorForDriverFailures', 0, async () => {
+      const connection = new MySqlDriverFactory().createConnection(new ConnectionConfig(), '');
+      let failure: Object | null = null;
+      try { await connection.query('SELECT 1'); } catch (error) { failure = error as Object; }
+      expect(failure instanceof ArkDbError).assertTrue();
+      expect((failure as ArkDbError).kind).assertEqual(ArkDbErrorKind.Protocol);
+      await connection.close();
+    });
+
     it('usesVerifiedTlsAndClosesAfterTheBoundedRead', 0, async () => {
       const factory = new FakeFactory();
       const request = validRequest();
@@ -90,34 +99,22 @@ function validRequest(): SampleRequest {
   return request;
 }
 
-class FakeFactory implements DbDriverFactory {
+class FakeFactory implements SampleConnectionFactory {
   readonly driverId: string = 'mysql';
   readonly capabilities: DriverCapabilities = new DriverCapabilities();
   readonly connection: FakeConnection = new FakeConnection();
   config: ConnectionConfig = new ConnectionConfig();
   created: number = 0;
-  private delegate: MySqlDriverFactory = new MySqlDriverFactory();
 
-  createConnection(config: ConnectionConfig, _password: string): DbConnection {
+  createConnection(config: ConnectionConfig, _password: string): SampleConnection {
     this.config = config.clone();
     this.created++;
     return this.connection;
   }
 
-  createMetadataProvider(connection: DbConnection): MetadataProvider {
-    return this.delegate.createMetadataProvider(connection);
-  }
-
-  createExecutionController(connection: DbConnection): DbExecutionController {
-    return this.delegate.createExecutionController(connection);
-  }
-
-  createServerMetricsProvider(connection: DbConnection): ServerMetricsProvider {
-    return this.delegate.createServerMetricsProvider(connection);
-  }
 }
 
-class FakeConnection implements DbConnection {
+class FakeConnection implements SampleConnection {
   state: ConnectionState = ConnectionState.Idle;
   serverInfo: ServerInfo = new ServerInfo();
   sessionStatus: DatabaseSessionStatus = new DatabaseSessionStatus();

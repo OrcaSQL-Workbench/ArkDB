@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.0.2 - 2026-10-24 (engineering preview)
+
+- Depend on the independent `@arkdb/core` 1.0.0 source module for common errors,
+  results, metadata and connection contracts.
+- Preserve the 1.0.1 MySQL connection, non-generic factory, handle-based controller
+  and provider interfaces; expose generic contracts under distinct `Core...` names.
+- Keep native scalar/column/stream types, numeric error codes and established
+  constructor defaults. Make additions to existing data shapes optional.
+- Keep one shared error constructor with a separate numeric/textual `nativeCode`;
+  preserve portable unknown observations separately from native stream defaults.
+- Compile core plus MySQL into one self-contained delivery HAR, with internal
+  declarations, source provenance and no consumer core dependency/override.
+- Validate the assembled manifest, merged module definition and combined legal
+  notices when publishing the sealed single-HAR release.
+- Expose adapter-typed factory creation and optional connection features; keep
+  native MySQL creation/provider helpers and public native information aliases.
+- Keep configuration, TCP/TLS, handshake/column details and InnoDB metrics in MySQL.
+- Add connection-owned cancellation lifetime and explicit reuse outcomes;
+  retain the lower-level handle-based control-session primitive.
+- Retire the target connection after an unacknowledged cancellation dispatch;
+  preserve reuse after a definite server rejection and prevent late completion
+  from resurrecting a closed connection.
+- Omit unreported insert IDs from EOF streaming summaries and retain identifiers
+  actually reported by OK row terminators, preserving native buffered defaults.
+- Distinguish unknown session state and catalog/schema alias validation.
+- Define per-driver single-HAR delivery and independent extension/composition regressions.
+- Generate current HAR profiles before native tests, resolve registered test
+  source paths, and use explicit ArkTS streaming/error types.
+- Keep local native/consumer evidence separate from unverified device behavior
+  and publication. No 1.0.1 asset or tag is replaced.
+
 ## 1.0.1 - 2026-10-23 (engineering preview)
 
 - Preserve the strict runner's checked native verdict across release clean-build cleanup; preparation no longer rereads a raw SDK report that packaging has removed.

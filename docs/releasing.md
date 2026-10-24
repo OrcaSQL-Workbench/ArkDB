@@ -4,6 +4,14 @@
 
 ArkDB is independent of OrcaSQL Workbench. The initial supported release module is `mysql` / `@arkdb/mysql`, targeting HarmonyOS 6.1.1 / API 24, tablet and 2in1, as a bytecode HAR with normalized OHM URLs. PostgreSQL is not implemented. Real-device networking, TLS/authentication and cancellation evidence remain deferred, so the initial release is an **engineering preview**, not a production certification.
 
+**Current engineering-preview release source:** MySQL 1.0.2 depends on
+core 1.0.0 in source and compiles both into one self-contained HAR. Local native tests and exact-archive consumer checks
+are distinct from publication and real-device validation. Uncommitted local
+candidates are not reviewed-source releases. The 1.0.1 evidence below is
+historical and remains unchanged, not evidence for the split. Publication
+commands use 1.0.2; do
+not recreate the existing 1.0.1 tag/assets from new source.
+
 ## Published engineering preview
 
 The first public HAR release is [mysql-v1.0.1](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.1), published on 2026-10-23. The earlier local `mysql-v1.0.0` candidate tag was not rewritten, pushed, or published.
@@ -20,13 +28,13 @@ The first public HAR release is [mysql-v1.0.1](https://github.com/OrcaSQL-Workbe
 | Actual public download acceptance | Downloaded all six real assets, verified their source/tag/digests, installed the remote HAR and compiled the independent sample/README examples; six local sample cases passed |
 | Not established | OHPM registry publication and real-device networking/TLS/cancellation |
 
-The real download verifier completed on 2026-10-23 at 01:14 UTC. Its local receipt is `dist\mysql-v1.0.1.download.json`; the immutable Release's preparation records are deliberately not replaced by this later receipt. Future code or documentation changes on `main` do not move this tag or rebuild/overwrite its assets.
+The real download verifier completed on 2026-10-23 at 01:14 UTC. Its receipt was originally `dist\mysql-v1.0.1.download.json` and is now preserved unchanged at `build\mysql-v1.0.1\evidence\mysql-v1.0.1.download.json`. The publication receipt is `build\mysql-v1.0.1\evidence\mysql-v1.0.1.publication.json`; the sealed six-file bundle is `dist\mysql-v1.0.1\`. The immutable Release's preparation records are not replaced by these later receipts. Folder organization does not move its tag or overwrite any asset.
 
 ## Prerequisites and source identity
 
 - Use Node.js >=22.19.0 and the installed compatible DevEco Studio / HarmonyOS API-24 toolchain. Explicit Hvigor/OHPM/SDK paths are supported as described in the [root README](../README.md).
 - Select the driver/package version and changelog, review the public source and legal notices, then commit through the owner's approved workflow.
-- Create a matching **annotated** local tag, for example `mysql-v1.0.1`, at that exact commit. The preparation command does not create tags, change versions or commit source.
+- After separate approval, create the matching **annotated** local tag `mysql-v1.0.2` at that exact commit. Preparation never creates tags, changes versions or commits.
 - The checkout must remain clean. An uncommitted local candidate, or a HAR built before its source was committed, cannot become a release merely by changing its metadata.
 - Have GitHub CLI `gh` installed and authenticated locally before actual publication. The publisher is scoped to the official `OrcaSQL-Workbench/ArkDB` repository and verifies both its origin and public remote identity. It does not use OHPM credentials or create GitHub tokens.
 
@@ -37,42 +45,58 @@ Commits, pushes, tag creation and publication each remain explicit owner-control
 ```powershell
 npm ci --ignore-scripts
 npm run restore
-npm run verify
+npm run verify -- --driver mysql
 ```
 
-This local-only gate runs tooling tests and package checks, builds the driver, runs local Hypium cases, clean-builds the release HAR, compiles its actual README examples and runnable sample, runs synthetic sample lifecycle tests, and invokes **OHPM `prepublish`**, which does not upload a package.
+This local-only gate uses the selected driver's `arkdb-package.json` declaration:
+tooling/package checks, the declared native module dependency suites, clean
+release builds of one selected driver HAR with shared source included, the driver's own exact-archive
+README/sample compilation and local lifecycle tests, and **OHPM `prepublish`**
+for each archive. It does not upload. Local candidate checks do not authorize
+source commits, tags, uploads or registry publication.
 
-Hypium's generated `.test` workspace is refreshed to avoid stale normalized mock record IDs. The gate checks completed result records against the native summary, with no failures/errors/ignored cases. SDK case-name headers can be duplicated or interleaved; they are not completed verdicts. A green `BUILD SUCCESSFUL` alone is not a passed native suite.
+Each HAR's current BuildProfile is generated before unit compilation; an ignored IDE-generated profile is not a prerequisite. Hypium's generated `.test` workspace is refreshed at the registered module source path to avoid stale normalized mock record IDs. The gate checks completed result records against the native summary, with no failures/errors/ignored cases. SDK case-name headers can be duplicated or interleaved; they are not completed verdicts. A green `BUILD SUCCESSFUL` alone is not a passed native suite.
 
-`dist` holds candidate outputs and mutable local verification records. A `sourceClean:false` / `sourceCommit:null` candidate is useful for development, not a source release. Do not upload the entire directory: stale optional receipts may belong to a different archive.
+`build\<driver>-v<version>\` holds the current `-local.har`, checksum and manifest. Its `evidence\` contains matching verification records; `work\` contains owned temporary SDK projects that are removed after use. Historical outputs are retained under that version's `history\` and are never build fallbacks. `dist\<driver>-v<version>\` holds only the sealed ready bundle. A `sourceClean:false` / `sourceCommit:null` candidate is useful for development, not a source release.
 
-The installed SDK currently accepts the retained `1.0.1` version without the warnings it emits for `0.x`; that number is not a stability certificate. Include nonempty package `README.md`, `CHANGELOG.md`, `LICENSE` and `README.OpenSource`. The last file preserves upstream MIT notices in a filename the HAR packager includes. Review any OHPM source-disclosure warning; it is not silently hidden by the tools.
+`-local` is an artifact filename label, not a package prerelease version. The SDK manifest/HAR keeps numeric version `1.0.2`, and the import stays `@arkdb/mysql`. This corrects the earlier unreleased major-version candidate after preserving the published MySQL interface through adapter-owned contracts and distinct `Core...` exports. Only actual PR builds should use a PR-specific label; the local builder does not invent a PR number.
+
+The earlier SDK accepted 1.0.1; neither that fact nor the next source version
+certifies stability. Include nonempty README, changelog, license and
+`README.OpenSource` in each package. MySQL retains its upstream MIT notices;
+core has its own applicable notice. Review OHPM warnings rather than hiding
+them.
 
 ## Prepare one sealed local release set
 
 After the clean reviewed commit and matching annotated tag exist:
 
 ```powershell
-npm run release:prepare -- --driver mysql --tag mysql-v1.0.1
+npm run release:prepare -- --driver mysql --tag mysql-v1.0.2
 ```
 
 Preparation validates the driver, package/tag version, annotated tag object and current clean source commit **before building**, runs the full local MySQL gate, then rechecks the source, tag, artifact and verification bindings. No Git reference or remote state is changed.
 
-Output:
+Intended next-version output after full authorized verification:
 
 ```text
-dist\releases\mysql-v1.0.1\
-  arkdb-mysql-1.0.1.har
-  arkdb-mysql-1.0.1.har.sha256
-  arkdb-mysql-1.0.1.manifest.json
-  arkdb-mysql-1.0.1.consumer.json
-  arkdb-mysql-1.0.1.readiness.json
+dist\mysql-v1.0.2\
+  arkdb-mysql-1.0.2.har
+  arkdb-mysql-1.0.2.har.sha256
+  arkdb-mysql-1.0.2.manifest.json
+  arkdb-mysql-1.0.2.consumer.json
+  arkdb-mysql-1.0.2.readiness.json
   release-set.json
 ```
 
-`release-set.json` binds repository, driver/module path, package/version, annotated tag object, source commit/fingerprint, API/platform, local validation counts and the five original asset digests/sizes. The publisher uploads it as the sixth asset. Local test/example records are not device, registry, or remote-download evidence.
+The single-HAR release set binds the selected driver, embedded source packages,
+exact source versions/fingerprints, reviewed public exports, annotated tag,
+source commit, platform and asset digests/sizes. Consumer/readiness evidence
+requires registry-independent runtime verification. Historical schema-1 standalone
+and schema-2 dependency-set records remain readable; local records are not device,
+registry-publication or remote-download evidence.
 
-Only these named, matching regular files are sealed. Extra `dist` files are ignored during preparation; extra files inside a sealed bundle invalidate it. Linked paths, stale receipts, missing assets, byte changes and source/tag changes fail explicitly.
+Only these named, matching regular files are sealed, collected from `build\<driver>-v<version>\` and its `evidence\`. Preparation removes `-local` from release filenames without changing HAR bytes, rewrites the checksum basename, marks the sealed manifest's `artifactChannel` as `release`, and normalizes any historical external-dependency filenames in manifests and evidence. The local records remain unchanged. The ready `dist` directory contains no loose test outputs or publication receipts. Extra files inside a sealed bundle invalidate it. Linked paths, stale receipts, missing assets, byte changes and source/tag changes fail explicitly.
 
 An existing versioned destination is never silently overwritten. If an attempt was interrupted, inspect and deliberately move the old local attempt aside before rebuilding. This command does not delete prior work. Once sealed, do not run another build to replace the bytes for that release.
 
@@ -85,7 +109,7 @@ First, the owner must explicitly authorize the source/tag push and public releas
 With the matching remote tag present:
 
 ```powershell
-npm run release:publish -- --driver mysql --tag mysql-v1.0.1 --confirm-publish
+npm run release:publish -- --driver mysql --tag mysql-v1.0.2 --confirm-publish
 ```
 
 **This command performs remote writes.** `--confirm-publish` acknowledges authorization to create/upload and make the verified engineering preview publicly downloadable. Omitting it cannot publish.
@@ -96,7 +120,7 @@ The publisher:
 2. Creates an identical draft prerelease, never a stable/latest release. It adopts only a release with its exact sealed identity marker.
 3. Uploads the original byte snapshots, without invoking a compiler, and verifies GitHub's returned asset size/digest and API identity. Drafts can have temporary `untagged-...` download URLs; those are accepted only for the same repository/asset while the release is still draft.
 4. Checks the full asset set and source/tag again before publishing the prerelease.
-5. Reads back public state/assets, requires their final version-tagged download URLs, and writes `dist\releases\mysql-v1.0.1.receipt.json`, containing actual Release/asset URLs, IDs and digests. A remaining temporary draft URL cannot enter a successful receipt.
+5. Reads back public state/assets, requires final version-tagged URLs, and writes the selected version's receipt (for example `build\mysql-v1.0.2\evidence\mysql-v1.0.2.publication.json`). A temporary draft URL cannot enter a successful receipt.
 
 The local preparation manifests continue to say `published:false`; they describe the original local preparation, not mutable remote state. The separate receipt describes the verified remote publication. Do not edit sealed files to flip status flags.
 
@@ -116,9 +140,15 @@ After an actual GitHub prerelease exists:
 npm run release:verify-download -- --driver mysql --tag mysql-v1.0.1
 ```
 
-The verifier reads the public release and immutable marker, checks its remote tag, downloads the exact allowlisted HAR/checksum/manifests/evidence, compares size and SHA-256, and installs the **downloaded** HAR into a fresh consumer workspace. It compiles the packaged README examples and sample HAP/Worker and runs synthetic sample lifecycle tests using the local toolchain. It never recompiles the driver or falls back to local `dist` or driver implementation source if the remote file is unavailable or wrong.
+The verifier reads the public release and immutable marker, checks its remote
+tag and downloads the exact allowlisted bytes. New self-contained releases use
+one HAR without a core file or override; historical schema-2 dependency sets
+remain supported by their recorded exact archive graph. No source, stale local
+artifact or registry fallback is allowed. The verifier compiles packaged examples
+and the driver's own sample, then runs local tests. The 1.0.1 command above selects
+that historical standalone release.
 
-Download redirects are limited to GitHub's public asset hosts, are bounded by size/time, and receive no account credential headers. Signed CDN redirect parameters are not written into the public receipt. The result is stored as `dist\mysql-v1.0.1.download.json`, separately from the sealed bundle.
+Download redirects are limited to GitHub's public asset hosts, bounded by size/time, and receive no account credential headers. Signed CDN parameters are not persisted. Results are stored at `build\<driver>-v<version>\evidence\<tag>.download.json`, with owned temporary workspaces under that version's `work\`, separately from sealed releases. The requested tag determines this version directory, not the current source version.
 
 Before a public version exists this command must fail. A download/consumer pass still does not establish actual device networking/TLS or stable production readiness. The release archive identity remains immutable even if a newer local source checkout is used to run the consumer verifier.
 
@@ -141,11 +171,14 @@ key_path=C:\Private\ArkDB\registry-private-key
 
 These are placeholders, not credentials provisioned by ArkDB. No tool here generates keys, accepts account terms, grants rights or stores publisher credentials. Keep secret values out of command arguments/logs and source. Check the official supported key/passphrase requirements before generating a key.
 
-With separate authorization, publish the **same sealed HAR**, initially under the `preview` distribution tag:
+Separate owner authorization is required to publish the selected sealed
+self-contained HAR. There is no prerequisite public core package. Never replace
+published bytes under the same version. An illustrative command for the
+MySQL package, initially using `preview`, is:
 
 ```powershell
 node .\tools\run-ohpm.mjs publish `
-  .\dist\releases\mysql-v1.0.1\arkdb-mysql-1.0.1.har `
+  .\dist\mysql-v1.0.2\arkdb-mysql-1.0.2.har `
   --tag preview --ensure_dependency_include --disallow_nested_package
 ```
 

@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
-  affectedDrivers, discoverDrivers, driverArgument, driverForTag, packageStem, resolveDriver, ROOT
+  affectedDrivers, discoverDrivers, downloadOutputPaths, driverArgument, driverForTag, packageStem,
+  resolveDriver, tagOutputPaths, ROOT
 } from './driver-packages.mjs';
 
 test('only the implemented MySQL driver is discoverable in this repository', () => {
@@ -44,6 +45,24 @@ test('rejects unsafe selectors and manifest-derived artifact names', () => {
   assert.equal(driverArgument([]), 'mysql');
   assert.equal(driverArgument(['--driver', 'pgsql']), 'pgsql');
   assert.throws(() => packageStem({ name: '@arkdb/../../private', version: '1.0.0' }));
+  for (const version of ['1.0.0-local', '1.0.0-pr123', '1.0.0-preview', '1.0.0+build']) {
+    assert.throws(() => packageStem({ name: '@arkdb/mysql', version }));
+  }
+});
+
+test('release and receipt paths follow the requested tag rather than the current source version', async (t) => {
+  const root = await fixture(t);
+  const paths = tagOutputPaths(root, 'mysql', 'mysql-v1.0.1');
+  assert.equal(paths.ready, join(root, 'dist', 'mysql-v1.0.1'));
+  assert.equal(paths.publicationRecord,
+    join(root, 'build', 'mysql-v1.0.1', 'evidence', 'mysql-v1.0.1.publication.json'));
+  assert.deepEqual(downloadOutputPaths(root, 'mysql', 'mysql-v1.0.1'), {
+    directory: join(root, 'build', 'mysql-v1.0.1', 'work'),
+    record: join(root, 'build', 'mysql-v1.0.1', 'evidence', 'mysql-v1.0.1.download.json')
+  });
+  for (const tag of ['mysql-v1.0.1-local', 'pgsql-v1.0.1', '..\\mysql-v1.0.1']) {
+    assert.throws(() => tagOutputPaths(root, 'mysql', tag), /matching.*tag/i);
+  }
 });
 
 test('registered modules cannot escape the checkout or use linked source directories', async (t) => {
@@ -73,6 +92,7 @@ async function fixture(t) {
     await mkdir(join(moduleRoot, 'src', 'main'), { recursive: true });
     await writeFile(join(moduleRoot, 'src', 'main', 'module.json5'), JSON.stringify({ module: { name: id, type: 'har' } }));
     await writeFile(join(moduleRoot, 'oh-package.json5'), JSON.stringify({ name, version }));
+    await writeFile(join(moduleRoot, 'arkdb-package.json'), '{"kind":"driver"}');
   }
   return root;
 }

@@ -1,0 +1,8 @@
+{
+  "kind": "driver",
+  "verification": {
+    "consumer": "examples/mysql-client",
+    "nativeModules": ["core", "mysql"],
+    "requiresInternet": true
+  }
+}

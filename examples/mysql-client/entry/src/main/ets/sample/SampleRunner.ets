@@ -1,7 +1,6 @@
 import {
-  ArkDbError, ArkDbErrorKind, ConnectionConfig, DbConnection, DbDriverFactory,
-  MySqlDriverFactory, QueryOptions, QueryResultMeta, QueryResultSink,
-  QueryResultSummary, QueryRowChunk, SqlValue, SslMode
+  ArkDbError, ArkDbErrorKind, ConnectionConfig, DbConnection, MySqlDriverFactory, QueryExecutionSummary,
+  QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk, SqlValue, SslMode
 } from '@arkdb/mysql';
 import { SampleRequest, SampleResponse } from './Messages';
 
@@ -9,13 +8,21 @@ const DEMO_SQL: string = 'SELECT VERSION() AS version, ' +
   'CAST(9007199254740993 AS UNSIGNED) AS exact_bigint, ' +
   'CAST(12.34 AS DECIMAL(10,2)) AS exact_decimal, NULL AS sql_null';
 
+export interface SampleConnection extends DbConnection {
+  queryStream(sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary>;
+}
+
+export interface SampleConnectionFactory {
+  createConnection(config: ConnectionConfig, password: string): SampleConnection;
+}
+
 export class SampleRunner {
-  private factory: DbDriverFactory;
+  private factory: SampleConnectionFactory;
   private active: DbConnection | null = null;
   private busy: boolean = false;
   private stopping: boolean = false;
 
-  constructor(factory: DbDriverFactory = new MySqlDriverFactory()) {
+  constructor(factory: SampleConnectionFactory = new MySqlDriverFactory()) {
     this.factory = factory;
   }
 
@@ -28,7 +35,7 @@ export class SampleRunner {
       return response;
     }
     this.busy = true;
-    let connection: DbConnection | null = null;
+    let connection: SampleConnection | null = null;
     try {
       const config = new ConnectionConfig();
       config.host = request.host;

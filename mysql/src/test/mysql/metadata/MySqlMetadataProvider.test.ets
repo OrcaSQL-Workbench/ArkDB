@@ -1,12 +1,10 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { DbConnection } from '../../../main/ets/core/connection/DbConnection';
-import { DatabaseContext } from '../../../main/ets/core/model/DatabaseContext';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { QueryResult } from '../../../main/ets/core/model/QueryResult';
-import { DatabaseSessionStatus, QueryExecutionSummary, QueryOptions, QueryResultSink } from
-  '../../../main/ets/core/model/QueryStream';
-import { ConnectionState, ServerInfo } from '../../../main/ets/core/model/ServerInfo';
-import { DbObjectKind } from '../../../main/ets/core/metadata/Metadata';
+import {
+  DbConnection, DatabaseContext, ArkDbError, ArkDbErrorKind, DatabaseSessionStatus, QueryExecutionSummary,
+  QueryOptions, QueryResultSink, ConnectionState, DbObjectKind
+} from '@arkdb/core';
+import { MySqlQueryResult as QueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
+import { MySqlServerInfo as ServerInfo } from '../../../main/ets/mysql/model/MySqlServerInfo';
 import { MySqlMetadataProvider } from '../../../main/ets/mysql/metadata/MySqlMetadataProvider';
 import { mysqlMetadataLiteral } from '../../../main/ets/mysql/metadata/MySqlMetadataSql';
 import { utf8Encode } from '../../../main/ets/mysql/protocol/Charsets';
@@ -51,6 +49,24 @@ class MetadataConnection implements DbConnection {
 
 export default function mySqlMetadataProviderTest() {
   describe('MySqlMetadataProvider', () => {
+    it('mapsCatalogAndSchemaAliasesConsistentlyAndRejectsContradictions', 0, async () => {
+      const connection = new MetadataConnection();
+      const provider = new MySqlMetadataProvider(connection);
+      const context = new DatabaseContext();
+      context.catalog = 'sales';
+      await provider.listObjects(context, DbObjectKind.Table);
+      expect(connection.queries[0].indexOf("CONVERT(X'73616C6573' USING utf8mb4)") >= 0).assertTrue();
+      context.schema = 'other';
+      let error: ArkDbError | null = null;
+      try { await provider.listObjects(context, DbObjectKind.Table); } catch (failure) { error = failure as ArkDbError; }
+      expect(error!.kind).assertEqual(ArkDbErrorKind.Validation);
+      expect(connection.queries.length).assertEqual(1);
+      connection.result.rows = [['sales'], ['other']];
+      const schemas = await provider.listSchemas('sales');
+      expect(schemas.length).assertEqual(1);
+      expect(schemas[0].catalog).assertEqual('sales');
+      expect(schemas[0].name).assertEqual('sales');
+    });
     it('encodesMetadataNamesWithoutSqlModeDependentEscapes', 0, () => {
       expect(mysqlMetadataLiteral("o'brien"))
         .assertEqual("CONVERT(X'6F27627269656E' USING utf8mb4)");

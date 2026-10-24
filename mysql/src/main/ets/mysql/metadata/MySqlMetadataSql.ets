@@ -1,4 +1,4 @@
-import { ArkDbError } from '../../core/model/ArkDbError';
+import { ArkDbError } from '@arkdb/core';
 import { utf8Encode } from '../protocol/Charsets';
 
 const MAX_METADATA_IDENTIFIER_BYTES: number = 512;

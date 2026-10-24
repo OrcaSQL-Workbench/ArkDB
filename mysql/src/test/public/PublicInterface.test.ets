@@ -1,18 +1,31 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
-  ConnectionConfig, DatabaseSessionStatus, DbDriverFactory,
-  estimateSqlRowBytes, LogTag, MySqlDriverFactory, ArkDbError, ArkDbErrorKind,
-  QueryOptions, QueryResult, SqlValue, SslMode
+  ConnectionConfig, DatabaseSessionStatus, CoreDbDriverFactory, estimateSqlRowBytes, LogTag,
+  MySqlDriverFactory, ArkDbError, ArkDbErrorKind, QueryOptions, QueryResult, SqlValue, SslMode,
+  MySqlConnection, MySqlConnectionOptions, ColumnDef, DbValueKind, DriverCapabilities,
+  DatabaseContext, ForeignKeyInfo, DbConnection, MetadataProvider, DbExecutionController,
+  ServerMetricsProvider
 } from '../../../Index';
 
 export default function publicInterfaceTest(): void {
   describe('PublicInterface', () => {
     it('createsTheDriverThroughItsNeutralFactoryContract', 0, () => {
-      const factory: DbDriverFactory = new MySqlDriverFactory();
+      const factory: CoreDbDriverFactory<MySqlConnectionOptions, MySqlConnection> = new MySqlDriverFactory();
       expect(factory.driverId).assertEqual('mysql');
       expect(factory.capabilities.supportsStreamingResults).assertTrue();
       expect(factory.capabilities.supportsTransactions).assertTrue();
       expect(factory.capabilities.supportsPreparedStatements).assertFalse();
+    });
+
+    it('retainsConcreteFactoryProviderHelperAssignments', 0, async () => {
+      const factory = new MySqlDriverFactory();
+      const connection: DbConnection = factory.createConnection(new ConnectionConfig(), '');
+      const metadata: MetadataProvider = factory.createMetadataProvider(connection);
+      const cancellation: DbExecutionController = factory.createExecutionController(connection);
+      const metrics: ServerMetricsProvider = factory.createServerMetricsProvider(connection);
+      expect(factory.driverId).assertEqual('mysql');
+      expect(metadata !== null && cancellation !== null && metrics !== null).assertTrue();
+      await connection.close();
     });
 
     it('validatesTheDocumentedConfigurationWithoutEmbeddingAPassword', 0, () => {
@@ -55,7 +68,33 @@ export default function publicInterfaceTest(): void {
       const status = new DatabaseSessionStatus();
       const copy = status.clone();
       copy.autocommit = false;
+      expect(status.known).assertFalse();
       expect(status.autocommit).assertTrue();
+    });
+
+    it('acceptsPublishedDataLiteralsWithoutNewRequiredCoreFields', 0, () => {
+      const capabilities: DriverCapabilities = {
+        supportsSsl: false, supportsCatalogs: false, supportsSchemas: true, supportsTransactions: true,
+        supportsMultipleResults: false, supportsStreamingResults: false, supportsGracefulCancel: false,
+        supportsExplain: false, supportsPreparedStatements: false, supportsServerMetrics: false
+      };
+      const column: ColumnDef = {
+        name: 'value', sourceSchema: '', sourceTable: '', nativeTypeId: '', nativeTypeName: '',
+        valueKind: DbValueKind.Unknown, nullable: true, table: '', type: 0, charset: 0,
+        columnLength: 0, flags: 0, decimals: 0
+      };
+      const result: QueryResult = {
+        columns: [column], rows: [], affectedRows: 0, lastInsertId: 0n, warningCount: 0,
+        loadedBytes: 0, executionTimeMs: 0, autocommit: true, inTransaction: false,
+        truncated: false, truncationReason: '', additionalResults: []
+      };
+      const foreignKey: ForeignKeyInfo = {
+        context: new DatabaseContext(), objectName: '', name: '', referencedSchema: '',
+        referencedTable: '', columns: []
+      };
+      expect(result.columns[0].name).assertEqual('value');
+      expect(capabilities.supportsTransactions).assertTrue();
+      expect(foreignKey.columns.length).assertEqual(0);
     });
   });
 }

@@ -1,14 +1,14 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { DbConnection } from '../../../main/ets/core/connection/DbConnection';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { DatabaseContext } from '../../../main/ets/core/model/DatabaseContext';
-import { QueryResult } from '../../../main/ets/core/model/QueryResult';
-import { ConnectionState, ServerInfo } from '../../../main/ets/core/model/ServerInfo';
-import { DatabaseSessionStatus, QueryExecutionSummary, QueryOptions, QueryResultSink } from
-  '../../../main/ets/core/model/QueryStream';
+import {
+  DbStreamingConnection, ArkDbError, ArkDbErrorKind, DatabaseContext, ConnectionState, DatabaseSessionStatus,
+  QueryExecutionSummary, QueryOptions, QueryResultSink
+} from '@arkdb/core';
+import { MySqlQueryResult as QueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
+import { MySqlServerInfo as ServerInfo } from '../../../main/ets/mysql/model/MySqlServerInfo';
 import { MySqlDriverFactory } from '../../../main/ets/mysql/driver/MySqlDriverFactory';
-import { isMySqlInterruptionError, mysqlKillQueryForHandle } from
-  '../../../main/ets/mysql/execution/MySqlExecutionController';
+import {
+  isMySqlInterruptionError, mysqlKillQueryForHandle
+} from '../../../main/ets/mysql/execution/MySqlExecutionController';
 
 export default function mySqlExecutionControllerTest() {
   describe('MySqlExecutionController', () => {
@@ -52,7 +52,7 @@ export default function mySqlExecutionControllerTest() {
   });
 }
 
-class StubConnection implements DbConnection {
+class StubConnection implements DbStreamingConnection {
   readonly state: ConnectionState = ConnectionState.Ready;
   readonly serverInfo: ServerInfo = new ServerInfo();
   readonly sessionStatus: DatabaseSessionStatus = new DatabaseSessionStatus();

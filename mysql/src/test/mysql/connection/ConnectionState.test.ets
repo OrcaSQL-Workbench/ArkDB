@@ -1,12 +1,13 @@
 import { describe, expect, it } from '@ohos/hypium';
-import { ConnectionState } from '../../../main/ets/core/model/ServerInfo';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { ConnectionConfig, SslMode } from '../../../main/ets/core/model/ConnectionConfig';
-import { MAX_QUERY_DRAIN_TIME_MS, MAX_STATEMENT_TIMEOUT_MS, QueryOptions } from
-  '../../../main/ets/core/model/QueryStream';
-import { connectionStateAfterCommandFailure, remainingSynchronizationTimeMs,
-  mysqlTlsRequested, synchronizationRefreshFailure } from
-  '../../../main/ets/mysql/MySqlConnection';
+import {
+  ConnectionState, ArkDbError, ArkDbErrorKind, MAX_QUERY_DRAIN_TIME_MS, MAX_STATEMENT_TIMEOUT_MS,
+  QueryOptions
+} from '@arkdb/core';
+import { ConnectionConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
+import {
+  connectionStateAfterCommandFailure, remainingSynchronizationTimeMs, mysqlTlsRequested,
+  synchronizationRefreshFailure
+} from '../../../main/ets/mysql/MySqlConnection';
 import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
 import { validateQueryOptions } from '../../../main/ets/mysql/command/Query';
 

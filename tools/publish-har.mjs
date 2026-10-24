@@ -1,12 +1,15 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkPackage, ROOT } from './check-package.mjs';
 import { inspectHar, sha256, sourceFingerprint } from './package-har.mjs';
 import { readReleaseBundle } from './prepare-har-release.mjs';
 import { sampleFingerprint } from './test-consumer.mjs';
-import { gitReader, jsonBytes, releaseArguments, releaseFile, releaseIdentity, RELEASE_REPOSITORY } from './har-release.mjs';
+import { gitReader, jsonBytes, plainPath, releaseArguments, releaseFile, releaseIdentity, releasePackages,
+  RELEASE_REPOSITORY } from './har-release.mjs';
+import { packageStem, tagOutputPaths } from './driver-packages.mjs';
+import { deliveryPlan } from './delivery-workspace.mjs';
 import {
   createGitHubClient, GITHUB_BASE, githubList, publicAssetUrl, publicReleaseUrl, verifyRemoteTag
 } from './github-release.mjs';
@@ -40,7 +43,7 @@ export async function publishHarRelease({ root = ROOT, bundleDirectory, confirmP
     if (identity.sourceCommit !== set.sourceCommit || identity.tagObject !== set.tagObject ||
       source.manifest.name !== set.packageName || source.manifest.version !== set.version ||
       source.driver.sourcePath !== set.modulePath || sourceFingerprint(root, set.driver) !== set.sourceFingerprint ||
-      sampleFingerprint(root) !== set.verification.sampleFingerprint) {
+      sampleFingerprint(root, set.driver) !== set.verification.sampleFingerprint) {
       throw new Error('Local source/tag identity changed or differs from the sealed release.');
     }
     const current = await readReleaseBundle(bundleDirectory);
@@ -49,11 +52,19 @@ export async function publishHarRelease({ root = ROOT, bundleDirectory, confirmP
     }
   }
   await assertLocal();
-  const harName = set.assets.find((asset) => asset.name.endsWith('.har')).name;
-  const inspected = await inspectHar(join(bundleDirectory, harName), source.manifest, source.exports, source.driver.definition);
-  for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE', 'README.OpenSource']) {
-    if (inspected.entries.get(`package/${name}`).sha256 !== sha256(readFileSync(join(source.driver.directory, name)))) {
-      throw new Error('Packaged documentation/legal files differ from reviewed source.');
+  const delivery = set.delivery === 'self-contained' ? deliveryPlan(root, set.driver) : null;
+  for (const entry of releasePackages(set)) {
+    const checked = checkPackage(root, entry.driver);
+    const harName = `${packageStem(checked.manifest)}.har`;
+    const inspected = await inspectHar(join(bundleDirectory, harName),
+      delivery ? delivery.manifest : checked.manifest, checked.exports,
+      delivery ? delivery.definition : checked.driver.definition);
+    for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE', 'README.OpenSource']) {
+      const expected = name === 'README.OpenSource' && delivery
+        ? delivery.notice : readFileSync(join(checked.driver.directory, name));
+      if (inspected.entries.get(`package/${name}`).sha256 !== sha256(expected)) {
+        throw new Error('Packaged documentation/legal files differ from reviewed source.');
+      }
     }
   }
   const github = dependencies.github ?? createGitHubClient(root);
@@ -220,11 +231,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     const options = releaseArguments(process.argv.slice(2), { publishing: true });
     if (!options.confirmPublish) throw new Error('Publishing requires owner approval and --confirm-publish.');
-    const bundleDirectory = join(ROOT, 'dist', 'releases', options.tag);
+    const paths = tagOutputPaths(ROOT, options.driver, options.tag);
+    const bundleDirectory = paths.ready;
     const bundle = await readReleaseBundle(bundleDirectory);
     if (bundle.releaseSet.driver !== options.driver) throw new Error('Selected driver differs from the release bundle.');
+    const directory = plainPath(ROOT, paths.evidence, { allowMissing: true });
+    await mkdir(directory, { recursive: true });
+    plainPath(ROOT, directory);
+    const destination = plainPath(directory, paths.publicationRecord, { allowMissing: true });
     const receipt = await publishHarRelease({ ...options, root: ROOT, bundleDirectory });
-    const destination = join(ROOT, 'dist', 'releases', `${options.tag}.receipt.json`);
     await saveReleaseReceipt(destination, receipt);
     console.log(`Published verified engineering preview: ${receipt.releaseUrl}. Receipt: ${destination}`);
   } catch (error) {

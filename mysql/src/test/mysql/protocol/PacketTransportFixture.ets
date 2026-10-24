@@ -1,5 +1,5 @@
-import { ArkDbError } from '../../../main/ets/core/model/ArkDbError';
-import { PacketByteTransport } from '../../../main/ets/core/transport/TcpTransport';
+import { ArkDbError } from '@arkdb/core';
+import { PacketByteTransport } from '../../../main/ets/mysql/transport/TcpTransport';
 
 export class PacketTransportFixture implements PacketByteTransport {
   readonly requestedLengths: number[] = [];

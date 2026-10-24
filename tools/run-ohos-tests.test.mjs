@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -33,9 +33,8 @@ test('fails on a non-zero Hvigor exit without assertion output', async (t) => {
 });
 
 test('reports Hvigor invocation errors without an uncaught stack', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'arkdb-missing-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const executable = join(root, 'missing-hvigorw');
+  const fixture = await createHvigorFixture(t, '', 0);
+  const executable = join(dirname(fixture), 'missing-hvigorw');
   const result = runStrictRunner(executable);
   const output = `${result.stdout}${result.stderr}`;
 
@@ -74,6 +73,34 @@ test('invalidates generated unit artifacts after a package identity change', asy
   assert.match(result.stdout, /PASSED mysql \(1 native cases\)/);
 });
 
+test('uses the registered module source path for fresh native reports and cleanup', async (t) => {
+  const sourcePath = join('drivers', 'mysql');
+  const executable = await createHvigorFixture(t, 'BUILD SUCCESSFUL', 0, successfulReport, sourcePath);
+  const root = dirname(executable);
+  const stale = join(root, sourcePath, '.test', 'default', 'cache', 'package-identity.json');
+  await mkdir(dirname(stale), { recursive: true });
+  await writeFile(stale, '{"packageVersion":"0.1.0"}');
+  const unrelated = join(root, 'mysql', '.test', 'keep.txt');
+  await mkdir(dirname(unrelated), { recursive: true });
+  await writeFile(unrelated, 'Not the registered module cache.');
+
+  const result = runStrictRunner(executable);
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.match(result.stdout, /PASSED mysql \(1 native cases\)/);
+  assert.equal(await readFile(unrelated, 'utf8'), 'Not the registered module cache.');
+});
+
+test('regenerates the HAR BuildProfile before native unit compilation', async (t) => {
+  const executable = await createHvigorFixture(t, 'BUILD SUCCESSFUL', 0, successfulReport, 'mysql', true);
+  await writeFile(join(dirname(executable), 'mysql', 'BuildProfile.ets'), 'Stale release profile.');
+
+  const result = runStrictRunner(executable);
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.match(result.stdout, /PASSED mysql \(1 native cases\)/);
+});
+
 test('rejects skipped, failed, zero-case and inconsistent native verdicts', () => {
   assert.deepEqual(parseHypiumResults(successfulReport), { total: 1, passed: 1 });
   for (const report of [
@@ -105,20 +132,41 @@ function runStrictRunner(executable) {
   });
 }
 
-async function createHvigorFixture(t, output, status, report) {
+async function createHvigorFixture(t, output, status, report, sourcePath = 'mysql', requireProfile = false) {
   const root = await mkdtemp(join(tmpdir(), 'arkdb-hvigor-'));
   t.after(() => rm(root, { recursive: true, force: true }));
+  const moduleRoot = join(root, sourcePath);
+  await mkdir(join(moduleRoot, 'src', 'main'), { recursive: true });
+  await writeFile(join(root, 'build-profile.json5'), JSON.stringify({
+    modules: [{ name: 'mysql', srcPath: `./${sourcePath.replaceAll('\\', '/')}` }]
+  }));
+  await writeFile(join(moduleRoot, 'src', 'main', 'module.json5'),
+    '{"module":{"name":"mysql","type":"har"}}');
+  await writeFile(join(moduleRoot, 'oh-package.json5'), '{"name":"@arkdb/mysql","version":"1.0.0"}');
+  await writeFile(join(moduleRoot, 'arkdb-package.json'), '{"kind":"driver"}');
   const reporter = join(root, 'reporter.mjs');
   await writeFile(reporter, `
-    import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+    import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
     import { dirname, join } from 'node:path';
-    if (existsSync(join(process.cwd(), 'mysql', '.test', 'default', 'cache', 'package-identity.json'))) {
+    const moduleRoot = join(process.cwd(), ${JSON.stringify(sourcePath)});
+    const profile = join(moduleRoot, 'BuildProfile.ets');
+    if (process.argv.includes('GenerateBuildProfile')) {
+      writeFileSync(profile, 'Current generated profile.');
+      console.log('BUILD SUCCESSFUL');
+      process.exit(0);
+    }
+    if (${requireProfile} &&
+      (!existsSync(profile) || readFileSync(profile, 'utf8') !== 'Current generated profile.')) {
+      console.error('hvigor ERROR: HAR BuildProfile is missing or stale');
+      process.exit(1);
+    }
+    if (existsSync(join(moduleRoot, '.test', 'default', 'cache', 'package-identity.json'))) {
       console.error('hvigor ERROR: stale unit package identity');
       process.exit(1);
     }
     const report = ${JSON.stringify(report) ?? 'undefined'};
     if (report !== undefined) {
-      const path = join(process.cwd(), 'mysql', '.test', 'default', 'intermediates',
+      const path = join(moduleRoot, '.test', 'default', 'intermediates',
         'test', 'coverage_data', 'test_result.txt');
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, report);
@@ -129,12 +177,12 @@ async function createHvigorFixture(t, output, status, report) {
 
   if (process.platform === 'win32') {
     const executable = join(root, 'hvigorw.cmd');
-    await writeFile(executable, `@echo off\r\n"${process.execPath}" "${reporter}"\r\n`);
+    await writeFile(executable, `@echo off\r\n"${process.execPath}" "${reporter}" %*\r\n`);
     return executable;
   }
 
   const executable = join(root, 'hvigorw');
-  await writeFile(executable, `#!/bin/sh\nexec "${process.execPath}" "${reporter}"\n`);
+  await writeFile(executable, `#!/bin/sh\nexec "${process.execPath}" "${reporter}" "$@"\n`);
   await chmod(executable, 0o755);
   return executable;
 }

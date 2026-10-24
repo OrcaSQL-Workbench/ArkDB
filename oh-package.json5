@@ -2,6 +2,9 @@
   "modelVersion": "6.1.1",
   "description": "ArkDB standalone HarmonyOS database drivers",
   "dependencies": {},
+  "overrides": {
+    "@arkdb/core": "file:./core"
+  },
   "devDependencies": {
     "@ohos/hypium": "1.0.25"
   }

@@ -107,17 +107,135 @@ export function jsonBytes(bytes) {
 export function releaseAssetNames(value) {
   const stem = packageStem({ name: value.packageName, version: value.version });
   return [`${stem}.har`, `${stem}.har.sha256`, `${stem}.manifest.json`,
-    `${stem}.consumer.json`, `${stem}.readiness.json`];
+    `${stem}.consumer.json`, `${stem}.readiness.json`,
+    ...(value.dependencies ?? []).flatMap((dependency) => {
+      const name = packageStem({ name: dependency.packageName, version: dependency.version });
+      return [`${name}.har`, `${name}.har.sha256`, `${name}.manifest.json`];
+    })];
+}
+
+export function releasePackages(value) {
+  return [
+    ...(value.dependencies ?? []),
+    { ...value, dependencies: value.packageDependencies ?? {} }
+  ];
+}
+
+export function validateEmbeddedPackages(value) {
+  if (value.delivery !== 'self-contained' || !Array.isArray(value.embeddedPackages) ||
+    value.embeddedPackages.length > 32 || !value.sourceDependencies ||
+    typeof value.sourceDependencies !== 'object' || Array.isArray(value.sourceDependencies)) {
+    throw new Error('Invalid self-contained source package identity.');
+  }
+  const packages = [...value.embeddedPackages, {
+    id: value.driver, packageName: value.packageName, version: value.version,
+    modulePath: value.modulePath, sourceFingerprint: value.sourceFingerprint,
+    dependencies: value.sourceDependencies
+  }];
+  if (new Set(packages.map((entry) => entry.id)).size !== packages.length ||
+    new Set(packages.map((entry) => entry.packageName)).size !== packages.length) {
+    throw new Error('Embedded source package identities must be unique.');
+  }
+  for (const entry of packages) {
+    packageStem({ name: entry.packageName, version: entry.version });
+    if (!/^[a-z][a-z0-9_-]*$/.test(entry.id ?? '') || !SHA256.test(entry.sourceFingerprint ?? '') ||
+      !/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(entry.modulePath ?? '') ||
+      !entry.dependencies || typeof entry.dependencies !== 'object' || Array.isArray(entry.dependencies)) {
+      throw new Error('Invalid embedded source package metadata.');
+    }
+  }
+  const visited = new Set();
+  const visiting = new Set();
+  function visit(entry) {
+    if (visited.has(entry.packageName)) return;
+    if (visiting.has(entry.packageName)) throw new Error('Cyclic embedded source dependencies.');
+    visiting.add(entry.packageName);
+    for (const [name, version] of Object.entries(entry.dependencies)) {
+      const dependency = packages.find((candidate) => candidate.packageName === name);
+      if (!dependency || dependency.version !== version) throw new Error('Missing or mismatched embedded source dependency.');
+      visit(dependency);
+    }
+    visiting.delete(entry.packageName);
+    visited.add(entry.packageName);
+  }
+  visit(packages.at(-1));
+  if (visited.size !== packages.length) throw new Error('Unrelated embedded source package.');
+  return value.embeddedPackages;
+}
+
+export function releaseDependencyReferences(set, selected = set) {
+  const packages = releasePackages(set);
+  const primary = packages.find((entry) => entry.driver === selected.driver);
+  const names = new Set();
+  const visiting = new Set();
+  function visit(entry) {
+    if (visiting.has(entry.packageName)) throw new Error('Cyclic release package dependencies.');
+    visiting.add(entry.packageName);
+    for (const [name, version] of Object.entries(entry.dependencies ?? {})) {
+      const dependency = packages.find((candidate) => candidate.packageName === name);
+      if (!dependency || dependency.version !== version) throw new Error('Release dependency identity/version is missing.');
+      if (!names.has(name)) {
+        visit(dependency);
+        names.add(name);
+      }
+    }
+    visiting.delete(entry.packageName);
+  }
+  visit(primary);
+  return packages.filter((entry) => names.has(entry.packageName)).map((entry) => {
+    const file = `${packageStem({ name: entry.packageName, version: entry.version })}.har`;
+    const asset = set.assets.find((candidate) => candidate.name === file);
+    if (!asset) throw new Error('Required dependency HAR is missing from the release set.');
+    return {
+      id: entry.driver, packageName: entry.packageName, version: entry.version,
+      file, sha256: asset.sha256, byteLength: asset.byteLength
+    };
+  });
 }
 
 export function validateReleaseSet(value) {
-  if (value?.schemaVersion !== 1 || value.repository !== RELEASE_REPOSITORY ||
+  if (![1, 2].includes(value?.schemaVersion) || value.repository !== RELEASE_REPOSITORY ||
     typeof value.driver !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(value.driver) ||
     !GIT_SHA.test(value.sourceCommit ?? '') || !GIT_SHA.test(value.tagObject ?? '') ||
     !SHA256.test(value.sourceFingerprint ?? '') || typeof value.modulePath !== 'string' ||
     !/^[a-zA-Z0-9_./-]+$/.test(value.modulePath) ||
     value.modulePath.split('/').some((part) => !part || part === '.' || part === '..')) {
     throw new Error('Invalid release-set source/package identity.');
+  }
+  if (value.schemaVersion === 1 && (value.dependencies !== undefined || value.packageDependencies !== undefined)) {
+    throw new Error('Legacy release sets cannot silently acquire new package dependencies.');
+  }
+  if (value.delivery !== undefined) {
+    if (value.delivery !== 'self-contained' || value.schemaVersion !== 1 ||
+      value.moduleDefinition?.name !== value.driver || value.moduleDefinition?.type !== 'har' ||
+      value.verification?.selfContainedRuntimeVerified !== true) {
+      throw new Error('Invalid self-contained release identity or runtime evidence.');
+    }
+    validateEmbeddedPackages(value);
+  }
+  if (value.schemaVersion === 2) {
+    if (!Array.isArray(value.dependencies) || value.dependencies.length === 0 || value.dependencies.length > 8 ||
+      !value.packageDependencies || typeof value.packageDependencies !== 'object' ||
+      Array.isArray(value.packageDependencies)) throw new Error('Invalid shared-HAR release dependency set.');
+    const packages = releasePackages(value);
+    if (new Set(packages.map((entry) => entry.driver)).size !== packages.length ||
+      new Set(packages.map((entry) => entry.packageName)).size !== packages.length) {
+      throw new Error('Release package identities must be unique.');
+    }
+    for (const entry of packages) {
+      packageStem({ name: entry.packageName, version: entry.version });
+      if (!/^[a-z][a-z0-9_-]*$/.test(entry.driver ?? '') ||
+        !SHA256.test(entry.sourceFingerprint ?? '') ||
+        typeof entry.modulePath !== 'string' || !/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(entry.modulePath) ||
+        entry.moduleDefinition?.name !== entry.driver || entry.moduleDefinition?.type !== 'har' ||
+        !entry.dependencies || typeof entry.dependencies !== 'object' || Array.isArray(entry.dependencies)) {
+        throw new Error('Invalid release dependency source/module identity.');
+      }
+      if (entry.driver !== value.driver && (!Array.isArray(entry.publicExports) ||
+        entry.publicExports.length === 0 || entry.publicExports.some((name) => !/^[A-Za-z_$][\w$]*$/.test(name)))) {
+        throw new Error('Release dependencies require their reviewed public exports.');
+      }
+    }
   }
   driverForTag([{ id: value.driver, version: value.version }], value.tag);
   const names = releaseAssetNames(value);
@@ -145,6 +263,12 @@ export function validateReleaseSet(value) {
       asset.byteLength > (asset.name.endsWith('.har') ? MAX_RELEASE_ASSET_BYTES : MAX_RELEASE_JSON_BYTES))) {
     throw new Error('Release assets do not match the bounded allowlist.');
   }
+  if (value.schemaVersion === 2) {
+    const references = releaseDependencyReferences(value);
+    if (references.length !== value.dependencies.length) {
+      throw new Error('Release contains an unrelated or missing shared dependency.');
+    }
+  }
   return value;
 }
 
@@ -154,13 +278,49 @@ export function validateEvidence(set, assets) {
   const har = assets.get(`${stem}.har`);
   const consumer = jsonBytes(assets.get(`${stem}.consumer.json`));
   const readiness = jsonBytes(assets.get(`${stem}.readiness.json`));
+  const references = releaseDependencyReferences(set);
   if (identity.schemaVersion !== 1 || identity.packageName !== set.packageName ||
     identity.version !== set.version || identity.driver !== set.driver || identity.modulePath !== set.modulePath ||
     identity.sourceClean !== true || identity.sourceCommit !== set.sourceCommit ||
     identity.sourceFingerprint !== set.sourceFingerprint || identity.file !== `${stem}.har` ||
     identity.sha256 !== sha256(har) || identity.byteLength !== har.length || identity.published !== false ||
-    Object.entries(set.platform).some(([key, value]) => identity[key] !== value)) {
+    Object.entries(set.platform).some(([key, value]) => identity[key] !== value) ||
+    JSON.stringify(identity.dependencies ?? {}) !== JSON.stringify(set.packageDependencies ?? {}) ||
+    JSON.stringify(identity.dependencyArtifacts ?? []) !== JSON.stringify(references) ||
+    (set.schemaVersion === 2 && JSON.stringify(identity.moduleDefinition) !== JSON.stringify(set.moduleDefinition))) {
     throw new Error('Release artifact identity/source evidence does not match the release set.');
+  }
+  if (identity.artifactChannel !== undefined && identity.artifactChannel !== 'release') {
+    throw new Error('A sealed release cannot retain a local artifact channel.');
+  }
+  if (identity.delivery !== set.delivery) throw new Error('Release delivery mode differs from its artifact.');
+  if (set.delivery === 'self-contained') {
+    validateEmbeddedPackages(identity);
+    if (JSON.stringify(identity.embeddedPackages) !== JSON.stringify(set.embeddedPackages) ||
+      JSON.stringify(identity.sourceDependencies) !== JSON.stringify(set.sourceDependencies) ||
+      JSON.stringify(identity.moduleDefinition) !== JSON.stringify(set.moduleDefinition) ||
+      consumer.selfContainedRuntimeVerified !== true || readiness.selfContainedRuntimeVerified !== true) {
+      throw new Error('Self-contained release source or runtime evidence is inconsistent.');
+    }
+  }
+  for (const dependency of set.dependencies ?? []) {
+    const name = packageStem({ name: dependency.packageName, version: dependency.version });
+    const record = jsonBytes(assets.get(`${name}.manifest.json`));
+    const bytes = assets.get(`${name}.har`);
+    if (record.schemaVersion !== 1 || record.packageName !== dependency.packageName ||
+      (record.artifactChannel !== undefined && record.artifactChannel !== 'release') ||
+      record.version !== dependency.version || record.driver !== dependency.driver ||
+      record.modulePath !== dependency.modulePath || record.sourceClean !== true ||
+      record.sourceCommit !== set.sourceCommit || record.sourceFingerprint !== dependency.sourceFingerprint ||
+      record.file !== `${name}.har` || record.sha256 !== sha256(bytes) ||
+      record.byteLength !== bytes.length || record.published !== false ||
+      JSON.stringify(record.dependencies ?? {}) !== JSON.stringify(dependency.dependencies) ||
+      JSON.stringify(record.moduleDefinition) !== JSON.stringify(dependency.moduleDefinition) ||
+      JSON.stringify(record.dependencyArtifacts ?? []) !== JSON.stringify(releaseDependencyReferences(set, dependency)) ||
+      Object.entries(set.platform).some(([key, value]) => record[key] !== value) ||
+      assets.get(`${name}.har.sha256`).toString('utf8') !== `${record.sha256}  ${name}.har\n`) {
+      throw new Error('Shared dependency artifact/source evidence differs from the release set.');
+    }
   }
   if (assets.get(`${stem}.har.sha256`).toString('utf8') !== `${identity.sha256}  ${stem}.har\n`) {
     throw new Error('Release checksum sidecar differs from the actual HAR.');
@@ -170,7 +330,8 @@ export function validateEvidence(set, assets) {
       record.artifactSha256 !== identity.sha256 || record.sourceFingerprint !== set.sourceFingerprint ||
       record.sampleFingerprint !== set.verification.sampleFingerprint ||
       record.sampleHapCompiled !== true || record.documentedExamples !== set.verification.documentedExamples ||
-      record.localSampleCases !== set.verification.localSampleCases || record.liveNetworkingVerified !== false) {
+      record.localSampleCases !== set.verification.localSampleCases || record.liveNetworkingVerified !== false ||
+      JSON.stringify(record.dependencyArtifacts ?? []) !== JSON.stringify(references)) {
       throw new Error('Release consumer/readiness evidence is stale or inconsistent.');
     }
   }

@@ -1,11 +1,8 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { Logger } from '../../../main/ets/core/diagnostics/Logger';
-import { LogLevel, LogSink } from '../../../main/ets/core/diagnostics/LogSink';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { MAX_LOGICAL_PACKET_BYTES, PacketChannel } from
-  '../../../main/ets/mysql/protocol/PacketChannel';
+import { Logger, LogLevel, LogSink, ArkDbError, ArkDbErrorKind } from '@arkdb/core';
+import { MAX_LOGICAL_PACKET_BYTES, PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
 import { PacketTransportFixture } from './PacketTransportFixture';
-import { TcpTransport } from '../../../main/ets/core/transport/TcpTransport';
+import { TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
 import { socket } from '../../../mock/NetworkKit.mock';
 
 const MAX_FRAME_PAYLOAD = 0xffffff;

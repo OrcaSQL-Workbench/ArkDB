@@ -2,18 +2,15 @@ import { MysqlPacket, MysqlPacketSource } from '../protocol/PacketChannel';
 import { PacketReader } from '../protocol/PacketReader';
 import { PacketWriter } from '../protocol/PacketWriter';
 import { Command, PacketType, Capabilities, StatusFlags } from '../protocol/Constants';
-import { QueryResult, ColumnDef, SqlValue } from '../../core/model/QueryResult';
-import { DatabaseSessionStatus, estimateSqlRowBytes, MAX_STATEMENT_TIMEOUT_MS,
-  MAX_QUERY_DRAIN_TIME_MS, QueryExecutionSummary, QueryOptions,
-  QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
-  QueryTruncation } from '../../core/model/QueryStream';
-import { ArkDbError, ArkDbErrorKind } from '../../core/model/ArkDbError';
+import { MySqlQueryResult as QueryResult, MySqlColumnDef as ColumnDef, mysqlValues } from '../model/MySqlQueryResult';
+import {
+  SqlValue, DatabaseSessionStatus, estimateSqlRowBytes, MAX_STATEMENT_TIMEOUT_MS, MAX_QUERY_DRAIN_TIME_MS,
+  QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
+  QueryTruncation, ArkDbError, ArkDbErrorKind, Logger, LogTag, monotonicNowMs
+} from '@arkdb/core';
 import { parseEof, parseOk, parseErr } from './ResultPackets';
 import { parseColumnDef } from './ColumnDefinition';
 import { mapTextValue } from '../value/TypeMapper';
-import { Logger } from '../../core/diagnostics/Logger';
-import { LogTag } from '../../core/diagnostics/LogSink';
-import { monotonicNowMs } from '../../core/time/MonotonicClock';
 
 /** Build a COM_QUERY command packet for a text SQL statement. */
 export function buildComQuery(sql: string): Uint8Array {
@@ -30,6 +27,7 @@ export async function parseQueryStream(source: MysqlPacketSource, capabilities: 
   validateQueryOptions(options);
   const started = monotonicNowMs();
   const execution = new QueryExecutionSummary();
+  execution.statusKnown = true;
   const streamState = new QueryStreamState();
   const guardedSink = new TransportBoundSink(source, sink);
   let first = await source.readPacket();
@@ -45,6 +43,7 @@ export async function parseQueryStream(source: MysqlPacketSource, capabilities: 
     if (result === null) {
       execution.rowCountKnown = false;
       execution.statusKnown = false;
+      execution.status.known = false;
       execution.truncationInterrupted = streamState.cancellationRequested;
       break;
     }
@@ -172,6 +171,7 @@ async function emitOkResult(packet: MysqlPacket, capabilities: number, sink: Que
   summary.lastInsertId = ok.lastInsertId;
   summary.warningCount = ok.warnings;
   summary.status = statusFromFlags(ok.statusFlags);
+  summary.statusKnown = true;
   await sink.onResultEnd(summary);
 
   const parsed = new ParsedResult();
@@ -307,6 +307,7 @@ async function finishCancelledRowResult(sink: QueryResultSink, resultIndex: numb
   summary.truncationReason = truncationReason;
   summary.statusKnown = false;
   summary.status = fallbackStatus.clone();
+  summary.status.known = false;
   await sink.onResultEnd(summary);
 
   const parsed = new ParsedResult();
@@ -443,10 +444,12 @@ async function finishRowResult(terminator: MysqlPacket, capabilities: number, si
   truncationReason: string): Promise<ParsedResult> {
   let statusFlags = 0;
   let warnings = 0;
+  let lastInsertId: bigint | undefined = undefined;
   if ((capabilities & Capabilities.DEPRECATE_EOF) !== 0) {
     const ok = parseOk(terminator.payload, capabilities);
     statusFlags = ok.statusFlags;
     warnings = ok.warnings;
+    lastInsertId = ok.lastInsertId;
   } else {
     const eof = parseEof(terminator.payload);
     statusFlags = eof.statusFlags;
@@ -459,9 +462,11 @@ async function finishRowResult(terminator: MysqlPacket, capabilities: number, si
   summary.loadedRowCount = emittedRows;
   summary.loadedBytes = loadedBytes;
   summary.warningCount = warnings;
+  if (lastInsertId !== undefined) summary.lastInsertId = lastInsertId;
   summary.truncated = truncationReason.length > 0;
   summary.truncationReason = truncationReason;
   summary.status = statusFromFlags(statusFlags);
+  summary.statusKnown = true;
   await sink.onResultEnd(summary);
 
   const parsed = new ParsedResult();
@@ -488,7 +493,12 @@ class BufferedResultCollector implements QueryResultSink {
 
   async onResultStart(meta: QueryResultMeta): Promise<void> {
     const result = new QueryResult();
-    result.columns = meta.columns;
+    for (const column of meta.columns) {
+      if (!(column instanceof ColumnDef)) {
+        throw ArkDbError.protocol('MySQL result contains non-MySQL column metadata.');
+      }
+      result.columns.push(column);
+    }
     this.results.push(result);
     await Promise.resolve();
   }
@@ -496,7 +506,7 @@ class BufferedResultCollector implements QueryResultSink {
   async onRows(chunk: QueryRowChunk): Promise<void> {
     const result = this.results[chunk.resultIndex];
     for (const row of chunk.rows) {
-      result.rows.push(row);
+      result.rows.push(mysqlValues(row));
     }
     await Promise.resolve();
   }
@@ -509,11 +519,12 @@ class BufferedResultCollector implements QueryResultSink {
   async onResultEnd(summary: QueryResultSummary): Promise<void> {
     const result = this.results[summary.resultIndex];
     result.affectedRows = summary.affectedRows;
-    result.lastInsertId = summary.lastInsertId;
-    result.warningCount = summary.warningCount;
+    if (summary.lastInsertId !== undefined) result.lastInsertId = summary.lastInsertId;
+    if (summary.warningCount !== undefined) result.warningCount = summary.warningCount;
     result.loadedBytes = summary.loadedBytes;
     result.autocommit = summary.status.autocommit;
     result.inTransaction = summary.status.inTransaction;
+    result.statusKnown = summary.statusKnown;
     result.truncated = summary.truncated;
     result.truncationReason = summary.truncationReason;
     await Promise.resolve();
@@ -527,6 +538,7 @@ class BufferedResultCollector implements QueryResultSink {
     primary.executionTimeMs = execution.executionTimeMs;
     primary.autocommit = execution.status.autocommit;
     primary.inTransaction = execution.status.inTransaction;
+    primary.statusKnown = execution.statusKnown;
     if (this.results.length > 1) {
       primary.additionalResults = this.results.slice(1);
     }
@@ -546,6 +558,7 @@ function parseTextRow(payload: Uint8Array, columns: ColumnDef[]): SqlValue[] {
 
 function statusFromFlags(statusFlags: number): DatabaseSessionStatus {
   const status = new DatabaseSessionStatus();
+  status.known = true;
   status.autocommit = (statusFlags & StatusFlags.AUTOCOMMIT) !== 0;
   status.inTransaction = (statusFlags & StatusFlags.IN_TRANS) !== 0;
   return status;

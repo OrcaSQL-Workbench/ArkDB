@@ -1,4 +1,4 @@
-import { ArkDbError } from '../../core/model/ArkDbError';
+import { ArkDbError } from '@arkdb/core';
 import { utf8Decode } from './Charsets';
 
 /**

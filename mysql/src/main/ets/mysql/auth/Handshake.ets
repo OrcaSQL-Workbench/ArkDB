@@ -1,7 +1,7 @@
 import { PacketReader } from '../protocol/PacketReader';
 import { Capabilities } from '../protocol/Constants';
-import { ArkDbError } from '../../core/model/ArkDbError';
-import { ServerFamily } from '../../core/model/ServerInfo';
+import { ArkDbError } from '@arkdb/core';
+import { ServerFamily } from '../model/MySqlServerInfo';
 import { concatBytes } from './Crypto';
 
 /** Parsed Initial Handshake Packet (protocol v10). */

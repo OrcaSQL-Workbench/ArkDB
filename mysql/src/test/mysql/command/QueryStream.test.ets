@@ -1,16 +1,16 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { DatabaseSessionStatus, estimateSqlRowsBytes, QueryOptions, QueryResultMeta,
-  QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation } from
-  '../../../main/ets/core/model/QueryStream';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { parseQueryStream } from '../../../main/ets/mysql/command/Query';
+import {
+  DatabaseSessionStatus, estimateSqlRowsBytes, QueryOptions, QueryResultMeta, QueryResultSink,
+  QueryResultSummary, QueryRowChunk, QueryTruncation, ArkDbError, ArkDbErrorKind
+} from '@arkdb/core';
+import { parseQueryStream, parseResultSet } from '../../../main/ets/mysql/command/Query';
 import { Capabilities, ColumnType, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
 import { MysqlPacket, MysqlPacketSource, PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
-import { TcpTransport } from '../../../main/ets/core/transport/TcpTransport';
+import { TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
 import { MockSocket, socket } from '../../../mock/NetworkKit.mock';
-import { SslConfig, SslMode } from '../../../main/ets/core/model/ConnectionConfig';
+import { SslConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
 
 class FixtureSource implements MysqlPacketSource {
   packets: MysqlPacket[];
@@ -469,6 +469,29 @@ export default function queryStreamTest() {
       expect(execution.rowCount).assertEqual(3);
       expect(execution.loadedRowCount).assertEqual(3);
       expect(source.packets.length).assertEqual(0);
+    });
+
+    it('doesNotInventInsertIdentifiersForEofRowResults', 0, async () => {
+      const packets = [
+        packet(bytes(1)), columnPacket('value'), eofPacket(StatusFlags.AUTOCOMMIT, 0),
+        textRow('one'), eofPacket(StatusFlags.AUTOCOMMIT, 0)
+      ];
+      const sink = new RecordingSink();
+      await parseQueryStream(new FixtureSource(packets.slice()), Capabilities.PROTOCOL_41,
+        new QueryOptions(), sink);
+      expect(sink.ends[0].lastInsertId === undefined).assertTrue();
+      const buffered = await parseResultSet(new FixtureSource(packets.slice()), Capabilities.PROTOCOL_41);
+      expect(buffered.lastInsertId).assertEqual(0n);
+    });
+
+    it('preservesInsertIdentifiersActuallyReportedByOkRowTerminators', 0, async () => {
+      const terminator = packet(new PacketWriter().writeUInt8(0xfe).writeLenEncInt(0)
+        .writeLenEncInt(27).writeUInt16(StatusFlags.AUTOCOMMIT).writeUInt16(0).toUint8Array());
+      const sink = new RecordingSink();
+      await parseQueryStream(new FixtureSource([
+        packet(bytes(1)), columnPacket('value'), textRow('one'), terminator
+      ]), Capabilities.PROTOCOL_41 | Capabilities.DEPRECATE_EOF, new QueryOptions(), sink);
+      expect(sink.ends[0].lastInsertId).assertEqual(27n);
     });
 
     it('doesNotApplyDrainDeadlineBeforeTruncation', 0, async () => {

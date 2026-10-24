@@ -1,12 +1,12 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ROOT } from './check-package.mjs';
-import { resolveDriver } from './driver-packages.mjs';
+import { downloadOutputPaths, driverVerification, packageStem, resolveDriver } from './driver-packages.mjs';
 import { inspectHar, sha256 } from './package-har.mjs';
 import {
   jsonBytes, MAX_RELEASE_ASSET_BYTES, MAX_RELEASE_JSON_BYTES, plainPath, releaseArguments,
-  releaseAssetNames, RELEASE_REPOSITORY, validateReleaseSet
+  releaseAssetNames, releaseDependencyReferences, releasePackages, RELEASE_REPOSITORY, validateReleaseSet
 } from './har-release.mjs';
 import {
   createGitHubClient, GITHUB_BASE, githubList, publicAssetUrl, publicReleaseUrl, verifyRemoteTag
@@ -114,9 +114,10 @@ function assetIdentity(asset, tag) {
 export async function verifyDownloadedHar({
   root = ROOT, driver = 'mysql', tag, releaseReceipt
 }, dependencies = {}) {
-  resolveDriver(root, driver);
-  if (driver !== 'mysql') throw new Error(`No independent downloaded-HAR consumer exists for driver ${driver}.`);
-  if (typeof tag !== 'string' || !/^mysql-v[1-9]\d?(?:\.(?:[1-9]?\d)){2}$/.test(tag)) {
+  const selected = resolveDriver(root, driver);
+  driverVerification(root, driver);
+  if (typeof tag !== 'string' || !/^[a-z][a-z0-9_-]*-v[1-9]\d?(?:\.(?:[1-9]?\d)){2}$/.test(tag) ||
+    !tag.startsWith(`${driver}-v`)) {
     throw new Error('Select an explicit implemented driver-version tag for download verification.');
   }
   const github = dependencies.github ?? createGitHubClient(root);
@@ -171,7 +172,7 @@ export async function verifyDownloadedHar({
     }
   }
   await verifyRemoteTag(github, set);
-  const build = plainPath(root, join(root, 'build'), { allowMissing: true });
+  const build = plainPath(root, downloadOutputPaths(root, driver, tag).directory, { allowMissing: true });
   await mkdir(build, { recursive: true });
   plainPath(root, build);
   const workspace = await mkdtemp(join(build, 'download-'));
@@ -183,20 +184,32 @@ export async function verifyDownloadedHar({
       await writeFile(join(bundleDirectory, asset.name), await download(asset), { flag: 'wx' });
     }
     const bundle = await readReleaseBundle(bundleDirectory);
-    const har = identities.find((asset) => asset.name.endsWith('.har'));
-    const manifest = identities.find((asset) => asset.name.endsWith('.manifest.json'));
-    await inspectHar(join(bundleDirectory, har.name), {
-      name: set.packageName, version: set.version, license: 'Apache-2.0', dependencies: {}
-    }, set.verification.publicExports);
+    const stem = packageStem({ name: set.packageName, version: set.version });
+    const har = identities.find((asset) => asset.name === `${stem}.har`);
+    const manifest = identities.find((asset) => asset.name === `${stem}.manifest.json`);
+    for (const entry of releasePackages(set)) {
+      const name = packageStem({ name: entry.packageName, version: entry.version });
+      await inspectHar(join(bundleDirectory, `${name}.har`), {
+        name: entry.packageName, version: entry.version, license: 'Apache-2.0', dependencies: entry.dependencies
+      }, entry.driver === driver ? set.verification.publicExports : entry.publicExports,
+      entry.moduleDefinition ?? selected.definition);
+    }
+    const dependencyArtifacts = releaseDependencyReferences(set).map((entry) => ({
+      artifactPath: join(bundleDirectory, entry.file),
+      manifestPath: join(bundleDirectory, entry.file.replace(/\.har$/, '.manifest.json')),
+      expectedSha256: entry.sha256
+    }));
     const consumer = await (dependencies.consumer ?? verifyHarConsumer)({
       root, driver, artifactPath: join(bundleDirectory, har.name), manifestPath: join(bundleDirectory, manifest.name),
-      expectedSha256: har.sha256, workspaceDirectory: join(workspace, 'consumer')
+      expectedSha256: har.sha256, dependencyArtifacts, workspaceDirectory: join(workspace, 'consumer')
     });
     if (consumer?.schemaVersion !== 1 || consumer.packageName !== set.packageName || consumer.version !== set.version ||
       consumer.artifactSha256 !== har.sha256 || consumer.sampleHapCompiled !== true ||
       consumer.localTestsExecuted !== true || !Number.isSafeInteger(consumer.localSampleCases) ||
       consumer.localSampleCases <= 0 || consumer.check !== 'isolated-release-hap-and-local-tests' ||
-      consumer.liveNetworkingVerified !== false) {
+      consumer.liveNetworkingVerified !== false ||
+      (set.delivery === 'self-contained' && consumer.selfContainedRuntimeVerified !== true) ||
+      JSON.stringify(consumer.dependencyArtifacts ?? []) !== JSON.stringify(releaseDependencyReferences(set))) {
       throw new Error('The downloaded-HAR consumer did not produce successful, correctly bound verification.');
     }
     const current = (await githubList(github, `${GITHUB_BASE}/releases/${release.id}/assets`))
@@ -223,10 +236,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   try {
     const options = releaseArguments(process.argv.slice(2));
     const record = await verifyDownloadedHar(options);
-    const dist = plainPath(ROOT, join(ROOT, 'dist'), { allowMissing: true });
-    await mkdir(dist, { recursive: true });
-    plainPath(ROOT, dist);
-    const destination = plainPath(dist, join(dist, `${options.tag}.download.json`), { allowMissing: true });
+    const paths = downloadOutputPaths(ROOT, options.driver, options.tag);
+    const directory = plainPath(ROOT, dirname(paths.record), { allowMissing: true });
+    await mkdir(directory, { recursive: true });
+    plainPath(ROOT, directory);
+    const destination = plainPath(directory, paths.record, { allowMissing: true });
     await writeFile(destination, `${JSON.stringify(record, null, 2)}\n`);
     console.log(`Downloaded HAR installed and compiled in an independent consumer: ${record.releaseUrl}`);
     console.log(`Verification record: ${destination}. Real-device networking remains unverified.`);

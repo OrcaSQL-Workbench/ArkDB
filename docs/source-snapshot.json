@@ -12,6 +12,8 @@
     "Driver-only source snapshot; no application code, credentials, operational evidence, generated files or private Git history were imported.",
     "The unpublished ArkDB interface is intentionally cleaned after extraction: ArkDbError/ArkDbErrorKind, driver-only connection options, and ArkDB logging tags replace the Workbench-facing surface without compatibility aliases.",
     "The extraction initially retained version 1.0.0; the first downloadable preview uses 1.0.1 after a release-preparation fix, without rewriting the unpublished local candidate tag. Version numbering is not evidence of registry publication or production certification.",
+    "The shared architecture maintains contracts, deadlines and diagnostics in core (@arkdb/core 1.0.0) and MySQL-native configuration, transport, protocol and metrics in mysql. Delivery compiles core plus MySQL 1.0.2 as one self-contained HAR; users do not install core separately. Local native/source and registry-independent single-HAR consumer checks are separate from device interoperability and publication. No published 1.0.1 tag or archive is rewritten.",
+    "The MySQL public entry retains the published 1.0.1 connection, non-generic factory, handle-based controller, provider and native result/stream interfaces. Portable interfaces use distinct Core-prefixed exports. Shared errors retain one constructor, numeric code compatibility and a numeric/textual nativeCode; additions to existing data shapes are optional.",
     "The repository and driver use Apache-2.0 by the owner's explicit choice. Adapted mysql/mysql2 MIT notices are retained."
   ]
 }

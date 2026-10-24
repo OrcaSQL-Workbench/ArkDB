@@ -1,16 +1,20 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { verifyHarConsumer } from './test-consumer.mjs';
-import { releaseFixture, STEM } from './test-fixtures/har-release.mjs';
+import { verifiedArtifact } from './package-har.mjs';
+import { releaseFixture, LOCAL_STEM, STEM } from './test-fixtures/har-release.mjs';
 
 function fakeCompiler() {
   let copiedHar;
+  let workspace;
   return {
     get copiedHar() { return copiedHar; },
+    get workspace() { return workspace; },
     runOhpm(args, { cwd }) {
+      workspace = cwd;
       assert.deepEqual(args, ['install', '--all']);
       const dependency = JSON.parse(readFileSync(join(cwd, 'entry', 'oh-package.json5'), 'utf8')).dependencies;
       assert.equal(dependency['@arkdb/mysql'], 'file:../dependency/mysql.har');
@@ -38,10 +42,39 @@ function fakeCompiler() {
   };
 }
 
+test('local artifacts are versioned outside dist and never fall back to loose dist files', async (t) => {
+  const fixture = await releaseFixture(t);
+  const directory = join(fixture.root, 'build', 'mysql-v1.0.0');
+  const legacy = join(fixture.root, 'dist');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(join(legacy, `${STEM}.har`), 'Stale loose output must not be selected.');
+
+  const source = await verifiedArtifact(fixture.root, 'mysql');
+
+  assert.equal(source.artifact, join(directory, `${LOCAL_STEM}.har`));
+  assert.equal(source.evidenceDirectory,
+    join(directory, 'evidence'));
+  await rm(source.artifact);
+  await assert.rejects(verifiedArtifact(fixture.root, 'mysql'), { code: 'ENOENT' });
+});
+
+test('consumer workspaces are grouped by driver and version and cleaned after verification', async (t) => {
+  const fixture = await releaseFixture(t);
+  const compiler = fakeCompiler();
+  await verifyHarConsumer({
+    root: fixture.root, driver: 'mysql', artifactPath: join(fixture.dist, `${LOCAL_STEM}.har`),
+    manifestPath: join(fixture.dist, `${LOCAL_STEM}.manifest.json`), expectedSha256: fixture.identity.sha256
+  }, compiler);
+
+  assert.equal(dirname(compiler.workspace),
+    join(fixture.root, 'build', 'mysql-v1.0.0', 'work'));
+  await assert.rejects(readdir(compiler.workspace), { code: 'ENOENT' });
+});
+
 test('consumer uses only the supplied archive and its packaged README, not current driver source/dist', async (t) => {
   const fixture = await releaseFixture(t);
-  const manifest = join(fixture.dist, `${STEM}.manifest.json`);
-  const artifact = join(fixture.dist, `${STEM}.har`);
+  const manifest = join(fixture.dist, `${LOCAL_STEM}.manifest.json`);
+  const artifact = join(fixture.dist, `${LOCAL_STEM}.har`);
   await writeFile(join(fixture.root, 'mysql', 'README.md'), 'Local guide deliberately differs from the downloaded version.');
   const compiler = fakeCompiler();
   const record = await verifyHarConsumer({
@@ -59,8 +92,8 @@ test('consumer uses only the supplied archive and its packaged README, not curre
 test('wrong archive identity fails before dependency restore or compiler execution', async (t) => {
   const fixture = await releaseFixture(t);
   await assert.rejects(verifyHarConsumer({
-    root: fixture.root, driver: 'mysql', artifactPath: join(fixture.dist, `${STEM}.har`),
-    manifestPath: join(fixture.dist, `${STEM}.manifest.json`), expectedSha256: '0'.repeat(64)
+    root: fixture.root, driver: 'mysql', artifactPath: join(fixture.dist, `${LOCAL_STEM}.har`),
+    manifestPath: join(fixture.dist, `${LOCAL_STEM}.manifest.json`), expectedSha256: '0'.repeat(64)
   }, {
     runOhpm() { assert.fail('No package restore is permitted'); },
     runHvigor() { assert.fail('No compiler invocation is permitted'); }
@@ -73,8 +106,8 @@ test('caller-owned existing workspace is never overwritten or cleaned up', async
   await mkdir(workspace, { recursive: true });
   await writeFile(join(workspace, 'owner.txt'), 'keep');
   await assert.rejects(verifyHarConsumer({
-    root: fixture.root, driver: 'mysql', artifactPath: join(fixture.dist, `${STEM}.har`),
-    manifestPath: join(fixture.dist, `${STEM}.manifest.json`), expectedSha256: fixture.identity.sha256,
+    root: fixture.root, driver: 'mysql', artifactPath: join(fixture.dist, `${LOCAL_STEM}.har`),
+    manifestPath: join(fixture.dist, `${LOCAL_STEM}.manifest.json`), expectedSha256: fixture.identity.sha256,
     workspaceDirectory: workspace
   }, fakeCompiler()), /exists|occupied/i);
   assert.deepEqual(await readdir(workspace), ['owner.txt']);

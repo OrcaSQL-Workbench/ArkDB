@@ -1,10 +1,10 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { cert } from '@kit.DeviceCertificateKit';
-import { ConnectionDeadline, ConnectionTimerPort } from '../../../main/ets/core/connection/ConnectionDeadline';
-import { ConnectionConfig, SslMode } from '../../../main/ets/core/model/ConnectionConfig';
-import { ConnectionState } from '../../../main/ets/core/model/ServerInfo';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { MAX_RECEIVE_BUFFER_BYTES, TcpTransport } from '../../../main/ets/core/transport/TcpTransport';
+import {
+  ConnectionDeadline, ConnectionTimerPort, ConnectionState, ArkDbError, ArkDbErrorKind
+} from '@arkdb/core';
+import { ConnectionConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
+import { MAX_RECEIVE_BUFFER_BYTES, TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
 import { MySqlConnection } from '../../../main/ets/mysql/MySqlConnection';
 import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';

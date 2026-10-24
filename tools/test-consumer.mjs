@@ -7,15 +7,19 @@ import JSON5 from 'json5';
 import { exportedNames, listFiles, ROOT } from './check-package.mjs';
 import { addDocumentationChecks } from './doc-examples.mjs';
 import { inspectHar, sha256, sourceFingerprint, verifiedArtifact } from './package-har.mjs';
-import { jsonBytes, plainPath, releaseFile, SHA256, MAX_RELEASE_ASSET_BYTES } from './har-release.mjs';
+import {
+  jsonBytes, plainPath, releaseFile, SHA256, MAX_RELEASE_ASSET_BYTES, validateEmbeddedPackages
+} from './har-release.mjs';
 import { runHvigor, runOhpm } from './run-hvigor.mjs';
 import { parseHypiumResults } from './run-ohos-tests.mjs';
+import { driverVerification, localOutputPaths, resolvePackage } from './driver-packages.mjs';
+import { artifactReference, verifiedArtifactSet } from './package-har.mjs';
 
 export const REGISTRY = 'https://ohpm.openharmony.cn/ohpm/';
 export { verifiedArtifact } from './package-har.mjs';
 
-export function sampleFingerprint(root = ROOT) {
-  const sample = join(root, 'examples', 'mysql-client');
+export function sampleFingerprint(root = ROOT, driver = 'mysql') {
+  const sample = driverVerification(root, driver).consumerDirectory;
   const files = [
     ...['README.md', 'build-profile.json5', 'hvigorfile.ts', 'oh-package.json5'].map((name) => join(sample, name)),
     ...['build-profile.json5', 'hvigorfile.ts', 'oh-package.json5'].map((name) => join(sample, 'entry', name)),
@@ -46,23 +50,36 @@ export function registryIdentity(lock, name, version) {
   return { resolved: entry.resolved, integrity: entry.integrity, version: entry.version };
 }
 
-async function prepareDependency(workspace, source, registry, dependencies) {
+async function prepareDependency(workspace, source, registry, dependencies, restoreArguments) {
   const packagePath = join(workspace, 'entry', 'oh-package.json5');
   const packageManifest = JSON5.parse(await readFile(packagePath, 'utf8'));
-  if (registry) {
-    packageManifest.dependencies[source.manifest.packageName] = source.manifest.version;
-    await writeFile(packagePath, `${JSON.stringify(packageManifest, null, 2)}\n`);
-  } else {
-    if (packageManifest.dependencies[source.manifest.packageName] !== 'file:../dependency/mysql.har') {
-      throw new Error('Sample verification requires the explicit release-HAR dependency, not another override.');
-    }
-    await mkdir(join(workspace, 'dependency'), { recursive: true });
-    await copyFile(source.artifactPath, join(workspace, 'dependency', 'mysql.har'));
-    if (sha256(await readFile(join(workspace, 'dependency', 'mysql.har'))) !== source.expectedSha256) {
-      throw new Error('The sample received a different archive.');
+  const projectPath = join(workspace, 'oh-package.json5');
+  const projectManifest = JSON5.parse(await readFile(projectPath, 'utf8'));
+  packageManifest.dependencies ??= {};
+  projectManifest.overrides ??= {};
+  for (const values of [packageManifest.dependencies, projectManifest.overrides]) {
+    for (const name of Object.keys(values)) if (name.startsWith('@arkdb/')) delete values[name];
+  }
+  if (!registry) await mkdir(join(workspace, 'dependency'), { recursive: true });
+  for (const archive of source.archives) {
+    const { manifest } = archive;
+    packageManifest.dependencies[manifest.packageName] = registry ? manifest.version :
+      `file:../dependency/${manifest.driver}.har`;
+    if (!registry) {
+      if (source.archives.at(-1).manifest.delivery !== 'self-contained') {
+        projectManifest.overrides[manifest.packageName] = `file:./dependency/${manifest.driver}.har`;
+      }
+      const target = join(workspace, 'dependency', `${manifest.driver}.har`);
+      await copyFile(archive.artifactPath, target);
+      if (sha256(await readFile(target)) !== archive.expectedSha256) {
+        throw new Error('The sample received a different archive.');
+      }
+      if (Object.keys(projectManifest.overrides).length === 0) delete projectManifest.overrides;
     }
   }
-  const args = ['install', '--all'];
+  await writeFile(packagePath, `${JSON.stringify(packageManifest, null, 2)}\n`);
+  await writeFile(projectPath, `${JSON.stringify(projectManifest, null, 2)}\n`);
+  const args = restoreArguments ?? ['install', '--all'];
   if (registry) args.push('--registry', REGISTRY, '--cache', join(workspace, '.ohpm-cache'));
   const restored = (dependencies.runOhpm ?? runOhpm)(args, { cwd: workspace });
   if (restored.status !== 0 || /ohpm ERROR/.test(restored.output)) throw new Error('The sample dependency restore failed.');
@@ -82,7 +99,7 @@ export function consumerMode(flags) {
   return flags[0] ?? '--verify';
 }
 
-async function buildSample(workspace, dependencies = {}) {
+async function buildSample(workspace, dependencies = {}, requiresInternet = true) {
   requireBuild((dependencies.runHvigor ?? runHvigor)([
     '--mode', 'module', '-p', 'module=entry@default', '-p', 'product=default', 'assembleHap', '--no-daemon'
   ], { cwd: workspace }), 'Sample HAP/Worker compilation');
@@ -90,7 +107,7 @@ async function buildSample(workspace, dependencies = {}) {
   if (!(await stat(hap)).isFile() || (await stat(hap)).size === 0) throw new Error('Sample HAP output is missing.');
   const module = JSON5.parse(await readFile(join(workspace, 'entry', 'build', 'default',
     'intermediates', 'merge_profile', 'default', 'module.json'), 'utf8')).module;
-  if (!module.requestPermissions?.some((permission) => permission.name === 'ohos.permission.INTERNET')) {
+  if (requiresInternet && !module.requestPermissions?.some((permission) => permission.name === 'ohos.permission.INTERNET')) {
     throw new Error('The sample merged module is missing INTERNET.');
   }
   return hap;
@@ -98,22 +115,66 @@ async function buildSample(workspace, dependencies = {}) {
 
 export async function verifyHarConsumer({
   root = ROOT, driver = 'mysql', artifactPath, manifestPath, expectedSha256,
-  workspaceDirectory, compileOnly = false, registry = false
+  dependencyArtifacts = [], workspaceDirectory, compileOnly = false, registry = false
 }, dependencies = {}) {
-  if (driver !== 'mysql') throw new Error(`No independent consumer is implemented for driver ${driver}.`);
-  if (registry && compileOnly) throw new Error('Registry and compile-only verification cannot be combined.');
-  const bytes = releaseFile(dirname(artifactPath), basename(artifactPath), MAX_RELEASE_ASSET_BYTES);
-  const manifest = jsonBytes(releaseFile(dirname(manifestPath), basename(manifestPath)));
-  if (!SHA256.test(expectedSha256 ?? '') || sha256(bytes) !== expectedSha256 ||
-    manifest.sha256 !== expectedSha256 || manifest.byteLength !== bytes.length ||
-    manifest.schemaVersion !== 1 || manifest.packageName !== '@arkdb/mysql' || manifest.driver !== driver ||
-    manifest.file !== basename(artifactPath) || !SHA256.test(manifest.sourceFingerprint ?? '')) {
-    throw new Error('The supplied HAR digest or manifest identity is inconsistent.');
+  const verification = driverVerification(root, driver);
+  if (!Array.isArray(dependencyArtifacts) || dependencyArtifacts.length > 8) {
+    throw new Error('Consumer dependency HAR set exceeds its bounded allowlist.');
   }
-  const inspected = await inspectHar(artifactPath, {
-    name: manifest.packageName, version: manifest.version, license: 'Apache-2.0', dependencies: {}
-  }, undefined);
-  const sampleSource = sampleFingerprint(root);
+  if (registry && compileOnly) throw new Error('Registry and compile-only verification cannot be combined.');
+  const archives = [];
+  for (const supplied of [...dependencyArtifacts, { artifactPath, manifestPath, expectedSha256 }]) {
+    const bytes = releaseFile(dirname(supplied.artifactPath), basename(supplied.artifactPath), MAX_RELEASE_ASSET_BYTES);
+    const manifest = jsonBytes(releaseFile(dirname(supplied.manifestPath), basename(supplied.manifestPath)));
+    const registered = resolvePackage(root, manifest.driver);
+    if (!SHA256.test(supplied.expectedSha256 ?? '') || sha256(bytes) !== supplied.expectedSha256 ||
+      manifest.sha256 !== supplied.expectedSha256 || manifest.byteLength !== bytes.length ||
+      manifest.schemaVersion !== 1 || manifest.packageName !== registered.packageName ||
+      manifest.file !== basename(supplied.artifactPath) || !SHA256.test(manifest.sourceFingerprint ?? '') ||
+      archives.some((archive) => archive.manifest.packageName === manifest.packageName)) {
+      throw new Error('The supplied HAR digest or manifest identity is inconsistent.');
+    }
+    const inspected = await inspectHar(supplied.artifactPath, {
+      name: manifest.packageName, version: manifest.version, license: 'Apache-2.0',
+      dependencies: manifest.dependencies ?? {}
+    }, undefined, manifest.delivery === 'self-contained' ? manifest.moduleDefinition : registered.definition);
+    if (manifest.delivery === 'self-contained') validateEmbeddedPackages(manifest);
+    archives.push({ ...supplied, manifest, inspected });
+  }
+  const { manifest, inspected } = archives.at(-1);
+  if (manifest.driver !== driver) throw new Error('The supplied archive is not the selected driver.');
+  const references = archives.slice(0, -1).map((archive) => suppliedReference(archive.manifest));
+  if (JSON.stringify(manifest.dependencyArtifacts ?? []) !== JSON.stringify(references)) {
+    throw new Error('The supplied dependency HAR set differs from the driver manifest.');
+  }
+  for (const archive of archives) {
+    for (const [name, version] of Object.entries(archive.manifest.dependencies ?? {})) {
+      const dependency = archives.find((candidate) => candidate.manifest.packageName === name);
+      if (!dependency || dependency === archive || dependency.manifest.version !== version) {
+        throw new Error('Missing or incompatible supplied dependency HAR.');
+      }
+    }
+    function dependenciesOf(archive, visiting = new Set()) {
+      if (visiting.has(archive.manifest.packageName)) throw new Error('Cyclic supplied HAR dependencies.');
+      const path = new Set(visiting).add(archive.manifest.packageName);
+      const names = new Set();
+      for (const name of Object.keys(archive.manifest.dependencies ?? {})) {
+        const dependency = archives.find((candidate) => candidate.manifest.packageName === name);
+        for (const child of dependenciesOf(dependency, path)) names.add(child);
+        names.add(name);
+      }
+      return names;
+    }
+    for (const archive of archives) {
+      const names = dependenciesOf(archive);
+      const expected = archives.filter((candidate) => names.has(candidate.manifest.packageName))
+        .map((candidate) => suppliedReference(candidate.manifest));
+      if (JSON.stringify(archive.manifest.dependencyArtifacts ?? []) !== JSON.stringify(expected)) {
+        throw new Error('Supplied HAR dependency identity graph is inconsistent or contains unrelated archives.');
+      }
+    }
+  }
+  const sampleSource = sampleFingerprint(root, driver);
   const build = plainPath(root, join(root, 'build'), { allowMissing: true });
   await mkdir(build, { recursive: true });
   plainPath(root, build);
@@ -121,31 +182,72 @@ export async function verifyHarConsumer({
   if (workspaceDirectory !== undefined) {
     workspace = plainPath(build, workspaceDirectory, { allowMissing: true });
     await mkdir(workspace);
-  } else workspace = await mkdtemp(join(build, 'consumer-'));
+  } else {
+    const consumers = plainPath(root, localOutputPaths(root, driver).consumers, { allowMissing: true });
+    await mkdir(consumers, { recursive: true });
+    plainPath(root, consumers);
+    workspace = await mkdtemp(join(consumers, 'consumer-'));
+  }
   try {
     const generated = new Set(['build', '.hvigor', '.test', 'oh_modules', 'node_modules', 'dependency',
       'BuildProfile.ets', 'oh-package-lock.json5', '.ohpmrc', '.npmrc', 'local.properties']);
-    await cp(join(root, 'examples', 'mysql-client'), workspace,
+    await cp(verification.consumerDirectory, workspace,
       { recursive: true, filter: (file) => !generated.has(basename(file)) });
     const markdown = new TextDecoder('utf-8', { fatal: true }).decode(inspected.entries.get('package/README.md').bytes);
     const examples = await addDocumentationChecks(workspace, markdown);
-    await prepareDependency(workspace, { artifactPath, manifest, expectedSha256 }, registry, dependencies);
-    let acquisition;
-    if (registry) {
-      acquisition = registryIdentity(JSON5.parse(await readFile(join(workspace, 'oh-package-lock.json5'), 'utf8')),
-        manifest.packageName, manifest.version);
-      const installed = join(workspace, 'entry', 'oh_modules', '@arkdb', 'mysql');
-      const resolved = JSON5.parse(await readFile(join(installed, 'oh-package.json5'), 'utf8'));
-      if (resolved.name !== manifest.packageName || resolved.version !== manifest.version ||
-        resolved.types !== 'Index.d.ets' || resolved.license !== 'Apache-2.0' ||
-        JSON.stringify(exportedNames(await readFile(join(installed, 'Index.d.ets'), 'utf8'))) !==
-          JSON.stringify(inspected.publicExports)) {
-        throw new Error('The installed registry package identity or public declarations differ from the candidate.');
+    const isolatedRuntime = manifest.delivery === 'self-contained' && !registry;
+    const testDependencies = [];
+    const cache = join(workspace, '.ohpm-cache');
+    if (isolatedRuntime) {
+      if (archives.length !== 1 || Object.keys(manifest.dependencies ?? {}).length !== 0) {
+        throw new Error('Self-contained consumption requires exactly one HAR and no external runtime dependencies.');
+      }
+      for (const file of [join(workspace, 'oh-package.json5'), join(workspace, 'entry', 'oh-package.json5')]) {
+        const config = JSON5.parse(await readFile(file, 'utf8'));
+        if (config.devDependencies !== undefined) {
+          testDependencies.push({ file, value: config.devDependencies });
+          delete config.devDependencies;
+          await writeFile(file, `${JSON.stringify(config, null, 2)}\n`);
+        }
       }
     }
-    await buildSample(workspace, dependencies);
+    await prepareDependency(workspace, { archives }, registry, dependencies, isolatedRuntime
+      ? ['install', '--all', '--cache', cache, '--registry', 'http://127.0.0.1:9'] : undefined);
+    let acquisition;
+    const dependencyAcquisition = [];
+    if (registry) {
+      const lock = JSON5.parse(await readFile(join(workspace, 'oh-package-lock.json5'), 'utf8'));
+      for (const archive of archives) {
+        const requested = archive.manifest;
+        const identity = registryIdentity(lock, requested.packageName, requested.version);
+        const installed = join(workspace, 'entry', 'oh_modules', ...requested.packageName.split('/'));
+        const resolved = JSON5.parse(await readFile(join(installed, 'oh-package.json5'), 'utf8'));
+        if (resolved.name !== requested.packageName || resolved.version !== requested.version ||
+          resolved.types !== 'Index.d.ets' || resolved.license !== 'Apache-2.0' ||
+          JSON.stringify(exportedNames(await readFile(join(installed, 'Index.d.ets'), 'utf8'))) !==
+            JSON.stringify(archive.inspected.publicExports)) {
+          throw new Error('The installed registry package identity or public declarations differ from the candidate.');
+        }
+        if (archive.manifest.driver === driver) acquisition = identity;
+        else dependencyAcquisition.push({ packageName: requested.packageName, ...identity });
+      }
+    }
+    await buildSample(workspace, dependencies, verification.requiresInternet);
     let verdict = null;
     if (!compileOnly) {
+      if (isolatedRuntime && testDependencies.length > 0) {
+        for (const saved of testDependencies) {
+          const config = JSON5.parse(await readFile(saved.file, 'utf8'));
+          config.devDependencies = saved.value;
+          await writeFile(saved.file, `${JSON.stringify(config, null, 2)}\n`);
+        }
+        const restored = (dependencies.runOhpm ?? runOhpm)([
+          'install', '--all', '--cache', cache, '--registry', REGISTRY
+        ], { cwd: workspace });
+        if (restored.status !== 0 || /ohpm ERROR/.test(restored.output)) {
+          throw new Error('The test-framework restore failed after isolated runtime verification.');
+        }
+      }
       requireBuild((dependencies.runHvigor ?? runHvigor)([
         '--mode', 'module', '-p', 'module=entry@default', '-p', 'product=default', 'test', '--no-daemon'
       ], { cwd: workspace }), 'Offline sample lifecycle tests');
@@ -153,42 +255,77 @@ export async function verifyHarConsumer({
         'intermediates', 'test', 'coverage_data', 'test_result.txt'), 'utf8'));
     }
     if (sha256(releaseFile(dirname(artifactPath), basename(artifactPath), MAX_RELEASE_ASSET_BYTES)) !== expectedSha256 ||
-      sampleFingerprint(root) !== sampleSource) throw new Error('The supplied archive or consumer example changed during verification.');
+      sampleFingerprint(root, driver) !== sampleSource ||
+      archives.some((archive) => sha256(releaseFile(dirname(archive.artifactPath),
+        basename(archive.artifactPath), MAX_RELEASE_ASSET_BYTES)) !== archive.expectedSha256)) {
+      throw new Error('The supplied archive, dependency set or consumer example changed during verification.');
+    }
     return {
       schemaVersion: 1, packageName: manifest.packageName, version: manifest.version,
       ...(registry ? { referenceLocalArtifactSha256: expectedSha256 } : { artifactSha256: expectedSha256 }),
       sourceFingerprint: manifest.sourceFingerprint, sampleFingerprint: sampleSource,
+      dependencyArtifacts: references,
+      ...(manifest.delivery === 'self-contained' ? { selfContainedRuntimeVerified: isolatedRuntime } : {}),
       check: compileOnly ? 'isolated-release-hap-compilation'
         : registry ? 'isolated-registry-hap-and-local-tests' : 'isolated-release-hap-and-local-tests',
       verifiedAt: new Date().toISOString(), documentedExamples: examples,
       localSampleCases: verdict?.total ?? null, localTestsExecuted: !compileOnly,
       sampleHapCompiled: true, registryAcquisitionVerified: registry, liveNetworkingVerified: false,
-      ...(acquisition ? { acquisition } : {})
+      ...(acquisition ? { acquisition, dependencyAcquisition } : {})
     };
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 }
 
+export function suppliedReference(manifest) {
+  return {
+    id: manifest.driver, packageName: manifest.packageName, version: manifest.version,
+    file: manifest.file, sha256: manifest.sha256, byteLength: manifest.byteLength
+  };
+}
+
+export function consumerArguments(argv) {
+  const flags = [];
+  let driver = 'mysql';
+  let selected = false;
+  for (let index = 0; index < argv.length; index++) {
+    if (argv[index] === '--driver' && !selected && /^[a-z][a-z0-9_-]*$/.test(argv[index + 1] ?? '')) {
+      driver = argv[++index];
+      selected = true;
+    } else flags.push(argv[index]);
+  }
+  return { driver, mode: consumerMode(flags) };
+}
+
 async function main() {
-  const mode = consumerMode(process.argv.slice(2));
-  const source = await verifiedArtifact();
+  const { driver, mode } = consumerArguments(process.argv.slice(2));
+  const sources = await verifiedArtifactSet(ROOT, driver);
+  const source = sources.at(-1);
+  const supplied = sources.map((entry) => ({
+    artifactPath: entry.artifact, manifestPath: join(entry.dist, `${entry.stem}.manifest.json`),
+    expectedSha256: entry.identity.sha256, manifest: entry.identity
+  }));
+  const verification = driverVerification(ROOT, driver);
   if (mode === '--prepare' || mode === '--example') {
-    const workspace = join(ROOT, 'examples', 'mysql-client');
-    await prepareDependency(workspace, {
-      artifactPath: source.artifact, manifest: source.identity, expectedSha256: source.identity.sha256
-    }, false, {});
-    if (mode === '--example') console.log(`Built unsigned sample: ${await buildSample(workspace)}`);
+    const workspace = verification.consumerDirectory;
+    await prepareDependency(workspace, { archives: supplied }, false, {});
+    if (mode === '--example') console.log(`Built unsigned sample: ${await buildSample(workspace, {}, verification.requiresInternet)}`);
     else console.log(`Prepared ${workspace}. Open it in DevEco Studio; configure your own debug signing.`);
     return;
   }
   const record = await verifyHarConsumer({
-    driver: 'mysql', artifactPath: source.artifact,
+    driver, artifactPath: source.artifact,
     manifestPath: join(source.dist, `${source.stem}.manifest.json`), expectedSha256: source.identity.sha256,
+    dependencyArtifacts: supplied.slice(0, -1),
     compileOnly: mode === '--compile-only', registry: mode === '--registry'
   });
-  if (sourceFingerprint() !== source.identity.sourceFingerprint) throw new Error('Current driver source changed during consumer verification.');
-  await writeFile(join(source.dist, `${source.stem}.${mode === '--compile-only' ? 'compile'
+  if (sourceFingerprint(ROOT, driver) !== source.identity.sourceFingerprint ||
+    JSON.stringify(record.dependencyArtifacts) !== JSON.stringify(sources.slice(0, -1).map(artifactReference))) {
+    throw new Error('Current driver source or dependency set changed during consumer verification.');
+  }
+  await mkdir(source.evidenceDirectory, { recursive: true });
+  await writeFile(join(source.evidenceDirectory, `${source.stem}.${mode === '--compile-only' ? 'compile'
     : mode === '--registry' ? 'registry' : 'consumer'}.json`), `${JSON.stringify(record, null, 2)}\n`);
   console.log(`Isolated sample HAP/Worker and ${record.documentedExamples} README examples compiled.`);
   console.log(record.localTestsExecuted ? `${record.localSampleCases} local sample cases passed.`

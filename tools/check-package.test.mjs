@@ -20,6 +20,7 @@ test('discovers the current standalone interface and registered suites', () => {
 
 test('allows additional registered modules without freezing the workspace layout', async (t) => {
   const root = await workspaceFixture(t);
+  await independentModule(root, 'another_driver', 'another_driver', '@arkdb/another-driver');
   const profile = JSON5.parse(readFileSync(join(root, 'build-profile.json5'), 'utf8'));
   profile.modules.push({ name: 'another_driver', srcPath: './another_driver' });
   await writeFile(join(root, 'build-profile.json5'), JSON.stringify(profile));
@@ -29,7 +30,7 @@ test('allows additional registered modules without freezing the workspace layout
 test('requires the MySQL module to be registered at its actual source path', async (t) => {
   const root = await workspaceFixture(t);
   const profile = JSON5.parse(readFileSync(join(root, 'build-profile.json5'), 'utf8'));
-  profile.modules[0].srcPath = './different-module';
+  profile.modules.find((entry) => entry.name === 'mysql').srcPath = './different-module';
   await writeFile(join(root, 'build-profile.json5'), JSON.stringify(profile));
   assert.throws(() => checkPackage(root), /register the mysql HAR/);
 });
@@ -42,19 +43,10 @@ test('rejects an empty public entry without freezing a historical export list', 
 
 test('validates a synthetic second driver without forcing the MySQL package or directory name', async (t) => {
   const root = await workspaceFixture(t);
-  await mkdir(join(root, 'drivers'), { recursive: true });
-  await cp(join(root, 'mysql'), join(root, 'drivers', 'pgsql'), { recursive: true });
+  await independentModule(root, 'drivers\\pgsql', 'pgsql', '@arkdb/postgres');
   const profile = JSON5.parse(readFileSync(join(root, 'build-profile.json5'), 'utf8'));
   profile.modules.push({ name: 'pgsql', srcPath: './drivers/pgsql' });
   await writeFile(join(root, 'build-profile.json5'), JSON.stringify(profile));
-  const definitionPath = join(root, 'drivers', 'pgsql', 'src', 'main', 'module.json5');
-  const definition = JSON5.parse(readFileSync(definitionPath, 'utf8'));
-  definition.module.name = 'pgsql';
-  await writeFile(definitionPath, JSON.stringify(definition));
-  const manifestPath = join(root, 'drivers', 'pgsql', 'oh-package.json5');
-  const manifest = JSON5.parse(readFileSync(manifestPath, 'utf8'));
-  manifest.name = '@arkdb/postgres';
-  await writeFile(manifestPath, JSON.stringify(manifest));
   const result = checkPackage(root, 'pgsql');
   assert.equal(result.manifest.name, '@arkdb/postgres');
   assert.equal(result.driver.sourcePath, 'drivers/pgsql');
@@ -79,13 +71,36 @@ async function workspaceFixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'arkdb-package-check-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const generated = new Set(['build', '.test', 'oh_modules', 'BuildProfile.ets', 'oh-package-lock.json5']);
-  await cp(join(ROOT, 'mysql'), join(root, 'mysql'), {
-    recursive: true,
-    filter: (file) => !generated.has(basename(file))
-  });
+  for (const name of ['core', 'mysql']) {
+    await cp(join(ROOT, name), join(root, name), {
+      recursive: true, filter: (file) => !generated.has(basename(file))
+    });
+  }
   await copyFile(join(ROOT, 'LICENSE'), join(root, 'LICENSE'));
   await copyFile(join(ROOT, 'build-profile.json5'), join(root, 'build-profile.json5'));
+  await copyFile(join(ROOT, 'oh-package.json5'), join(root, 'oh-package.json5'));
   return root;
+}
+
+async function independentModule(root, directory, id, name) {
+  const target = join(root, ...directory.split('\\'));
+  await mkdir(join(target, 'src', 'main', 'ets'), { recursive: true });
+  await mkdir(join(target, 'src', 'test'), { recursive: true });
+  for (const file of ['LICENSE', 'README.md', 'CHANGELOG.md', 'README.OpenSource']) {
+    await writeFile(join(target, file), file === 'LICENSE' ? readFileSync(join(ROOT, 'LICENSE')) : 'Test-only independent module.\n');
+  }
+  await writeFile(join(target, 'oh-package.json5'), JSON.stringify({
+    name, version: '1.0.0', main: 'Index.ets', license: 'Apache-2.0', author: 'Synthetic fixture',
+    dependencies: { '@arkdb/core': '1.0.0' }
+  }));
+  await writeFile(join(target, 'arkdb-package.json'), '{"kind":"driver"}');
+  await writeFile(join(target, 'src', 'main', 'module.json5'), JSON.stringify({ module: { name: id, type: 'har' } }));
+  await writeFile(join(target, 'Index.ets'), "export { Probe } from './src/main/ets/Probe';\n");
+  await writeFile(join(target, 'src', 'main', 'ets', 'Probe.ets'),
+    "import { ArkDbError } from '@arkdb/core';\nexport class Probe { fail(): void { throw ArkDbError.unsupported('Test only.'); } }\n");
+  await writeFile(join(target, 'src', 'test', 'List.test.ets'),
+    "import suite from './Probe.test';\nexport default function tests(): void { suite(); }\n");
+  await writeFile(join(target, 'src', 'test', 'Probe.test.ets'), 'export default function suite(): void {}\n');
 }
 
 test('import scanning covers both concrete and type-only seams', () => {

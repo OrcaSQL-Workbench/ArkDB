@@ -1,5 +1,6 @@
 import { ColumnType, Collation } from '../protocol/Constants';
-import { ColumnDef, SqlValue } from '../../core/model/QueryResult';
+import { MySqlColumnDef as ColumnDef } from '../model/MySqlQueryResult';
+import { SqlValue } from '@arkdb/core';
 import { utf8Decode } from '../protocol/Charsets';
 
 /**

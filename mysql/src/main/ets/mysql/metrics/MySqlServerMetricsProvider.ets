@@ -1,38 +1,22 @@
-import { DbConnection } from '../../core/connection/DbConnection';
-import { ArkDbError, ArkDbErrorKind } from '../../core/model/ArkDbError';
-import { ColumnDef, SqlValue } from '../../core/model/QueryResult';
-import { QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary,
-  QueryRowChunk, QueryTruncation } from '../../core/model/QueryStream';
-import { monotonicNowMs } from '../../core/time/MonotonicClock';
 import {
-  InnoDbSnapshot,
-  MAX_METRICS_PROCESS_ROWS,
-  MAX_METRICS_REPLICATION_CHANNELS,
-  MAX_METRICS_UNSIGNED_64,
-  QueryActivitySnapshot,
-  ReplicationChannelInfo,
-  ReplicationIoRunning,
-  ReplicationSnapshot,
-  ReplicationSqlRunning,
-  ServerMetricsAvailability,
-  ServerMetricsCategory,
-  ServerMetricsErrorKind,
-  ServerMetricsModel,
-  ServerOverviewSnapshot,
-  ServerProcessInfo,
-  ServerProcessSnapshot
-} from '../../core/metrics/ServerMetrics';
-import { ServerMetricsProvider } from '../../core/metrics/ServerMetricsProvider';
+  DbStreamingConnection, ColumnDef, MetricKind, MetricMeasurement, ServerMetricsProvider,
+  ServerMetricsSnapshot, ArkDbError, ArkDbErrorKind, SqlValue, QueryExecutionSummary, QueryOptions,
+  QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation, monotonicNowMs
+} from '@arkdb/core';
+import {
+  InnoDbSnapshot, MAX_METRICS_PROCESS_ROWS, MAX_METRICS_REPLICATION_CHANNELS, MAX_METRICS_UNSIGNED_64,
+  QueryActivitySnapshot, ReplicationChannelInfo, ReplicationIoRunning, ReplicationSnapshot,
+  ReplicationSqlRunning, ServerMetricsAvailability, ServerMetricsCategory, ServerMetricsErrorKind,
+  ServerMetricsModel, ServerOverviewSnapshot, ServerProcessInfo, ServerProcessSnapshot
+} from './MySqlServerMetrics';
+import { MySqlMetricsProvider } from './MySqlMetricsProvider';
+import { MySqlDbConnection } from '../driver/MySqlContracts';
+import { MySqlQueryResultSink } from '../model/MySqlQueryStream';
 import { utf8Decode, utf8Encode } from '../protocol/Charsets';
 import {
-  MYSQL_METRICS_INNODB_SQL,
-  MYSQL_METRICS_OVERVIEW_SQL,
-  MYSQL_METRICS_PERFORMANCE_SCHEMA_SQL,
-  MYSQL_METRICS_PROCESS_SQL,
-  MYSQL_METRICS_QUERY_ACTIVITY_SQL,
-  MYSQL_METRICS_REPLICATION_REPLICA_SQL,
-  mysqlMetricsProductSupported,
-  mysqlReplicationSqlForServer
+  MYSQL_METRICS_INNODB_SQL, MYSQL_METRICS_OVERVIEW_SQL, MYSQL_METRICS_PERFORMANCE_SCHEMA_SQL,
+  MYSQL_METRICS_PROCESS_SQL, MYSQL_METRICS_QUERY_ACTIVITY_SQL, MYSQL_METRICS_REPLICATION_REPLICA_SQL,
+  mysqlMetricsProductSupported, mysqlReplicationSqlForServer
 } from './MySqlMetricsSql';
 
 const GLOBAL_STATUS_MAX_ROWS: number = 13;
@@ -42,17 +26,56 @@ const PROCESS_SOURCE_MAX_BYTES: number = 128 * 1024;
 const REPLICATION_SOURCE_MAX_ROWS: number = 17;
 const REPLICATION_SOURCE_MAX_BYTES: number = 128 * 1024;
 
-export class MySqlServerMetricsProvider implements ServerMetricsProvider {
-  private connection: DbConnection;
+function measurement(name: string, kind: MetricKind, value: bigint): MetricMeasurement {
+  const result = new MetricMeasurement();
+  result.name = name;
+  result.kind = kind;
+  result.unit = 'count';
+  result.value = value;
+  return result;
+}
 
-  constructor(connection: DbConnection) {
+export class MySqlServerMetricsProvider implements ServerMetricsProvider, MySqlMetricsProvider {
+  private connection: DbStreamingConnection | MySqlDbConnection;
+
+  constructor(connection: DbStreamingConnection | MySqlDbConnection) {
     this.connection = connection;
+  }
+
+  async readMetrics(): Promise<ServerMetricsSnapshot> {
+    const overview = await this.readOverview();
+    const snapshot = new ServerMetricsSnapshot();
+    snapshot.availability = overview.availability;
+    snapshot.sampledAtUptimeMs = overview.sampledAtUptimeMs;
+    if (overview.data !== null) {
+      snapshot.measurements = [
+        measurement('connections.current', MetricKind.Gauge, overview.data.threadsConnected.value),
+        measurement('queries.active', MetricKind.Gauge, overview.data.threadsRunning.value),
+        measurement('connections.total', MetricKind.Counter, overview.data.connectionAttempts.value),
+        measurement('connections.failed', MetricKind.Counter, overview.data.abortedConnectionAttempts.value),
+        measurement('connections.peak', MetricKind.Gauge, overview.data.maxUsedConnections.value)
+      ];
+    } else {
+      if (overview.errorKind === null) {
+        throw ArkDbError.protocol('Unavailable MySQL metrics have no error classification.');
+      }
+      snapshot.reason = overview.errorKind;
+      if (overview.errorKind === ServerMetricsErrorKind.Server) {
+        snapshot.error = ArkDbError.server('MySQL metrics source is unavailable.',
+          overview.errorCode === null ? undefined : overview.errorCode,
+          overview.errorSqlState === null ? undefined : overview.errorSqlState);
+      }
+    }
+    const errors = snapshot.validate();
+    if (errors.length > 0) throw errors[0];
+    return snapshot;
   }
 
   async readOverview(): Promise<ServerMetricsCategory<ServerOverviewSnapshot>> {
     if (!mysqlMetricsProductSupported(this.connection.serverInfo)) {
       return unsupportedProduct<ServerOverviewSnapshot>();
     }
+
     const probe = await this.ensurePerformanceSchema<ServerOverviewSnapshot>();
     if (probe !== null) return probe;
     try {
@@ -239,7 +262,7 @@ class MetricsQueryResult {
   rows: SqlValue[][] = [];
 }
 
-class MetricsQuerySink implements QueryResultSink {
+class MetricsQuerySink implements QueryResultSink, MySqlQueryResultSink {
   columns: ColumnDef[] = [];
   rows: SqlValue[][] = [];
   truncated: boolean = false;
@@ -405,7 +428,10 @@ function serverCategory<T extends ServerMetricsModel>(availability: ServerMetric
   const result = new ServerMetricsCategory<T>();
   result.availability = availability;
   result.errorKind = ServerMetricsErrorKind.Server;
-  result.errorCode = error.code === undefined ? null : error.code;
+  if (typeof error.code !== 'number') {
+    throw ArkDbError.protocol('MySQL metrics server error has no numeric native code.');
+  }
+  result.errorCode = error.code;
   result.errorSqlState = error.sqlState === undefined ? null : error.sqlState;
   ensureCategoryValid(result);
   return result;

@@ -1,28 +1,44 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { DbConnection } from '../../../main/ets/core/connection/DbConnection';
-import { DatabaseContext } from '../../../main/ets/core/model/DatabaseContext';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { ColumnDef, QueryResult, SqlValue } from '../../../main/ets/core/model/QueryResult';
-import { DatabaseSessionStatus, QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink,
-  QueryResultSummary, QueryRowChunk, QueryTruncation } from '../../../main/ets/core/model/QueryStream';
-import { ConnectionState, ServerFamily, ServerInfo } from '../../../main/ets/core/model/ServerInfo';
-import { ServerMetricsAvailability, ServerMetricsErrorKind, ReplicationIoRunning,
-  ReplicationSqlRunning } from '../../../main/ets/core/metrics/ServerMetrics';
+import {
+  DbStreamingConnection, DatabaseContext, ArkDbError, ArkDbErrorKind, SqlValue, DatabaseSessionStatus,
+  QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
+  QueryTruncation, ConnectionState
+} from '@arkdb/core';
+import {
+  MySqlColumnDef as ColumnDef, MySqlQueryResult as QueryResult
+} from '../../../main/ets/mysql/model/MySqlQueryResult';
+import { ServerFamily, MySqlServerInfo as ServerInfo } from '../../../main/ets/mysql/model/MySqlServerInfo';
+import {
+  ServerMetricsAvailability, ServerMetricsErrorKind, ReplicationIoRunning, ReplicationSqlRunning
+} from '../../../main/ets/mysql/metrics/MySqlServerMetrics';
 import { MySqlServerMetricsProvider } from '../../../main/ets/mysql/metrics/MySqlServerMetricsProvider';
 import {
-  MYSQL_METRICS_INNODB_SQL,
-  MYSQL_METRICS_OVERVIEW_SQL,
-  MYSQL_METRICS_PERFORMANCE_SCHEMA_SQL,
-  MYSQL_METRICS_PROCESS_SQL,
-  MYSQL_METRICS_QUERY_ACTIVITY_SQL,
-  MYSQL_METRICS_REPLICATION_REPLICA_SQL,
-  MYSQL_METRICS_REPLICATION_SLAVE_SQL,
-  mysqlMetricsProductSupported,
-  mysqlReplicationSqlForServer
+  MYSQL_METRICS_INNODB_SQL, MYSQL_METRICS_OVERVIEW_SQL, MYSQL_METRICS_PERFORMANCE_SCHEMA_SQL,
+  MYSQL_METRICS_PROCESS_SQL, MYSQL_METRICS_QUERY_ACTIVITY_SQL, MYSQL_METRICS_REPLICATION_REPLICA_SQL,
+  MYSQL_METRICS_REPLICATION_SLAVE_SQL, mysqlMetricsProductSupported, mysqlReplicationSqlForServer
 } from '../../../main/ets/mysql/metrics/MySqlMetricsSql';
 
 export default function mySqlServerMetricsProviderTest() {
   describe('MySqlServerMetricsProvider', () => {
+    it('adaptsNativeOverviewToPortableMetricsWithoutExposingStorageEngineFields', 0, async () => {
+      const connection = new MetricsConnection('8.0.36');
+      connection.pushResult([['performance_schema', 'ON']]);
+      connection.pushResult([
+        ['Threads_connected', '12'], ['Threads_running', '3'],
+        ['Connections', '9007199254740993'], ['Aborted_connects', '2'], ['Max_used_connections', '19']
+      ]);
+      const snapshot = await new MySqlServerMetricsProvider(connection).readMetrics();
+      expect(snapshot.validate().length).assertEqual(0);
+      expect(snapshot.measurements.length).assertEqual(5);
+      expect(snapshot.measurements[2].name).assertEqual('connections.total');
+      expect(snapshot.measurements[2].value.toString()).assertEqual('9007199254740993');
+      expect(snapshot.measurements[2].unit).assertEqual('count');
+      const unsupported = await new MySqlServerMetricsProvider(new MetricsConnection('10.11.8',
+        ServerFamily.MariaDB)).readMetrics();
+      expect(unsupported.availability).assertEqual(ServerMetricsAvailability.Unsupported);
+      expect(unsupported.measurements.length).assertEqual(0);
+      expect(unsupported.reason.length > 0).assertTrue();
+    });
     it('mapsOverviewRowsAndPreservesUnsignedCountersAboveSafeInteger', 0, async () => {
       const connection = new MetricsConnection('8.0.36');
       connection.pushResult([['performance_schema', 'ON']]);
@@ -588,7 +604,7 @@ class StreamResponse {
   truncationInterrupted: boolean = false;
 }
 
-class MetricsConnection implements DbConnection {
+class MetricsConnection implements DbStreamingConnection {
   readonly serverInfo: ServerInfo = new ServerInfo();
   readonly sessionStatus: DatabaseSessionStatus = new DatabaseSessionStatus();
   readonly state: ConnectionState = ConnectionState.Ready;

@@ -1,11 +1,12 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { socket as platformSocket } from '@kit.NetworkKit';
 import { cert as platformCert } from '@kit.DeviceCertificateKit';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { dnsNameFromSan, dnsNameMatchesHost, ipAddressBytes, TcpByteSender,
-  MAX_RECEIVE_BUFFER_BYTES, TcpTransport } from '../../../main/ets/core/transport/TcpTransport';
+import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
+import {
+  dnsNameFromSan, dnsNameMatchesHost, ipAddressBytes, TcpByteSender, MAX_RECEIVE_BUFFER_BYTES, TcpTransport
+} from '../../../main/ets/mysql/transport/TcpTransport';
 import { remainingPacketWriteTimeMs } from '../../../main/ets/mysql/protocol/PacketChannel';
-import { SslConfig, SslMode } from '../../../main/ets/core/model/ConnectionConfig';
+import { SslConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
 import { MockSocket, socket } from '../../../mock/NetworkKit.mock';
 import { MockX509Cert, cert } from '../../../mock/DeviceCertificateKit.mock';
 

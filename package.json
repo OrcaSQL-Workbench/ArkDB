@@ -9,10 +9,11 @@
   "scripts": {
     "restore": "node tools/run-ohpm.mjs install --all",
     "drivers": "node tools/plan-har-builds.mjs",
-    "check": "npm run test:tools && node tools/check-package.mjs",
+    "check": "npm run test:tools && node tools/check-package.mjs && node tools/driver-contracts.mjs",
     "test:tools": "node --test --test-concurrency=1 tools/*.test.mjs",
-    "build": "node tools/run-hvigor.mjs -- --mode module -p module=mysql@default -p product=default assembleHar --no-daemon",
-    "build:release": "node tools/run-hvigor.mjs -- --mode module -p module=mysql@default -p product=default -p buildMode=release assembleHar --no-daemon",
+    "test:contracts": "node --test tools/driver-contracts.test.mjs",
+    "build": "node tools/package-har.mjs",
+    "build:release": "node tools/package-har.mjs",
     "test:arkts": "node tools/run-ohos-tests.mjs",
     "pack": "node tools/package-har.mjs",
     "test:consumer": "node tools/test-consumer.mjs",
@@ -23,10 +24,11 @@
     "release:prepare": "node tools/prepare-har-release.mjs",
     "release:publish": "node tools/publish-har.mjs",
     "release:verify-download": "node tools/verify-download.mjs",
-    "verify": "npm run check && npm run build && npm run test:arkts && npm run pack && npm run test:consumer && npm run release:check"
+    "verify": "npm run check && node tools/verify-driver.mjs"
   },
   "devDependencies": {
     "json5": "2.2.3",
-    "tar": "7.5.22"
+    "tar": "7.5.22",
+    "typescript": "5.9.3"
   }
 }

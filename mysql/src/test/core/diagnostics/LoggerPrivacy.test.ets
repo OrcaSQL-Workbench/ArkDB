@@ -1,6 +1,5 @@
 import { describe, expect, it } from '@ohos/hypium';
-import { Logger } from '../../../main/ets/core/diagnostics/Logger';
-import { LogLevel, LogSink, LogTag } from '../../../main/ets/core/diagnostics/LogSink';
+import { Logger, LogLevel, LogSink, LogTag } from '@arkdb/core';
 
 class RecordingLogSink implements LogSink {
   messages: string[] = [];

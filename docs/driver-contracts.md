@@ -1,0 +1,213 @@
+# Shared driver contracts
+
+## Status and ownership
+
+This is the engineering-preview source architecture for `@arkdb/mysql` 1.0.2 with
+`@arkdb/core` 1.0.0. The published `mysql-v1.0.1` preview remains a standalone HAR
+from source commit `27d4095575ca56ff4f1b9d38221e610034f3a049`; its tag and bytes are
+not changed by this migration. PostgreSQL is not implemented.
+
+| Module | Owns |
+| --- | --- |
+| `core` / `@arkdb/core` | One runtime error identity, portable results and server information, minimal connections, optional capability interfaces, deadlines and HarmonyOS diagnostics |
+| `mysql` / `@arkdb/mysql` | MySQL options/TLS posture, wire protocol, authentication, native columns/server information, SQL, context aliases, control-session cancellation and vendor metrics |
+| Driver-local `arkdb-package.json` | Tooling-only shared/driver classification and driver-owned verification declaration; not an OHPM schema extension |
+| `tools` | Dependency discovery, source/import constraints and exact-archive verification/distribution |
+
+The maintained source dependency direction is driver to core. Drivers import the
+core public entry, not another driver's internals or a relative path into core
+source. Core is maintained once, not copied into each driver's source tree.
+Delivery stages core plus the selected driver as one temporary SDK module and
+compiles one HAR; consumers do not install the development core package.
+
+## Connection and creation interface
+
+Core's `DbConnection` requires connect/query/close, lifecycle state and portable server
+information. A query-only engine can implement it without fake transaction,
+metadata, metrics, context, ping or streaming methods.
+
+Optional `features` expose typed interfaces for streaming, health, context,
+transactions, cancellation, metadata and metrics. An absent interface is
+unsupported. Driver capability flags are discovery hints, default false, and do
+not replace checking the connection's actual feature availability.
+
+Core's `DbDriverFactory<TOptions, TConnection>` has `create(options)`. Options and
+credentials are adapter-owned, not a common MySQL configuration or arbitrary
+object/JSON bag. The MySQL request is `MySqlConnectionOptions(config, password)`;
+it is transient and must not be serialized as a saved profile.
+
+```typescript
+import { DbDriverRegistry, ConnectionConfig, MySqlConnection, MySqlConnectionOptions, MySqlDriverFactory } from '@arkdb/mysql';
+
+export function createSession(host: string, user: string, password: string): MySqlConnection {
+  const registry = new DbDriverRegistry();
+  const mysql = registry.register(new MySqlDriverFactory());
+  const config = new ConnectionConfig();
+  config.host = host;
+  config.user = user;
+  return mysql.create(new MySqlConnectionOptions(config, password));
+}
+```
+
+The registry uses open string identifiers, rejects duplicates and returns the
+typed factory handle. `describe(id)` is discovery only; it does not erase the
+configuration type to offer unsafe arbitrary-engine construction.
+
+MySQL retains `createConnection(config, password)` and
+`createMySqlConnection(config, password)` as native convenience interfaces.
+Its native provider and handle-based cancellation helpers remain available.
+The established `@arkdb/mysql` names `DbConnection`, `DbDriverFactory`,
+`DbExecutionController` and `MetadataProvider` are adapter-owned interfaces
+compatible with 1.0.1, not replacements by their minimal/generic core counterparts.
+Portable consumers use the distinct `CoreDbConnection`, `CoreDbDriverFactory`,
+`CoreDbExecutionController` and `CoreMetadataProvider` exports from the same HAR.
+
+## Semantics that must not become MySQL assumptions
+
+Catalog and schema are independent fields. `DatabaseContextPolicy` reports
+in-place, reconnect-required or unsupported changes for each. MySQL explicitly
+declares catalog/schema aliases, accepts either, and rejects conflicting values.
+Its metadata queries follow the same alias rule. An adapter with one catalog per
+connection can require reconnecting for catalog changes while changing schemas
+in place; it need not emulate `USE`.
+
+Transactions expose begin/commit/rollback and session status. Configurable
+autocommit is a MySQL convenience, not a required transaction interface.
+`DatabaseSessionStatus.known` and result `statusKnown` must be explicitly true before
+using session flags. Default or invalidated status is not evidence of autocommit
+or transaction state. MySQL invalidates status after a failed command and can
+refresh it with its health check.
+
+Cancellation is connection-bound and targets only the execution current at the
+call. `Requested` means a request was accepted, not that the query was interrupted.
+Await the original operation as well. `ConnectionReuse` distinguishes not ready,
+ready, awaiting completion, requiring synchronization and closed.
+
+MySQL's generic cancellation feature owns a separate control connection,
+waits for query dispatch, suppresses a stale request if the execution completed,
+and blocks a subsequent command until the request settles. Closing waits for
+control cleanup. The control operation uses the MySQL `connectTimeoutMs` budget,
+does not select an initial database, and does not open an autocommit-disabled
+control session. Control failures are surfaced, not converted to successful
+cancellation. This is an adapter decision: another engine can send a protocol
+cancel message without implementing a SQL control connection or `KILL QUERY`.
+The old handle-based helper is lower-level and still leaves lifetime management
+to its caller.
+
+After an uncertain dispatched MySQL cancellation, the target is closed and
+permanently retired, even if its original operation already completed. Closing
+the control socket alone does not acknowledge the server-side `KILL`. A definite
+server rejection is distinguishable and does not require retirement.
+
+Portable `ServerInfo` has no engine enum, handshake version, connection number,
+authentication plugin or capability bitmask. Portable `ColumnDef` has no wire
+type number, flags or collation. Native details remain typed driver-owned
+subclasses. Native type identifiers and logical value kinds are available to
+generic callers. Scalars include boolean, bigint and lossless text/bytes; no
+automatic conversion of exact decimals or structured values to JSON is required.
+Generated insert identifiers and warning counts are optional observations, not
+invented zero values for an engine that did not report them. MySQL's native
+result retains its established numeric warning and bigint insert-id fields.
+
+`ArkDbError` has one owner inside a delivery, so its public entry and driver
+implementation use the same constructor. Separately assembled standalone driver
+HARs do not automatically share constructors; their coexistence is not established
+by a single-driver build. A source composition includes core once for all selected
+adapters. Native codes may
+be numeric or textual in `nativeCode`, and SQLSTATE is independent. The numeric
+`code` compatibility field is retained on the same error constructor. MySQL
+preserves its numeric error codes and SQLSTATE. Unsupported operations use an explicit missing
+feature or `Unsupported` error, never a success-shaped no-op.
+
+Generic metrics are named gauge/counter measurements with units, exact values
+and explicit availability. MySQL adapts its overview to that interface. InnoDB,
+Performance Schema and replication-thread models remain MySQL extensions; a new
+engine does not implement dummy InnoDB methods.
+
+## Adding a driver
+
+1. Add its real HAR implementation, typed creation options, public entry,
+   package/legal/usage files and native contract suites. Depend on the exact
+   `@arkdb/core` version; do not import `@arkdb/mysql`.
+2. Register the build module in root `build-profile.json5` and add its own
+   `arkdb-package.json`. Declare `kind: "driver"` and, for full verification, its
+   consumer path, native module dependency closure and Internet requirement.
+3. Register its typed factory in the consuming application's registry. No core
+   engine enum or MySQL implementation change is needed.
+4. Supply independent behavior tests for its supported optional features and its
+   own consumer. A missing verification declaration fails explicitly before a
+   release build; the MySQL sample is not evidence for another driver.
+
+For example, a driver declaration has this shape; it does not create that driver:
+
+```json
+{
+  "kind": "driver",
+  "verification": {
+    "consumer": "examples/new-driver-client",
+    "nativeModules": ["core", "new_driver"],
+    "requiresInternet": true
+  }
+}
+```
+
+The test-only in-memory catalog adapter under `core/src/test` accepts test
+commands, preserves separate catalog/schema semantics, has no transaction or
+metrics stubs, uses textual native error codes, and cancels without SQL control
+connections. It is not a production PostgreSQL driver.
+
+## Source and HAR dependency graph
+
+`discoverDrivers` excludes shared HARs. Dependency closure is ordered before the
+selected driver, rejects cycles, unregistered/version-mismatched dependencies
+and shared-to-driver dependencies. Core changes affect dependent build plans and
+source fingerprints without modifying those implementations.
+
+The MySQL source manifest declares `@arkdb/core: "1.0.0"` and the development
+project overrides it to local source. That is not the consumer dependency model.
+The delivery workspace keeps the chosen package name and public entry, copies
+each selected source package once, and rewrites only actual module specifiers
+through an AST. The normal API24 SDK then generates bytecode and declarations
+for that one module. No prebuilt HAR is patched or manually merged.
+
+The emitted MySQL package has no core dependency. Its provenance manifest records
+`sourceDependencies` and `embeddedPackages`, including exact versions and source
+fingerprints. Source changes in core still invalidate dependent artifacts.
+One-HAR release sets seal that artifact and its consumer/readiness evidence;
+historical schema-1 standalone and schema-2 dependency-set records remain readable.
+Download verification supplies only the sealed bytes, without source, stale
+artifact or registry fallback. See [building drivers](building-drivers.md).
+
+## Compatibility and verification limits
+
+The generic core factory needs type arguments and uses `create(options)`;
+the old MySQL `DbDriverFactory` remains non-generic with its provider helpers.
+Core's minimal connection and optional features do not remove methods from the
+native MySQL `DbConnection`. Core server/column types remain portable; MySQL
+`ServerInfo`, `ColumnDef`, `QueryResult`, scalar values and stream callbacks retain
+native types and defaults. Optional additions preserve existing data literals.
+The numeric error field and one shared error constructor are retained, with
+textual identifiers available through `nativeCode`.
+
+Native streaming converts portable events at the adapter seam: MySQL callbacks
+retain required warning/insert-id defaults, while `features.streaming` leaves
+unreported identifiers absent. The `ServerMetricsProvider` alias remains
+MySQL-specific. `ServerFamily.PostgreSQL` is a reserved compatibility value,
+not a database implementation or a core engine enum. Consumer applications
+must still restore and rebuild dependencies when replacing their HAR;
+source compatibility is not a claim of binary interchangeability.
+
+Validation is split by evidence type. Node regressions check registration,
+dependency graphs and synthetic archive/release handling. Actual native suites
+compile and exercise the shared adapter and MySQL protocol/lifecycle behavior.
+The isolated consumer restores one exact HAR with an empty cache and unavailable
+registry, compiles packaged examples and the sample HAP, then separately restores
+test-only dependencies and checks driver-created error identity.
+The compatibility consumer exercises the published factory/connection/provider
+signatures, native scalar/column/stream types, numeric codes, defaults and old
+data literals against the original 1.0.1 HAR and the new one-file candidate.
+Native test launching first generates each HAR's current BuildProfile and refreshes the
+registered source directory's unit cache; it does not depend on IDE leftovers.
+Neither local mock networking nor these artifact checks establishes device
+interoperability, PostgreSQL support or a three-HAR MySQL/PostgreSQL application.
+Do not reuse published 1.0.1 evidence as evidence for this architecture.

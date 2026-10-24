@@ -1,0 +1,8 @@
+ArkDB shared core
+Copyright 2026 OrcaSQL Workbench
+
+Licensed under the Apache License, Version 2.0; see LICENSE.
+
+Shared contracts, connection deadlines and diagnostics were extracted from the
+ArkDB MySQL package. No MySQL wire protocol, authentication, vendor metrics or
+upstream-derived MySQL fixtures are included in this package.

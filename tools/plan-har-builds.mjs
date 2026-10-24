@@ -17,7 +17,8 @@ export function selectBuilds(drivers, { event = 'workflow_dispatch', driver = 'a
   }
   return { include: selected.map((entry) => ({
     driver: entry.id, sourcePath: entry.sourcePath, packageName: entry.packageName,
-    version: entry.version, artifact: entry.artifact
+    version: entry.version, artifact: entry.artifact,
+    dependencySourcePaths: entry.dependencySourcePaths ?? []
   })) };
 }
 

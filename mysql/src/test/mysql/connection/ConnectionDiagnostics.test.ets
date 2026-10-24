@@ -1,14 +1,13 @@
 import { describe, expect, it } from '@ohos/hypium';
-import { Logger } from '../../../main/ets/core/diagnostics/Logger';
-import { LogLevel, LogSink, LogTag } from '../../../main/ets/core/diagnostics/LogSink';
-import { ConnectionConfig, SslMode } from '../../../main/ets/core/model/ConnectionConfig';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
-import { ConnectionState, ServerFamily } from '../../../main/ets/core/model/ServerInfo';
+import { Logger, LogLevel, LogSink, LogTag, ArkDbError, ArkDbErrorKind, ConnectionState } from '@arkdb/core';
+import { ConnectionConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
+import { ServerFamily } from '../../../main/ets/mysql/model/MySqlServerInfo';
 import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
 import { MockSocket, socket } from '../../../mock/NetworkKit.mock';
-import { MySqlConnection, authPluginLogValue, queryFailureDiagnostic } from
-  '../../../main/ets/mysql/MySqlConnection';
+import {
+  MySqlConnection, authPluginLogValue, queryFailureDiagnostic
+} from '../../../main/ets/mysql/MySqlConnection';
 
 const SERVER_CAPABILITIES: number = Capabilities.PROTOCOL_41 | Capabilities.SECURE_CONNECTION |
   Capabilities.PLUGIN_AUTH | Capabilities.TRANSACTIONS;

@@ -1,16 +1,18 @@
-import { DbConnection } from '../../core/connection/DbConnection';
-import { DatabaseContext } from '../../core/model/DatabaseContext';
-import { CatalogInfo, SchemaInfo, DbObjectKind, DbObjectInfo, ColumnInfo, ForeignKeyColumnInfo,
-  ForeignKeyInfo, IndexColumnInfo, IndexInfo } from '../../core/metadata/Metadata';
-import { MetadataProvider } from '../../core/metadata/MetadataProvider';
-import { ArkDbError } from '../../core/model/ArkDbError';
-import { SqlValue } from '../../core/model/QueryResult';
+import {
+  DbConnection, DatabaseContext, CatalogInfo, SchemaInfo, DbObjectKind, DbObjectInfo, ColumnInfo,
+  ForeignKeyColumnInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, MetadataProvider, ArkDbError, SqlValue
+} from '@arkdb/core';
 import { utf8Decode } from '../protocol/Charsets';
 import { mysqlMetadataLiteral } from './MySqlMetadataSql';
+import { mysqlDatabaseForContext } from '../model/MySqlContext';
+import { MySqlMetadataProviderContract } from '../driver/MySqlContracts';
 
 const SYSTEM_SCHEMAS: string[] = ['information_schema', 'mysql', 'performance_schema', 'sys'];
 
-export class MySqlMetadataProvider implements MetadataProvider {
+export class MySqlMetadataProvider implements MetadataProvider, MySqlMetadataProviderContract {
+  readonly supportedObjectKinds: DbObjectKind[] = [
+    DbObjectKind.Table, DbObjectKind.View, DbObjectKind.Routine, DbObjectKind.Trigger, DbObjectKind.Event
+  ];
   private connection: DbConnection;
 
   constructor(connection: DbConnection) {
@@ -33,8 +35,9 @@ export class MySqlMetadataProvider implements MetadataProvider {
     const schemas: SchemaInfo[] = [];
     for (const row of result.rows) {
       const schema = new SchemaInfo();
-      schema.catalog = catalog;
       schema.name = valueAsString(row[0]);
+      if (catalog.length > 0 && catalog !== schema.name) continue;
+      schema.catalog = schema.name;
       schema.system = isSystemSchema(schema.name);
       schemas.push(schema);
     }
@@ -42,7 +45,7 @@ export class MySqlMetadataProvider implements MetadataProvider {
   }
 
   async listObjects(context: DatabaseContext, kind: DbObjectKind): Promise<DbObjectInfo[]> {
-    const result = await this.connection.query(objectQuery(kind, context.schema));
+    const result = await this.connection.query(objectQuery(kind, mysqlDatabaseForContext(context)));
     const objects: DbObjectInfo[] = [];
     for (const row of result.rows) {
       const object = new DbObjectInfo();
@@ -58,7 +61,7 @@ export class MySqlMetadataProvider implements MetadataProvider {
   }
 
   async listColumns(context: DatabaseContext, objectName: string): Promise<ColumnInfo[]> {
-    const schema = mysqlMetadataLiteral(context.schema);
+    const schema = mysqlMetadataLiteral(mysqlDatabaseForContext(context));
     const table = mysqlMetadataLiteral(objectName);
     const sql = 'SELECT COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION, IS_NULLABLE ' +
       'FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ' + schema +
@@ -79,7 +82,7 @@ export class MySqlMetadataProvider implements MetadataProvider {
   }
 
   async listIndexes(context: DatabaseContext, objectName: string): Promise<IndexInfo[]> {
-    const schema = mysqlMetadataLiteral(context.schema);
+    const schema = mysqlMetadataLiteral(mysqlDatabaseForContext(context));
     const table = mysqlMetadataLiteral(objectName);
     const sql = 'SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME ' +
       'FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ' + schema +
@@ -119,7 +122,7 @@ export class MySqlMetadataProvider implements MetadataProvider {
   }
 
   async listForeignKeys(context: DatabaseContext, objectName: string): Promise<ForeignKeyInfo[]> {
-    const schema = mysqlMetadataLiteral(context.schema);
+    const schema = mysqlMetadataLiteral(mysqlDatabaseForContext(context));
     const table = mysqlMetadataLiteral(objectName);
     const sql = 'SELECT CONSTRAINT_NAME, ORDINAL_POSITION, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, ' +
       'REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE ' +
@@ -144,6 +147,7 @@ export class MySqlMetadataProvider implements MetadataProvider {
         current.objectName = objectName;
         current.name = name;
         current.referencedSchema = referencedSchema;
+        current.referencedCatalog = referencedSchema;
         current.referencedTable = referencedTable;
         foreignKeys.push(current);
       } else if (current.referencedSchema !== referencedSchema || current.referencedTable !== referencedTable) {

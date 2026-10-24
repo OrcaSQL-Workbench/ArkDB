@@ -1,4 +1,5 @@
-import { ServerFamily, ServerInfo } from '../../core/model/ServerInfo';
+import { ServerInfo } from '@arkdb/core';
+import { ServerFamily, MySqlServerInfo } from '../model/MySqlServerInfo';
 
 export const MYSQL_METRICS_PERFORMANCE_SCHEMA_SQL: string =
   "SHOW VARIABLES LIKE 'performance_schema'";
@@ -47,7 +48,7 @@ class MySqlVersion {
 }
 
 function parseAcceptedMySqlVersion(serverInfo: ServerInfo): MySqlVersion | null {
-  if (serverInfo.family !== ServerFamily.MySQL) return null;
+  if (!(serverInfo instanceof MySqlServerInfo) || serverInfo.family !== ServerFamily.MySQL) return null;
   const version = serverInfo.version;
   if (!/^(?:5\.7|[89]\.(?:0|[1-9][0-9]*))\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[._+~-][0-9A-Za-z]+)*)?$/.test(version)) {
     return null;

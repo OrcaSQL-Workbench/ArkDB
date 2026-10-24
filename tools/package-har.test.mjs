@@ -54,7 +54,9 @@ test('inspects a selected driver module instead of hard-coding MySQL into every 
   const file = await fixture(t, postgres, undefined, undefined, definition);
   const inspected = await inspectHar(file, postgres, fixtureExports, definition);
   assert.equal(inspected.manifest.name, postgres.name);
-  await assert.rejects(inspectHar(file, postgres, fixtureExports), /module identity/);
+  await assert.rejects(inspectHar(file, postgres, fixtureExports, {
+    name: 'mysql', type: 'har', requestPermissions: [{ name: 'ohos.permission.INTERNET' }]
+  }), /module identity/);
 });
 
 test('source fingerprints and artifact digests are stable full SHA-256 identities', () => {

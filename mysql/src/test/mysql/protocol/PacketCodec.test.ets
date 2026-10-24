@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { ArkDbError, ArkDbErrorKind } from '../../../main/ets/core/model/ArkDbError';
+import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
 

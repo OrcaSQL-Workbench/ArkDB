@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { prepareHarRelease } from './prepare-har-release.mjs';
 import { publishHarRelease } from './publish-har.mjs';
 import { downloadBytes, verifyDownloadedHar } from './verify-download.mjs';
 import { fakeGitHub } from './test-fixtures/github-release.mjs';
-import { REPO, releaseFixture, STEM, TAG } from './test-fixtures/har-release.mjs';
+import { REPO, releaseFixture, LOCAL_STEM, STEM, TAG } from './test-fixtures/har-release.mjs';
 
 async function remoteFixture(t) {
   const source = await releaseFixture(t);
@@ -30,7 +30,7 @@ async function remoteFixture(t) {
   };
   const consume = async (options) => {
     consumerCalls++;
-    assert.notEqual(options.artifactPath, join(source.dist, `${STEM}.har`));
+    assert.notEqual(options.artifactPath, join(source.dist, `${LOCAL_STEM}.har`));
     assert.deepEqual(await readFile(options.artifactPath), data.get(`${STEM}.har`));
     return {
       schemaVersion: 1, packageName: '@arkdb/mysql', version: '1.0.0',
@@ -56,6 +56,23 @@ test('downloads exact public release assets before invoking the independent cons
   assert.equal(result.liveNetworkingVerified, false);
   assert.equal(f.consumerCalls, 1);
   assert.equal(f.github.state.writes.length, 0);
+});
+
+test('download workspaces are grouped by driver and tag and removed after verification', async (t) => {
+  const fixture = await remoteFixture(t);
+  let workspace;
+  await verifyDownloadedHar(fixture.options, {
+    ...fixture.dependencies,
+    consumer: async (options) => {
+      workspace = dirname(dirname(options.artifactPath));
+      return fixture.dependencies.consumer(options);
+    }
+  });
+
+  assert.equal(dirname(workspace),
+    join(fixture.root, 'build', TAG, 'work'));
+  await assert.rejects(readdir(workspace), { code: 'ENOENT' });
+  assert.equal(fixture.github.state.writes.length, 0);
 });
 
 test('404 or damaged remote HAR never falls back to an available correct local dist copy', async (t) => {

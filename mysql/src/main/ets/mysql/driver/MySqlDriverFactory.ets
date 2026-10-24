@@ -1,42 +1,47 @@
-import { DbConnection } from '../../core/connection/DbConnection';
-import { ConnectionConfig } from '../../core/model/ConnectionConfig';
-import { DbDriverFactory } from '../../core/driver/DbDriverFactory';
-import { DriverCapabilities } from '../../core/driver/DriverCapabilities';
-import { MetadataProvider } from '../../core/metadata/MetadataProvider';
-import { DbExecutionController } from '../../core/execution/DbExecutionController';
-import { ServerMetricsProvider } from '../../core/metrics/ServerMetricsProvider';
+import {
+  DbConnection, DbStreamingConnection, DbDriverFactory
+} from '@arkdb/core';
+import { ConnectionConfig } from '../model/ConnectionConfig';
+import { MySqlConnectionOptions } from './MySqlConnectionOptions';
+import { MySqlDbConnection, MySqlDbDriverFactory, MySqlDriverCapabilities } from './MySqlContracts';
 import { MySqlConnection } from '../MySqlConnection';
 import { MySqlExecutionController } from '../execution/MySqlExecutionController';
 import { MySqlMetadataProvider } from '../metadata/MySqlMetadataProvider';
 import { MySqlServerMetricsProvider } from '../metrics/MySqlServerMetricsProvider';
 
-export class MySqlDriverFactory implements DbDriverFactory {
+export class MySqlDriverFactory implements DbDriverFactory<MySqlConnectionOptions, MySqlConnection>,
+  MySqlDbDriverFactory {
   readonly driverId: string = 'mysql';
-  readonly capabilities: DriverCapabilities = mysqlCapabilities();
+  readonly capabilities: MySqlDriverCapabilities = mysqlCapabilities();
 
-  createConnection(config: ConnectionConfig, password: string): DbConnection {
+  create(options: MySqlConnectionOptions): MySqlConnection {
+    return this.createConnection(options.config, options.password);
+  }
+
+  createConnection(config: ConnectionConfig, password: string): MySqlConnection {
     return new MySqlConnection(config, password);
   }
 
-  createMetadataProvider(connection: DbConnection): MetadataProvider {
+  createMetadataProvider(connection: DbConnection): MySqlMetadataProvider {
     return new MySqlMetadataProvider(connection);
   }
 
-  createExecutionController(controlConnection: DbConnection): DbExecutionController {
+  createExecutionController(controlConnection: DbConnection): MySqlExecutionController {
     return new MySqlExecutionController(controlConnection);
   }
 
-  createServerMetricsProvider(connection: DbConnection): ServerMetricsProvider {
+  createServerMetricsProvider(connection: MySqlDbConnection | DbStreamingConnection): MySqlServerMetricsProvider {
     return new MySqlServerMetricsProvider(connection);
   }
 }
 
-function mysqlCapabilities(): DriverCapabilities {
-  const capabilities = new DriverCapabilities();
+function mysqlCapabilities(): MySqlDriverCapabilities {
+  const capabilities = new MySqlDriverCapabilities();
   capabilities.supportsSsl = true;
   capabilities.supportsCatalogs = true;
   capabilities.supportsSchemas = true;
   capabilities.supportsTransactions = true;
+  capabilities.supportsMetadata = true;
   capabilities.supportsMultipleResults = true;
   capabilities.supportsStreamingResults = true;
   capabilities.supportsGracefulCancel = true;

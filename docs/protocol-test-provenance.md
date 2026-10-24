@@ -16,6 +16,46 @@ The protocol regression fixtures are derived from immutable revisions of the two
 
 The applicable license texts are [`mysqljs/mysql/License`](https://github.com/mysqljs/mysql/blob/dc9c152a87ec51a1f647447268917243d2eab1fd/License) and [`sidorares/node-mysql2/License`](https://github.com/sidorares/node-mysql2/blob/928c3c511a0316713966ade2cf27e47285feb878/License).
 
+## Checked primitives and binary input fixtures
+
+`MySqlParameter` and `encodeBinaryParameters()` are internal input-codec seams,
+separate from the unchanged native result union. They do not execute prepared
+commands, decode binary rows, or enable a public factory capability. Byte inputs
+are snapshotted; the encoder revalidates inputs before allocating its output.
+The parameter list is captured before reading any value getters; appended,
+replaced or removed caller-list entries cannot change its fixed count, type
+table, bitmap, or command-budget accounting.
+Invalid inputs use `Validation` errors. Truncated, invalid-length, unsafe
+length-encoded, and unterminated packet reads use `Protocol`, not `RangeError`.
+Existing unsigned 8/16/24/32-bit writer wrapping remains unchanged.
+
+The new fixtures use independently specified little-endian byte literals:
+
+| Input | Encoded value hex |
+| --- | --- |
+| UInt64 `18446744073709551615n` | `ffffffffffffffff` |
+| Int64 `-9223372036854775808n` | `0000000000000080` |
+| Float64 `1.5` | `000000000000f83f` |
+| Decimal `"12.3400"` | `0731322e33343030` |
+| TIME `"-838:59:59.000001"` | `0c0122000000163b3b01000000` |
+| Empty binary or text | `00` |
+
+The parameter NULL bitmap starts at bit zero (unlike the binary-row bitmap).
+Typed NULLs retain their type-table entry and contribute no value bytes; UInt64
+uses the LONGLONG unsigned byte `80`. JSON input is validated text bound as
+VAR_STRING, not the server-specific JSON type. Temporal zero values use a
+zero-length body, and other temporal fixtures cover Gregorian leap years,
+multi-day negative TIME, wall-clock DATETIME/TIMESTAMP and microseconds without
+`Date` or timezone conversion.
+
+Boundary cases include 65 total decimal digits / 30 fractional digits, 65535
+parameters, and an exact 16777216-byte command versus one byte over. The command
+budget includes the ten-byte execute header, bitmap, new-parameter flag and
+complete type table; this codec returns only the bitmap, type table and value
+sections. A future command caller must emit `new_params_bound_flag=1` for
+nonempty bindings. These local codec fixtures establish no live-server,
+SQL-mode, or target-device behavior.
+
 ## Fixed authentication vectors
 
 Expected bytes were calculated outside the ArkTS implementation with Node.js `node:crypto` SHA-1/SHA-256 digests and byte-wise XOR. Password columns contain UTF-8 bytes, not credentials. An empty expected value is a zero-length response.

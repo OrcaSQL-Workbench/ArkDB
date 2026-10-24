@@ -10,6 +10,7 @@ import queryStreamTest from './command/QueryStream.test';
 import packetChannelTest from './protocol/PacketChannel.test';
 import packetCodecTest from './protocol/PacketCodec.test';
 import typeMapperTest from './value/TypeMapper.test';
+import binaryParameterEncoderTest from './value/BinaryParameterEncoder.test';
 
 export default function testsuite(): void {
   authenticationTest();
@@ -24,4 +25,5 @@ export default function testsuite(): void {
   packetChannelTest();
   packetCodecTest();
   typeMapperTest();
+  binaryParameterEncoderTest();
 }

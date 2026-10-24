@@ -340,10 +340,13 @@ export default function connectionOpeningTest(): void {
       await fixture.finished;
       const send = new Deferred();
       fixture.peer.sendResult = send.promise;
-      const closing = fixture.connection!.close();
+      const closing = fixture.connection!.close().then(
+        (): ArkDbError | null => null, (error: ArkDbError): ArkDbError | null => error);
       await flush();
       fixture.timers.advance(1000);
-      await closing;
+      const failure = await closing;
+      expect(failure instanceof ArkDbError).assertTrue();
+      expect(failure!.kind).assertEqual(ArkDbErrorKind.Protocol);
       expect(fixture.connection!.state).assertEqual(ConnectionState.Closed);
       expect(fixture.peer.closeCalls).assertEqual(1);
       expect(fixture.peer.listenerCount).assertEqual(0);

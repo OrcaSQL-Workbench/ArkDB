@@ -4,8 +4,8 @@ import {
   DbConnectionHealth, DbContextController, DbTransactionController, DbExecutionController,
   CancellationOutcome, ConnectionReuse, QueryCancellationResult, DatabaseSessionStatus,
   QueryExecutionSummary, QueryOptions, QueryResultSink, ArkDbError, ArkDbErrorKind, DbConnection,
-  ConnectionDeadline, ConnectionTimerPort, SystemConnectionTimerPort, connectionCleanupError, Logger,
-  LogTag, monotonicNowMs
+  ConnectionDeadline, ConnectionTimerPort, SystemConnectionTimerPort, Logger,
+  LogTag, monotonicNowMs, QueryResultMeta, QueryResultSummary, QueryRowChunk, QueryTruncation
 } from '@arkdb/core';
 import { MySqlServerInfo as ServerInfo } from './model/MySqlServerInfo';
 import { MySqlQueryResult as QueryResult } from './model/MySqlQueryResult';
@@ -30,7 +30,15 @@ import { buildComQuery, parseQueryStream, parseResultSet, validateQueryOptions }
 import { mysqlContextPolicy, mysqlDatabaseForContext } from './model/MySqlContext';
 import { MySqlMetadataProvider } from './metadata/MySqlMetadataProvider';
 import { MySqlServerMetricsProvider } from './metrics/MySqlServerMetricsProvider';
-import { MySqlExecutionController, isMySqlInterruptionError } from './execution/MySqlExecutionController';
+import {
+  MySqlExecutionController, isMySqlInterruptionError, mysqlKillQueryForHandle
+} from './execution/MySqlExecutionController';
+import {
+  MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
+} from './execution/MySqlCommandGate';
+import {
+  MySqlExecutionOutcome, MySqlOperationError, isMySqlServerRejection
+} from './model/MySqlOperationError';
 
 /**
  * A single MySQL/MariaDB connection over TCP with an optional in-handshake TLS upgrade.
@@ -56,7 +64,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private status: DatabaseSessionStatus = new MySqlDatabaseSessionStatus();
   private cancelTask: Promise<QueryCancellationResult> | null = null;
   private retiredByCancellation: boolean = false;
-  private querySerial: number = 0;
+  private commandGate: MySqlCommandGate = new MySqlCommandGate();
+  private completedScope: MySqlCommandScope | null = null;
+  private executingScope: MySqlCommandScope | null = null;
+  private closePending: boolean = false;
   private queryWrite: Promise<void> | null = null;
   private cancellationHandle: string = '';
   private createControlConnection: () => DbConnection;
@@ -107,9 +118,24 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     if (this.connState !== ConnectionState.Idle && this.connState !== ConnectionState.Closed) {
       throw ArkDbError.protocol('connect() called in state ' + this.connState);
     }
+    this.commandGate.advanceGeneration();
+    const scope = this.commandGate.reserve(MySqlCommandKind.Connect);
+    try {
+      await this.connectOwned(scope);
+    } finally {
+      this.finishCommand(scope);
+    }
+  }
+
+  private async connectOwned(scope: MySqlCommandScope): Promise<void> {
     const deadline = new ConnectionDeadline(this.config.connectTimeoutMs, this.timers);
     this.opening = deadline;
+    let primary: Object | null = null;
+    const cleanupErrors: ArkDbError[] = [];
+    let dispatched = false;
     try {
+      if (this.closePending) throw ArkDbError.cancelled('Connection closed while opening.');
+      this.commandGate.setPhase(scope, MySqlCommandPhase.Preparing);
       this.connState = ConnectionState.Connecting;
       this.status.known = false;
       this.tlsActive = false;
@@ -146,6 +172,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       }
       if (withTls) {
         this.transport.prepareTlsUpgrade();
+        dispatched = true;
         await deadline.wait((): Promise<void> => channel.writePacket(buildSslRequest(
           params.capabilities, params.charset, params.maxPacketSize)));
         await deadline.wait((): Promise<void> => this.transport.upgradeToTls(
@@ -156,6 +183,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       }
       params.authResponse = await deadline.wait((): Promise<Uint8Array> =>
         this.computeAuth(handshake.authPluginName, handshake.salt));
+      dispatched = true;
       await deadline.wait((): Promise<void> => channel.writePacket(buildHandshakeResponse(params)));
 
       const authStatusFlags = await this.readAuthResult(channel, deadline);
@@ -175,10 +203,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       this.connState = ConnectionState.Ready;
       Logger.i(LogTag.Conn, 'ready host=' + Logger.mask(this.config.host) + ' user=' + Logger.mask(this.config.user));
     } catch (e) {
+      primary = e as Object;
       if (this.connState !== ConnectionState.Closed) this.connState = ConnectionState.Error;
       this.status.known = false;
       const oe = toArkDbError(e);
-      deadline.cancel(oe);
+      this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+      try { deadline.cancel(oe); } catch (cleanup) {
+        cleanupErrors.push(toCleanupError(cleanup as Object));
+      }
       Logger.e(LogTag.Conn, 'connect failed host=' + Logger.mask(this.config.host) +
         ' kind=' + String(oe.kind) + ' error=' + Logger.errorToken(oe));
       this.channel = null;
@@ -186,27 +218,48 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         await this.transport.abort(oe);
       } catch (cleanup) {
         Logger.w(LogTag.Conn, 'connect cleanup failed error=' + Logger.errorToken(cleanup));
-        throw connectionCleanupError(oe);
+        cleanupErrors.push(toCleanupError(cleanup as Object));
       }
-      throw oe;
     } finally {
-      deadline.dispose();
+      try { deadline.dispose(); } catch (cleanup) {
+        cleanupErrors.push(toCleanupError(cleanup as Object));
+      }
       if (this.opening === deadline) this.opening = null;
+    }
+    if (primary !== null) {
+      const outcome = isMySqlServerRejection(toArkDbError(primary)) ? MySqlExecutionOutcome.ServerRejected :
+        (dispatched ? MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.NotDispatched);
+      throw operationFailure(primary, cleanupErrors, outcome);
+    }
+    if (cleanupErrors.length > 0) {
+      throw operationFailure(cleanupErrors[0], cleanupErrors, MySqlExecutionOutcome.Completed);
     }
   }
 
   /** Run a text SQL statement and return the (fully buffered) result. */
   async query(sql: string): Promise<QueryResult> {
-    const channel = this.requireReady();
+    const scope = this.reserveCommand(MySqlCommandKind.Query);
+    try {
+      return await this.queryOwned(scope, sql);
+    } finally {
+      this.finishCommand(scope);
+    }
+  }
+
+  private async queryOwned(scope: MySqlCommandScope, sql: string): Promise<QueryResult> {
+    const channel = this.requireOwnedChannel(scope);
     const command = buildComQuery(sql);
     let startedAtMs: number = 0;
+    let reading = false;
     this.connState = ConnectionState.Querying;
-    this.querySerial += 1;
+    this.executingScope = scope;
+    this.commandGate.setPhase(scope, MySqlCommandPhase.Executing);
     try {
       channel.resetSequence();
       startedAtMs = monotonicNowMs();
       this.queryWrite = channel.writePacket(command);
       await this.queryWrite;
+      reading = true;
       const result = await parseResultSet(channel, this.clientCaps);
       result.executionTimeMs = monotonicNowMs() - startedAtMs;
       if (this.state !== ConnectionState.Closed) {
@@ -219,12 +272,13 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       return result;
     } catch (e) {
       const failedAtMs = monotonicNowMs();
-      const oe = await this.classifyCommandFailure(e);
+      const oe = await this.classifyCommandFailure(scope, e, reading);
       const diagnostic = queryFailureDiagnostic(oe, failedAtMs - startedAtMs);
       Logger.e(LogTag.Query, 'query failed ' + diagnostic);
       throw oe;
     } finally {
       this.queryWrite = null;
+      this.executingScope = null;
     }
   }
 
@@ -236,23 +290,43 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   private async queryStreamInternal(sql: string, options: QueryOptions,
     sink: QueryResultSink): Promise<QueryExecutionSummary> {
-    const channel = this.requireReady();
-    const executionOptions = options.clone();
-    validateQueryOptions(executionOptions);
+    const scope = this.reserveCommand(MySqlCommandKind.QueryStream);
+    try {
+      const executionOptions = options.clone();
+      validateQueryOptions(executionOptions);
+      return await this.queryStreamOwned(scope, sql, executionOptions, sink);
+    } finally {
+      this.finishCommand(scope);
+    }
+  }
+
+  private async queryStreamOwned(scope: MySqlCommandScope, sql: string, executionOptions: QueryOptions,
+    sink: QueryResultSink): Promise<QueryExecutionSummary> {
+    const channel = this.requireOwnedChannel(scope);
     const command = buildComQuery(sql);
+    const operationSink = new OperationResultSink(sink, (): void => {
+      this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+    });
     let startedAtMs: number = 0;
+    let reading = false;
+    let synchronized = false;
     this.connState = ConnectionState.Querying;
-    this.querySerial += 1;
+    this.executingScope = scope;
+    this.commandGate.setPhase(scope, MySqlCommandPhase.Executing);
     try {
       channel.resetSequence();
       startedAtMs = monotonicNowMs();
       this.queryWrite = channel.writePacket(command);
       await this.queryWrite;
+      reading = true;
+      if (this.state !== ConnectionState.Closed) {
+        this.commandGate.setPhase(scope, MySqlCommandPhase.Streaming);
+      }
       const summary = await parseQueryStream(channel, this.clientCaps,
-        executionOptions, sink, this.status);
+        executionOptions, operationSink, this.status);
       if (!summary.statusKnown) {
         try {
-          await this.refreshSessionStatus(channel, summary.synchronizationDeadlineMs);
+          await this.refreshSessionStatus(scope, summary.synchronizationDeadlineMs);
         } catch (error) {
           throw synchronizationRefreshFailure(error as Object);
         }
@@ -262,50 +336,64 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       if (this.state !== ConnectionState.Closed) {
         this.status = summary.status.clone();
         this.connState = ConnectionState.Ready;
+        synchronized = true;
       }
+      const hookFailure = operationSink.truncationFailure;
+      if (hookFailure !== null) throw hookFailure;
       Logger.d(LogTag.Query, 'query stream ok results=' + summary.resultSetCount + ' rows=' +
         summary.loadedRowCount + '/' + summary.rowCount + ' dur=' + summary.executionTimeMs + 'ms');
       return summary;
     } catch (e) {
       const failedAtMs = monotonicNowMs();
-      const error = await this.classifyCommandFailure(e);
+      let primary = e as Object;
+      const hookFailure = operationSink.truncationFailure;
+      if (hookFailure !== null && primary !== hookFailure) {
+        primary = operationFailure(hookFailure, [toCleanupError(primary)], MySqlExecutionOutcome.Unknown);
+      }
+      const error = await this.classifyCommandFailure(scope, primary, reading, synchronized);
       const diagnostic = queryFailureDiagnostic(error, failedAtMs - startedAtMs);
       Logger.e(LogTag.Query, 'query stream failed ' + diagnostic);
       throw error;
     } finally {
       this.queryWrite = null;
+      this.executingScope = null;
     }
   }
 
   /** Round-trip COM_PING. */
   async ping(): Promise<void> {
-    const channel = this.requireReady();
-    const w = new PacketWriter();
-    w.writeUInt8(Command.PING);
-    const command = w.toUint8Array();
+    const scope = this.reserveCommand(MySqlCommandKind.Ping);
     try {
-      channel.resetSequence();
-      await channel.writePacket(command);
-      this.expectOk(await channel.readPacket());
-    } catch (e) {
-      throw await this.classifyCommandFailure(e);
+      const command = new PacketWriter().writeUInt8(Command.PING).toUint8Array();
+      await this.executeOkOwned(scope, command);
+    } finally {
+      this.finishCommand(scope);
     }
   }
 
   /** Switch the default database (COM_INIT_DB / USE). */
   async useDatabase(name: string): Promise<void> {
-    const channel = this.requireReady();
-    Logger.d(LogTag.Conn, 'useDatabase ' + Logger.mask(name));
-    const w = new PacketWriter();
-    w.writeUInt8(Command.INIT_DB);
-    w.writeString(name);
-    const command = w.toUint8Array();
+    const scope = this.reserveCommand(MySqlCommandKind.Context);
+    try {
+      Logger.d(LogTag.Conn, 'useDatabase ' + Logger.mask(name));
+      const command = new PacketWriter().writeUInt8(Command.INIT_DB).writeString(name).toUint8Array();
+      await this.executeOkOwned(scope, command);
+    } finally {
+      this.finishCommand(scope);
+    }
+  }
+
+  private async executeOkOwned(scope: MySqlCommandScope, command: Uint8Array): Promise<void> {
+    const channel = this.requireOwnedChannel(scope);
+    let reading = false;
+    this.commandGate.setPhase(scope, MySqlCommandPhase.Executing);
     try {
       channel.resetSequence();
       await channel.writePacket(command);
+      reading = true;
       this.expectOk(await channel.readPacket());
-    } catch (e) {
-      throw await this.classifyCommandFailure(e);
+    } catch (error) {
+      throw await this.classifyCommandFailure(scope, error as Object, reading);
     }
   }
 
@@ -314,33 +402,44 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   async begin(): Promise<MySqlDatabaseSessionStatus> {
-    await this.query('START TRANSACTION');
-    return this.sessionStatus;
+    return this.transactionCommand('START TRANSACTION');
   }
 
   async setAutocommit(enabled: boolean): Promise<MySqlDatabaseSessionStatus> {
-    await this.query(enabled ? 'SET autocommit = 1' : 'SET autocommit = 0');
-    return this.sessionStatus;
+    return this.transactionCommand(enabled ? 'SET autocommit = 1' : 'SET autocommit = 0');
   }
 
   async commit(): Promise<MySqlDatabaseSessionStatus> {
-    await this.query('COMMIT');
-    return this.sessionStatus;
+    return this.transactionCommand('COMMIT');
   }
 
   async rollback(): Promise<MySqlDatabaseSessionStatus> {
-    await this.query('ROLLBACK');
-    return this.sessionStatus;
+    return this.transactionCommand('ROLLBACK');
+  }
+
+  private async transactionCommand(sql: string): Promise<MySqlDatabaseSessionStatus> {
+    const scope = this.reserveCommand(MySqlCommandKind.Transaction);
+    try {
+      await this.queryOwned(scope, sql);
+      return this.sessionStatus;
+    } finally {
+      this.finishCommand(scope);
+    }
   }
 
   cancel(): Promise<QueryCancellationResult> {
     if (this.cancelTask !== null) return this.cancelTask;
-    if (this.connState !== ConnectionState.Querying) {
+    const scope = this.commandGate.current;
+    if (scope === null || !this.canCancelScope(scope)) {
       return Promise.resolve(new QueryCancellationResult(CancellationOutcome.NotRunning, this.reuseState()));
     }
-    const task = this.cancelCurrentQuery(this.querySerial, this.cancellationHandle, this.queryWrite);
+    const task = this.cancelCurrentQuery(scope, this.cancellationHandle, this.queryWrite);
     this.cancelTask = task;
-    task.then((): void => { this.cancelTask = null; }, (): void => { this.cancelTask = null; });
+    const settled = (): void => {
+      this.cancelTask = null;
+      this.releaseCompletedCommand();
+    };
+    task.then(settled, settled);
     return task;
   }
 
@@ -348,90 +447,149 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return isMySqlInterruptionError(error);
   }
 
-  private async cancelCurrentQuery(serial: number, handle: string,
+  private canCancelScope(scope: MySqlCommandScope): boolean {
+    return this.commandGate.isOwner(scope) && this.executingScope === scope &&
+      this.connState === ConnectionState.Querying &&
+      (scope.kind === MySqlCommandKind.Query || scope.kind === MySqlCommandKind.QueryStream ||
+        scope.kind === MySqlCommandKind.Transaction) &&
+      (scope.phase === MySqlCommandPhase.Executing || scope.phase === MySqlCommandPhase.Streaming);
+  }
+
+  private async cancelCurrentQuery(scope: MySqlCommandScope, handle: string,
     written: Promise<void> | null): Promise<QueryCancellationResult> {
-    const control = this.createControlConnection();
-    if (control === this) throw ArkDbError.validation('MySQL cancellation requires a distinct control connection.');
-    const deadline = new ConnectionDeadline(this.config.connectTimeoutMs, this.timers);
-    let primary: ArkDbError | null = null;
+    let control: DbConnection | null = null;
+    let deadline: ConnectionDeadline | null = null;
+    let primary: Object | null = null;
+    const cleanupErrors: ArkDbError[] = [];
     let outcome = CancellationOutcome.NotRunning;
     let dispatched = false;
     let outcomeKnown = false;
+    let knownNotDispatched = false;
     try {
-      await deadline.wait((): Promise<void> => control.connect());
-      if (this.connState === ConnectionState.Querying && serial === this.querySerial) {
+      // Validate before marking a KILL dispatch attempt.
+      mysqlKillQueryForHandle(handle);
+      const ownedControl = this.createControlConnection();
+      if (ownedControl === this) {
+        throw ArkDbError.validation('MySQL cancellation requires a distinct control connection.');
+      }
+      control = ownedControl;
+      const budget = new ConnectionDeadline(this.config.connectTimeoutMs, this.timers);
+      deadline = budget;
+      await budget.wait((): Promise<void> => ownedControl.connect());
+      if (this.canCancelScope(scope)) {
         const dispatch = written;
-        if (dispatch !== null) await deadline.wait((): Promise<void> => dispatch);
-        if (this.connState === ConnectionState.Querying && serial === this.querySerial) {
-          outcome = await deadline.wait(async (): Promise<CancellationOutcome> => {
+        if (dispatch !== null) await budget.wait((): Promise<void> => dispatch);
+        if (this.canCancelScope(scope)) {
+          outcome = await budget.wait(async (): Promise<CancellationOutcome> => {
             dispatched = true;
             try {
-              const result = await new MySqlExecutionController(control).requestCancellation(handle);
+              const result = await new MySqlExecutionController(ownedControl).requestCancellation(handle);
               outcomeKnown = true;
               return result;
             } catch (error) {
               const failure = toArkDbError(error as Object);
-              outcomeKnown = failure.kind === ArkDbErrorKind.Server ||
-                failure.kind === ArkDbErrorKind.Validation;
-              throw failure;
+              knownNotDispatched = failure instanceof MySqlOperationError &&
+                failure.outcome === MySqlExecutionOutcome.NotDispatched && failure.originalCause === undefined;
+              outcomeKnown = isMySqlServerRejection(failure) || knownNotDispatched;
+              throw error as Error;
             }
           });
         }
       }
     } catch (error) {
-      primary = toArkDbError(error as Object);
+      primary = error as Object;
     } finally {
-      deadline.dispose();
+      if (deadline !== null) {
+        try { deadline.dispose(); } catch (cleanup) {
+          cleanupErrors.push(toCleanupError(cleanup as Object));
+        }
+      }
     }
     // Closing the control socket cannot rule out a delayed server-side KILL.
     if (dispatched && !outcomeKnown) {
+      this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
       this.retiredByCancellation = true;
       this.connState = ConnectionState.Closed;
       this.status.known = false;
       this.channel = null;
-      const failure = primary !== null ? primary :
+      const failure = primary !== null ? toArkDbError(primary) :
         ArkDbError.cancelled('Connection retired after an unacknowledged cancellation.');
-      primary = failure;
+      if (primary === null) primary = failure;
       try {
         await this.transport.abort(failure);
       } catch (cleanup) {
         Logger.w(LogTag.Conn, 'cancellation target cleanup failed error=' + Logger.errorToken(cleanup));
-        primary = connectionCleanupError(failure);
+        cleanupErrors.push(toCleanupError(cleanup as Object));
       }
     }
-    try {
-      await control.close();
-    } catch (cleanup) {
-      Logger.w(LogTag.Conn, 'cancellation cleanup failed error=' + Logger.errorToken(cleanup));
-      if (primary !== null) throw connectionCleanupError(primary);
-      throw cleanup as Error;
+    if (control !== null) {
+      try {
+        await control.close();
+      } catch (cleanup) {
+        Logger.w(LogTag.Conn, 'cancellation cleanup failed error=' + Logger.errorToken(cleanup));
+        cleanupErrors.push(toCleanupError(cleanup as Object));
+      }
     }
-    if (primary !== null) throw primary;
+    if (primary !== null) {
+      const failure = toArkDbError(primary);
+      const failedOutcome = !dispatched || knownNotDispatched ?
+        MySqlExecutionOutcome.NotDispatched : (isMySqlServerRejection(failure) ?
+          MySqlExecutionOutcome.ServerRejected : MySqlExecutionOutcome.Unknown);
+      throw operationFailure(primary, cleanupErrors, failedOutcome);
+    }
+    if (cleanupErrors.length > 0) {
+      throw operationFailure(cleanupErrors[0], cleanupErrors,
+        dispatched ? MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.NotDispatched);
+    }
     return new QueryCancellationResult(outcome, this.reuseState());
   }
 
   private reuseState(): ConnectionReuse {
     if (this.connState === ConnectionState.Querying) return ConnectionReuse.AwaitingCompletion;
     if (this.connState === ConnectionState.Ready) {
+      if (this.commandGate.current !== null && this.completedScope !== this.commandGate.current) {
+        return ConnectionReuse.AwaitingCompletion;
+      }
       return this.status.known ? ConnectionReuse.Ready : ConnectionReuse.RequiresSynchronization;
     }
     return this.connState === ConnectionState.Closed ? ConnectionReuse.Closed : ConnectionReuse.NotReady;
   }
 
-  /** Politely COM_QUIT (best effort) then close the socket. */
+  /** Attempt COM_QUIT when idle, always close the socket, and retain any failures. */
   close(): Promise<void> {
-    if (this.closing === null) this.closing = this.closeInternal();
+    if (this.closing === null) {
+      const current = this.commandGate.current;
+      const ownsScope = current === null;
+      const scope = current !== null ? current : this.commandGate.reserve(MySqlCommandKind.Close);
+      const polite = ownsScope && this.opening === null && this.connState === ConnectionState.Ready;
+      this.closePending = true;
+      this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+      this.closing = this.closeWithScope(scope, ownsScope, polite);
+    }
     return this.closing;
   }
 
-  private async closeInternal(): Promise<void> {
+  private async closeWithScope(scope: MySqlCommandScope, ownsScope: boolean, polite: boolean): Promise<void> {
+    try {
+      await this.closeInternal(polite);
+    } finally {
+      this.closePending = false;
+      if (ownsScope) this.finishCommand(scope);
+      else this.releaseCompletedCommand();
+    }
+  }
+
+  private async closeInternal(polite: boolean): Promise<void> {
     const channel = this.channel;
-    const polite = this.opening === null && this.connState === ConnectionState.Ready;
+    let primary: Object | null = null;
+    const cleanupErrors: ArkDbError[] = [];
     this.connState = ConnectionState.Closed;
     this.status.known = false;
     this.channel = null;
     if (this.opening !== null) {
-      this.opening.cancel(ArkDbError.cancelled('Connection closed while opening.'));
+      try {
+        this.opening.cancel(ArkDbError.cancelled('Connection closed while opening.'));
+      } catch (error) { primary = error as Object; }
     }
     if (channel !== null && polite) {
       try {
@@ -441,24 +599,26 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         await channel.writePacket(w.toUint8Array(), 1000);
       } catch (e) {
         Logger.w(LogTag.Conn, 'quit before close failed error=' + Logger.errorToken(e));
+        if (primary === null) primary = e as Object;
+        else cleanupErrors.push(toCleanupError(e as Object));
       }
     }
-    let transportFailure: ArkDbError | null = null;
     try {
       await this.transport.close();
     } catch (error) {
-      transportFailure = toArkDbError(error as Object);
+      if (primary === null) primary = error as Object;
+      else cleanupErrors.push(toCleanupError(error as Object));
     }
     try {
       if (this.cancelTask !== null) await this.cancelTask;
     } catch (cleanup) {
-      if (transportFailure !== null) {
-        Logger.w(LogTag.Conn, 'close cancellation cleanup failed error=' + Logger.errorToken(cleanup));
-        throw connectionCleanupError(transportFailure);
-      }
-      throw cleanup as Error;
+      Logger.w(LogTag.Conn, 'close cancellation cleanup failed error=' + Logger.errorToken(cleanup));
+      if (primary === null) primary = cleanup as Object;
+      else cleanupErrors.push(toCleanupError(cleanup as Object));
     }
-    if (transportFailure !== null) throw transportFailure;
+    if (primary !== null) {
+      throw operationFailure(primary, cleanupErrors, MySqlExecutionOutcome.Unknown);
+    }
     Logger.d(LogTag.Conn, 'closed');
   }
 
@@ -559,6 +719,37 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.channel;
   }
 
+  private reserveCommand(kind: MySqlCommandKind): MySqlCommandScope {
+    this.requireReady();
+    return this.commandGate.reserve(kind);
+  }
+
+  private requireOwnedChannel(scope: MySqlCommandScope): PacketChannel {
+    this.commandGate.assertOwner(scope);
+    if (this.channel === null || (this.connState !== ConnectionState.Ready &&
+      this.connState !== ConnectionState.Querying)) {
+      throw ArkDbError.protocol('The owned command has no ready connection channel.');
+    }
+    return this.channel;
+  }
+
+  private finishCommand(scope: MySqlCommandScope): void {
+    this.commandGate.assertOwner(scope);
+    this.completedScope = scope;
+    if (this.cancelTask !== null || this.closePending) {
+      this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+    }
+    this.releaseCompletedCommand();
+  }
+
+  private releaseCompletedCommand(): void {
+    const scope = this.completedScope;
+    if (scope !== null && this.cancelTask === null && !this.closePending) {
+      this.commandGate.release(scope);
+      this.completedScope = null;
+    }
+  }
+
   private expectOk(pkt: MysqlPacket): void {
     const fb = firstByte(pkt.payload);
     if (fb === PacketType.ERR) {
@@ -568,11 +759,16 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     if (fb !== PacketType.OK) {
       throw ArkDbError.protocol('Expected an OK packet, got 0x' + fb.toString(16));
     }
-    this.applyStatusFlags(parseOk(pkt.payload, this.clientCaps).statusFlags);
+    const flags = parseOk(pkt.payload, this.clientCaps).statusFlags;
+    if (this.connState !== ConnectionState.Closed) this.applyStatusFlags(flags);
   }
 
-  private async refreshSessionStatus(channel: PacketChannel,
+  private async refreshSessionStatus(scope: MySqlCommandScope,
     synchronizationDeadlineMs: number): Promise<void> {
+    this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+    const cancellation = this.cancelTask;
+    if (cancellation !== null) await cancellation;
+    const channel = this.requireOwnedChannel(scope);
     if (remainingSynchronizationTimeMs(synchronizationDeadlineMs, monotonicNowMs()) <= 0) {
       throw ArkDbError.protocol('Truncated result exceeded synchronization drain time budget');
     }
@@ -619,28 +815,86 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.status.inTransaction = (statusFlags & 0x0001) !== 0;
   }
 
-  private async classifyCommandFailure(error: Object): Promise<ArkDbError> {
+  private async classifyCommandFailure(scope: MySqlCommandScope, error: Object,
+    reading: boolean, synchronized: boolean = false): Promise<ArkDbError> {
+    if (synchronized) {
+      return operationFailure(error, [], MySqlExecutionOutcome.Completed);
+    }
     const typed = toArkDbError(error);
+    const rejected = reading && isMySqlServerRejection(typed);
+    const reusable = rejected && (!(typed instanceof MySqlOperationError) || typed.cleanupErrors.length === 0);
     this.status.known = false;
     if (this.connState !== ConnectionState.Closed) {
-      this.connState = connectionStateAfterCommandFailure(typed.kind);
+      this.connState = connectionStateAfterCommandFailure(typed.kind, reusable);
     }
-    if (this.connState === ConnectionState.Error) await this.safeClose();
-    return typed;
-  }
-
-  private async safeClose(): Promise<void> {
-    try {
-      await this.transport.close();
-    } catch (e) {
-      Logger.w(LogTag.Conn, 'transport cleanup failed error=' + Logger.errorToken(e));
+    const cleanupErrors: ArkDbError[] = [];
+    if (this.connState === ConnectionState.Error) {
+      this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+      this.channel = null;
+      try {
+        await this.transport.close();
+      } catch (cleanup) {
+        Logger.w(LogTag.Conn, 'transport cleanup failed error=' + Logger.errorToken(cleanup));
+        cleanupErrors.push(toCleanupError(cleanup as Object));
+      }
     }
-    this.channel = null;
+    return operationFailure(error, cleanupErrors,
+      rejected ? MySqlExecutionOutcome.ServerRejected : MySqlExecutionOutcome.Unknown);
   }
 }
 
-export function connectionStateAfterCommandFailure(kind: ArkDbErrorKind): ConnectionState {
-  return kind === ArkDbErrorKind.Server ? ConnectionState.Ready : ConnectionState.Error;
+class OperationResultSink implements QueryResultSink {
+  private sink: QueryResultSink;
+  private finishWireQuery: () => void;
+  private retainedTruncationFailure: MySqlOperationError | null = null;
+
+  constructor(sink: QueryResultSink, finishWireQuery: () => void) {
+    this.sink = sink;
+    this.finishWireQuery = finishWireQuery;
+  }
+
+  get truncationFailure(): MySqlOperationError | null {
+    return this.retainedTruncationFailure;
+  }
+
+  async onResultStart(meta: QueryResultMeta): Promise<void> {
+    await this.invoke((): Promise<void> => this.sink.onResultStart(meta));
+  }
+
+  async onRows(chunk: QueryRowChunk): Promise<void> {
+    await this.invoke((): Promise<void> => this.sink.onRows(chunk));
+  }
+
+  async onResultEnd(summary: QueryResultSummary): Promise<void> {
+    if (!summary.statusKnown) this.finishWireQuery();
+    await this.invoke((): Promise<void> => this.sink.onResultEnd(summary));
+  }
+
+  async onTruncation(truncation: QueryTruncation): Promise<boolean> {
+    try {
+      if (this.sink.onTruncation === undefined) return false;
+      return await this.sink.onTruncation(truncation);
+    } catch (error) {
+      const failure = callbackFailure(error as Object);
+      this.retainedTruncationFailure = this.retainedTruncationFailure === null ? failure :
+        operationFailure(this.retainedTruncationFailure, [failure], MySqlExecutionOutcome.Unknown);
+      Logger.w(LogTag.Query, 'truncation control failed error=' + Logger.errorToken(error));
+      return false;
+    }
+  }
+
+  private async invoke(callback: () => Promise<void>): Promise<void> {
+    try {
+      await callback();
+    } catch (error) {
+      throw callbackFailure(error as Object);
+    }
+  }
+}
+
+export function connectionStateAfterCommandFailure(kind: ArkDbErrorKind,
+  reusableServerError: boolean = true): ConnectionState {
+  return kind === ArkDbErrorKind.Server && reusableServerError ? ConnectionState.Ready : ConnectionState.Error;
 }
 
 export function authPluginLogValue(plugin: string): string {
@@ -683,7 +937,7 @@ export function remainingSynchronizationTimeMs(deadlineMs: number, nowMs: number
 }
 
 export function synchronizationRefreshFailure(error: Object): ArkDbError {
-  return ArkDbError.protocol('Could not verify session status after result truncation');
+  return operationFailure(error, [], MySqlExecutionOutcome.Unknown);
 }
 
 /** Convenience factory mirroring the documented public API. */
@@ -741,4 +995,27 @@ function toArkDbError(e: Object): ArkDbError {
   const err = e as Error;
   const msg = err !== null && err !== undefined && err.message !== undefined ? err.message : String(e);
   return ArkDbError.protocol(msg);
+}
+
+function toCleanupError(error: Object): ArkDbError {
+  return error instanceof ArkDbError ? error : operationFailure(error, [], MySqlExecutionOutcome.Unknown);
+}
+
+function operationFailure(error: Object, cleanupErrors: ArkDbError[],
+  outcome: MySqlExecutionOutcome): MySqlOperationError {
+  if (error instanceof MySqlOperationError) {
+    const combined = error.cleanupErrors.slice();
+    for (const cleanup of cleanupErrors) combined.push(cleanup);
+    return new MySqlOperationError(error.primary, combined, outcome, error.originalCause);
+  }
+  return new MySqlOperationError(toArkDbError(error), cleanupErrors, outcome,
+    error instanceof ArkDbError ? undefined : error);
+}
+
+function callbackFailure(error: Object): MySqlOperationError {
+  if (error instanceof MySqlOperationError) {
+    return new MySqlOperationError(error.primary, error.cleanupErrors, MySqlExecutionOutcome.Unknown,
+      error.originalCause !== undefined ? error.originalCause : error);
+  }
+  return new MySqlOperationError(toArkDbError(error), [], MySqlExecutionOutcome.Unknown, error);
 }

@@ -106,6 +106,8 @@ Passwords are passed separately and must not be stored in `ConnectionConfig` or 
 
 `close()` can itself fail. The simple function above propagates that failure; applications that must preserve both an operation error and a cleanup error should retain them separately, as the runnable sample and transaction example do. Do not automatically reconnect and replay SQL after an uncertain outcome.
 
+When an idle connection sends QUIT, a failed or timed-out write now rejects `close()` even if socket shutdown succeeds. Socket shutdown is still attempted, and subsequent cleanup failures are retained with the original QUIT failure. Successful close and repeated calls remain idempotent.
+
 ## Runnable Worker sample
 
 Source: [examples/mysql-client](https://github.com/OrcaSQL-Workbench/ArkDB/tree/main/examples/mysql-client). It is a complete Stage-model HAP with an ArkUI page, registered Worker entry, bounded output, typed error handling, and explicit connection cleanup. It uses the built HAR, not a source dependency.
@@ -204,6 +206,8 @@ export function publicErrorText(error: Object): string {
 
 Kinds include `Network`, `Tls`, `Auth`, `Protocol`, `Server`, `Timeout`, `Cancelled`, `Validation` and `Unsupported`. MySQL retains numeric `code` values; the same shared error's `nativeCode` also preserves textual codes for other adapters, independently of SQLSTATE. An ordinary SQL error can leave the connection open but its session status unknown. Check lifecycle, known status and execution outcome before reuse. Do not replay writes.
 
+Driver-owned cleanup preserves the primary error's kind, `nativeCode`/`code` and SQLSTATE alongside cleanup failures. A stream callback throwing a `Server`-kind error is not a consumed server rejection: its original cause is retained, and the connection fails closed rather than assuming the remaining response was consumed. Error category alone is not proof of synchronization.
+
 `Logger.setLevel(LogLevel.OFF)` disables driver logging; custom `LogSink` implementations are opt-in per thread. Built-in identifier tokens are pseudonymous, not anonymization, and passwords/authentication material must never be passed to a logger.
 
 ## TLS and custom certificates
@@ -239,6 +243,8 @@ For server-only TLS, leave both client fields unset. A successful local compile 
 ## Bounded streaming
 
 Use an awaited sink to process each chunk without retaining every row. Omitting `onTruncation` selects bounded synchronization draining rather than pretending cancellation occurred. Sink callbacks must settle; awaiting a sink does not pause incoming socket delivery.
+
+A failing `onTruncation` hook still permits bounded fallback draining, but does not become a successful stream: the hook's original cause and any cancellation/cleanup failures are reported after draining. A fully synchronized drain can leave the connection reusable while the stream rejects; an incomplete drain fails closed.
 
 <!-- arkts-example: streaming -->
 ```typescript
@@ -422,13 +428,13 @@ MySQL also exposes these through `features.metadata` and `features.metrics`; gen
 
 ## Execution contract
 
-- **One connection, serialized operations.** The driver does not create a Worker, queue concurrent requests, or reconnect/replay SQL. Use one connection per Worker session and serialize all commands. Live connection objects do not cross Worker messages.
+- **One connection, serialized operations.** The driver does not create a Worker, queue concurrent requests, or reconnect/replay SQL. Query/stream, ping, context and transaction commands reject overlap with a `Protocol` error. Await each operation; stream callbacks must not reenter the same connection, and the coarse `Ready` lifecycle state is not an ownership permit. Use one connection per Worker session. Live connection objects do not cross Worker messages.
 - **Typed values.** Rows are arrays aligned with `columns`. SQL NULL is `null`; BIGINT is `bigint`; DECIMAL and temporal values remain strings; binary values are `Uint8Array`. Preserve these types when designing your own Worker DTOs.
 - **Bounded results.** `query()` uses the bounded streaming implementation and exposes `truncated`, `truncationReason`, and `additionalResults`. It is not an unlimited collector.
 - **Streaming.** `queryStream(sql, options, sink)` awaits each `QueryResultSink` callback. Set row/chunk/result/drain budgets in `QueryOptions`, handle truncation and unknown status explicitly, and avoid accumulating every chunk. Awaiting a sink does not pause socket delivery; the separate receive queue remains bounded and fails closed on overflow.
 - **Timeouts.** `connectTimeoutMs` covers connection opening. The low-level driver validates `QueryOptions.statementTimeoutMs` but does **not** start a statement-cancellation timer. Callers must own statement deadlines, cancellation orchestration, and cleanup; `Promise.race` alone does not cancel server execution.
 - **Transactions.** Generic features expose `begin`, `commit`, `rollback` and known session status. MySQL also retains native `setAutocommit`. Failure can invalidate status or leave an unknown execution outcome; never replay writes.
-- **Cancellation.** The generic connection feature owns its MySQL control-session lifetime. The retained handle-based factory helper does not. Await the original query and request, then inspect reuse/status before another command.
+- **Cancellation.** The generic connection feature owns its MySQL control-session lifetime. The retained handle-based factory helper does not. Ownership is retained until required cancellation/close cleanup settles. Only the wire-query phase can be killed, not an interrupted-result end callback or an internal status-refresh ping. Status refresh waits for any pending control request and its cleanup; an unknown KILL outcome retires the target instead. Await the original query and request, then inspect reuse/status before another command.
 - **Errors.** `ArkDbError` and `ArkDbErrorKind` expose common categories and server error code/SQLSTATE. No Workbench-name compatibility aliases are exported. Server messages can contain sensitive data; do not copy them into public logs.
 - **Logging.** `Logger`, `LogSink`, and the five `ArkDB.*` subsystem tags describe driver activity only. Host UI, storage, and RPC logging stay outside the driver. File output remains an explicit opt-in convenience.
 

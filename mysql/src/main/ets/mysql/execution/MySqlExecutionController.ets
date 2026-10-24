@@ -1,5 +1,6 @@
-import { DbConnection, ArkDbError, ArkDbErrorKind, CancellationOutcome } from '@arkdb/core';
+import { DbConnection, ArkDbError, CancellationOutcome } from '@arkdb/core';
 import { MySqlDbExecutionController } from '../driver/MySqlContracts';
+import { MySqlOperationError, isMySqlServerRejection } from '../model/MySqlOperationError';
 
 const MAX_MYSQL_CONNECTION_ID: bigint = 4294967295n;
 const ER_NO_SUCH_THREAD: number = 1094;
@@ -23,8 +24,9 @@ export class MySqlExecutionController implements MySqlDbExecutionController {
       await this.controlConnection.query(query);
       return CancellationOutcome.Requested;
     } catch (error) {
-      if (error instanceof ArkDbError && error.kind === ArkDbErrorKind.Server &&
-        error.code === ER_NO_SUCH_THREAD) {
+      if (error instanceof ArkDbError && isMySqlServerRejection(error) &&
+        error.code === ER_NO_SUCH_THREAD &&
+        (!(error instanceof MySqlOperationError) || error.cleanupErrors.length === 0)) {
         return CancellationOutcome.NotRunning;
       }
       throw error as Error;
@@ -37,7 +39,7 @@ export class MySqlExecutionController implements MySqlDbExecutionController {
 }
 
 export function isMySqlInterruptionError(error: ArkDbError): boolean {
-  return error.kind === ArkDbErrorKind.Server && error.code === ER_QUERY_INTERRUPTED;
+  return isMySqlServerRejection(error) && error.code === ER_QUERY_INTERRUPTED;
 }
 
 export function mysqlKillQueryForHandle(connectionHandle: string): string {

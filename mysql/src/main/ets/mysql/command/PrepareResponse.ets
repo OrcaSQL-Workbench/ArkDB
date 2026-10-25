@@ -4,6 +4,7 @@ import { Capabilities, ColumnType, Command, PacketType } from '../protocol/Const
 import { MysqlPacketSource } from '../protocol/PacketChannel';
 import { PacketReader } from '../protocol/PacketReader';
 import { PacketWriter } from '../protocol/PacketWriter';
+import { EncodedBinaryParameters } from '../value/BinaryParameterEncoder';
 import { parseColumnDef } from './ColumnDefinition';
 import { parseErr } from './ResultPackets';
 
@@ -52,6 +53,19 @@ export class PrepareResponse {
   closePayload(): Uint8Array {
     return new PacketWriter().writeUInt8(Command.STMT_CLOSE)
       .writeUInt32(this.statementId).toUint8Array();
+  }
+
+  executePayload(encoded: EncodedBinaryParameters): Uint8Array {
+    if (encoded.types.length !== this.parameterCount * 2 ||
+      encoded.nullBitmap.length !== Math.ceil(this.parameterCount / 8)) {
+      throw ArkDbError.validation('Parameter count must match the prepared statement');
+    }
+    const writer = new PacketWriter().writeUInt8(0x17).writeUInt32(this.statementId)
+      .writeUInt8(0).writeUInt32(1);
+    if (this.parameterCount > 0) {
+      writer.writeBytes(encoded.nullBitmap).writeUInt8(1).writeBytes(encoded.types).writeBytes(encoded.values);
+    }
+    return writer.toUint8Array();
   }
 
   sameStatementAs(other: PrepareResponse): boolean {

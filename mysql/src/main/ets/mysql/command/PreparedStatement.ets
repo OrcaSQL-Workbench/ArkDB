@@ -10,6 +10,7 @@ import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperat
 import { Capabilities, Command, PacketType } from '../protocol/Constants';
 import { utf8Encode } from '../protocol/Charsets';
 import { PacketChannel } from '../protocol/PacketChannel';
+import { EncodedBinaryParameters } from '../value/BinaryParameterEncoder';
 import { PrepareResponse, prepareServerError } from './PrepareResponse';
 
 const MAX_PREPARE_COMMAND_BYTES = 16 * 1024 * 1024;
@@ -22,6 +23,14 @@ export interface MySqlPreparedSessionHost {
   readonly capabilities: number;
   readonly state: ConnectionState;
   retire(error: ArkDbError): Promise<void>;
+  runCommand?<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T>;
+}
+
+export interface MySqlPreparedStatementRunner {
+  executeStatement(statement: MySqlPreparedStatement, parameters: MySqlParameter[],
+    options?: QueryOptions): Promise<MySqlQueryResult>;
+  streamStatement(statement: MySqlPreparedStatement, parameters: MySqlParameter[], options: QueryOptions,
+    sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
 }
 
 export class MySqlPreparedSession {
@@ -32,13 +41,15 @@ export class MySqlPreparedSession {
   private capabilities: number;
   private retired: boolean = false;
   private handles: PreparedHandle[] = [];
+  private runner: MySqlPreparedStatementRunner | null;
 
-  constructor(host: MySqlPreparedSessionHost) {
+  constructor(host: MySqlPreparedSessionHost, runner: MySqlPreparedStatementRunner | null = null) {
     this.host = host;
     this.gate = host.commandGate;
     this.channel = host.channel;
     this.generation = this.gate.generation;
     this.capabilities = host.capabilities;
+    this.runner = runner;
   }
 
   async prepare(sql: string): Promise<MySqlPreparedStatement> {
@@ -92,6 +103,33 @@ export class MySqlPreparedSession {
     }
   }
 
+  async executeOwned<T>(scope: MySqlCommandScope, statement: MySqlPreparedStatement,
+    encoded: EncodedBinaryParameters, operation: (command: Uint8Array) => Promise<T>): Promise<T> {
+    const channel = this.requireOwnedSession(scope);
+    this.assertUsable(scope, statement);
+    const command = this.ownedHandle(statement).executePayload(encoded);
+    beginPreparedCommand(channel);
+    try {
+      return await operation(command);
+    } finally {
+      pendingPreparedChannels.delete(channel);
+    }
+  }
+
+  async execute(statement: MySqlPreparedStatement, parameters: MySqlParameter[],
+    options?: QueryOptions): Promise<MySqlQueryResult> {
+    this.requireExecutable(statement);
+    if (this.runner === null) return this.rejectExecution(statement);
+    return this.runner.executeStatement(statement, parameters, options);
+  }
+
+  async executeStream(statement: MySqlPreparedStatement, parameters: MySqlParameter[], options: QueryOptions,
+    sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> {
+    this.requireExecutable(statement);
+    if (this.runner === null) return this.rejectExecution(statement);
+    return this.runner.streamStatement(statement, parameters, options, sink);
+  }
+
   async close(statement: MySqlPreparedStatement): Promise<void> {
     const handle = this.ownedHandle(statement);
     const result = handle.closeResult;
@@ -142,11 +180,15 @@ export class MySqlPreparedSession {
   }
 
   rejectExecution(statement: MySqlPreparedStatement): never {
+    this.requireExecutable(statement);
+    throw ArkDbError.unsupported('Prepared execution is not implemented.');
+  }
+
+  private requireExecutable(statement: MySqlPreparedStatement): void {
     const handle = this.ownedHandle(statement);
     this.requireReady();
     if (handle.closed) throw ArkDbError.protocol('The prepared statement is closed.');
     if (this.gate.current !== null) throw ArkDbError.protocol('Another command already owns this connection.');
-    throw ArkDbError.unsupported('Prepared execution is not implemented.');
   }
 
   private samePhysicalSession(): boolean {
@@ -207,6 +249,7 @@ export class MySqlPreparedSession {
 
   private async runCommand<T>(kind: MySqlCommandKind,
     operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
+    if (this.host.runCommand !== undefined) return this.host.runCommand<T>(kind, operation);
     const scope = this.gate.reserve(kind);
     let task: Promise<T>;
     try {
@@ -276,13 +319,17 @@ class PreparedHandle implements MySqlPreparedStatement {
     return this.response.closePayload();
   }
 
+  executePayload(encoded: EncodedBinaryParameters): Uint8Array {
+    return this.response.executePayload(encoded);
+  }
+
   async execute(parameters: MySqlParameter[], options?: QueryOptions): Promise<MySqlQueryResult> {
-    return this.owner.rejectExecution(this);
+    return this.owner.execute(this, parameters, options);
   }
 
   async executeStream(parameters: MySqlParameter[], options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> {
-    return this.owner.rejectExecution(this);
+    return this.owner.executeStream(this, parameters, options, sink);
   }
 
   close(): Promise<void> {
@@ -324,7 +371,7 @@ function preparePayload(sql: string): Uint8Array {
   return payload;
 }
 
-function preparedFailure(error: Object, cleanup: ArkDbError[],
+export function preparedFailure(error: Object, cleanup: ArkDbError[],
   outcome: MySqlExecutionOutcome): MySqlOperationError {
   if (error instanceof MySqlOperationError) {
     return new MySqlOperationError(error.primary, error.cleanupErrors.concat(cleanup),
@@ -336,7 +383,7 @@ function preparedFailure(error: Object, cleanup: ArkDbError[],
     error instanceof ArkDbError ? undefined : error);
 }
 
-function preparedCleanup(error: Object): ArkDbError {
+export function preparedCleanup(error: Object): ArkDbError {
   return error instanceof ArkDbError ? error :
     preparedFailure(error, [], MySqlExecutionOutcome.Unknown);
 }

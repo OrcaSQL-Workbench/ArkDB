@@ -618,6 +618,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       this.closePending = true;
       this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
       this.closing = this.closeWithScope(scope, ownsScope, polite);
+      const prepared = this.preparedOperation;
+      if (prepared !== null && prepared.scope === scope) prepared.closeResult = this.closing;
     }
     return this.closing;
   }
@@ -787,7 +789,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private async runPreparedCommand<T>(kind: MySqlCommandKind,
     operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
     const scope = this.reserveCommand(kind);
-    this.preparedOperation = new PreparedCommandSettlement(scope);
+    const settlement = new PreparedCommandSettlement(scope);
+    this.preparedOperation = settlement;
     let value: T | undefined;
     let primary: Object | null = null;
     const cleanup: ArkDbError[] = [];
@@ -798,8 +801,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } catch (error) {
       primary = error as Object;
     }
-    if (this.closePending && this.closing !== null) {
-      try { await this.closing; } catch (error) {
+    const closeResult = settlement.closeResult;
+    if (closeResult !== null) {
+      try { await closeResult; } catch (error) {
         if (primary === null) primary = error as Object;
         else cleanup.push(toCleanupError(error as Object));
       }
@@ -1028,6 +1032,7 @@ class PreparedCommandSettlement {
   readonly scope: MySqlCommandScope;
   readonly cancellations: Promise<QueryCancellationResult>[] = [];
   joinedCancellations: number = 0;
+  closeResult: Promise<void> | null = null;
 
   constructor(scope: MySqlCommandScope) {
     this.scope = scope;

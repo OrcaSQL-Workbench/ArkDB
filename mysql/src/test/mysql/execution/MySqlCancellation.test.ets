@@ -1622,6 +1622,93 @@ export default function mySqlCancellationTest(): void {
         await executing;
       }
     });
+
+    it('retainsPromptPhysicalCloseFailureWhenPreparedStreamUnwindsAfterCloseSettles', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      const executor = await fixture.open();
+      fixture.peer.responses.push(prepareResponse(7), binaryIntResult([42]));
+      fixture.peer.closeFailure = new Error('Synthetic prompt physical cleanup failure.');
+      const sink = new PreparedHeldRowsSink();
+      const executing = preparedFailureOf(executor.executeStream(
+        'SELECT 42', [], new QueryOptions(), sink));
+      await sink.entered.promise;
+      const closeTask = fixture.close();
+      const closed = preparedFailureOf(closeTask);
+      try {
+        const closeFailure = await closed;
+        expect(closeFailure instanceof MySqlOperationError).assertTrue();
+        expect(fixture.connection.close() === closeTask).assertTrue();
+        const failure = await executing;
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError && closeFailure instanceof MySqlOperationError) {
+          expect(failure.kind).assertEqual(ArkDbErrorKind.Network);
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          expect(failure.primary === closeFailure.primary).assertFalse();
+          expect(failure.cleanupErrors.length).assertEqual(1);
+          expect(failure.cleanupErrors[0] === closeFailure).assertTrue();
+          expect(closeFailure.kind).assertEqual(ArkDbErrorKind.Network);
+          expect(closeFailure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        }
+        expect(sink.ends.length).assertEqual(0);
+        expect(fixture.peer.closeCalls).assertEqual(1);
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+        expect(fixture.connection.sessionStatus.known).assertFalse();
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23');
+        expect((await preparedFailureOf(fixture.connection.ping()))!.kind).assertEqual(ArkDbErrorKind.Protocol);
+      } finally {
+        sink.acknowledgement.release();
+        await closed;
+        await executing;
+      }
+    });
+
+    it('ordersSettledControlAndPromptCloseFailuresAfterPreparedStreamPrimary', 0, async () => {
+      const control = new ControlConnection();
+      control.cleanupFailure = new ArkDbError(ArkDbErrorKind.Network,
+        'Synthetic settled control cleanup failure.', 'CONTROL_CLEANUP', '08S01');
+      const fixture = new PreparedExecutionFixture(Capabilities.PROTOCOL_41, (): DbConnection => control);
+      const executor = await fixture.open();
+      fixture.peer.responses.push(prepareResponse(7));
+      fixture.peer.holdCommand = 0x17;
+      const sink = new PreparedHeldRowsSink();
+      const executing = preparedFailureOf(executor.executeStream(
+        'SELECT 42', [], new QueryOptions(), sink));
+      try {
+        await flushPrepared();
+        const cancellation = await preparedFailureOf(fixture.connection.cancel());
+        expect(cancellation instanceof MySqlOperationError).assertTrue();
+        if (cancellation instanceof MySqlOperationError) {
+          expect(cancellation.primary === control.cleanupFailure).assertTrue();
+          expect(cancellation.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+        }
+        fixture.peer.emitResponse(binaryIntResult([42]));
+        await sink.entered.promise;
+        fixture.peer.closeFailure = new Error('Synthetic prompt physical cleanup after control failure.');
+        const closeFailure = await preparedFailureOf(fixture.close());
+        expect(closeFailure instanceof MySqlOperationError).assertTrue();
+        const failure = await executing;
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError && closeFailure instanceof MySqlOperationError) {
+          expect(failure.kind).assertEqual(ArkDbErrorKind.Network);
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          expect(failure.primary === control.cleanupFailure).assertFalse();
+          expect(failure.primary === closeFailure.primary).assertFalse();
+          expect(failure.cleanupErrors.length).assertEqual(2);
+          expect(failure.cleanupErrors[0] === cancellation).assertTrue();
+          expect(failure.cleanupErrors[1] === closeFailure).assertTrue();
+        }
+        expect(fixture.peer.closeCalls).assertEqual(1);
+        expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23');
+        expect(sink.ends.length).assertEqual(0);
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+      } finally {
+        sink.acknowledgement.release();
+        releasePreparedControl(control);
+        await preparedFailureOf(fixture.close());
+        await executing;
+      }
+    });
   });
 }
 

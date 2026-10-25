@@ -8,6 +8,7 @@ import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
 import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';
 import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
 import queryStreamTest from './command/QueryStream.test';
+import preparedStatementTest from './command/PreparedStatement.test';
 import packetChannelTest from './protocol/PacketChannel.test';
 import packetCodecTest from './protocol/PacketCodec.test';
 import mySqlSqlHelpersTest from './value/MySqlSqlHelpers.test';
@@ -26,6 +27,7 @@ export default function testsuite(): void {
   mySqlServerMetricsProviderTest();
   mySqlMetadataProviderTest();
   queryStreamTest();
+  preparedStatementTest();
   packetChannelTest();
   packetCodecTest();
   mySqlSqlHelpersTest();

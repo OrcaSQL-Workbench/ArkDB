@@ -85,6 +85,64 @@ callbacks; they do not change transport or logical-packet bounds. These local
 protocol fixtures do not establish live prepared execution or device/server
 interoperability.
 
+## Internal prepared statement lifecycle
+
+`MySqlPreparedSession` is an internal PREPARE/CLOSE owner, not a public prepared
+capability or an additional transport. Its host supplies the existing command
+gate, physical `PacketChannel`, negotiated capabilities, lifecycle state and
+physical retirement callback. Create one owner per physical session generation;
+do not carry it across reconnect or replace its host channel. Public connection,
+factory and package-root interfaces remain unchanged, prepared support remains
+false, and both statement execution methods explicitly reject `Unsupported`.
+
+PREPARE consumes the header, every parameter definition and every result-column
+definition before returning a handle. Classic mode requires a five-byte EOF
+after each nonempty definition block. With negotiated `DEPRECATE_EOF`, both
+metadata terminators are omitted, not replaced by OK packets. Zero-count blocks
+have no terminator in either mode. Fixed metadata fields, length prefixes,
+fillers and truncation are checked before using the existing column decoder.
+Both definition blocks reject unknown or unsupported native type codes before
+returning a handle; the legacy text-query fallback is unchanged.
+The internal parser accepts the documented ten-byte warningless OK and the
+twelve-byte OK with warnings; unnegotiated optional metadata is not guessed.
+
+These rules and the response-free CLOSE command are documented in the MySQL
+server's [protocol source](https://github.com/mysql/mysql-server/blob/trunk/sql/protocol_classic.cc)
+under `COM_STMT_PREPARE` and `COM_STMT_CLOSE`. CLOSE writes `19` followed by the
+four-byte little-endian identifier, resets the existing channel sequence and
+does not read an ACK. The identifier is private, not a caller-supplied handle
+field. Repeated close shares its pending or settled result. A closed physical
+session only needs local handle invalidation; it does not manufacture a server
+acknowledgement.
+
+Handles are bound to the owner, physical channel and gate generation. Metadata
+access returns defensive prepare-time snapshots; it is not proof that future
+execution metadata is unchanged after DDL. `prepareOwned`, `closeOwned` and
+`assertUsable` require the caller's active gate scope and never reserve or
+release it. The owning caller must settle its whole composed operation before
+releasing the scope. External overlap fails rather than entering a hidden queue.
+A private in-flight guard shared by lifecycle objects also rejects concurrent
+owned PREPARE/CLOSE on the same physical channel before phase changes, sequence
+reset, dispatch or handle invalidation. It remains held through response and
+failure cleanup, then permits sequential reuse of the caller's scope.
+
+Only a consumed, valid first-packet ERR proves a reusable server rejection.
+Malformed, unsupported or incomplete metadata, a read/write failure, or an ERR
+after the prepare OK invalidates all handles and retires that physical session. A CLOSE
+write failure also invalidates the handle and conservatively retires the
+session. Primary fields, ordinary causes and retirement failures are retained
+using the existing canonical operation error; failure is not a retry signal.
+The retirement callback must detach and close the owned physical transport
+without acquiring another gate scope or releasing the caller's scope.
+
+The registered lifecycle fixtures use the real gate, checked codecs and packet
+channel with a deterministic byte-transport boundary. They cover both EOF
+modes, exact consumption, no-ACK/idempotent CLOSE, foreign/stale/recycled IDs,
+independent handles, owned composition, overlap, malformed metadata, server and
+transport failures, cleanup provenance, UTF-8 budgets and existing packet
+fragmentation. They establish neither live-server/device interoperability nor
+EXECUTE, cursor, long-data, caching, pooling or public capability support.
+
 ## Fixed authentication vectors
 
 Expected bytes were calculated outside the ArkTS implementation with Node.js `node:crypto` SHA-1/SHA-256 digests and byte-wise XOR. Password columns contain UTF-8 bytes, not credentials. An empty expected value is a zero-length response.

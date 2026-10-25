@@ -801,6 +801,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } catch (error) {
       primary = error as Object;
     }
+    const executionOutcome = primary instanceof MySqlOperationError ? primary.outcome :
+      (primary === null ? MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.NotDispatched);
     const closeResult = settlement.closeResult;
     if (closeResult !== null) {
       try { await closeResult; } catch (error) {
@@ -813,8 +815,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
     this.preparedOperation = null;
     if (primary !== null) {
-      throw operationFailure(primary, cleanup, primary instanceof MySqlOperationError ?
-        primary.outcome : MySqlExecutionOutcome.NotDispatched);
+      throw operationFailure(primary, cleanup, executionOutcome);
     }
     if (cleanup.length > 0) throw operationFailure(cleanup[0], cleanup.slice(1), MySqlExecutionOutcome.Completed);
     return value!;

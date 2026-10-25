@@ -7,6 +7,8 @@ export enum MySqlCommandKind {
   Ping = 'ping',
   Context = 'context',
   Transaction = 'transaction',
+  Prepare = 'prepare',
+  StatementClose = 'statement_close',
   Close = 'close'
 }
 
@@ -54,6 +56,10 @@ export class MySqlCommandGate {
 
   get current(): MySqlCommandScope | null {
     return this.active;
+  }
+
+  get generation(): number {
+    return this.sessionGeneration;
   }
 
   advanceGeneration(): void {

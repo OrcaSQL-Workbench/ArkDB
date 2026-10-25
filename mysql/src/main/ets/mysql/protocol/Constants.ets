@@ -32,12 +32,14 @@ export class Capabilities {
   static readonly DEPRECATE_EOF = 0x01000000;
 }
 
-/** Text-protocol commands (first payload byte). */
+/** Protocol commands (first payload byte). */
 export class Command {
   static readonly QUIT = 0x01;
   static readonly INIT_DB = 0x02;
   static readonly QUERY = 0x03;
   static readonly PING = 0x0e;
+  static readonly STMT_PREPARE = 0x16;
+  static readonly STMT_CLOSE = 0x19;
 }
 
 /** Generic packet-type sentinels (first payload byte of a response). */

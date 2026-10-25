@@ -94,25 +94,37 @@ export class MySqlPreparedSession {
 
   async close(statement: MySqlPreparedStatement): Promise<void> {
     const handle = this.ownedHandle(statement);
+    const result = handle.closeResult;
+    if (result !== null) return result;
     if (handle.closed) {
       this.forget(handle);
       return;
     }
     this.requireReady();
-    await this.runCommand(MySqlCommandKind.StatementClose,
-      (scope: MySqlCommandScope): Promise<void> => this.closeOwned(scope, handle));
+    return handle.retainCloseResult(this.runCommand(MySqlCommandKind.StatementClose,
+      (scope: MySqlCommandScope): Promise<void> => this.closeOwned(scope, handle)));
   }
 
   async closeOwned(scope: MySqlCommandScope, statement: MySqlPreparedStatement): Promise<void> {
     this.gate.assertOwner(scope);
     const handle = this.ownedHandle(statement);
+    const result = handle.closeResult;
+    if (result !== null) return result;
     if (handle.closed) {
       this.forget(handle);
       return;
     }
     const channel = this.requireOwnedSession(scope);
     beginPreparedCommand(channel);
+    // Publish the shared result before invoking a potentially reentrant writer.
+    return handle.retainCloseResult(Promise.resolve().then((): Promise<void> =>
+      this.closeOnChannel(scope, handle, channel)));
+  }
+
+  private async closeOnChannel(scope: MySqlCommandScope, handle: PreparedHandle,
+    channel: PacketChannel): Promise<void> {
     try {
+      this.requireOwnedSession(scope);
       this.gate.setPhase(scope, MySqlCommandPhase.Cleaning);
       this.forget(handle);
       channel.resetSequence();
@@ -196,24 +208,30 @@ export class MySqlPreparedSession {
   private async runCommand<T>(kind: MySqlCommandKind,
     operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
     const scope = this.gate.reserve(kind);
-    let primary: Object | null = null;
+    let task: Promise<T>;
     try {
-      return await operation(scope);
+      task = operation(scope);
     } catch (error) {
-      primary = error as Object;
-      const failure: ArkDbError = error instanceof ArkDbError ? error :
-        preparedFailure(error as Object, [], MySqlExecutionOutcome.Unknown);
-      throw failure;
-    } finally {
-      try { this.gate.release(scope); } catch (error) {
-        const cleanup = preparedCleanup(error as Object);
-        if (primary !== null) {
-          throw preparedFailure(primary, [cleanup],
-            primary instanceof MySqlOperationError ? primary.outcome : MySqlExecutionOutcome.Unknown);
-        }
-        throw preparedFailure(cleanup, [], MySqlExecutionOutcome.Completed);
-      }
+      task = Promise.reject<T>(error as Object);
     }
+    return task.then((value: T): T => {
+      try { this.gate.release(scope); } catch (error) {
+        throw preparedFailure(preparedCleanup(error as Object), [], MySqlExecutionOutcome.Completed);
+      }
+      return value;
+    }, (error: Object): T => {
+      const cleanupErrors: ArkDbError[] = [];
+      try { this.gate.release(scope); } catch (cleanup) {
+        cleanupErrors.push(preparedCleanup(cleanup as Object));
+      }
+      if (cleanupErrors.length > 0) {
+        throw preparedFailure(error, cleanupErrors,
+          error instanceof MySqlOperationError ? error.outcome : MySqlExecutionOutcome.Unknown);
+      }
+      const failure: ArkDbError = error instanceof ArkDbError ? error :
+        preparedFailure(error, [], MySqlExecutionOutcome.Unknown);
+      throw failure;
+    });
   }
 }
 
@@ -269,7 +287,14 @@ class PreparedHandle implements MySqlPreparedStatement {
 
   close(): Promise<void> {
     if (this.closeTask !== null) return this.closeTask;
-    const task = this.owner.close(this);
+    return this.retainCloseResult(this.owner.close(this));
+  }
+
+  get closeResult(): Promise<void> | null {
+    return this.closeTask;
+  }
+
+  retainCloseResult(task: Promise<void>): Promise<void> {
     this.closeTask = task;
     task.then((): void => {}, (): void => {
       if (!this.invalid) this.closeTask = null;

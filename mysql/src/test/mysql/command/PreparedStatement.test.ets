@@ -5,7 +5,7 @@ import {
 } from '../../../main/ets/mysql/command/PreparedStatement';
 import { MySqlPreparedStatement } from '../../../main/ets/mysql/driver/MySqlPreparedContracts';
 import {
-  MySqlCommandGate, MySqlCommandKind
+  MySqlCommandGate, MySqlCommandKind, MySqlCommandScope
 } from '../../../main/ets/mysql/execution/MySqlCommandGate';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperationError';
 import {
@@ -67,8 +67,22 @@ class PreparedChannel extends PacketChannel {
   }
 }
 
+class ReleaseFailureGate extends MySqlCommandGate {
+  closeReleaseFailure: ArkDbError | null = null;
+  closeReleaseCalls: number = 0;
+
+  release(scope: MySqlCommandScope): void {
+    super.release(scope);
+    if (scope.kind === MySqlCommandKind.StatementClose) {
+      this.closeReleaseCalls += 1;
+      const failure = this.closeReleaseFailure;
+      if (failure !== null) throw failure;
+    }
+  }
+}
+
 class PreparedHost implements MySqlPreparedSessionHost {
-  readonly commandGate: MySqlCommandGate = new MySqlCommandGate();
+  readonly commandGate: MySqlCommandGate;
   readonly transport: PreparedTransport;
   readonly initialChannel: PreparedChannel;
   channel: PacketChannel | null;
@@ -76,9 +90,12 @@ class PreparedHost implements MySqlPreparedSessionHost {
   state: ConnectionState = ConnectionState.Ready;
   retirements: ArkDbError[] = [];
   retirementFailure: ArkDbError | Error | null = null;
+  holdRetirement: boolean = false;
+  private resumeRetirement: (() => void) | null = null;
 
   constructor(responses: Uint8Array[][], capabilities: number = Capabilities.PROTOCOL_41,
-    firstSequences: number[] = []) {
+    firstSequences: number[] = [], commandGate: MySqlCommandGate = new MySqlCommandGate()) {
+    this.commandGate = commandGate;
     const frames: Uint8Array[] = [];
     for (let response = 0; response < responses.length; response += 1) {
       const firstSequence = response < firstSequences.length ? firstSequences[response] : 1;
@@ -96,14 +113,44 @@ class PreparedHost implements MySqlPreparedSessionHost {
     this.retirements.push(error);
     this.state = ConnectionState.Closed;
     this.channel = null;
+    if (this.holdRetirement) {
+      await new Promise<void>((resolve: () => void): void => { this.resumeRetirement = resolve; });
+    }
     const failure = this.retirementFailure;
     if (failure !== null) throwFixtureFailure(failure);
+  }
+
+  releaseRetirement(): void {
+    const resume = this.resumeRetirement;
+    this.resumeRetirement = null;
+    if (resume !== null) resume();
   }
 }
 
 class PreparedObservation {
   statement: MySqlPreparedStatement | null = null;
   error: Object | null = null;
+}
+
+enum CloseEntry {
+  Handle,
+  Session,
+  Owned
+}
+
+class CloseObservation {
+  settled: boolean = false;
+  error: Object | null = null;
+  readonly done: Promise<void>;
+
+  constructor(task: Promise<void>) {
+    this.done = task.then((): void => {
+      this.settled = true;
+    }, (error: Object): void => {
+      this.error = error;
+      this.settled = true;
+    });
+  }
 }
 
 class RecordingSink implements MySqlQueryResultSink {
@@ -809,7 +856,359 @@ export default function preparedStatementTest(): void {
         expect(host.retirements.length).assertEqual(0);
       }
     });
+
+    it('joinsPendingOwnedCloseAcrossAllValidEntryPoints', 0, async () => {
+      await expectPendingCloseJoined(CloseEntry.Owned);
+    });
+
+    it('joinsPendingSessionCloseAcrossHandleAndOwnedEntryPoints', 0, async () => {
+      await expectPendingCloseJoined(CloseEntry.Session);
+    });
+
+    it('joinsPendingHandleCloseAcrossSessionAndOwnedEntryPoints', 0, async () => {
+      await expectPendingCloseJoined(CloseEntry.Handle);
+    });
+
+    it('sharesOwnedCloseWriteAndRetirementFailureDuringAndAfterCleanup', 0, async () => {
+      await expectOwnedCloseFailureJoined(false);
+    });
+
+    it('preservesOrdinaryOwnedCloseCausesForEveryRepeatedEntryPoint', 0, async () => {
+      await expectOwnedCloseFailureJoined(true);
+    });
+
+    it('rejectsForeignAndStaleScopesBeforeJoiningTheOwnedClose', 0, async () => {
+      const host = new PreparedHost([[prepareOk(7, 0, 0)]]);
+      const session = new MySqlPreparedSession(host);
+      const statement = await prepareSuccessfully(session, 'DO 7');
+      const stale = host.commandGate.reserve(MySqlCommandKind.Transaction);
+      host.commandGate.release(stale);
+      const scope = host.commandGate.reserve(MySqlCommandKind.Transaction);
+      const foreignHost = new PreparedHost([]);
+      const foreignSession = new MySqlPreparedSession(foreignHost);
+      const foreignScope = foreignHost.commandGate.reserve(MySqlCommandKind.Transaction);
+      host.transport.holdWriteAt = 2;
+      const first = new CloseObservation(session.closeOwned(scope, statement));
+      await nextTask();
+      const rejected = [
+        new CloseObservation(session.closeOwned(stale, statement)),
+        new CloseObservation(session.closeOwned(foreignScope, statement)),
+        new CloseObservation(foreignSession.close(statement))
+      ];
+      await nextTask();
+      const allRejectedBeforeFirstSettled = rejected.every((entry: CloseObservation): boolean =>
+        entry.settled && entry.error instanceof ArkDbError &&
+        entry.error.kind === ArkDbErrorKind.Protocol);
+      const firstStillPending = !first.settled;
+      const sameScope = host.commandGate.current === scope;
+      const writes = host.transport.writes.length;
+      const reads = host.transport.readAttempts;
+      const resets = host.initialChannel.resets;
+      host.transport.releaseWrite();
+      await first.done;
+      for (const entry of rejected) await entry.done;
+      const staleAfter = await captureCommandFailure(session.closeOwned(stale, statement));
+      foreignHost.commandGate.release(foreignScope);
+      host.commandGate.release(scope);
+      expect(allRejectedBeforeFirstSettled).assertTrue();
+      expect(firstStillPending).assertTrue();
+      expect(sameScope).assertTrue();
+      expect(first.error === null).assertTrue();
+      expectProtocolError(staleAfter);
+      expect(writes).assertEqual(2);
+      expect(reads).assertEqual(2);
+      expect(resets).assertEqual(2);
+      expect(host.transport.writes.length).assertEqual(2);
+      expect(host.retirements.length).assertEqual(0);
+    });
+
+    it('retriesUndispatchedOwnedAndSessionCloseAfterOtherHandleOverlap', 0, async () => {
+      const host = new PreparedHost([
+        [prepareOk(7, 0, 0)], [prepareOk(8, 0, 0)],
+        [prepareOk(9, 0, 1), column('result'), eof()]
+      ]);
+      const session = new MySqlPreparedSession(host);
+      const owned = await prepareSuccessfully(session, 'DO 7');
+      const external = await prepareSuccessfully(session, 'DO 8');
+      const scope = host.commandGate.reserve(MySqlCommandKind.Transaction);
+      host.transport.holdReadAt = 7;
+      const preparing = capturePrepared(session.prepareOwned(scope, 'SELECT 9'));
+      await nextTask();
+      const ownedError = await captureCommandFailure(session.closeOwned(scope, owned));
+      const sessionError = await captureCommandFailure(session.close(external));
+      const handleError = await captureCommandFailure(external.close());
+      const bothStillOpen = !owned.closed && !external.closed;
+      const unchangedWrites = host.transport.writes.length;
+      const unchangedReads = host.transport.readAttempts;
+      const unchangedResets = host.initialChannel.resets;
+      host.transport.releaseRead();
+      const prepared = await preparing;
+      let retryOwned: Object | null = null;
+      try {
+        retryOwned = await captureCommandFailure(session.closeOwned(scope, owned));
+        if (prepared.statement !== null) await session.closeOwned(scope, prepared.statement);
+      } finally {
+        host.commandGate.release(scope);
+      }
+      const retrySession = await captureCommandFailure(session.close(external));
+      await external.close();
+      expectProtocolError(ownedError);
+      expectProtocolError(sessionError);
+      expectProtocolError(handleError);
+      expect(bothStillOpen).assertTrue();
+      expect(unchangedWrites).assertEqual(3);
+      expect(unchangedReads).assertEqual(7);
+      expect(unchangedResets).assertEqual(3);
+      expect(prepared.error === null).assertTrue();
+      expect(retryOwned === null).assertTrue();
+      expect(retrySession === null).assertTrue();
+      expect(owned.closed).assertTrue();
+      expect(external.closed).assertTrue();
+      expect(host.transport.writes.length).assertEqual(6);
+      expect(host.retirements.length).assertEqual(0);
+      expect(host.commandGate.current === null).assertTrue();
+    });
+
+    it('reusesConnectionImmediatelyAfterRepeatedHandleCloseWithoutAwaitingSessionOriginal', 0, async () => {
+      await expectReuseAtRepeatedSessionClose(CloseEntry.Handle);
+    });
+
+    it('repeatsHandleCloseRetainSessionOwnedReleaseFailure', 0, async () => {
+      const gate = new ReleaseFailureGate();
+      const host = new PreparedHost([[prepareOk(7, 0, 0)]], Capabilities.PROTOCOL_41, [], gate);
+      const session = new MySqlPreparedSession(host);
+      const statement = await prepareSuccessfully(session, 'DO 7');
+      const finalizer = new ArkDbError(ArkDbErrorKind.Protocol,
+        'Synthetic reserved-scope release failure.', 'E_CLOSE_RELEASE', 'HY000');
+      gate.closeReleaseFailure = finalizer;
+      host.transport.holdWriteAt = 2;
+      const original = new CloseObservation(session.close(statement));
+      const repeated = statement.close();
+      await nextTask();
+      host.transport.releaseWrite();
+      let repeatedFailure: Object | null = null;
+      try { await repeated; } catch (error) { repeatedFailure = error as Object; }
+      const gateSettledAtRepeatedContinuation = gate.current === null;
+      await original.done;
+      const laterHandle = await captureCommandFailure(statement.close());
+      const laterSession = await captureCommandFailure(session.close(statement));
+      expect(repeatedFailure instanceof MySqlOperationError).assertTrue();
+      expect(repeatedFailure === original.error).assertTrue();
+      expect(laterHandle === original.error).assertTrue();
+      expect(laterSession === original.error).assertTrue();
+      expect(gateSettledAtRepeatedContinuation).assertTrue();
+      if (!(repeatedFailure instanceof MySqlOperationError)) throw new Error('Missing full close finalizer error.');
+      expect(repeatedFailure.primary === finalizer).assertTrue();
+      expect(repeatedFailure.nativeCode).assertEqual('E_CLOSE_RELEASE');
+      expect(repeatedFailure.code === undefined).assertTrue();
+      expect(repeatedFailure.sqlState).assertEqual('HY000');
+      expect(repeatedFailure.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+      expect(repeatedFailure.cleanupErrors.length).assertEqual(0);
+      expect(gate.closeReleaseCalls).assertEqual(1);
+      expect(gate.current === null).assertTrue();
+      expect(statement.closed).assertTrue();
+      expect(host.transport.writes.length).assertEqual(2);
+      expect(host.transport.readAttempts).assertEqual(2);
+      expect(host.initialChannel.resets).assertEqual(2);
+      expect(host.retirements.length).assertEqual(0);
+    });
+
+    it('reusesConnectionImmediatelyAfterRepeatedSessionCloseWithoutAwaitingOriginal', 0, async () => {
+      await expectReuseAtRepeatedSessionClose(CloseEntry.Session);
+    });
+
+    it('reusesConnectionImmediatelyAfterRepeatedOwnedCloseWithoutAwaitingSessionOriginal', 0, async () => {
+      await expectReuseAtRepeatedSessionClose(CloseEntry.Owned);
+    });
+
+    it('retainsCallerScopeAtRepeatedCloseContinuationBeforeAwaitingOwnedOriginal', 0, async () => {
+      const host = new PreparedHost([[prepareOk(7, 0, 0)], [prepareOk(8, 0, 0)]]);
+      const session = new MySqlPreparedSession(host);
+      const statement = await prepareSuccessfully(session, 'DO 7');
+      const scope = host.commandGate.reserve(MySqlCommandKind.Transaction);
+      host.transport.holdWriteAt = 2;
+      const original = new CloseObservation(session.closeOwned(scope, statement));
+      const repeated = statement.close();
+      await nextTask();
+      host.transport.releaseWrite();
+      let repeatedFailure: Object | null = null;
+      try { await repeated; } catch (error) { repeatedFailure = error as Object; }
+      const retainedAtContinuation = host.commandGate.current === scope;
+      const immediatelyReused = await capturePrepared(session.prepareOwned(scope, 'DO 8'));
+      await original.done;
+      try {
+        if (immediatelyReused.statement !== null) await session.closeOwned(scope, immediatelyReused.statement);
+      } finally {
+        host.commandGate.release(scope);
+      }
+      expect(repeatedFailure === null).assertTrue();
+      expect(retainedAtContinuation).assertTrue();
+      expect(immediatelyReused.error === null).assertTrue();
+      expect(original.error === null).assertTrue();
+      expect(scope.serial).assertEqual(2);
+      expect(host.commandGate.current === null).assertTrue();
+      expect(host.transport.writes.length).assertEqual(4);
+      expect(host.transport.readAttempts).assertEqual(4);
+      expect(host.initialChannel.resets).assertEqual(4);
+      expect(host.retirements.length).assertEqual(0);
+    });
   });
+}
+
+async function expectReuseAtRepeatedSessionClose(entry: CloseEntry): Promise<void> {
+  const host = new PreparedHost([[prepareOk(7, 0, 0)], [prepareOk(8, 0, 0)]]);
+  const session = new MySqlPreparedSession(host);
+  const statement = await prepareSuccessfully(session, 'DO 7');
+  host.transport.holdWriteAt = 2;
+  const original = new CloseObservation(session.close(statement));
+  const scope = host.commandGate.current!;
+  const repeated = entry === CloseEntry.Handle ? statement.close() :
+    (entry === CloseEntry.Session ? session.close(statement) : session.closeOwned(scope, statement));
+  await nextTask();
+  host.transport.releaseWrite();
+  let repeatedFailure: Object | null = null;
+  try { await repeated; } catch (error) { repeatedFailure = error as Object; }
+  const gateSettledAtContinuation = host.commandGate.current === null;
+  const immediatelyReused = await capturePrepared(session.prepare('DO 8'));
+  await original.done;
+  if (immediatelyReused.statement !== null) await immediatelyReused.statement.close();
+  expect(repeatedFailure === null).assertTrue();
+  expect(gateSettledAtContinuation).assertTrue();
+  expect(immediatelyReused.error === null).assertTrue();
+  expect(immediatelyReused.statement !== null).assertTrue();
+  expect(original.error === null).assertTrue();
+  expect(statement.closed).assertTrue();
+  expect(scope.serial).assertEqual(2);
+  expect(host.commandGate.current === null).assertTrue();
+  expect(host.transport.writes.length).assertEqual(4);
+  expect(host.transport.readAttempts).assertEqual(4);
+  expect(host.initialChannel.resets).assertEqual(4);
+  expect(host.retirements.length).assertEqual(0);
+}
+
+async function expectPendingCloseJoined(entry: CloseEntry): Promise<void> {
+  const host = new PreparedHost([[prepareOk(7, 0, 0)]]);
+  const session = new MySqlPreparedSession(host);
+  const statement = await prepareSuccessfully(session, 'DO 7');
+  let callerScope: MySqlCommandScope | null = null;
+  if (entry === CloseEntry.Owned) callerScope = host.commandGate.reserve(MySqlCommandKind.Transaction);
+  host.transport.holdWriteAt = 2;
+  const first = new CloseObservation(entry === CloseEntry.Handle ? statement.close() :
+    (entry === CloseEntry.Session ? session.close(statement) : session.closeOwned(callerScope!, statement)));
+  await nextTask();
+  const scope = host.commandGate.current!;
+  const repeated = [
+    new CloseObservation(statement.close()),
+    new CloseObservation(session.close(statement)),
+    new CloseObservation(session.closeOwned(scope, statement))
+  ];
+  await nextTask();
+  const allPending = !first.settled && repeated.every((item: CloseObservation): boolean => !item.settled);
+  const unchangedScope = host.commandGate.current === scope;
+  const serial = scope.serial;
+  const writes = host.transport.writes.length;
+  const reads = host.transport.readAttempts;
+  const resets = host.initialChannel.resets;
+  host.transport.releaseWrite();
+  await first.done;
+  for (const item of repeated) await item.done;
+  const callerScopeRetained = callerScope === null ? host.commandGate.current === null :
+    host.commandGate.current === callerScope;
+  if (callerScope !== null) {
+    await session.closeOwned(callerScope, statement);
+    host.commandGate.release(callerScope);
+  }
+  await statement.close();
+  await session.close(statement);
+  expect(allPending).assertTrue();
+  expect(unchangedScope).assertTrue();
+  expect(serial).assertEqual(2);
+  expect(first.error === null).assertTrue();
+  expect(repeated.every((item: CloseObservation): boolean => item.error === null)).assertTrue();
+  expect(callerScopeRetained).assertTrue();
+  expect(statement.closed).assertTrue();
+  expect(writes).assertEqual(2);
+  expect(reads).assertEqual(2);
+  expect(resets).assertEqual(2);
+  expect(host.transport.writes.length).assertEqual(2);
+  expect(host.transport.readAttempts).assertEqual(2);
+  expect(host.initialChannel.resets).assertEqual(2);
+  expect(host.retirements.length).assertEqual(0);
+  expect(host.commandGate.current === null).assertTrue();
+}
+
+async function expectOwnedCloseFailureJoined(ordinary: boolean): Promise<void> {
+  const host = new PreparedHost([[prepareOk(7, 0, 0)], [prepareOk(8, 0, 0)]]);
+  const session = new MySqlPreparedSession(host);
+  const statement = await prepareSuccessfully(session, 'DO 7');
+  const other = await prepareSuccessfully(session, 'DO 8');
+  const scope = host.commandGate.reserve(MySqlCommandKind.Transaction);
+  const primary: ArkDbError | Error = ordinary ? new Error('Synthetic ordinary owned CLOSE failure.') :
+    new ArkDbError(ArkDbErrorKind.Network, 'Synthetic owned CLOSE failure.', 2006, 'HY000');
+  const cleanup: ArkDbError | Error = ordinary ? new Error('Synthetic ordinary retirement failure.') :
+    ArkDbError.timeout('Synthetic owned CLOSE retirement failure.');
+  host.transport.failWriteAt = 3;
+  host.transport.writeFailure = primary;
+  host.retirementFailure = cleanup;
+  host.holdRetirement = true;
+  const first = new CloseObservation(session.closeOwned(scope, statement));
+  await nextTask();
+  const repeated = [
+    new CloseObservation(statement.close()),
+    new CloseObservation(session.close(statement)),
+    new CloseObservation(session.closeOwned(scope, statement))
+  ];
+  await nextTask();
+  const allPendingUntilRetirement = !first.settled &&
+    repeated.every((item: CloseObservation): boolean => !item.settled);
+  const scopeRetainedDuringRetirement = host.commandGate.current === scope;
+  const retirements = host.retirements.length;
+  const writes = host.transport.writes.length;
+  const reads = host.transport.readAttempts;
+  const resets = host.initialChannel.resets;
+  host.releaseRetirement();
+  await first.done;
+  for (const item of repeated) await item.done;
+  const afterFailure = [
+    new CloseObservation(statement.close()),
+    new CloseObservation(session.close(statement)),
+    new CloseObservation(session.closeOwned(scope, statement))
+  ];
+  for (const item of afterFailure) await item.done;
+  const scopeRetainedAfterFailure = host.commandGate.current === scope;
+  host.commandGate.release(scope);
+  expect(allPendingUntilRetirement).assertTrue();
+  expect(scopeRetainedDuringRetirement).assertTrue();
+  expect(scopeRetainedAfterFailure).assertTrue();
+  expect(first.error instanceof MySqlOperationError).assertTrue();
+  if (!(first.error instanceof MySqlOperationError)) throw new Error('Missing original close failure.');
+  const failure = first.error;
+  expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+  expect(failure.cleanupErrors.length).assertEqual(1);
+  if (primary instanceof ArkDbError) {
+    expect(failure.primary === primary).assertTrue();
+    expect(failure.nativeCode).assertEqual(2006);
+    expect(failure.code).assertEqual(2006);
+    expect(failure.sqlState).assertEqual('HY000');
+    expect(failure.cleanupErrors[0] === cleanup).assertTrue();
+  } else {
+    expect(failure.originalCause === primary).assertTrue();
+    expect(asOperation(failure.cleanupErrors[0]).originalCause === cleanup).assertTrue();
+  }
+  expect(repeated.every((item: CloseObservation): boolean => item.error === failure)).assertTrue();
+  expect(afterFailure.every((item: CloseObservation): boolean => item.error === failure)).assertTrue();
+  expect(retirements).assertEqual(1);
+  expect(writes).assertEqual(3);
+  expect(reads).assertEqual(4);
+  expect(resets).assertEqual(3);
+  expect(statement.closed).assertTrue();
+  expect(other.closed).assertTrue();
+  expect(host.state).assertEqual(ConnectionState.Closed);
+  expect(host.transport.writes.length).assertEqual(3);
+  expect(host.transport.readAttempts).assertEqual(4);
+  expect(host.initialChannel.resets).assertEqual(3);
+  expect(host.retirements.length).assertEqual(1);
+  expect(host.commandGate.current === null).assertTrue();
 }
 
 async function expectUnknownMetadataRejected(parameter: boolean): Promise<void> {

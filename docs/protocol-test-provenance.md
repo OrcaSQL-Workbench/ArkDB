@@ -52,8 +52,8 @@ Boundary cases include 65 total decimal digits / 30 fractional digits, 65535
 parameters, and an exact 16777216-byte command versus one byte over. The command
 budget includes the ten-byte execute header, bitmap, new-parameter flag and
 complete type table; this codec returns only the bitmap, type table and value
-sections. A future command caller must emit `new_params_bound_flag=1` for
-nonempty bindings. These local codec fixtures establish no live-server,
+sections. The internal prepared executor emits `new_params_bound_flag=1` for
+every nonempty execution, including explicit handle reuse. These local codec fixtures establish no live-server,
 SQL-mode, or target-device behavior.
 
 ## Shared text and binary result fixtures
@@ -92,8 +92,10 @@ capability or an additional transport. Its host supplies the existing command
 gate, physical `PacketChannel`, negotiated capabilities, lifecycle state and
 physical retirement callback. Create one owner per physical session generation;
 do not carry it across reconnect or replace its host channel. Public connection,
-factory and package-root interfaces remain unchanged, prepared support remains
-false, and both statement execution methods explicitly reject `Unsupported`.
+factory and package-root interfaces remain unchanged and prepared support remains
+false. A standalone lifecycle-only session without an execution dispatcher keeps
+its explicit `Unsupported` execution contract. The internal prepared executor
+binds its handles to the original connection's execution dispatcher.
 
 PREPARE consumes the header, every parameter definition and every result-column
 definition before returning a handle. Classic mode requires a five-byte EOF
@@ -141,7 +143,56 @@ modes, exact consumption, no-ACK/idempotent CLOSE, foreign/stale/recycled IDs,
 independent handles, owned composition, overlap, malformed metadata, server and
 transport failures, cleanup provenance, UTF-8 budgets and existing packet
 fragmentation. They establish neither live-server/device interoperability nor
-EXECUTE, cursor, long-data, caching, pooling or public capability support.
+cursor, long-data, caching, pooling or public capability support.
+
+## Internal prepared execution and cleanup
+
+`command/PreparedExecutor.ets` implements the internal buffered and native-stream
+contracts. The connection's protected accessor supplies its real physical
+channel, generation, existing command gate, cancellation lifetime and shared
+result pipeline; it does not expose a package-root factory or feature.
+Convenience execution has no cache: one scope owns PREPARE, EXECUTE, consumption
+or synchronization of all results, and response-free CLOSE. Explicit handles
+reuse their server statement until closed or physically invalidated.
+
+The existing typed encoder captures the parameter list and values before the
+first asynchronous dispatch. Invalid values or query options send no PREPARE;
+a server count mismatch can follow PREPARE but sends no EXECUTE. The opaque
+prepare response builds the ten-byte EXECUTE header with cursor flag zero and
+iteration count one, followed, only for nonempty bindings, by the index-zero
+NULL bitmap, flag one, full type table and captured values. The identifier never
+becomes a caller-supplied field. `PS_MULTI_RESULTS` is negotiated independently
+when offered; prepared execution does not enable `MULTI_STATEMENTS`.
+
+Buffered and streamed execution use T03's binary row decoder with each result's
+actual execution metadata, not the defensive prepare-time column snapshot.
+Chunk, row, decoded-byte, result-set and drain limits retain their existing
+defaults. Consumer acknowledgements are awaited, and legacy
+`statementTimeoutMs` remains validation-only rather than an automatic deadline.
+
+Only consumed valid server ERR packets establish reusable rejections.
+Malformed results, uncertain writes/reads and unsynchronized drain failures
+retire the physical protocol path without retrying SQL or writing CLOSE into
+an unread response. Cancellation is available in EXECUTE's query phases, not
+PREPARE, synchronization PING or statement CLOSE. Control cancellation and its
+cleanup settle before convenience CLOSE and scope release, including failures
+that finish before the original result. Unknown dispatched KILL outcomes retain
+the existing permanent physical-retirement rule.
+
+Operation errors retain the execution primary, native code, SQLSTATE, ordinary
+consumer cause, cleanup errors and execution outcome. A CLOSE failure after a
+fully consumed result reports `Completed`, not a claim that SQL was never sent;
+a count mismatch remains `NotDispatched` even if its cleanup also fails.
+Bound statement CLOSE retains T04's shared full-operation completion promise.
+
+The registered execution, stream and cancellation regressions exercise the real
+connection, gate, packet channel, checked encoder and shared decoders through
+the deterministic socket/control boundary. Exact scalar fixtures include
+unsigned BIGINT `18446744073709551615n`, DECIMAL
+`"12345678901234567890.1234567890"`, TIME `"-838:59:59.000001"`, bytes and SQL NULL
+in both EOF modes. They do not establish live-server/device interoperability,
+prepared CALL/OUT support, public capability availability, cursor, long-data,
+caching, deadlines or automatic retries.
 
 ## Fixed authentication vectors
 

@@ -15,7 +15,7 @@ import {
 } from './model/MySqlQueryStream';
 import { MySqlDbConnection } from './driver/MySqlContracts';
 import { TcpTransport } from './transport/TcpTransport';
-import { PacketChannel, MysqlPacket } from './protocol/PacketChannel';
+import { PacketChannel, MysqlPacket, MysqlPacketSource } from './protocol/PacketChannel';
 import { PacketWriter } from './protocol/PacketWriter';
 import { Capabilities, Command, PacketType } from './protocol/Constants';
 import { parseHandshake, HandshakePacket } from './auth/Handshake';
@@ -39,6 +39,13 @@ import {
 import {
   MySqlExecutionOutcome, MySqlOperationError, isMySqlServerRejection
 } from './model/MySqlOperationError';
+import { MySqlPreparedExecutor } from './driver/MySqlPreparedContracts';
+import {
+  MySqlPreparedExecutor as InternalPreparedExecutor, MySqlPreparedExecutorHost
+} from './command/PreparedExecutor';
+import { parseBufferedResultStream, parseResultStream } from './command/ResultStream';
+import { prepareServerError } from './command/PrepareResponse';
+import { BinaryRowDecoder } from './value/BinaryRowDecoder';
 
 /**
  * A single MySQL/MariaDB connection over TCP with an optional in-handshake TLS upgrade.
@@ -71,6 +78,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private queryWrite: Promise<void> | null = null;
   private cancellationHandle: string = '';
   private createControlConnection: () => DbConnection;
+  private prepared: InternalPreparedExecutor | null = null;
+  private preparedOperation: PreparedCommandSettlement | null = null;
 
   constructor(config: ConnectionConfig, password: string, transport: TcpTransport = new TcpTransport(),
     timers: ConnectionTimerPort = new SystemConnectionTimerPort(),
@@ -109,6 +118,32 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return mysqlSessionStatus(this.status);
   }
 
+  protected preparedExecutor(): MySqlPreparedExecutor {
+    this.requireReady();
+    if (this.prepared === null) {
+      const host = new PreparedConnectionHost(this.commandGate,
+        (): PacketChannel | null => this.channel, (): number => this.clientCaps,
+        (): ConnectionState => this.connState,
+        (error: ArkDbError): Promise<void> => this.retirePreparedSession(error),
+        <T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> =>
+          this.runPreparedCommand<T>(kind, operation),
+        (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions): Promise<QueryResult> =>
+          this.awaitPreparedExecution(scope,
+            this.bufferedCommandOwned(scope, command, (channel: PacketChannel): Promise<QueryResult> =>
+              parseBufferedResultStream(new PreparedPacketSource(channel, this.clientCaps),
+                this.clientCaps, new BinaryRowDecoder(), options, this.status))),
+        async (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+          sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> =>
+          mysqlExecutionSummary(await this.awaitPreparedExecution(scope,
+            this.streamCommandOwned(scope, command, new MySqlResultSinkAdapter(sink),
+              (channel: PacketChannel, guarded: QueryResultSink): Promise<QueryExecutionSummary> =>
+                parseResultStream(new PreparedPacketSource(channel, this.clientCaps),
+                  this.clientCaps, options, guarded, new BinaryRowDecoder(), this.status)))));
+      this.prepared = new InternalPreparedExecutor(host);
+    }
+    return this.prepared;
+  }
+
   /** Connect, read the handshake, and authenticate. */
   async connect(): Promise<void> {
     if (this.retiredByCancellation) {
@@ -119,6 +154,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       throw ArkDbError.protocol('connect() called in state ' + this.connState);
     }
     this.commandGate.advanceGeneration();
+    this.prepared = null;
     const scope = this.commandGate.reserve(MySqlCommandKind.Connect);
     try {
       await this.connectOwned(scope);
@@ -161,6 +197,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       const withDb = this.config.defaultSchema !== undefined && this.config.defaultSchema.length > 0;
       const withTls = mysqlTlsRequested(this.config.ssl.mode, handshake.capabilities);
       this.clientCaps = computeClientCapabilities(handshake.capabilities, withDb, withTls);
+      this.clientCaps |= handshake.capabilities & Capabilities.PS_MULTI_RESULTS;
 
       this.connState = ConnectionState.Authenticating;
       const params = new HandshakeResponseParams();
@@ -247,8 +284,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   private async queryOwned(scope: MySqlCommandScope, sql: string): Promise<QueryResult> {
-    const channel = this.requireOwnedChannel(scope);
     const command = buildComQuery(sql);
+    return this.bufferedCommandOwned(scope, command,
+      (channel: PacketChannel): Promise<QueryResult> => parseResultSet(channel, this.clientCaps));
+  }
+
+  private async bufferedCommandOwned(scope: MySqlCommandScope, command: Uint8Array,
+    parse: (channel: PacketChannel) => Promise<QueryResult>): Promise<QueryResult> {
+    const channel = this.requireOwnedChannel(scope);
     let startedAtMs: number = 0;
     let reading = false;
     this.connState = ConnectionState.Querying;
@@ -260,7 +303,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       this.queryWrite = channel.writePacket(command);
       await this.queryWrite;
       reading = true;
-      const result = await parseResultSet(channel, this.clientCaps);
+      const result = await parse(channel);
       result.executionTimeMs = monotonicNowMs() - startedAtMs;
       if (this.state !== ConnectionState.Closed) {
         this.status.autocommit = result.autocommit;
@@ -302,8 +345,16 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   private async queryStreamOwned(scope: MySqlCommandScope, sql: string, executionOptions: QueryOptions,
     sink: QueryResultSink): Promise<QueryExecutionSummary> {
-    const channel = this.requireOwnedChannel(scope);
     const command = buildComQuery(sql);
+    return this.streamCommandOwned(scope, command, sink,
+      (channel: PacketChannel, guarded: QueryResultSink): Promise<QueryExecutionSummary> =>
+        parseQueryStream(channel, this.clientCaps, executionOptions, guarded, this.status));
+  }
+
+  private async streamCommandOwned(scope: MySqlCommandScope, command: Uint8Array, sink: QueryResultSink,
+    parse: (channel: PacketChannel, guarded: QueryResultSink) => Promise<QueryExecutionSummary>
+  ): Promise<QueryExecutionSummary> {
+    const channel = this.requireOwnedChannel(scope);
     const operationSink = new OperationResultSink(sink, (): void => {
       this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
     });
@@ -322,8 +373,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       if (this.state !== ConnectionState.Closed) {
         this.commandGate.setPhase(scope, MySqlCommandPhase.Streaming);
       }
-      const summary = await parseQueryStream(channel, this.clientCaps,
-        executionOptions, operationSink, this.status);
+      const summary = await parse(channel, operationSink);
       if (!summary.statusKnown) {
         try {
           await this.refreshSessionStatus(scope, summary.synchronizationDeadlineMs);
@@ -435,6 +485,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
     const task = this.cancelCurrentQuery(scope, this.cancellationHandle, this.queryWrite);
     this.cancelTask = task;
+    if (this.preparedOperation !== null && this.preparedOperation.scope === scope) {
+      this.preparedOperation.cancellations.push(task);
+    }
     const settled = (): void => {
       this.cancelTask = null;
       this.releaseCompletedCommand();
@@ -565,6 +618,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       this.closePending = true;
       this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
       this.closing = this.closeWithScope(scope, ownsScope, polite);
+      const prepared = this.preparedOperation;
+      if (prepared !== null && prepared.scope === scope) prepared.closeResult = this.closing;
     }
     return this.closing;
   }
@@ -724,6 +779,80 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.commandGate.reserve(kind);
   }
 
+  private async retirePreparedSession(error: ArkDbError): Promise<void> {
+    this.connState = ConnectionState.Closed;
+    this.status.known = false;
+    this.channel = null;
+    await this.transport.abort(error);
+  }
+
+  private async runPreparedCommand<T>(kind: MySqlCommandKind,
+    operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
+    const scope = this.reserveCommand(kind);
+    const settlement = new PreparedCommandSettlement(scope);
+    this.preparedOperation = settlement;
+    let value: T | undefined;
+    let primary: Object | null = null;
+    const cleanup: ArkDbError[] = [];
+    try {
+      let task: Promise<T>;
+      try { task = operation(scope); } catch (error) { task = Promise.reject<T>(error as Object); }
+      value = await this.awaitPreparedExecution(scope, task, MySqlExecutionOutcome.NotDispatched);
+    } catch (error) {
+      primary = error as Object;
+    }
+    const executionOutcome = primary instanceof MySqlOperationError ? primary.outcome :
+      (primary === null ? MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.NotDispatched);
+    const closeResult = settlement.closeResult;
+    if (closeResult !== null) {
+      try { await closeResult; } catch (error) {
+        if (primary === null) primary = error as Object;
+        else cleanup.push(toCleanupError(error as Object));
+      }
+    }
+    try { this.finishCommand(scope); } catch (error) {
+      cleanup.push(toCleanupError(error as Object));
+    }
+    this.preparedOperation = null;
+    if (primary !== null) {
+      throw operationFailure(primary, cleanup, executionOutcome);
+    }
+    if (cleanup.length > 0) throw operationFailure(cleanup[0], cleanup.slice(1), MySqlExecutionOutcome.Completed);
+    return value!;
+  }
+
+  private async awaitPreparedExecution<T>(scope: MySqlCommandScope, task: Promise<T>,
+    fallbackOutcome: MySqlExecutionOutcome = MySqlExecutionOutcome.Unknown): Promise<T> {
+    let value: T | undefined;
+    let primary: Object | null = null;
+    try { value = await task; } catch (error) { primary = error as Object; }
+    this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+    const cleanup = await this.settlePreparedCancellation(scope);
+    if (primary !== null) {
+      throw operationFailure(primary, cleanup, primary instanceof MySqlOperationError ?
+        primary.outcome : fallbackOutcome);
+    }
+    if (cleanup.length > 0) {
+      // Consuming SQL does not acknowledge an unknown dispatched KILL.
+      const outcome = this.retiredByCancellation ? MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.Completed;
+      throw operationFailure(cleanup[0], cleanup.slice(1), outcome);
+    }
+    return value!;
+  }
+
+  private async settlePreparedCancellation(scope: MySqlCommandScope): Promise<ArkDbError[]> {
+    const failures: ArkDbError[] = [];
+    const operation = this.preparedOperation;
+    if (operation === null || operation.scope !== scope) return failures;
+    while (operation.joinedCancellations < operation.cancellations.length) {
+      const cancellation = operation.cancellations[operation.joinedCancellations++];
+      try { await cancellation; } catch (error) {
+        failures.push(toCleanupError(error as Object));
+      }
+    }
+    return failures;
+  }
+
   private requireOwnedChannel(scope: MySqlCommandScope): PacketChannel {
     this.commandGate.assertOwner(scope);
     if (this.channel === null || (this.connState !== ConnectionState.Ready &&
@@ -767,7 +896,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     synchronizationDeadlineMs: number): Promise<void> {
     this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
     const cancellation = this.cancelTask;
-    if (cancellation !== null) await cancellation;
+    if (this.preparedOperation !== null && this.preparedOperation.scope === scope) {
+      const failures = await this.settlePreparedCancellation(scope);
+      if (failures.length > 0) {
+        throw operationFailure(failures[0], failures.slice(1), MySqlExecutionOutcome.Unknown);
+      }
+    } else if (cancellation !== null) {
+      await cancellation;
+    }
     const channel = this.requireOwnedChannel(scope);
     if (remainingSynchronizationTimeMs(synchronizationDeadlineMs, monotonicNowMs()) <= 0) {
       throw ArkDbError.protocol('Truncated result exceeded synchronization drain time budget');
@@ -840,6 +976,96 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
     return operationFailure(error, cleanupErrors,
       rejected ? MySqlExecutionOutcome.ServerRejected : MySqlExecutionOutcome.Unknown);
+  }
+}
+
+type PreparedCommandRunner = <T>(kind: MySqlCommandKind,
+  operation: (scope: MySqlCommandScope) => Promise<T>) => Promise<T>;
+
+class PreparedConnectionHost implements MySqlPreparedExecutorHost {
+  readonly commandGate: MySqlCommandGate;
+  private readChannel: () => PacketChannel | null;
+  private readCapabilities: () => number;
+  private readState: () => ConnectionState;
+  private retireSession: (error: ArkDbError) => Promise<void>;
+  private run: PreparedCommandRunner;
+  private buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions) => Promise<QueryResult>;
+  private stream: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+    sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
+
+  constructor(gate: MySqlCommandGate, readChannel: () => PacketChannel | null,
+    readCapabilities: () => number, readState: () => ConnectionState,
+    retire: (error: ArkDbError) => Promise<void>, run: PreparedCommandRunner,
+    buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions) => Promise<QueryResult>,
+    stream: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+      sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>) {
+    this.commandGate = gate;
+    this.readChannel = readChannel;
+    this.readCapabilities = readCapabilities;
+    this.readState = readState;
+    this.retireSession = retire;
+    this.run = run;
+    this.buffered = buffered;
+    this.stream = stream;
+  }
+
+  get channel(): PacketChannel | null { return this.readChannel(); }
+  get capabilities(): number { return this.readCapabilities(); }
+  get state(): ConnectionState { return this.readState(); }
+
+  retire(error: ArkDbError): Promise<void> { return this.retireSession(error); }
+
+  runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
+    return this.run<T>(kind, operation);
+  }
+
+  executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions): Promise<QueryResult> {
+    return this.buffered(scope, command, options);
+  }
+
+  streamPrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+    sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> {
+    return this.stream(scope, command, options, sink);
+  }
+}
+
+class PreparedCommandSettlement {
+  readonly scope: MySqlCommandScope;
+  readonly cancellations: Promise<QueryCancellationResult>[] = [];
+  joinedCancellations: number = 0;
+  closeResult: Promise<void> | null = null;
+
+  constructor(scope: MySqlCommandScope) {
+    this.scope = scope;
+  }
+}
+
+class PreparedPacketSource implements MysqlPacketSource {
+  private channel: PacketChannel;
+  private capabilities: number;
+
+  constructor(channel: PacketChannel, capabilities: number) {
+    this.channel = channel;
+    this.capabilities = capabilities;
+  }
+
+  async readPacket(timeoutMs: number = 0): Promise<MysqlPacket> {
+    let packet: MysqlPacket;
+    try {
+      packet = await this.channel.readPacket(timeoutMs);
+    } catch (error) {
+      throw operationFailure(error as Object, [], MySqlExecutionOutcome.Unknown);
+    }
+    if (packet.payload[0] === PacketType.ERR) prepareServerError(packet.payload, this.capabilities);
+    return packet;
+  }
+
+  async runWhileOpen<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await this.channel.runWhileOpen(operation);
+    } catch (error) {
+      throw operationFailure(error as Object, [], MySqlExecutionOutcome.Unknown);
+    }
   }
 }
 

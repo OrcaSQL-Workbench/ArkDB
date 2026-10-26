@@ -10,6 +10,7 @@ import {
   MySqlDatabaseSessionStatus, MySqlQueryExecutionSummary, MySqlQueryResultSink
 } from '../model/MySqlQueryStream';
 import { MySqlMetricsProvider } from '../metrics/MySqlMetricsProvider';
+import { MySqlConnectionFeatures } from './MySqlConnectionFeatures';
 
 export class MySqlDriverCapabilities extends DriverCapabilities {
   supportsSchemas: boolean = true;
@@ -29,6 +30,7 @@ export interface MySqlDbConnection extends CoreDbConnection {
   readonly state: ConnectionState;
   readonly serverInfo: MySqlServerInfo;
   readonly sessionStatus: MySqlDatabaseSessionStatus;
+  readonly mysqlFeatures?: MySqlConnectionFeatures;
 }
 
 export interface MySqlDbExecutionController {

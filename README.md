@@ -11,7 +11,7 @@ Native ArkTS database drivers for HarmonyOS, distributed as headless Harmony Arc
 
 The published 1.0.1 tag/HAR remains immutable. Its successful historical checks below do not validate the new split. See [shared driver contracts](docs/driver-contracts.md) for ownership, optional interfaces and compatibility changes.
 
-The current driver supports the MySQL text protocol, authentication, TCP/TLS, bounded streamed results, transactions, metadata, cancellation primitives, and server metrics. MariaDB is experimental. Prepared statements, parameter binding, pooling, and an automatically managed Worker are not implemented. Read the [usage and execution contract](mysql/README.md) before integrating it.
+The current driver supports the MySQL text protocol, optional typed prepared statements, authentication, TCP/TLS, bounded streamed results, transactions, metadata, cancellation primitives, and server metrics. MariaDB is experimental. Statement caching, pooling and an automatically managed Worker are not implemented. Read the [usage and execution contract](mysql/README.md) before integrating it.
 
 The [package guide](mysql/README.md) includes configuration defaults and examples for typed rows, errors, verified/custom-CA TLS, bounded streaming, transactions, cancellation, and providers. The [runnable example](examples/mysql-client/README.md) supplies a host-owned Worker and UI; it is not a new managed-client interface inside the driver.
 

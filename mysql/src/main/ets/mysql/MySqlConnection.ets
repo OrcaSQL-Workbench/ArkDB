@@ -39,7 +39,10 @@ import {
 import {
   MySqlExecutionOutcome, MySqlOperationError, isMySqlServerRejection
 } from './model/MySqlOperationError';
-import { MySqlPreparedExecutor } from './driver/MySqlPreparedContracts';
+import { MySqlPreparedExecutor, MySqlPreparedStatement } from './driver/MySqlPreparedContracts';
+import { MySqlConnectionFeatures } from './driver/MySqlConnectionFeatures';
+import { MySqlSession } from './driver/MySqlSession';
+import { MySqlParameter } from './model/MySqlParameter';
 import {
   MySqlPreparedExecutor as InternalPreparedExecutor, MySqlPreparedExecutorHost
 } from './command/PreparedExecutor';
@@ -53,8 +56,9 @@ import { BinaryRowDecoder } from './value/BinaryRowDecoder';
  * Not thread-safe — run one per Worker connection, requests strictly serialized.
  */
 export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
-  DbContextController, DbTransactionController, DbExecutionController {
+  DbContextController, DbTransactionController, DbExecutionController, MySqlSession {
   readonly features: DbConnectionFeatures = new DbConnectionFeatures();
+  readonly mysqlFeatures: MySqlConnectionFeatures = new MySqlConnectionFeatures();
   readonly contextPolicy: DatabaseContextPolicy = mysqlContextPolicy();
   private config: ConnectionConfig;
   private password: string;
@@ -104,6 +108,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.features.cancellation = this;
     this.features.metadata = new MySqlMetadataProvider(this);
     this.features.metrics = new MySqlServerMetricsProvider(this.features.streaming);
+    this.mysqlFeatures.prepared = new MySqlConnectionPreparedExecutor(
+      (): MySqlPreparedExecutor => this.preparedExecutor());
   }
 
   get state(): ConnectionState {
@@ -976,6 +982,27 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
     return operationFailure(error, cleanupErrors,
       rejected ? MySqlExecutionOutcome.ServerRejected : MySqlExecutionOutcome.Unknown);
+  }
+}
+
+class MySqlConnectionPreparedExecutor implements MySqlPreparedExecutor {
+  private getExecutor: () => MySqlPreparedExecutor;
+
+  constructor(getExecutor: () => MySqlPreparedExecutor) {
+    this.getExecutor = getExecutor;
+  }
+
+  async prepare(sql: string): Promise<MySqlPreparedStatement> {
+    return this.getExecutor().prepare(sql);
+  }
+
+  async execute(sql: string, parameters: MySqlParameter[], options?: QueryOptions): Promise<QueryResult> {
+    return this.getExecutor().execute(sql, parameters, options);
+  }
+
+  async executeStream(sql: string, parameters: MySqlParameter[], options: QueryOptions,
+    sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> {
+    return this.getExecutor().executeStream(sql, parameters, options, sink);
   }
 }
 

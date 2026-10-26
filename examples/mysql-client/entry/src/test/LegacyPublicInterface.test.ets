@@ -1,10 +1,10 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
-  ArkDbError, ColumnDef, ColumnInfo, ConnectionConfig, DatabaseContext, DatabaseSessionStatus,
+  ArkDbError, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionState, DatabaseContext, DatabaseSessionStatus,
   DbConnection, DbDriverFactory, DbExecutionController, DbObjectInfo, DbObjectKind, DbValueKind,
   DriverCapabilities, ForeignKeyInfo, IndexInfo, CatalogInfo, SchemaInfo, MetadataProvider,
   MySqlDriverFactory, QueryExecutionSummary, QueryOptions, QueryResult, QueryResultMeta,
-  QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation, ServerFamily,
+  QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation, ServerFamily, ServerInfo,
   ServerMetricsProvider, SqlValue
 } from '@arkdb/mysql';
 
@@ -86,6 +86,13 @@ export default function legacyPublicInterfaceTest(): void {
       expect(status.clone().autocommit).assertTrue();
       expect(foreignKey.columns.length).assertEqual(0);
     });
+
+    it('oldCustomConnectionNeedsNoNewMethods', 0, async () => {
+      const connection: DbConnection = new LegacyCustomConnection();
+      expect((await connection.query('SELECT 1')).rows.length).assertEqual(0);
+      expect(connection.sessionStatus.autocommit).assertTrue();
+      await connection.close();
+    });
   });
 }
 
@@ -149,4 +156,22 @@ class LegacyMetadataProvider implements MetadataProvider {
   async listColumns(_context: DatabaseContext, _objectName: string): Promise<ColumnInfo[]> { return []; }
   async listIndexes(_context: DatabaseContext, _objectName: string): Promise<IndexInfo[]> { return []; }
   async listForeignKeys(_context: DatabaseContext, _objectName: string): Promise<ForeignKeyInfo[]> { return []; }
+}
+
+export class LegacyCustomConnection implements DbConnection {
+  readonly state: ConnectionState = ConnectionState.Idle;
+  readonly serverInfo: ServerInfo = new ServerInfo();
+  readonly sessionStatus: DatabaseSessionStatus = new DatabaseSessionStatus();
+  async connect(): Promise<void> {}
+  async ping(): Promise<void> {}
+  async query(_sql: string): Promise<QueryResult> { return new QueryResult(); }
+  async queryStream(_sql: string, _options: QueryOptions,
+    _sink: QueryResultSink): Promise<QueryExecutionSummary> {
+    return new QueryExecutionSummary();
+  }
+  async changeContext(_context: DatabaseContext): Promise<void> {}
+  async setAutocommit(_enabled: boolean): Promise<DatabaseSessionStatus> { return this.sessionStatus; }
+  async commit(): Promise<DatabaseSessionStatus> { return this.sessionStatus; }
+  async rollback(): Promise<DatabaseSessionStatus> { return this.sessionStatus; }
+  async close(): Promise<void> {}
 }

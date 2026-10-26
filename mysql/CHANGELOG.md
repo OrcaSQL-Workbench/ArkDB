@@ -16,6 +16,13 @@
   notices when publishing the sealed single-HAR release.
 - Expose adapter-typed factory creation and optional connection features; keep
   native MySQL creation/provider helpers and public native information aliases.
+- Expose optional MySQL prepared statements, typed parameters, identifier quoting
+  and positional placeholder helpers from the single package entry. Resolve the
+  connection-owned executor lazily on every call, preserving ready/busy checks,
+  physical-session ownership and the shared streaming/cleanup pipeline.
+- Enable the built-in factory's prepared capability hint without adding required
+  methods to core or old custom connections. Add a restricted `MySqlSession`
+  borrowing interface and retain native/portable text-stream defaults.
 - Keep configuration, TCP/TLS, handshake/column details and InnoDB metrics in MySQL.
 - Add connection-owned cancellation lifetime and explicit reuse outcomes;
   retain the lower-level handle-based control-session primitive.

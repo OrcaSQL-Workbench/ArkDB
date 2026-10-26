@@ -37,6 +37,14 @@ export { ServerFamily, MySqlServerInfo, MySqlServerInfo as ServerInfo } from
 export { MySqlColumnDef, MySqlColumnDef as ColumnDef, MySqlQueryResult, MySqlQueryResult as QueryResult } from
   './src/main/ets/mysql/model/MySqlQueryResult';
 export { MySqlConnectionOptions } from './src/main/ets/mysql/driver/MySqlConnectionOptions';
+export { MySqlConnectionFeatures, requireMySqlFeatures } from
+  './src/main/ets/mysql/driver/MySqlConnectionFeatures';
+export type { MySqlSession } from './src/main/ets/mysql/driver/MySqlSession';
+export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
+  './src/main/ets/mysql/driver/MySqlPreparedContracts';
+export { MySqlParameter, MySqlParameterType } from './src/main/ets/mysql/model/MySqlParameter';
+export type { MySqlParameterValue } from './src/main/ets/mysql/model/MySqlParameter';
+export { quoteMySqlIdentifier, mysqlPlaceholders } from './src/main/ets/mysql/value/MySqlSqlHelpers';
 export { MySqlConnection, createMySqlConnection } from './src/main/ets/mysql/MySqlConnection';
 export { MySqlDriverFactory } from './src/main/ets/mysql/driver/MySqlDriverFactory';
 export { MySqlExecutionController } from './src/main/ets/mysql/execution/MySqlExecutionController';

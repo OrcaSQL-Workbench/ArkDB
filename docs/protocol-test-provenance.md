@@ -18,9 +18,10 @@ The applicable license texts are [`mysqljs/mysql/License`](https://github.com/my
 
 ## Checked primitives and binary input fixtures
 
-`MySqlParameter` and `encodeBinaryParameters()` are internal input-codec seams,
-separate from the unchanged native result union. They do not execute prepared
-commands, decode binary rows, or enable a public factory capability. Byte inputs
+`MySqlParameter` is the public typed input model; `encodeBinaryParameters()` is
+its internal codec, separate from the unchanged native result union. The codec
+does not itself execute prepared commands, decode binary rows or enable a
+factory capability. Byte inputs
 are snapshotted; the encoder revalidates inputs before allocating its output.
 The parameter list is captured before reading any value getters; appended,
 replaced or removed caller-list entries cannot change its fixed count, type
@@ -91,9 +92,9 @@ interoperability.
 capability or an additional transport. Its host supplies the existing command
 gate, physical `PacketChannel`, negotiated capabilities, lifecycle state and
 physical retirement callback. Create one owner per physical session generation;
-do not carry it across reconnect or replace its host channel. Public connection,
-factory and package-root interfaces remain unchanged and prepared support remains
-false. A standalone lifecycle-only session without an execution dispatcher keeps
+do not carry it across reconnect or replace its host channel. The lifecycle owner
+does not itself enable the public feature; the optional connection facade below
+uses the execution dispatcher. A standalone lifecycle-only session without one keeps
 its explicit `Unsupported` execution contract. The internal prepared executor
 binds its handles to the original connection's execution dispatcher.
 
@@ -150,7 +151,8 @@ cursor, long-data, caching, pooling or public capability support.
 `command/PreparedExecutor.ets` implements the internal buffered and native-stream
 contracts. The connection's protected accessor supplies its real physical
 channel, generation, existing command gate, cancellation lifetime and shared
-result pipeline; it does not expose a package-root factory or feature.
+result pipeline. That accessor remains protected; the public feature resolves it
+lazily for each method call.
 Convenience execution has no cache: one scope owns PREPARE, EXECUTE, consumption
 or synchronization of all results, and response-free CLOSE. Explicit handles
 reuse their server statement until closed or physically invalidated.
@@ -193,6 +195,25 @@ unsigned BIGINT `18446744073709551615n`, DECIMAL
 in both EOF modes. They do not establish live-server/device interoperability,
 prepared CALL/OUT support, public capability availability, cursor, long-data,
 caching, deadlines or automatic retries.
+
+## Optional public prepared capability
+
+The package entry exports `MySqlConnectionFeatures`, `requireMySqlFeatures`,
+typed parameters, prepared interfaces, identifier quoting and positional
+placeholders. Each built-in creation path supplies the optional feature without
+opening a connection. Its methods delegate to the existing ready-only accessor;
+they do not duplicate encoding, result adapters, command ownership, cancellation
+or cleanup. Core's connection has no new required methods.
+
+Public-boundary fixtures use the actual factory/connection methods and the
+existing deterministic socket boundary. They cover buffered execution, explicit
+handle reuse/close, native prepared streaming, unchanged native and portable
+text-stream defaults, busy/closed-state rejection and separate physical
+connections with recycled server IDs. Old custom implementations and data
+literals remain part of the public and single-HAR consumer suites. The consumer
+imports only `@arkdb/mysql`, checks the canonical error constructor and compiles
+the documented prepared example. These local checks are not real-device,
+live-server, publication or application-deployment evidence.
 
 ## Fixed authentication vectors
 

@@ -177,7 +177,7 @@ export async function flushPrepared(): Promise<void> {
   await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 0); });
 }
 
-function handshake(extraCapabilities: number): Uint8Array {
+export function handshake(extraCapabilities: number): Uint8Array {
   const caps = Capabilities.PROTOCOL_41 | Capabilities.LONG_PASSWORD | Capabilities.LONG_FLAG |
     Capabilities.TRANSACTIONS | Capabilities.SECURE_CONNECTION | Capabilities.PLUGIN_AUTH |
     extraCapabilities;

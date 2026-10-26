@@ -69,6 +69,59 @@ Use `CoreDbConnection`, `CoreDbDriverFactory`, `CoreQueryResultSink` and the oth
 The reserved `ServerFamily.PostgreSQL` value is retained only for source
 compatibility; it does not mean a PostgreSQL driver exists.
 
+## Optional typed prepared statements
+
+Built-in connections expose `mysqlFeatures.prepared`; the factory's
+`supportsPreparedStatements` hint is true. The native `DbConnection` adds only an
+optional `mysqlFeatures` property: old custom connections and capability literals
+need no new fields or methods. Core's minimal connection stays unchanged.
+`requireMySqlFeatures(connection)` throws the same public `ArkDbError` with
+`Unsupported` when the container is absent. Check `prepared` separately because
+an available container need not provide every optional feature.
+
+Discovering the feature does not connect or prepare anything. Call it only after
+`connect()` completes; `prepare`, `execute` and `executeStream` still reject a
+not-ready or busy connection. Saving the feature does not bypass those checks or
+transfer a statement to another physical connection or session generation.
+There is one command owner, no hidden queue and no automatic replay.
+
+The compiled quickstart module below also exports `selectBoundValue` for an
+already-connected connection. It combines a typed UInt64 value with identifier
+quoting and positional placeholders without interpolating the value into SQL.
+
+`MySqlParameter` is input-only; it does not widen the native result `SqlValue`
+union. Choose an explicit `MySqlParameterType`: Null, Boolean, Int32, Int64,
+UInt64, Float64, Decimal, Text, Binary, Date, DateTime, Timestamp, Time or Json.
+Int64/UInt64 use `bigint`; Decimal uses a canonical decimal string with at most
+65 total digits and 30 fractional digits; floating-point values must be finite.
+Temporal values use validated MySQL strings, not `Date` or implicit timezone
+conversion. Json accepts validated JSON text, not arbitrary objects. Every type
+can carry SQL NULL; Binary snapshots its `Uint8Array`. Invalid types and values
+fail before PREPARE. The command payload is bounded to 16 MiB and 65535
+parameters. A binding-count mismatch can follow PREPARE but never sends EXECUTE.
+
+`execute(sql, parameters, options?)` prepares, consumes or synchronizes the
+results, and closes its statement without caching. `executeStream` uses the same
+budgets and awaited native `QueryResultSink` callbacks as text streaming; results
+retain exact BIGINT/DECIMAL/temporal/binary mappings and native summary defaults.
+The portable `features.streaming` interface remains the separate text-stream
+adapter with optional unreported observations.
+
+For explicit reuse, `prepare(sql)` returns a `MySqlPreparedStatement` with
+`parameterCount`, defensive prepare-time `columns`, `closed`, `execute`,
+`executeStream` and idempotent `close()`. Close it when finished. Execution
+metadata can differ from prepare-time metadata, and handles remain bound to their
+original physical session. Close does not invent a server acknowledgement.
+No statement cache, pool, cursor, batch, named binding, long-data upload or
+automatic deadline is exposed; `statementTimeoutMs` remains validation-only.
+
+`MySqlSession` is a restricted borrowing interface with read-only feature,
+server-info and session-status properties plus native `query`/`queryStream`.
+It does not own connection creation/closure, implement a pool lease or enforce
+read-only SQL. `quoteMySqlIdentifier(parts)` quotes each nonempty identifier
+segment; `mysqlPlaceholders(count)` returns comma-separated `?` markers for
+1..65535 values. Neither interpolates values or implements text-protocol binding.
+
 ## Connect, query, close
 
 Run connection work in a host-owned Worker, not in an ArkUI callback. This function uses only the public package interface; the runnable sample below supplies the Worker and page.
@@ -76,8 +129,9 @@ Run connection work in a host-owned Worker, not in an ArkUI callback. This funct
 <!-- arkts-example: quickstart -->
 ```typescript
 import {
-  ConnectionConfig, DbConnection, DbDriverFactory, MySqlDriverFactory,
-  QueryResult, SslMode
+  ArkDbError, ConnectionConfig, DbConnection, DbDriverFactory, MySqlDriverFactory,
+  MySqlParameter, MySqlParameterType, QueryResult, SslMode, mysqlPlaceholders,
+  quoteMySqlIdentifier, requireMySqlFeatures
 } from '@arkdb/mysql';
 
 export async function readVersion(host: string, user: string, password: string): Promise<QueryResult> {
@@ -99,6 +153,13 @@ export async function readVersion(host: string, user: string, password: string):
   } finally {
     await connection.close();
   }
+}
+
+export async function selectBoundValue(connection: DbConnection, value: bigint): Promise<QueryResult> {
+  const prepared = requireMySqlFeatures(connection).prepared;
+  if (prepared === undefined) throw ArkDbError.unsupported('Prepared statements are unavailable.');
+  const sql = 'SELECT ' + mysqlPlaceholders(1) + ' AS ' + quoteMySqlIdentifier(['value']);
+  return prepared.execute(sql, [new MySqlParameter(MySqlParameterType.UInt64, value)]);
 }
 ```
 
@@ -438,7 +499,7 @@ MySQL also exposes these through `features.metadata` and `features.metrics`; gen
 - **Errors.** `ArkDbError` and `ArkDbErrorKind` expose common categories and server error code/SQLSTATE. No Workbench-name compatibility aliases are exported. Server messages can contain sensitive data; do not copy them into public logs.
 - **Logging.** `Logger`, `LogSink`, and the five `ArkDB.*` subsystem tags describe driver activity only. Host UI, storage, and RPC logging stay outside the driver. File output remains an explicit opt-in convenience.
 
-The factory also exposes capability flags and metadata/server-metrics providers. SQL is not portable between engines. MariaDB metrics are explicitly unsupported. Prepared statements, parameter placeholders/binding, pooling, a managed Worker client, and PostgreSQL are not implemented. Never interpolate untrusted input into SQL.
+The factory also exposes capability flags and metadata/server-metrics providers. SQL is not portable between engines. MariaDB metrics are explicitly unsupported. Typed prepared binding is available through the optional MySQL feature above; text-query interpolation, pooling, a managed Worker client and PostgreSQL are not implemented. Never interpolate untrusted input into SQL.
 
 ## Verification limits
 

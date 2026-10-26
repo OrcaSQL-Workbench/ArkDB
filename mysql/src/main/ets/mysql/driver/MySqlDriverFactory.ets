@@ -46,7 +46,7 @@ function mysqlCapabilities(): MySqlDriverCapabilities {
   capabilities.supportsStreamingResults = true;
   capabilities.supportsGracefulCancel = true;
   capabilities.supportsExplain = true;
-  capabilities.supportsPreparedStatements = false;
+  capabilities.supportsPreparedStatements = true;
   capabilities.supportsServerMetrics = true;
   return capabilities;
 }

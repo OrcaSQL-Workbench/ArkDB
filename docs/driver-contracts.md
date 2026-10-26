@@ -62,6 +62,22 @@ compatible with 1.0.1, not replacements by their minimal/generic core counterpar
 Portable consumers use the distinct `CoreDbConnection`, `CoreDbDriverFactory`,
 `CoreDbExecutionController` and `CoreMetadataProvider` exports from the same HAR.
 
+MySQL-specific prepared statements use the separate optional
+`mysqlFeatures.prepared` interface. `requireMySqlFeatures` reports a missing
+container with the canonical `Unsupported` error; callers still check the
+individual feature. The built-in factory advertises prepared support, but old
+custom connections and capability literals need no new required members.
+Typed input parameters, prepared interfaces and identifier/placeholder helpers
+are exported by `@arkdb/mysql`, not core. The public facade resolves the existing
+ready-only executor for each call instead of constructing or retaining a
+physical-session executor while disconnected. Native prepared streams retain
+native callback types; portable `features.streaming` remains text streaming.
+
+`MySqlSession` restricts borrowing to read-only feature/server/status properties
+and native query/stream methods. It is neither a read-only SQL policy nor an
+implemented transaction scope or pool lease. No future optional-feature types
+are required to use this interface.
+
 ## Semantics that must not become MySQL assumptions
 
 Catalog and schema are independent fields. `DatabaseContextPolicy` reports

@@ -2,6 +2,8 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ConnectionConfig,
   ConnectionConfigField,
+  MySqlSessionOptions,
+  ArkDbError,
   ArkDbErrorKind,
   SslMode
 } from '../../../../Index';
@@ -148,6 +150,186 @@ export default function connectionConfigTest(): void {
         expect(errors[index].message).assertEqual(issues[index].error.message);
       }
     });
+
+    it('sessionValidationRejectsIllFormedStringsInStableOrder', 0, () => {
+      const config = validConfig();
+      config.session = sessionTextOptions('\uD800', '\uDC00');
+      const issues = config.validateIssues();
+
+      expect(issues.length).assertEqual(2);
+      for (const issue of issues) {
+        expect(issue.error instanceof ArkDbError).assertTrue();
+        expect(issue.error.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(issue.invalidValue === undefined).assertTrue();
+        expect(issue.error.message.indexOf('\uD800')).assertEqual(-1);
+        expect(issue.error.message.indexOf('\uDC00')).assertEqual(-1);
+      }
+      expect(JSON.stringify(issues[0]).indexOf('"field":"session.timeZone"') >= 0).assertTrue();
+      expect(JSON.stringify(issues[1]).indexOf('"field":"session.sqlMode"') >= 0).assertTrue();
+      const errors = config.validate();
+      expect(errors.length).assertEqual(2);
+      for (let index = 0; index < errors.length; index++) {
+        expect(errors[index].kind).assertEqual(issues[index].error.kind);
+        expect(errors[index].message).assertEqual(issues[index].error.message);
+      }
+    });
+
+    it('sessionCloneRejectsIllFormedStringsAndPreservesLegacyRules', 0, () => {
+      const legacy = new ConnectionConfig();
+      legacy.port = 0;
+      legacy.connectTimeoutMs = 0;
+      legacy.ssl.clientCertPath = 'fixture-client.pem';
+      legacy.ssl.tlsVersions = ['TLSv1.1'];
+      const legacyCopy = legacy.clone();
+      expect(legacyCopy.host).assertEqual('');
+      expect(legacyCopy.user).assertEqual('');
+      expect(legacyCopy.port).assertEqual(0);
+      expect(legacyCopy.connectTimeoutMs).assertEqual(0);
+      expect(legacyCopy.ssl.clientCertPath).assertEqual('fixture-client.pem');
+      for (const options of [sessionTextOptions('\uD800', ''), sessionTextOptions('', '\uDC00')]) {
+        const config = validConfig();
+        config.session = options;
+        const failure = sessionCloneFailure(config);
+        expect(failure !== null).assertTrue();
+        if (failure !== null) {
+          expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+          expect(failure.message.indexOf('\uD800')).assertEqual(-1);
+          expect(failure.message.indexOf('\uDC00')).assertEqual(-1);
+        }
+      }
+    });
+
+    it('sessionValidationKeepsExactWellFormedOptionsAndCloneIsolation', 0, () => {
+      const absent = validConfig();
+      expect(absent.validateIssues().length).assertEqual(0);
+      expect(absent.clone().session === undefined).assertTrue();
+      absent.session = new MySqlSessionOptions();
+      expect(absent.validateIssues().length).assertEqual(0);
+      const emptyCopy = absent.clone().session;
+      expect(emptyCopy !== undefined && emptyCopy !== absent.session).assertTrue();
+      if (emptyCopy === undefined) throw new Error('Expected cloned empty session options.');
+      expect(JSON.stringify(emptyCopy)).assertEqual('{}');
+      const fixtures: SessionTextFixture[] = [
+        { timeZone: '', sqlMode: '' },
+        { timeZone: ' Unknown/Session_Zone ', sqlMode: '' },
+        { timeZone: '+08:00', sqlMode: 'ANSI_QUOTES' },
+        { timeZone: 'Z'.repeat(1024), sqlMode: 'M'.repeat(1024) },
+        { timeZone: " a'\\\u0000;\n\u8868\uD83D\uDE00 ", sqlMode: "'\"\\;\n" }
+      ];
+      for (const fixture of fixtures) {
+        const config = validConfig();
+        const options = sessionTextOptions(fixture.timeZone, fixture.sqlMode);
+        config.session = options;
+        expect(config.validateIssues().length).assertEqual(0);
+        expect(config.validate().length).assertEqual(0);
+        const copied = config.clone().session;
+        expect(copied !== undefined && copied !== options).assertTrue();
+        if (copied === undefined) throw new Error('Expected independently cloned session options.');
+        expect(copied.timeZone).assertEqual(fixture.timeZone);
+        expect(copied.sqlMode).assertEqual(fixture.sqlMode);
+        options.timeZone = 'caller-mutated-zone';
+        options.sqlMode = 'caller-mutated-mode';
+        expect(copied.timeZone).assertEqual(fixture.timeZone);
+        expect(copied.sqlMode).assertEqual(fixture.sqlMode);
+        copied.timeZone = 'copy-mutated-zone';
+        expect(options.timeZone).assertEqual('caller-mutated-zone');
+      }
+    });
+
+    it('sessionIssuesAppendAfterLegacyValidationWithoutLeakingValues', 0, () => {
+      const config = new ConnectionConfig();
+      config.port = 0;
+      config.connectTimeoutMs = 0;
+      config.ssl.clientCertPath = 'fixture-client.pem';
+      config.ssl.tlsVersions = ['TLSv1.1'];
+      config.session = sessionTextOptions('private-session-payload-\uD800', 'private-session-payload-\uDC00');
+      const issues = config.validateIssues();
+      const oldFields = [ConnectionConfigField.Host, ConnectionConfigField.Port,
+        ConnectionConfigField.User, ConnectionConfigField.ConnectTimeoutMs,
+        ConnectionConfigField.ClientCredentials, ConnectionConfigField.TlsVersions];
+      const oldMessages = ['Host is required', 'Port must be between 1 and 65535',
+        'Username is required', 'Connect timeout must be a positive integer',
+        'Client certificate and private key must be configured together', 'Unsupported TLS version: TLSv1.1'];
+      expect(issues.length).assertEqual(8);
+      for (let index = 0; index < oldFields.length; index++) {
+        expect(issues[index].field).assertEqual(oldFields[index]);
+        expect(issues[index].error.message).assertEqual(oldMessages[index]);
+      }
+      expect(JSON.stringify(issues[6]).indexOf('"field":"session.timeZone"') >= 0).assertTrue();
+      expect(JSON.stringify(issues[7]).indexOf('"field":"session.sqlMode"') >= 0).assertTrue();
+      for (const issue of issues.slice(6)) {
+        expect(issue.error.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(issue.error.message.indexOf('private-session-payload')).assertEqual(-1);
+        expect(issue.invalidValue === undefined).assertTrue();
+      }
+      const errors = config.validate();
+      expect(errors.length).assertEqual(issues.length);
+      for (let index = 0; index < errors.length; index++) {
+        expect(errors[index].kind).assertEqual(issues[index].error.kind);
+        expect(errors[index].message).assertEqual(issues[index].error.message);
+      }
+    });
+
+    it('sessionJsonDtoAcceptsEmptyAndUnknownExtraFields', 0, () => {
+      for (const source of ['{}', '{"extra":"not-a-driver-setting"}']) {
+        const config = validConfig();
+        config.session = sessionOptionsFromUntrustedJsonFixture(source);
+        expect(config.validateIssues().length).assertEqual(0);
+        const copied = config.clone().session;
+        expect(copied !== undefined && copied !== config.session).assertTrue();
+        if (copied === undefined) throw new Error('Expected cloned empty public session options.');
+        expect(JSON.stringify(copied)).assertEqual('{}');
+      }
+      const config = validConfig();
+      config.session = sessionOptionsFromUntrustedJsonFixture(
+        '{"timeZone":"Unknown/Session_Zone","sqlMode":"","extra":7}');
+      expect(config.validateIssues().length).assertEqual(0);
+      const copied = config.clone().session;
+      if (copied === undefined) throw new Error('Expected a cloned public session DTO.');
+      expect(copied.timeZone).assertEqual('Unknown/Session_Zone');
+      expect(copied.sqlMode).assertEqual('');
+    });
+
+    it('sessionJsonDtoRejectsMalformedOptionsWithCanonicalCloneErrors', 0, () => {
+      const fixtures: SessionJsonFixture[] = [
+        { source: 'null', fields: ['session'] },
+        { source: '[]', fields: ['session'] },
+        { source: '7', fields: ['session'] },
+        { source: 'false', fields: ['session'] },
+        { source: '"private-session-payload"', fields: ['session'] },
+        { source: '{"timeZone":null}', fields: ['session.timeZone'] },
+        { source: '{"timeZone":7}', fields: ['session.timeZone'] },
+        { source: '{"timeZone":false}', fields: ['session.timeZone'] },
+        { source: '{"timeZone":[]}', fields: ['session.timeZone'] },
+        { source: '{"timeZone":{}}', fields: ['session.timeZone'] },
+        { source: '{"sqlMode":null}', fields: ['session.sqlMode'] },
+        { source: '{"sqlMode":7}', fields: ['session.sqlMode'] },
+        { source: '{"sqlMode":false}', fields: ['session.sqlMode'] },
+        { source: '{"sqlMode":[]}', fields: ['session.sqlMode'] },
+        { source: '{"sqlMode":{}}', fields: ['session.sqlMode'] },
+        { source: '{"timeZone":{"private":"private-session-payload"},"sqlMode":0}',
+          fields: ['session.timeZone', 'session.sqlMode'] },
+        { source: '{"timeZone":"private-session-payload-\\ud800"}', fields: ['session.timeZone'] }
+      ];
+      for (const fixture of fixtures) {
+        const config = validConfig();
+        config.session = sessionOptionsFromUntrustedJsonFixture(fixture.source);
+        const issues = config.validateIssues();
+        expect(issues.length).assertEqual(fixture.fields.length);
+        for (let index = 0; index < issues.length; index++) {
+          expect(issues[index].error.kind).assertEqual(ArkDbErrorKind.Validation);
+          expect(JSON.stringify(issues[index]).indexOf('"field":"' + fixture.fields[index] + '"') >= 0).assertTrue();
+          expect(issues[index].invalidValue === undefined).assertTrue();
+          expect(issues[index].error.message.indexOf('private-session-payload')).assertEqual(-1);
+        }
+        const failure = sessionCloneFailure(config);
+        expect(failure !== null).assertTrue();
+        if (failure !== null) {
+          expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+          expect(failure.message.indexOf('private-session-payload')).assertEqual(-1);
+        }
+      }
+    });
   });
 }
 
@@ -156,4 +338,35 @@ function validConfig(): ConnectionConfig {
   config.host = '127.0.0.1';
   config.user = 'root';
   return config;
+}
+
+interface SessionTextFixture {
+  timeZone: string;
+  sqlMode: string;
+}
+
+interface SessionJsonFixture {
+  source: string;
+  fields: string[];
+}
+
+function sessionTextOptions(timeZone: string, sqlMode: string): MySqlSessionOptions {
+  const options = new MySqlSessionOptions();
+  options.timeZone = timeZone;
+  options.sqlMode = sqlMode;
+  return options;
+}
+
+function sessionCloneFailure(config: ConnectionConfig): ArkDbError | null {
+  try {
+    config.clone();
+  } catch (error) {
+    if (!(error instanceof ArkDbError)) throw error as Error;
+    return error;
+  }
+  return null;
+}
+
+function sessionOptionsFromUntrustedJsonFixture(source: string): MySqlSessionOptions {
+  return JSON.parse(source) as MySqlSessionOptions;
 }

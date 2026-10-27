@@ -177,13 +177,15 @@ export async function flushPrepared(): Promise<void> {
   await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 0); });
 }
 
-export function handshake(extraCapabilities: number): Uint8Array {
+export function handshake(extraCapabilities: number, connectionId: number = 42,
+  nonce: Uint8Array = new Uint8Array(20)): Uint8Array {
+  if (nonce.length !== 20) throw new Error('Handshake fixture nonce must contain 20 bytes.');
   const caps = Capabilities.PROTOCOL_41 | Capabilities.LONG_PASSWORD | Capabilities.LONG_FLAG |
     Capabilities.TRANSACTIONS | Capabilities.SECURE_CONNECTION | Capabilities.PLUGIN_AUTH |
     extraCapabilities;
-  return framePacket(new PacketWriter().writeUInt8(10).writeNulString('8.0.36').writeUInt32(42)
-    .writeBytes(new Uint8Array(8)).writeUInt8(0).writeUInt16(caps & 0xffff)
+  return framePacket(new PacketWriter().writeUInt8(10).writeNulString('8.0.36').writeUInt32(connectionId)
+    .writeBytes(nonce.subarray(0, 8)).writeUInt8(0).writeUInt16(caps & 0xffff)
     .writeUInt8(45).writeUInt16(2).writeUInt16(caps >>> 16).writeUInt8(21)
-    .writeBytes(new Uint8Array(10)).writeBytes(new Uint8Array(12)).writeUInt8(0)
+    .writeBytes(new Uint8Array(10)).writeBytes(nonce.subarray(8)).writeUInt8(0)
     .writeNulString('mysql_native_password').toUint8Array(), 0);
 }

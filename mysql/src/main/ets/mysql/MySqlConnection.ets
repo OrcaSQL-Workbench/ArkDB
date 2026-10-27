@@ -37,6 +37,9 @@ import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from './execution/MySqlCommandGate';
 import {
+  MySqlSessionFingerprint, MySqlSessionFingerprintRowDecoder, mysqlSessionFingerprint, mysqlSessionInitializationSql
+} from './execution/MySqlSessionInitialization';
+import {
   MySqlExecutionOutcome, MySqlOperationError, isMySqlServerRejection
 } from './model/MySqlOperationError';
 import { MySqlPreparedExecutor, MySqlPreparedStatement } from './driver/MySqlPreparedContracts';
@@ -93,12 +96,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.transport = transport;
     this.timers = timers;
     this.createControlConnection = createControlConnection !== undefined ? createControlConnection :
-      (): DbConnection => {
-        const controlConfig = this.config.clone();
-        controlConfig.defaultSchema = undefined;
-        controlConfig.autocommit = true;
-        return new MySqlConnection(controlConfig, this.password);
-      };
+      (): DbConnection => this.createDefaultControlConnection();
     this.features.streaming = new MySqlCoreStreamingConnection(this,
       (sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
         this.queryStreamInternal(sql, options, sink));
@@ -122,6 +120,35 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   get sessionStatus(): MySqlDatabaseSessionStatus {
     return mysqlSessionStatus(this.status);
+  }
+
+  protected createDefaultControlConnection(): MySqlConnection {
+    const controlConfig = this.config.clone();
+    controlConfig.defaultSchema = undefined;
+    controlConfig.autocommit = true;
+    controlConfig.session = undefined;
+    return new MySqlConnection(controlConfig, this.password, undefined, undefined,
+      (): DbConnection => {
+        throw ArkDbError.unsupported('A MySQL control connection cannot create another control connection.');
+      });
+  }
+
+  protected async readMySqlSessionFingerprint(scope: MySqlCommandScope): Promise<MySqlSessionFingerprint> {
+    this.commandGate.assertOwner(scope);
+    this.requireReady();
+    let fingerprint: MySqlSessionFingerprint | null = null;
+    const command = buildComQuery('SELECT DATABASE(), @@SESSION.sql_mode, ' +
+      '@@SESSION.character_set_client, @@SESSION.time_zone');
+    await this.bufferedCommandOwned(scope, command, async (channel: PacketChannel): Promise<QueryResult> => {
+      const result = await parseBufferedResultStream(channel, this.clientCaps,
+        new MySqlSessionFingerprintRowDecoder());
+      this.commandGate.assertOwner(scope);
+      fingerprint = mysqlSessionFingerprint(result);
+      return result;
+    });
+    this.commandGate.assertOwner(scope);
+    if (fingerprint === null) throw ArkDbError.protocol('The MySQL session fingerprint result was not produced.');
+    return fingerprint;
   }
 
   protected preparedExecutor(): MySqlPreparedExecutor {
@@ -177,6 +204,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     let dispatched = false;
     try {
       if (this.closePending) throw ArkDbError.cancelled('Connection closed while opening.');
+      const sessionStatements = mysqlSessionInitializationSql(this.config.session);
       this.commandGate.setPhase(scope, MySqlCommandPhase.Preparing);
       this.connState = ConnectionState.Connecting;
       this.status.known = false;
@@ -241,6 +269,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         deadline.remainingMs();
         this.status.autocommit = setup.autocommit;
         this.status.inTransaction = setup.inTransaction;
+      }
+      for (const sql of sessionStatements) {
+        this.commandGate.assertOwner(scope);
+        channel.resetSequence();
+        await deadline.wait((): Promise<void> => channel.writePacket(buildComQuery(sql)));
+        const setup = await deadline.wait((): Promise<MysqlPacket> => channel.readPacket());
+        deadline.remainingMs();
+        this.expectOk(setup);
       }
       deadline.remainingMs();
       this.connState = ConnectionState.Ready;
@@ -792,7 +828,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     await this.transport.abort(error);
   }
 
-  private async runPreparedCommand<T>(kind: MySqlCommandKind,
+  protected async runPreparedCommand<T>(kind: MySqlCommandKind,
     operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
     const scope = this.reserveCommand(kind);
     const settlement = new PreparedCommandSettlement(scope);

@@ -16,7 +16,7 @@ import {
 import { MySqlColumnDef, MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
-import { Capabilities, ColumnType, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
+import { Capabilities, Collation, ColumnType, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
 import { MockSocket, socket } from '../../../mock/NetworkKit.mock';
 import {
   PreparedGate, PreparedSocket, columnPayload, eofPayload, errorPayload, framePacket, handshake,
@@ -298,6 +298,61 @@ function malformedFingerprintCases(): FingerprintWireCase[] {
     { name: 'binary-charset', packets: fingerprintWireResult(binaryCharset, [validRow]) },
     { name: 'additional-result', packets: extraResult }
   ];
+}
+
+async function assertFingerprintRejectsStringMappedWireColumn(columnType: number, columnIndex: number,
+  text: string, decimals: number = 0): Promise<void> {
+  const peer = new PreparedSocket();
+  const connection = new SessionFingerprintConnection(sessionConfig(), '');
+  const names = ['database', 'sql_mode', 'character_set_client', 'time_zone'];
+  const columns = [
+    columnPayload(names[0], ColumnType.VARCHAR), columnPayload(names[1], ColumnType.VAR_STRING),
+    columnPayload(names[2], ColumnType.STRING), columnPayload(names[3], ColumnType.VAR_STRING)
+  ];
+  try {
+    await openFingerprintConnection(connection, peer);
+    peer.responses.push(fingerprintWireResult(columns,
+      [fingerprintWireRow([null, 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM'])]));
+    const valid = await connection.fingerprint();
+    expect(valid.database === null).assertTrue();
+    expect(valid.sqlMode).assertEqual('ANSI_QUOTES');
+    expect(valid.characterSetClient).assertEqual('utf8mb4');
+    expect(valid.timeZone).assertEqual('SYSTEM');
+
+    const nonTextColumns = columns.slice();
+    nonTextColumns[columnIndex] = columnPayload(names[columnIndex], columnType, 0, decimals, Collation.BINARY);
+    const values = ['wire_schema', 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM'];
+    values[columnIndex] = text;
+    const packets = fingerprintWireResult(nonTextColumns, [fingerprintWireRow(values)]);
+    peer.responses.push(packets, packets);
+    const ordinary = await connection.query('SELECT fingerprint_scalar_type_control');
+    expect(ordinary.columns.length).assertEqual(4);
+    expect(ordinary.rows.length).assertEqual(1);
+    expect(ordinary.rows[0].length).assertEqual(4);
+    expect(ordinary.columns[columnIndex].nativeTypeId).assertEqual(String(columnType));
+    for (const value of ordinary.rows[0]) expect(typeof value).assertEqual('string');
+    expect(ordinary.rows[0][columnIndex]).assertEqual(text);
+
+    const failure = await preparedFailureOf(connection.fingerprint());
+    expect(failure !== null).assertTrue();
+    if (failure === null) throw new Error('Fingerprint accepted a string-mapped non-text wire column.');
+    expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+    expect(failure instanceof MySqlOperationError).assertTrue();
+    if (!(failure instanceof MySqlOperationError)) {
+      throw new Error('Invalid fingerprint metadata must preserve the canonical operation failure.');
+    }
+    expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Protocol);
+    expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+    expect(failure.cleanupErrors.length).assertEqual(0);
+    expect(connection.state !== ConnectionState.Ready).assertTrue();
+    expect(connection.sessionStatus.known).assertFalse();
+    expect(peer.closeCalls).assertEqual(1);
+    expect(peer.listenerCount).assertEqual(0);
+    expect(peer.writes.length).assertEqual(3);
+    expect(peer.responses.length).assertEqual(0);
+  } finally {
+    await connection.close();
+  }
 }
 
 export default function mySqlSessionInitializationTest(): void {
@@ -632,6 +687,16 @@ export default function mySqlSessionInitializationTest(): void {
           }
         }
       }
+    });
+
+    it('probeRejectsDecimalWireMetadataDespiteStringValues', 0, async () => {
+      await assertFingerprintRejectsStringMappedWireColumn(ColumnType.DECIMAL, 1, '7.5', 1);
+      await assertFingerprintRejectsStringMappedWireColumn(ColumnType.NEWDECIMAL, 0, '12.50', 2);
+    });
+
+    it('probeRejectsTemporalWireMetadataDespiteStringValues', 0, async () => {
+      await assertFingerprintRejectsStringMappedWireColumn(ColumnType.DATE, 2, '2026-10-28');
+      await assertFingerprintRejectsStringMappedWireColumn(ColumnType.TIME, 3, '07:42:12');
     });
 
     it('probeServerRejectionDoesNotReplayAndKeepsCanonicalFailure', 0, async () => {

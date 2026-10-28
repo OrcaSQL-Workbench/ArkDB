@@ -201,6 +201,11 @@ async function emitRowResult(source: MysqlPacketSource, first: MysqlPacket, capa
       if (isExpectedTruncationError(columnTerminator, capabilities, streamState)) return null;
       throwServerError(columnTerminator.payload, capabilities);
     }
+    const metadataEofLength = (capabilities & Capabilities.PROTOCOL_41) !== 0 ? 5 : 1;
+    if (packetFirstByte(columnTerminator) !== PacketType.EOF ||
+      columnTerminator.payload.length !== metadataEofLength) {
+      throw ArkDbError.protocol('Expected the result metadata EOF packet.');
+    }
   }
 
   const meta = new QueryResultMeta();

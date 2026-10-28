@@ -85,6 +85,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private queryWrite: Promise<void> | null = null;
   private cancellationHandle: string = '';
   private createControlConnection: () => DbConnection;
+  private skipAutocommitSetup: boolean = false;
   private prepared: InternalPreparedExecutor | null = null;
   private preparedOperation: PreparedCommandSettlement | null = null;
 
@@ -127,10 +128,12 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     controlConfig.defaultSchema = undefined;
     controlConfig.autocommit = true;
     controlConfig.session = undefined;
-    return new MySqlConnection(controlConfig, this.password, undefined, undefined,
+    const control = new MySqlConnection(controlConfig, this.password, undefined, undefined,
       (): DbConnection => {
         throw ArkDbError.unsupported('A MySQL control connection cannot create another control connection.');
       });
+    control.skipAutocommitSetup = true;
+    return control;
   }
 
   protected async readMySqlSessionFingerprint(scope: MySqlCommandScope): Promise<MySqlSessionFingerprint> {
@@ -260,7 +263,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       const authStatusFlags = await this.readAuthResult(channel, deadline);
       deadline.remainingMs();
       this.applyStatusFlags(authStatusFlags);
-      if (this.status.autocommit !== this.config.autocommit) {
+      if (!this.skipAutocommitSetup && this.status.autocommit !== this.config.autocommit) {
         channel.resetSequence();
         await deadline.wait((): Promise<void> => channel.writePacket(buildComQuery(
           this.config.autocommit ? 'SET autocommit = 1' : 'SET autocommit = 0')));

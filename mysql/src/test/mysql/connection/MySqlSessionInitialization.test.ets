@@ -98,6 +98,38 @@ class SessionSocket extends PreparedSocket {
   }
 }
 
+class ZeroStatusAuthSocket extends PreparedSocket {
+  rejectSetup: boolean = false;
+  setupSql: string[] = [];
+  querySql: string[] = [];
+  private authenticated: boolean = false;
+
+  async connect(options: Object): Promise<void> {
+    await super.connect(options);
+    this.emitMessage(handshake(0, 43));
+  }
+
+  async send(options: Object): Promise<void> {
+    const packet = new Uint8Array((options as SessionSentPacket).data);
+    const authenticating = !this.authenticated;
+    if (!authenticating && packet[4] === 0x03) {
+      const sql = new PacketReader(packet.subarray(5)).readEofString();
+      if (sql.indexOf('SET ') === 0) {
+        this.setupSql.push(sql);
+        this.responses.push([this.rejectSetup ? errorPayload(1298, 'HY000') : okPayload()]);
+      } else {
+        this.querySql.push(sql);
+        this.responses.push([okPayload(0)]);
+      }
+    }
+    await super.send(options);
+    if (authenticating) {
+      this.authenticated = true;
+      this.emitMessage(framePacket(okPayload(0), 2));
+    }
+  }
+}
+
 class ObservedDefaultControlConnection extends MySqlConnection {
   observedControl: MySqlConnection | null = null;
 
@@ -355,8 +387,184 @@ async function assertFingerprintRejectsStringMappedWireColumn(columnType: number
   }
 }
 
+async function assertClassicMetadataFailure(packets: Uint8Array[], ordinaryQuery: boolean): Promise<void> {
+  const peer = new PreparedSocket();
+  const connection = new SessionFingerprintConnection(sessionConfig(), '');
+  try {
+    await openFingerprintConnection(connection, peer);
+    peer.responses.push(packets);
+    const failure = ordinaryQuery ?
+      await preparedFailureOf(connection.query('SELECT malformed_classic_metadata')) :
+      await preparedFailureOf(connection.fingerprint());
+    expect(failure !== null).assertTrue();
+    if (!(failure instanceof MySqlOperationError)) {
+      throw new Error('Malformed classic metadata must produce the canonical operation failure.');
+    }
+    expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+    expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Protocol);
+    expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+    expect(failure.cleanupErrors.length).assertEqual(0);
+    expect(connection.state !== ConnectionState.Ready).assertTrue();
+    expect(connection.sessionStatus.known).assertFalse();
+    expect(peer.closeCalls).assertEqual(1);
+    expect(peer.listenerCount).assertEqual(0);
+    expect(peer.writes.length).assertEqual(1);
+  } finally {
+    await connection.close();
+  }
+}
+
 export default function mySqlSessionInitializationTest(): void {
   describe('MySQL session initialization', () => {
+    it('controlConnectionSkipsAutocommitSetupForZeroStatusAuthentication', 0, async () => {
+      const config = sessionConfig();
+      config.autocommit = false;
+      const peer = plainSessionSocket();
+      peer.resultFlags = 0;
+      socket.nextTcp = peer;
+      const connection = new ObservedDefaultControlConnection(config, '');
+      const controlPeer = new ZeroStatusAuthSocket();
+      controlPeer.rejectSetup = true;
+      const cancellation = new CancellationObservation();
+      let running: Promise<ArkDbError | null> | null = null;
+      try {
+        await connection.connect();
+        expect(peer.setupSql[0]).assertEqual('SET autocommit = 0');
+        socket.nextTcp = controlPeer;
+        running = preparedFailureOf(connection.query('SELECT held_for_zero_status_control'));
+        await peer.queryEntered.promise;
+        cancellation.observe(connection.cancel());
+        await cancellation.finished;
+
+        expect(controlPeer.setupSql.length).assertEqual(0);
+        expect(cancellation.failure === null).assertTrue();
+        expect(cancellation.result !== null).assertTrue();
+        if (cancellation.result !== null) expect(cancellation.result.outcome).assertEqual(CancellationOutcome.Requested);
+        expect(connection.observedControl !== null).assertTrue();
+        expect(controlPeer.querySql.length).assertEqual(1);
+        expect(controlPeer.querySql[0]).assertEqual('KILL QUERY 42');
+        expect(controlPeer.writes.length).assertEqual(3);
+        expect(new SessionAuth(controlPeer.writes[0]).database === null).assertTrue();
+        expect(controlPeer.closeCalls).assertEqual(1);
+        expect(controlPeer.listenerCount).assertEqual(0);
+      } finally {
+        peer.emitResponse([okPayload(0)]);
+        await cancellation.finished;
+        if (running !== null) await running;
+        await connection.close();
+        if (socket.nextTcp === controlPeer) socket.nextTcp = null;
+      }
+    });
+
+    it('ordinaryConnectionRestoresAutocommitForZeroStatusAuthentication', 0, async () => {
+      const peer = new ZeroStatusAuthSocket();
+      socket.nextTcp = peer;
+      const connection = new MySqlConnection(sessionConfig(), '');
+      try {
+        await connection.connect();
+        expect(connection.state).assertEqual(ConnectionState.Ready);
+        expect(connection.sessionStatus.autocommit).assertTrue();
+        expect(peer.setupSql.length).assertEqual(1);
+        expect(peer.setupSql[0]).assertEqual('SET autocommit = 1');
+        expect(peer.writes.length).assertEqual(2);
+      } finally {
+        await connection.close();
+      }
+    });
+
+    it('classicResultsRejectMissingMetadataEofBeforeRows', 0, async () => {
+      const columns = fingerprintWireColumns();
+      const packets = fingerprintWireResult(columns, [
+        fingerprintWireRow(['discarded_schema', 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM']),
+        fingerprintWireRow(['accepted_schema', 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM'])
+      ]);
+      packets.splice(columns.length + 1, 1);
+      for (const ordinary of [false, true]) await assertClassicMetadataFailure(packets, ordinary);
+    });
+
+    it('classicResultsRejectInvalidMetadataTerminators', 0, async () => {
+      for (const terminator of [okPayload(), new Uint8Array([0xfe, 0, 0])]) {
+        const columns = fingerprintWireColumns();
+        const packets = fingerprintWireResult(columns,
+          [fingerprintWireRow(['wire_schema', 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM'])]);
+        packets[columns.length + 1] = terminator;
+        for (const ordinary of [false, true]) await assertClassicMetadataFailure(packets, ordinary);
+      }
+    });
+
+    it('probeAndOrdinaryQueryPreserveClassicAndDeprecatedEofRows', 0, async () => {
+      for (const deprecated of [false, true]) {
+        const peer = new PreparedSocket();
+        const connection = new SessionFingerprintConnection(sessionConfig(), '');
+        try {
+          await openFingerprintConnection(connection, peer, deprecated ? Capabilities.DEPRECATE_EOF : 0);
+          const columns = fingerprintWireColumns();
+          const first = fingerprintWireRow(['first_schema', 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM']);
+          const nullable = fingerprintWireRow([null, '', 'latin1', '+00:00']);
+          const ordinaryPackets = fingerprintWireResult(columns, [first, nullable]);
+          const probePackets = fingerprintWireResult(columns, [nullable]);
+          if (deprecated) {
+            for (const packets of [ordinaryPackets, probePackets]) {
+              packets.splice(columns.length + 1, 1);
+              packets[packets.length - 1] = new Uint8Array([0xfe, 0, 0, 2, 0, 0, 0]);
+            }
+          }
+          peer.responses.push(ordinaryPackets, probePackets);
+          const ordinary = await connection.query('SELECT valid_classic_or_deprecated_rows');
+          expect(ordinary.rows.length).assertEqual(2);
+          expect(ordinary.rows[0][0]).assertEqual('first_schema');
+          expect(ordinary.rows[1][0] === null).assertTrue();
+          const fingerprint = await connection.fingerprint();
+          expect(fingerprint.database === null).assertTrue();
+          expect(fingerprint.sqlMode).assertEqual('');
+          expect(fingerprint.characterSetClient).assertEqual('latin1');
+          expect(fingerprint.timeZone).assertEqual('+00:00');
+          expect(connection.state).assertEqual(ConnectionState.Ready);
+          expect(peer.closeCalls).assertEqual(0);
+          expect(peer.writes.length).assertEqual(2);
+          expect(peer.responses.length).assertEqual(0);
+        } finally {
+          await connection.close();
+        }
+      }
+    });
+
+    it('probeRejectsBinaryCollationForNullDatabase', 0, async () => {
+      const peer = new PreparedSocket();
+      const connection = new SessionFingerprintConnection(sessionConfig(), '');
+      try {
+        await openFingerprintConnection(connection, peer);
+        const columns = fingerprintWireColumns();
+        const nullable = fingerprintWireRow([null, 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM']);
+        const binaryColumns = columns.slice();
+        binaryColumns[0] = columnPayload('database', ColumnType.VAR_STRING, 0, 0, Collation.BINARY);
+        peer.responses.push(fingerprintWireResult(columns, [nullable]),
+          fingerprintWireResult(binaryColumns, [nullable]), fingerprintWireResult(binaryColumns, [nullable]));
+        expect((await connection.fingerprint()).database === null).assertTrue();
+        const ordinary = await connection.query('SELECT binary_collation_null_control');
+        expect(ordinary.rows.length).assertEqual(1);
+        expect(ordinary.rows[0][0] === null).assertTrue();
+        expect(ordinary.columns[0].nativeTypeId).assertEqual(String(ColumnType.VAR_STRING));
+
+        const failure = await preparedFailureOf(connection.fingerprint());
+        expect(failure !== null).assertTrue();
+        if (!(failure instanceof MySqlOperationError)) {
+          throw new Error('Binary-collated NULL fingerprint metadata must preserve the operation failure.');
+        }
+        expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(failure.cleanupErrors.length).assertEqual(0);
+        expect(connection.state !== ConnectionState.Ready).assertTrue();
+        expect(connection.sessionStatus.known).assertFalse();
+        expect(peer.closeCalls).assertEqual(1);
+        expect(peer.listenerCount).assertEqual(0);
+        expect(peer.writes.length).assertEqual(3);
+      } finally {
+        await connection.close();
+      }
+    });
+
     it('sessionOptionsAreCloned', 0, () => {
       const config = new ConnectionConfig();
       const session = new MySqlSessionOptions();

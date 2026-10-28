@@ -1,9 +1,10 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
-  ArkDbError, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionState, DatabaseContext, DatabaseSessionStatus,
+  ArkDbError, ArkDbErrorKind, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionConfigField,
+  ConnectionState, DatabaseContext, DatabaseSessionStatus,
   DbConnection, DbDriverFactory, DbExecutionController, DbObjectInfo, DbObjectKind, DbValueKind,
   DriverCapabilities, ForeignKeyInfo, IndexInfo, CatalogInfo, SchemaInfo, MetadataProvider,
-  MySqlDriverFactory, QueryExecutionSummary, QueryOptions, QueryResult, QueryResultMeta,
+  MySqlDriverFactory, MySqlSessionOptions, QueryExecutionSummary, QueryOptions, QueryResult, QueryResultMeta,
   QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation, ServerFamily, ServerInfo,
   ServerMetricsProvider, SqlValue
 } from '@arkdb/mysql';
@@ -92,6 +93,71 @@ export default function legacyPublicInterfaceTest(): void {
       expect((await connection.query('SELECT 1')).rows.length).assertEqual(0);
       expect(connection.sessionStatus.autocommit).assertTrue();
       await connection.close();
+    });
+  });
+
+  describe('Optional MySQL session options through the HAR', () => {
+    it('clonesOptionalSessionOptionsThroughThePublicPackageEntry', 0, () => {
+      const config = new ConnectionConfig();
+      config.host = 'offline.invalid';
+      config.user = 'consumer-user';
+      const session = new MySqlSessionOptions();
+      session.timeZone = 'Unknown/Session_Zone';
+      session.sqlMode = '';
+      config.session = session;
+      expect(config.validateIssues().length).assertEqual(0);
+      const copied = config.clone().session;
+      expect(copied !== undefined && copied !== session).assertTrue();
+      if (copied === undefined) throw new Error('Expected the public session options snapshot.');
+      const timeZone: string | undefined = copied.timeZone;
+      const sqlMode: string | undefined = copied.sqlMode;
+      expect(timeZone).assertEqual('Unknown/Session_Zone');
+      expect(sqlMode).assertEqual('');
+      session.timeZone = '+08:00';
+      session.sqlMode = 'ANSI_QUOTES';
+      expect(copied.timeZone).assertEqual('Unknown/Session_Zone');
+      expect(copied.sqlMode).assertEqual('');
+      copied.timeZone = 'copy-only';
+      expect(session.timeZone).assertEqual('+08:00');
+      expect(ConnectionConfigField.Session).assertEqual('session');
+      expect(ConnectionConfigField.SessionTimeZone).assertEqual('session.timeZone');
+      expect(ConnectionConfigField.SessionSqlMode).assertEqual('session.sqlMode');
+    });
+
+    it('retainsCanonicalValidationAndCloneErrorsForSessionInputs', 0, () => {
+      const config = new ConnectionConfig();
+      config.host = 'offline.invalid';
+      config.user = 'consumer-user';
+      config.session = new MySqlSessionOptions();
+      config.session.timeZone = '\uD800';
+      config.session.sqlMode = '\uDC00';
+      const issues = config.validateIssues();
+      expect(issues.length).assertEqual(2);
+      expect(issues[0].field).assertEqual(ConnectionConfigField.SessionTimeZone);
+      expect(issues[1].field).assertEqual(ConnectionConfigField.SessionSqlMode);
+      for (const issue of issues) {
+        expect(issue.error instanceof ArkDbError).assertTrue();
+        expect(issue.error.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(issue.invalidValue === undefined).assertTrue();
+      }
+      const errors = config.validate();
+      expect(errors.length).assertEqual(2);
+      expect(errors[0] instanceof ArkDbError).assertTrue();
+      expect(errors[0].kind).assertEqual(ArkDbErrorKind.Validation);
+      let failure: ArkDbError | null = null;
+      try {
+        config.clone();
+      } catch (error) {
+        if (!(error instanceof ArkDbError)) throw error as Error;
+        failure = error;
+      }
+      expect(failure !== null).assertTrue();
+      if (failure !== null) {
+        expect(failure instanceof ArkDbError).assertTrue();
+        expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(failure.message.indexOf('\uD800')).assertEqual(-1);
+        expect(failure.message.indexOf('\uDC00')).assertEqual(-1);
+      }
     });
   });
 }

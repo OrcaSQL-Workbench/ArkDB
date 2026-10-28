@@ -130,7 +130,7 @@ Run connection work in a host-owned Worker, not in an ArkUI callback. This funct
 ```typescript
 import {
   ArkDbError, ConnectionConfig, DbConnection, DbDriverFactory, MySqlDriverFactory,
-  MySqlParameter, MySqlParameterType, QueryResult, SslMode, mysqlPlaceholders,
+  MySqlParameter, MySqlParameterType, MySqlSessionOptions, QueryResult, SslMode, mysqlPlaceholders,
   quoteMySqlIdentifier, requireMySqlFeatures
 } from '@arkdb/mysql';
 
@@ -160,6 +160,13 @@ export async function selectBoundValue(connection: DbConnection, value: bigint):
   if (prepared === undefined) throw ArkDbError.unsupported('Prepared statements are unavailable.');
   const sql = 'SELECT ' + mysqlPlaceholders(1) + ' AS ' + quoteMySqlIdentifier(['value']);
   return prepared.execute(sql, [new MySqlParameter(MySqlParameterType.UInt64, value)]);
+}
+
+export function configureOptionalSession(config: ConnectionConfig): void {
+  const session = new MySqlSessionOptions();
+  session.timeZone = '+00:00';
+  session.sqlMode = 'ANSI_QUOTES';
+  config.session = session;
 }
 ```
 
@@ -214,10 +221,19 @@ Huawei's [Worker guide](https://developer.huawei.com/consumer/cn/doc/harmonyos-g
 | `ssl` | `new SslConfig()` | TLS policy and optional certificate paths |
 | `connectTimeoutMs` | `10000` | Positive integer; total connection-opening deadline |
 | `autocommit` | `true` | Requested initial autocommit state |
+| `session` | unset | Optional `MySqlSessionOptions`; `timeZone` and `sqlMode` are individually unset by default |
 
-`validate()` returns typed errors; `validateIssues()` additionally identifies the field. Neither opens a connection. `clone()` copies the options and isolates nested TLS configuration.
+`validate()` returns typed errors; `validateIssues()` additionally identifies the field. Neither opens a connection. `clone()` copies the options and isolates nested TLS and session configuration. A connection snapshots these options when constructed; later caller mutations do not change that connection.
 
-Profile IDs, names, grouping, and credential storage belong to the host. Select the driver through its factory, not a tag inside connection options. The client uses `utf8mb4`; ignored charset/compression/SQL-mode/connection-attribute switches, file-engine paths, and generic future-option bags are not exposed.
+The quickstart's optional `configureOptionalSession(config)` helper can be called before creating the connection. Omitted fields leave the server's settings unchanged; `sqlMode = ''` explicitly requests an empty SQL mode. Empty options keep the no-extra-initialization-command path. Charset remains fixed to `utf8mb4`.
+
+Session containers must be non-null, non-array objects, and present fields must be primitive, well-formed UTF-16 strings. Invalid new session inputs produce canonical `Validation` errors from `validateIssues()`/`validate()` and `clone()`, with field ids `session`, `session.timeZone`, or `session.sqlMode`. Existing non-session clone validation behavior is unchanged. Values are not trimmed, normalized, coerced, defaulted, or limited by the metadata identifier's 512-byte bound. Unknown object keys do not become driver settings.
+
+Timezone and SQL-mode semantics belong to the server: local validation accepts empty and unknown names without checking a local timezone list. A server may reject a timezone name, for example when its timezone tables are unavailable; that error propagates without a local-timezone fallback. Configured values use checked UTF-8 byte expressions, not raw SQL interpolation or backslash-escaping assumptions. Initialization completes within the existing opening deadline before `connect()` reports Ready. Failure rejects connection opening and cleans up the partial connection, retaining primary and cleanup errors.
+
+Ordinary connection/query calls do not add hidden session-fingerprint probes or replay SQL. The internal owned fingerprint reports actual database, SQL mode, client charset, and timezone, not configured defaults; it is not a new public connection method or a statement-cache/reset feature. Cancellation control connections retain authentication, TLS, and transport policy but skip the default database, `autocommit=false`, user session initialization, and recursive control creation.
+
+Profile IDs, names, grouping, and credential storage belong to the host. Select the driver through its factory, not a tag inside connection options. Top-level SQL-mode/charset/compression/connection-attribute switches, file-engine paths, and generic future-option bags are not exposed; use only the typed `session.sqlMode` option described above for SQL mode.
 
 ## Reading typed results
 

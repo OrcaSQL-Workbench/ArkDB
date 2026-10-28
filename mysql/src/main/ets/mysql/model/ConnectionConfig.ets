@@ -1,4 +1,5 @@
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
+import { MySqlSessionOptions } from './MySqlSessionOptions';
 
 /** SSL/TLS posture for a connection. String values are the canonical wire-style ids. */
 export enum SslMode {
@@ -15,7 +16,10 @@ export enum ConnectionConfigField {
   User = 'user',
   ConnectTimeoutMs = 'connectTimeoutMs',
   ClientCredentials = 'clientCredentials',
-  TlsVersions = 'tlsVersions'
+  TlsVersions = 'tlsVersions',
+  Session = 'session',
+  SessionTimeZone = 'session.timeZone',
+  SessionSqlMode = 'session.sqlMode'
 }
 
 export class ConnectionValidationIssue {
@@ -61,6 +65,7 @@ export class ConnectionConfig {
   user: string = '';
   defaultSchema?: string;
   ssl: SslConfig = new SslConfig();
+  session?: MySqlSessionOptions;
 
   connectTimeoutMs: number = 10000;
   autocommit: boolean = true;
@@ -113,6 +118,7 @@ export class ConnectionConfig {
         }
       }
     }
+    appendSessionValidationIssues(issues, this.session);
     return issues;
   }
 
@@ -123,8 +129,52 @@ export class ConnectionConfig {
     c.user = this.user;
     c.defaultSchema = this.defaultSchema;
     c.ssl = this.ssl.clone();
+    const session = this.session;
+    if (session !== undefined) {
+      const issues: ConnectionValidationIssue[] = [];
+      appendSessionValidationIssues(issues, session);
+      if (issues.length > 0) throw issues[0].error;
+      c.session = new MySqlSessionOptions();
+      c.session.timeZone = session.timeZone;
+      c.session.sqlMode = session.sqlMode;
+    }
     c.connectTimeoutMs = this.connectTimeoutMs;
     c.autocommit = this.autocommit;
     return c;
   }
+}
+
+function appendSessionValidationIssues(issues: ConnectionValidationIssue[],
+  session: MySqlSessionOptions | undefined): void {
+  if (session === undefined) return;
+  if (session === null || typeof session !== 'object' || Array.isArray(session)) {
+    issues.push(new ConnectionValidationIssue(ConnectionConfigField.Session,
+      ArkDbError.validation('Session options must be a non-null, non-array object.')));
+    return;
+  }
+  if (!isValidSessionString(session.timeZone)) {
+    issues.push(new ConnectionValidationIssue(ConnectionConfigField.SessionTimeZone,
+      ArkDbError.validation('Session timeZone must be a primitive, well-formed string.')));
+  }
+  if (!isValidSessionString(session.sqlMode)) {
+    issues.push(new ConnectionValidationIssue(ConnectionConfigField.SessionSqlMode,
+      ArkDbError.validation('Session sqlMode must be a primitive, well-formed string.')));
+  }
+}
+
+function isValidSessionString(value: string | undefined): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== 'string') return false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      if (index + 1 >= value.length) return false;
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xDC00 || next > 0xDFFF) return false;
+      index++;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      return false;
+    }
+  }
+  return true;
 }

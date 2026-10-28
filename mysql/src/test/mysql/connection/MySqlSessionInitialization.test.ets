@@ -179,6 +179,15 @@ class SessionFingerprintConnection extends MySqlConnection {
   }
 }
 
+class FinalEofFingerprintConnection extends SessionFingerprintConnection {
+  fingerprintScope: MySqlCommandScope | null = null;
+
+  protected readMySqlSessionFingerprint(scope: MySqlCommandScope): Promise<MySqlSessionFingerprint> {
+    this.fingerprintScope = scope;
+    return super.readMySqlSessionFingerprint(scope);
+  }
+}
+
 class CancellationObservation {
   result: QueryCancellationResult | null = null;
   failure: ArkDbError | null = null;
@@ -414,8 +423,107 @@ async function assertClassicMetadataFailure(packets: Uint8Array[], ordinaryQuery
   }
 }
 
+async function assertValidFinalEofWithZeroStatus(deprecated: boolean): Promise<void> {
+  const peer = new PreparedSocket();
+  const connection = new SessionFingerprintConnection(sessionConfig(), '');
+  try {
+    await openFingerprintConnection(connection, peer, deprecated ? Capabilities.DEPRECATE_EOF : 0);
+    const columns = fingerprintWireColumns();
+    const packets = fingerprintWireResult(columns,
+      [fingerprintWireRow(['wire_schema', 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM'])], 0);
+    if (deprecated) {
+      packets.splice(columns.length + 1, 1);
+      packets[packets.length - 1] = new Uint8Array([0xfe, 0, 0, 0, 0, 0, 0]);
+    }
+    peer.responses.push(packets, packets);
+    const ordinary = await connection.query('SELECT valid_zero_status_final_eof');
+    expect(ordinary.columns.length).assertEqual(4);
+    expect(ordinary.rows.length).assertEqual(1);
+    expect(ordinary.rows[0][0]).assertEqual('wire_schema');
+    expect(ordinary.statusKnown).assertTrue();
+    expect(ordinary.autocommit).assertFalse();
+    expect(connection.sessionStatus.known).assertTrue();
+    expect(connection.sessionStatus.autocommit).assertFalse();
+
+    const fingerprint = await connection.fingerprint();
+    expect(fingerprint.database).assertEqual('wire_schema');
+    expect(fingerprint.sqlMode).assertEqual('ANSI_QUOTES');
+    expect(fingerprint.characterSetClient).assertEqual('utf8mb4');
+    expect(fingerprint.timeZone).assertEqual('SYSTEM');
+    expect(connection.state).assertEqual(ConnectionState.Ready);
+    expect(connection.sessionStatus.known).assertTrue();
+    expect(connection.sessionStatus.autocommit).assertFalse();
+    expect(connection.sessionStatus.inTransaction).assertFalse();
+    expect(peer.closeCalls).assertEqual(0);
+    expect(peer.writes.length).assertEqual(2);
+    expect(peer.responses.length).assertEqual(0);
+  } finally {
+    await connection.close();
+  }
+  expect(peer.closeCalls).assertEqual(1);
+  expect(peer.listenerCount).assertEqual(0);
+}
+
+async function assertClassicFinalEofFailure(terminator: Uint8Array, ordinaryQuery: boolean): Promise<void> {
+  const peer = new PreparedSocket();
+  const connection = new FinalEofFingerprintConnection(sessionConfig(), '');
+  try {
+    await openFingerprintConnection(connection, peer);
+    const packets = fingerprintWireResult(fingerprintWireColumns(),
+      [fingerprintWireRow(['wire_schema', 'ANSI_QUOTES', 'utf8mb4', 'SYSTEM'])]);
+    packets[packets.length - 1] = terminator;
+    peer.responses.push(packets);
+    const failure = ordinaryQuery ?
+      await preparedFailureOf(connection.query('SELECT malformed_classic_final_eof')) :
+      await preparedFailureOf(connection.fingerprint());
+    expect(failure !== null).assertTrue();
+    if (!(failure instanceof MySqlOperationError)) {
+      throw new Error('Malformed final EOF must produce the canonical operation failure.');
+    }
+    expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+    expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Protocol);
+    expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+    expect(failure.cleanupErrors.length).assertEqual(0);
+    expect(connection.state !== ConnectionState.Ready).assertTrue();
+    expect(connection.sessionStatus.known).assertFalse();
+    expect(peer.closeCalls).assertEqual(1);
+    expect(peer.listenerCount).assertEqual(0);
+    expect(peer.writes.length).assertEqual(1);
+    expect(peer.responses.length).assertEqual(0);
+    if (!ordinaryQuery) {
+      const scope = connection.fingerprintScope;
+      expect(scope !== null).assertTrue();
+      if (scope === null) throw new Error('The fingerprint must use the real owned command scope.');
+      expect(scope.phase).assertEqual('settled');
+    }
+    expect((await connection.cancel()).outcome).assertEqual(CancellationOutcome.NotRunning);
+    await connection.close();
+    expect(connection.state).assertEqual(ConnectionState.Closed);
+    expect(connection.sessionStatus.known).assertFalse();
+    expect(peer.closeCalls).assertEqual(1);
+    expect(peer.listenerCount).assertEqual(0);
+    expect(peer.writes.length).assertEqual(1);
+  } finally {
+    await connection.close();
+  }
+}
+
 export default function mySqlSessionInitializationTest(): void {
   describe('MySQL session initialization', () => {
+    it('classicResultsRejectHeaderOnlyFinalEof', 0, async () => {
+      for (const deprecated of [false, true]) await assertValidFinalEofWithZeroStatus(deprecated);
+      for (const ordinary of [false, true]) {
+        await assertClassicFinalEofFailure(new Uint8Array([0xfe]), ordinary);
+      }
+    });
+
+    it('classicResultsRejectFinalEofWithoutStatusFlags', 0, async () => {
+      for (const deprecated of [false, true]) await assertValidFinalEofWithZeroStatus(deprecated);
+      for (const ordinary of [false, true]) {
+        await assertClassicFinalEofFailure(new Uint8Array([0xfe, 0, 0]), ordinary);
+      }
+    });
+
     it('controlConnectionSkipsAutocommitSetupForZeroStatusAuthentication', 0, async () => {
       const config = sessionConfig();
       config.autocommit = false;

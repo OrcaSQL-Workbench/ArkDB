@@ -100,8 +100,22 @@ can carry SQL NULL; Binary snapshots its `Uint8Array`. Invalid types and values
 fail before PREPARE. The command payload is bounded to 16 MiB and 65535
 parameters. A binding-count mismatch can follow PREPARE but never sends EXECUTE.
 
-`execute(sql, parameters, options?)` prepares, consumes or synchronizes the
-results, and closes its statement without caching. `executeStream` uses the same
+By default, `execute(sql, parameters, options?)` prepares, consumes or synchronizes
+the results, and closes its statement without caching. Set
+`config.preparedCacheSize` to an integer from 1 to 256 before constructing the
+connection to retain a bounded, private LRU of convenience statements on that
+physical connection. Missing or zero keeps the uncached path and adds no
+fingerprint probe. Each enabled lookup, including a hit, first reads the actual
+database, SQL mode, client charset and timezone in the same owned command scope.
+Exact SQL, session generation and those current values determine reuse, including
+after raw `USE` or `SET`; context changes retire old entries. This adds a round
+trip and does not promise lower latency.
+
+The cache closes only unborrowed LRU entries. If every retained entry is in use,
+the call uses a temporary statement instead of stealing a handle or exceeding
+retained capacity. Failed, retired or disconnected ownership is not returned;
+stream completion includes all results, drain, consumer acknowledgements and
+cancellation settlement. `executeStream` uses the same
 budgets and awaited native `QueryResultSink` callbacks as text streaming; results
 retain exact BIGINT/DECIMAL/temporal/binary mappings and native summary defaults.
 The portable `features.streaming` interface remains the separate text-stream
@@ -111,8 +125,9 @@ For explicit reuse, `prepare(sql)` returns a `MySqlPreparedStatement` with
 `parameterCount`, defensive prepare-time `columns`, `closed`, `execute`,
 `executeStream` and idempotent `close()`. Close it when finished. Execution
 metadata can differ from prepare-time metadata, and handles remain bound to their
-original physical session. Close does not invent a server acknowledgement.
-No statement cache, pool, cursor, batch, named binding, long-data upload or
+original physical session. Explicit handles never enter or borrow from the
+convenience cache. Close does not invent a server acknowledgement.
+No pool, cursor, batch, named binding, long-data upload or
 automatic deadline is exposed; `statementTimeoutMs` remains validation-only.
 
 `MySqlSession` is a restricted borrowing interface with read-only feature,
@@ -222,6 +237,7 @@ Huawei's [Worker guide](https://developer.huawei.com/consumer/cn/doc/harmonyos-g
 | `connectTimeoutMs` | `10000` | Positive integer; total connection-opening deadline |
 | `autocommit` | `true` | Requested initial autocommit state |
 | `session` | unset | Optional `MySqlSessionOptions`; `timeZone` and `sqlMode` are individually unset by default |
+| `preparedCacheSize` | unset; off | Integer from 0 to 256; 0 disables the private convenience-statement cache |
 
 `validate()` returns typed errors; `validateIssues()` additionally identifies the field. Neither opens a connection. `clone()` copies the options and isolates nested TLS and session configuration. A connection snapshots these options when constructed; later caller mutations do not change that connection.
 
@@ -229,9 +245,13 @@ The quickstart's optional `configureOptionalSession(config)` helper can be calle
 
 Session containers must be non-null, non-array objects, and present fields must be primitive, well-formed UTF-16 strings. Invalid new session inputs produce canonical `Validation` errors from `validateIssues()`/`validate()` and `clone()`, with field ids `session`, `session.timeZone`, or `session.sqlMode`. Existing non-session clone validation behavior is unchanged. Values are not trimmed, normalized, coerced, defaulted, or limited by the metadata identifier's 512-byte bound. Unknown object keys do not become driver settings.
 
+Invalid `preparedCacheSize` values are rejected by `validateIssues()`/`validate()`
+and `clone()` with the `preparedCacheSize` field id; values are not rounded or
+coerced. The connection snapshots the capacity with its other options.
+
 Timezone and SQL-mode semantics belong to the server: local validation accepts empty and unknown names without checking a local timezone list. A server may reject a timezone name, for example when its timezone tables are unavailable; that error propagates without a local-timezone fallback. Configured values use checked UTF-8 byte expressions, not raw SQL interpolation or backslash-escaping assumptions. Initialization completes within the existing opening deadline before `connect()` reports Ready. Failure rejects connection opening and cleans up the partial connection, retaining primary and cleanup errors.
 
-Ordinary connection/query calls do not add hidden session-fingerprint probes or replay SQL. The internal owned fingerprint reports actual database, SQL mode, client charset, and timezone, not configured defaults; it is not a new public connection method or a statement-cache/reset feature. Cancellation control connections retain authentication, TLS, and transport policy but skip the default database, `autocommit=false`, user session initialization, and recursive control creation.
+Ordinary connection/query calls do not add hidden session-fingerprint probes or replay SQL. Only enabled convenience-statement cache lookups add the owned fingerprint probe; it reports actual database, SQL mode, client charset, and timezone, not configured defaults. It is not a new public connection method or reset API. Disconnect, retirement and a new physical session invalidate private cached ownership; failed or uncertain SQL is never replayed. Cancellation control connections retain authentication, TLS, and transport policy but skip the default database, `autocommit=false`, user session initialization, and recursive control creation.
 
 Profile IDs, names, grouping, and credential storage belong to the host. Select the driver through its factory, not a tag inside connection options. Top-level SQL-mode/charset/compression/connection-attribute switches, file-engine paths, and generic future-option bags are not exposed; use only the typed `session.sqlMode` option described above for SQL mode.
 

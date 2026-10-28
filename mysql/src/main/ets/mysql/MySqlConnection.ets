@@ -174,7 +174,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
             this.streamCommandOwned(scope, command, new MySqlResultSinkAdapter(sink),
               (channel: PacketChannel, guarded: QueryResultSink): Promise<QueryExecutionSummary> =>
                 parseResultStream(new PreparedPacketSource(channel, this.clientCaps),
-                  this.clientCaps, options, guarded, new BinaryRowDecoder(), this.status)))));
+                  this.clientCaps, options, guarded, new BinaryRowDecoder(), this.status)))),
+        this.config.preparedCacheSize === undefined ? 0 : this.config.preparedCacheSize,
+        (scope: MySqlCommandScope): Promise<MySqlSessionFingerprint> =>
+          this.awaitPreparedExecution(scope, this.readMySqlSessionFingerprint(scope)));
       this.prepared = new InternalPreparedExecutor(host);
     }
     return this.prepared;
@@ -190,6 +193,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       throw ArkDbError.protocol('connect() called in state ' + this.connState);
     }
     this.commandGate.advanceGeneration();
+    this.invalidatePreparedCache();
     this.prepared = null;
     const scope = this.commandGate.reserve(MySqlCommandKind.Connect);
     try {
@@ -296,6 +300,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       Logger.e(LogTag.Conn, 'connect failed host=' + Logger.mask(this.config.host) +
         ' kind=' + String(oe.kind) + ' error=' + Logger.errorToken(oe));
       this.channel = null;
+      this.invalidatePreparedCache();
       try {
         await this.transport.abort(oe);
       } catch (cleanup) {
@@ -610,6 +615,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       this.connState = ConnectionState.Closed;
       this.status.known = false;
       this.channel = null;
+      this.invalidatePreparedCache();
       const failure = primary !== null ? toArkDbError(primary) :
         ArkDbError.cancelled('Connection retired after an unacknowledged cancellation.');
       if (primary === null) primary = failure;
@@ -686,6 +692,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.connState = ConnectionState.Closed;
     this.status.known = false;
     this.channel = null;
+    this.invalidatePreparedCache();
     if (this.opening !== null) {
       try {
         this.opening.cancel(ArkDbError.cancelled('Connection closed while opening.'));
@@ -824,10 +831,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.commandGate.reserve(kind);
   }
 
+  private invalidatePreparedCache(): void {
+    if (this.prepared !== null) this.prepared.invalidate();
+  }
+
   private async retirePreparedSession(error: ArkDbError): Promise<void> {
     this.connState = ConnectionState.Closed;
     this.status.known = false;
     this.channel = null;
+    this.invalidatePreparedCache();
     await this.transport.abort(error);
   }
 
@@ -1012,6 +1024,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     if (this.connState === ConnectionState.Error) {
       this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
       this.channel = null;
+      this.invalidatePreparedCache();
       try {
         await this.transport.close();
       } catch (cleanup) {
@@ -1050,6 +1063,7 @@ type PreparedCommandRunner = <T>(kind: MySqlCommandKind,
 
 class PreparedConnectionHost implements MySqlPreparedExecutorHost {
   readonly commandGate: MySqlCommandGate;
+  readonly preparedCacheSize: number;
   private readChannel: () => PacketChannel | null;
   private readCapabilities: () => number;
   private readState: () => ConnectionState;
@@ -1058,14 +1072,18 @@ class PreparedConnectionHost implements MySqlPreparedExecutorHost {
   private buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions) => Promise<QueryResult>;
   private stream: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
+  private fingerprint: (scope: MySqlCommandScope) => Promise<MySqlSessionFingerprint>;
 
   constructor(gate: MySqlCommandGate, readChannel: () => PacketChannel | null,
     readCapabilities: () => number, readState: () => ConnectionState,
     retire: (error: ArkDbError) => Promise<void>, run: PreparedCommandRunner,
     buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions) => Promise<QueryResult>,
     stream: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
-      sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>) {
+      sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>,
+    preparedCacheSize: number,
+    fingerprint: (scope: MySqlCommandScope) => Promise<MySqlSessionFingerprint>) {
     this.commandGate = gate;
+    this.preparedCacheSize = preparedCacheSize;
     this.readChannel = readChannel;
     this.readCapabilities = readCapabilities;
     this.readState = readState;
@@ -1073,6 +1091,7 @@ class PreparedConnectionHost implements MySqlPreparedExecutorHost {
     this.run = run;
     this.buffered = buffered;
     this.stream = stream;
+    this.fingerprint = fingerprint;
   }
 
   get channel(): PacketChannel | null { return this.readChannel(); }
@@ -1080,6 +1099,10 @@ class PreparedConnectionHost implements MySqlPreparedExecutorHost {
   get state(): ConnectionState { return this.readState(); }
 
   retire(error: ArkDbError): Promise<void> { return this.retireSession(error); }
+
+  readMySqlSessionFingerprint(scope: MySqlCommandScope): Promise<MySqlSessionFingerprint> {
+    return this.fingerprint(scope);
+  }
 
   runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
     return this.run<T>(kind, operation);

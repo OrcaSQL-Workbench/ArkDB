@@ -18,8 +18,8 @@ import {
 import { ConnectionConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperationError';
 import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
-import { MySqlQueryResultSummary } from '../../../main/ets/mysql/model/MySqlQueryStream';
-import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
+import { MySqlQueryResultSummary, MySqlResultSinkAdapter } from '../../../main/ets/mysql/model/MySqlQueryStream';
+import { Capabilities, Collation, ColumnType } from '../../../main/ets/mysql/protocol/Constants';
 import { PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
@@ -46,11 +46,11 @@ class StatementCacheConnection extends MySqlConnection {
   readonly fingerprintScopes: MySqlCommandScope[] = [];
 
   protected runPreparedCommand<T>(kind: MySqlCommandKind,
-    operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
+    operation: (scope: MySqlCommandScope) => Promise<T>, cachedConvenience: boolean = false): Promise<T> {
     return super.runPreparedCommand<T>(kind, (scope: MySqlCommandScope): Promise<T> => {
       this.operationScopes.push(scope);
       return operation(scope);
-    });
+    }, cachedConvenience);
   }
 
   protected readMySqlSessionFingerprint(scope: MySqlCommandScope): Promise<MySqlSessionFingerprint> {
@@ -118,7 +118,7 @@ class StatementCacheFixture {
 
 export default function mySqlStatementCacheTest(): void {
   describe('MySQL statement cache', () => {
-    it('enabledCacheReusesStatementAfterCurrentProbe', 0, async () => {
+    it('enabledCacheReusesStatementWithoutHiddenSql', 0, async () => {
       const config = new StatementCacheTestConfig();
       config.preparedCacheSize = 1;
       const fixture = new StatementCacheFixture(config);
@@ -133,17 +133,12 @@ export default function mySqlStatementCacheTest(): void {
         expect(commandStatementId(executions[0])).assertEqual(7);
         expect(commandStatementId(executions[1])).assertEqual(7);
         const probes = commandFrames(fixture.peer, 0x03);
-        expect(probes.length).assertEqual(2);
-        for (const probe of probes) {
-          expect(commandSql(probe)).assertEqual('SELECT DATABASE(), @@SESSION.sql_mode, ' +
-            '@@SESSION.character_set_client, @@SESSION.time_zone');
-        }
+        expect(probes.length).assertEqual(0);
         expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,23');
         expect(fixture.connection.operationScopes.length).assertEqual(2);
-        expect(fixture.connection.fingerprintScopes.length).assertEqual(2);
-        expect(fixture.connection.fingerprintScopes[0] === fixture.connection.operationScopes[0]).assertTrue();
-        expect(fixture.connection.fingerprintScopes[1] === fixture.connection.operationScopes[1]).assertTrue();
+        expect(fixture.connection.fingerprintScopes.length).assertEqual(0);
+        expect(fixture.connection.operationScopes[0] === fixture.connection.operationScopes[1]).assertFalse();
       } finally {
         await fixture.close();
       }
@@ -184,7 +179,7 @@ export default function mySqlStatementCacheTest(): void {
         await prepared.execute('DO 1', []);
         enabled.preparedCacheSize = 256;
         await prepared.execute('DO 1', []);
-        expect(retained.peer.commands().join(',')).assertEqual('3,22,23,3,23');
+        expect(retained.peer.commands().join(',')).assertEqual('22,23,23');
         expect(cacheStatementIds(retained.peer.writes, 0x17)).assertEqual('7,7');
       } finally { await retained.close(); }
       const disabled = cacheCoverageConfig(0);
@@ -226,60 +221,58 @@ export default function mySqlStatementCacheTest(): void {
         await prepared.execute('DO 1', []);
         expect(commandFrames(fixture.peer, 0x16).map(commandSql).join('|')).assertEqual('DO 1|do 1|DO 1 ');
         expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,9,7');
-        expect(cacheProbeFrames(fixture.peer).length).assertEqual(4);
+        expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
         expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
       } finally { await fixture.close(); }
     });
 
-    it('contextFingerprintChangesCacheKey', 0, async () => {
+    it('rawCommandsRetireContextEvenWhenSessionValuesAreUnchanged', 0, async () => {
       const fixture = new CacheCoverageFixture(cacheCoverageConfig(2));
-      const contexts: MySqlSessionFingerprint[] = [
-        new MySqlSessionFingerprint('wire_schema', '', 'utf8mb4', '+00:00'),
-        new MySqlSessionFingerprint('other_schema', '', 'utf8mb4', '+00:00'),
-        new MySqlSessionFingerprint('other_schema', 'ANSI_QUOTES', 'utf8mb4', '+00:00'),
-        new MySqlSessionFingerprint('other_schema', 'ANSI_QUOTES', 'latin1', '+00:00'),
-        new MySqlSessionFingerprint('other_schema', 'ANSI_QUOTES', 'latin1', '+08:00')
-      ];
+      const commands: string[] = ['DO 2', 'SELECT 1', 'CALL preserves_context()', 'DO 2'];
       try {
         const prepared = await fixture.open();
-        for (const context of contexts) {
-          fixture.peer.fingerprint = context;
+        await prepared.execute('DO 1', []);
+        for (const sql of commands) {
+          fixture.peer.textReplies.push(new CacheTextReply(sql));
+          await fixture.connection.query(sql);
           await prepared.execute('DO 1', []);
         }
         await prepared.execute('DO 1', []);
         expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,9,10,11,11');
         expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,8,9,10');
         expect(commandFrames(fixture.peer, 0x16).length).assertEqual(5);
-        expect(cacheProbeFrames(fixture.peer).length).assertEqual(6);
-        expect(fixture.connection.fingerprintScopes.length).assertEqual(6);
+        expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
+        expect(fixture.connection.fingerprintScopes.length).assertEqual(0);
+        expect(commandFrames(fixture.peer, 0x03).map(commandSql).join('|')).assertEqual(commands.join('|'));
         expect(fixture.connection.operationScopes.length).assertEqual(6);
-        for (let index = 0; index < 6; index += 1) {
-          expect(fixture.connection.fingerprintScopes[index] === fixture.connection.operationScopes[index])
-            .assertTrue();
-          if (index > 0) {
-            expect(fixture.connection.operationScopes[index] === fixture.connection.operationScopes[index - 1])
-              .assertFalse();
-          }
-        }
       } finally { await fixture.close(); }
     });
 
-    it('nullableDatabaseFingerprintIsDistinctFromAnEmptyDatabase', 0, async () => {
+    it('rawAndPortableStreamsEndTheSameCacheReuseContext', 0, async () => {
       const fixture = new CacheCoverageFixture();
       try {
         const prepared = await fixture.open();
-        fixture.peer.fingerprint = new MySqlSessionFingerprint(null, '', 'utf8mb4', '+00:00');
         await prepared.execute('DO 1', []);
-        fixture.peer.fingerprint = new MySqlSessionFingerprint('', '', 'utf8mb4', '+00:00');
+        fixture.peer.textReplies.push(new CacheTextReply('DO 2'));
+        const nativeSink = new PreparedRecordingSink();
+        await fixture.connection.queryStream('DO 2', new QueryOptions(), nativeSink);
         await prepared.execute('DO 1', []);
+        const streaming = fixture.connection.features.streaming;
+        if (streaming === undefined) throw new Error('Expected the portable streaming feature.');
+        fixture.peer.textReplies.push(new CacheTextReply('DO 3'));
+        const portableSink = new PreparedRecordingSink();
+        await streaming.queryStream('DO 3', new QueryOptions(), new MySqlResultSinkAdapter(portableSink));
         await prepared.execute('DO 1', []);
-        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,8');
-        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7');
-        expect(cacheProbeFrames(fixture.peer).length).assertEqual(3);
+        await prepared.executeStream('DO 1', [], new QueryOptions(), new PreparedRecordingSink());
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,9,9');
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,8');
+        expect(nativeSink.ends.length).assertEqual(1);
+        expect(portableSink.ends.length).assertEqual(1);
+        expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
       } finally { await fixture.close(); }
     });
 
-    it('rawUseAndSetTakeTheirCacheContextFromActualProbes', 0, async () => {
+    it('rawUseAndSetRetireWithoutRecognizingSqlOrProbingValues', 0, async () => {
       const fixture = new CacheCoverageFixture();
       try {
         const prepared = await fixture.open();
@@ -296,13 +289,12 @@ export default function mySqlStatementCacheTest(): void {
           new MySqlSessionFingerprint('other_schema', 'ANSI_QUOTES', 'utf8mb4', '+00:00')));
         await fixture.connection.query('USE other_schema');
         await prepared.execute('DO 1', []);
-        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,7,8,9');
-        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,8');
-        expect(commandFrames(fixture.peer, 0x16).length).assertEqual(3);
-        expect(cacheProbeFrames(fixture.peer).length).assertEqual(4);
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,9,10');
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,8,9');
+        expect(commandFrames(fixture.peer, 0x16).length).assertEqual(4);
+        expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
         expect(commandFrames(fixture.peer, 0x03).map(commandSql).join('|'))
-          .assertEqual(CACHE_FINGERPRINT_SQL + '|USE cache_schema|' + CACHE_FINGERPRINT_SQL + '|' +
-            modeSql + '|' + CACHE_FINGERPRINT_SQL + '|USE other_schema|' + CACHE_FINGERPRINT_SQL);
+          .assertEqual('USE cache_schema|' + modeSql + '|USE other_schema');
       } finally { await fixture.close(); }
     });
 
@@ -317,14 +309,14 @@ export default function mySqlStatementCacheTest(): void {
         expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('8,9');
         expect(commandFrames(fixture.peer, 0x16).map(commandSql).join('|')).assertEqual('DO 1|DO 2|DO 3|DO 2');
         expect(fixture.peer.commands().join(','))
-          .assertEqual('3,22,23,3,22,23,3,23,3,25,22,23,3,23,3,25,22,23,3,23');
+          .assertEqual('22,23,22,23,23,25,22,23,23,25,22,23,23');
         await fixture.close();
         expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('8,9');
         expect(commandFrames(fixture.peer, 0x01).length).assertEqual(1);
       } finally { await fixture.close(); }
     });
 
-    it('explicitHandlesNeitherBorrowNorEvictConvenienceEntries', 0, async () => {
+    it('explicitHandlesStayIndependentAndEndConvenienceContext', 0, async () => {
       const fixture = new CacheCoverageFixture();
       try {
         const prepared = await fixture.open();
@@ -334,33 +326,41 @@ export default function mySqlStatementCacheTest(): void {
         await explicit.execute([]);
         await prepared.execute('DO 1', []);
         expect(explicit.closed).assertFalse();
-        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,8,7');
-        expect(cacheProbeFrames(fixture.peer).length).assertEqual(2);
-        expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
-        await explicit.close();
-        await explicit.close();
-        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('8');
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,8,9');
+        expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7');
+        const sink = new PreparedRecordingSink();
+        await explicit.executeStream([], new QueryOptions(), sink);
         await prepared.execute('DO 1', []);
-        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,8,7,7');
-        expect(commandFrames(fixture.peer, 0x16).length).assertEqual(2);
+        expect(sink.ends.length).assertEqual(1);
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,8,9,8,10');
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,9');
+        await explicit.close();
+        await explicit.close();
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,9,8');
+        await prepared.execute('DO 1', []);
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,8,9,8,10,11');
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,9,8,10');
+        expect(commandFrames(fixture.peer, 0x16).length).assertEqual(5);
       } finally { await fixture.close(); }
     });
 
-    it('explicitServerRejectionDoesNotPoisonConvenienceRetention', 0, async () => {
+    it('explicitServerRejectionRetiresConvenienceContextWithoutPoisoningSession', 0, async () => {
       const fixture = new CacheCoverageFixture();
       try {
         const prepared = await fixture.open();
         await prepared.execute('DO 1', []);
         const explicit = await prepared.prepare('DO 1');
+        await prepared.execute('DO 1', []);
         fixture.peer.executeReplies.push([errorPayload(1064, '42000')]);
         const failure = await cacheOperationFailure(explicit.execute([]));
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
         expect(explicit.closed).assertFalse();
         await prepared.execute('DO 1', []);
-        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,7');
-        expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,9,8,10');
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,9');
         await explicit.close();
-        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('8');
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,9,8');
       } finally { await fixture.close(); }
     });
 
@@ -383,7 +383,7 @@ export default function mySqlStatementCacheTest(): void {
         await current.execute('DO 1', []);
         expect(cacheStatementIds(oldPeer.writes, 0x17)).assertEqual('7');
         expect(commandFrames(oldPeer, 0x01).length).assertEqual(1);
-        expect(replacement.peer.commands().join(',')).assertEqual('3,22,23,3,23');
+        expect(replacement.peer.commands().join(',')).assertEqual('22,23,23');
         expect(cacheStatementIds(replacement.peer.writes, 0x17)).assertEqual('7,7');
         expect(commandFrames(replacement.peer, 0x19).length).assertEqual(0);
         expect(fixture.connection.operationScopes[0] === replacement.connection.operationScopes[0]).assertFalse();
@@ -410,7 +410,7 @@ export default function mySqlStatementCacheTest(): void {
         expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
         const current = await replacement.open();
         await current.execute('DO 1', []);
-        expect(replacement.peer.commands().join(',')).assertEqual('3,22,23');
+        expect(replacement.peer.commands().join(',')).assertEqual('22,23');
         expect(cacheStatementIds(replacement.peer.writes, 0x17)).assertEqual('7');
         expect(commandFrames(replacement.peer, 0x19).length).assertEqual(0);
       } finally {
@@ -453,10 +453,10 @@ export default function mySqlStatementCacheTest(): void {
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
         expect(fixture.connection.state).assertEqual(ConnectionState.Error);
         expect(fixture.peer.closeCalls).assertEqual(1);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,23');
         const blocked = await preparedFailureOf(prepared.execute('DO 1', []));
         expect(blocked !== null && blocked.kind === ArkDbErrorKind.Protocol).assertTrue();
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,23');
       } finally { await fixture.close(); }
     });
 
@@ -479,7 +479,7 @@ export default function mySqlStatementCacheTest(): void {
         expect(cleanup.primary === fixture.peer.failure).assertTrue();
         expect(cleanup.cleanupErrors.length).assertEqual(1);
         expect(cleanup.cleanupErrors[0].kind).assertEqual(ArkDbErrorKind.Network);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,25');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,25');
         expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
       } finally {
         const closing = await preparedFailureOf(fixture.close());
@@ -497,7 +497,7 @@ export default function mySqlStatementCacheTest(): void {
         expect(failure.primary === fixture.peer.failure).assertTrue();
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
         expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,25');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,25');
         expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7');
         expect(commandFrames(fixture.peer, 0x16).map(commandSql).join('|')).assertEqual('DO 1');
         expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7');
@@ -515,7 +515,7 @@ export default function mySqlStatementCacheTest(): void {
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
         expect(failure.cleanupErrors.length).assertEqual(0);
         expect(fixture.connection.state).assertEqual(ConnectionState.Ready);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,22,25');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,22,25');
         expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7');
         await prepared.execute('DO 1', []);
         expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8');
@@ -538,84 +538,104 @@ export default function mySqlStatementCacheTest(): void {
         expect(cleanup instanceof MySqlOperationError).assertTrue();
         if (!(cleanup instanceof MySqlOperationError)) throw new Error('Expected retained idle cleanup cause.');
         expect(cleanup.primary === fixture.peer.failure).assertTrue();
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,22,25');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,22,25');
         expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
       } finally { await fixture.close(); }
     });
 
-    it('fingerprintServerRejectionNeverFallsBackToAnIdleHandle', 0, async () => {
+    it('rawServerRejectionStillRetiresThePreviousReuseContext', 0, async () => {
       const fixture = new CacheCoverageFixture();
       try {
         const prepared = await fixture.open();
         await prepared.execute('DO 1', []);
-        fixture.peer.probeReplies.push([errorPayload(1142, '42000')]);
-        const failure = await cacheOperationFailure(prepared.execute('DO 1', []));
+        fixture.peer.textReplies.push(new CacheTextReply('DO 2', [errorPayload(1142, '42000')]));
+        const failure = await cacheOperationFailure(fixture.connection.query('DO 2'));
         expect(failure.nativeCode).assertEqual(1142);
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
         expect(failure.cleanupErrors.length).assertEqual(0);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,25');
-        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,3');
+        expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
         await prepared.execute('DO 1', []);
         expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8');
         expect(commandFrames(fixture.peer, 0x16).length).assertEqual(2);
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7');
+        expect(commandFrames(fixture.peer, 0x03).map(commandSql).join('|')).assertEqual('DO 2');
       } finally { await fixture.close(); }
     });
 
-    it('fingerprintFailureKeepsItsPrimaryWhenIdleCloseFails', 0, async () => {
+    it('retiredIdleCloseFailurePreventsReplacementAndHiddenSql', 0, async () => {
       const fixture = new CacheCoverageFixture();
       try {
         const prepared = await fixture.open();
         await prepared.execute('DO 1', []);
-        fixture.peer.probeReplies.push([errorPayload(1142, '42000')]);
+        fixture.peer.textReplies.push(new CacheTextReply('DO 2'));
+        await fixture.connection.query('DO 2');
+        expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
         fixture.peer.failCommand = 0x19;
         const failure = await cacheOperationFailure(prepared.execute('DO 1', []));
-        expect(failure.nativeCode).assertEqual(1142);
-        expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
-        expect(failure.cleanupErrors.length).assertEqual(1);
-        const cleanup = failure.cleanupErrors[0];
-        expect(cleanup instanceof MySqlOperationError).assertTrue();
-        if (!(cleanup instanceof MySqlOperationError)) throw new Error('Expected cache clear CLOSE failure.');
-        expect(cleanup.primary === fixture.peer.failure).assertTrue();
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,25');
+        expect(failure.primary === fixture.peer.failure).assertTrue();
+        expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(failure.cleanupErrors.length).assertEqual(0);
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,3,25');
+        expect(commandFrames(fixture.peer, 0x16).length).assertEqual(1);
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7');
         expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
       } finally { await fixture.close(); }
     });
 
-    it('malformedActualFingerprintCannotUseConfiguredOrPreviousContext', 0, async () => {
-      for (let invalidField = 1; invalidField <= 4; invalidField += 1) {
-        const fixture = new CacheCoverageFixture();
-        try {
-          const prepared = await fixture.open();
-          await prepared.execute('DO 1', []);
-          const row = new PacketWriter();
-          const values: string[] = ['cache_schema', '', 'utf8mb4', '+00:00'];
-          for (let index = 0; index < values.length; index += 1) {
-            if (index === invalidField) row.writeUInt8(0xfb);
-            else row.writeLenEncString(values[index]);
-          }
-          const rows = invalidField === 4 ? [row.toUint8Array(), row.toUint8Array()] : [row.toUint8Array()];
-          fixture.peer.probeReplies.push(cacheFingerprintRows(rows));
-          const failure = await cacheOperationFailure(prepared.execute('DO 1', []));
-          expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
-          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
-          expect(fixture.connection.state).assertEqual(ConnectionState.Error);
-          expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3');
-          expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
-          const blocked = await preparedFailureOf(prepared.execute('DO 1', []));
-          expect(blocked !== null && blocked.kind === ArkDbErrorKind.Protocol).assertTrue();
-          expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3');
-        } finally { await fixture.close(); }
-      }
+    it('controlTransactionMetadataAndMetricsShareNonCacheAdmission', 0, async () => {
+      const fixture = new CacheCoverageFixture();
+      try {
+        const prepared = await fixture.open();
+        await prepared.execute('DO 1', []);
+        await fixture.connection.ping();
+        await prepared.execute('DO 1', []);
+        await fixture.connection.useDatabase('cache_schema');
+        await prepared.execute('DO 1', []);
+        fixture.peer.textReplies.push(new CacheTextReply('START TRANSACTION'));
+        await fixture.connection.begin();
+        await prepared.execute('DO 1', []);
+        fixture.peer.textReplies.push(new CacheTextReply('SET autocommit = 1'));
+        await fixture.connection.setAutocommit(true);
+        await prepared.execute('DO 1', []);
+        fixture.peer.textReplies.push(new CacheTextReply('COMMIT'));
+        await fixture.connection.commit();
+        await prepared.execute('DO 1', []);
+        fixture.peer.textReplies.push(new CacheTextReply('ROLLBACK'));
+        await fixture.connection.rollback();
+        await prepared.execute('DO 1', []);
+        const metadata = fixture.connection.features.metadata;
+        const metrics = fixture.connection.features.metrics;
+        if (metadata === undefined || metrics === undefined) throw new Error('Expected metadata and metrics features.');
+        fixture.peer.textReplies.push(new CacheTextReply('SHOW DATABASES',
+          [new Uint8Array([1]), columnPayload('Database'), eofPayload(), eofPayload()]));
+        const schemas = await metadata.listSchemas('');
+        await prepared.execute('DO 1', []);
+        fixture.peer.textReplies.push(new CacheTextReply("SHOW VARIABLES LIKE 'performance_schema'",
+          [new Uint8Array([2]), columnPayload('Variable_name'), columnPayload('Value'), eofPayload(),
+            new PacketWriter().writeLenEncString('performance_schema').writeLenEncString('OFF').toUint8Array(),
+            eofPayload()]));
+        const sample = await metrics.readMetrics();
+        await prepared.execute('DO 1', []);
+        expect(schemas.length).assertEqual(0);
+        expect(sample.measurements.length).assertEqual(0);
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,8,9,10,11,12,13,14,15');
+        expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,8,9,10,11,12,13,14');
+        expect(commandFrames(fixture.peer, 0x16).length).assertEqual(9);
+        expect(commandFrames(fixture.peer, 0x03).map(commandSql).join('|'))
+          .assertEqual("START TRANSACTION|SET autocommit = 1|COMMIT|ROLLBACK|SHOW DATABASES|" +
+            "SHOW VARIABLES LIKE 'performance_schema'");
+        expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
+      } finally { await fixture.close(); }
     });
 
     it('allBorrowedUsesTemporaryHandle', 0, async () => {
       const fixture = new CacheOwnedFixture(1,
         [prepareResponse(7), prepareResponse(8), prepareResponse(9), [okPayload()], prepareResponse(10)]);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       try {
-        const retained = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
-        const firstTemporary = await fixture.cache.borrow(fixture.scope, 'DO 2', context);
-        const secondTemporary = await fixture.cache.borrow(fixture.scope, 'DO 3', context);
+        const retained = await fixture.cache.borrow(fixture.scope, 'DO 1');
+        const firstTemporary = await fixture.cache.borrow(fixture.scope, 'DO 2');
+        const secondTemporary = await fixture.cache.borrow(fixture.scope, 'DO 3');
         expect(retained.statement.closed).assertFalse();
         expect(firstTemporary.statement.closed).assertFalse();
         expect(secondTemporary.statement.closed).assertFalse();
@@ -625,11 +645,11 @@ export default function mySqlStatementCacheTest(): void {
         expect(secondTemporary.statement.closed).assertTrue();
         expect(retained.statement.closed).assertFalse();
         await fixture.cache.release(fixture.scope, retained, true);
-        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
+        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1');
         expect(hit.statement === retained.statement).assertTrue();
         await fixture.execute(hit);
         await fixture.cache.release(fixture.scope, hit, true);
-        const replacement = await fixture.cache.borrow(fixture.scope, 'DO 4', context);
+        const replacement = await fixture.cache.borrow(fixture.scope, 'DO 4');
         expect(retained.statement.closed).assertTrue();
         await fixture.cache.release(fixture.scope, replacement, true);
         await fixture.cache.clearOwned(fixture.scope);
@@ -642,20 +662,19 @@ export default function mySqlStatementCacheTest(): void {
 
     it('retiredBorrowKeepsItsCapacityUntilTheOwnerReturnsIt', 0, async () => {
       const fixture = new CacheOwnedFixture(1, [prepareResponse(7), prepareResponse(8), prepareResponse(9)]);
-      const before = new MySqlSessionFingerprint('before', '', 'utf8mb4', '+00:00');
-      const after = new MySqlSessionFingerprint('after', '', 'utf8mb4', '+00:00');
       try {
-        const old = await fixture.cache.borrow(fixture.scope, 'DO 1', before);
-        const temporary = await fixture.cache.borrow(fixture.scope, 'DO 1', after);
+        const old = await fixture.cache.borrow(fixture.scope, 'DO 1');
+        fixture.cache.retireOwned(fixture.scope);
+        const temporary = await fixture.cache.borrow(fixture.scope, 'DO 1');
         await fixture.cache.release(fixture.scope, temporary, true);
         expect(temporary.statement.closed).assertTrue();
         expect(old.statement.closed).assertFalse();
         expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('8');
         await fixture.cache.release(fixture.scope, old, true);
         expect(old.statement.closed).assertTrue();
-        const current = await fixture.cache.borrow(fixture.scope, 'DO 1', after);
+        const current = await fixture.cache.borrow(fixture.scope, 'DO 1');
         await fixture.cache.release(fixture.scope, current, true);
-        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1', after);
+        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1');
         expect(hit.statement === current.statement).assertTrue();
         await fixture.cache.release(fixture.scope, hit, true);
         await fixture.cache.clearOwned(fixture.scope);
@@ -667,10 +686,9 @@ export default function mySqlStatementCacheTest(): void {
 
     it('temporaryCloseFailureRetiresTheRetainedPhysicalHandleToo', 0, async () => {
       const fixture = new CacheOwnedFixture(1, [prepareResponse(7), prepareResponse(8)]);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       try {
-        const retained = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
-        const temporary = await fixture.cache.borrow(fixture.scope, 'DO 2', context);
+        const retained = await fixture.cache.borrow(fixture.scope, 'DO 1');
+        const temporary = await fixture.cache.borrow(fixture.scope, 'DO 2');
         fixture.host.transport.failCommand = 0x19;
         const failure = await cacheOperationFailure(fixture.cache.release(fixture.scope, temporary, true));
         expect(failure.primary === fixture.host.transport.failure).assertTrue();
@@ -679,7 +697,7 @@ export default function mySqlStatementCacheTest(): void {
         expect(retained.statement.closed).assertTrue();
         expect(temporary.statement.closed).assertTrue();
         await fixture.cache.release(fixture.scope, retained, false);
-        const blocked = await preparedFailureOf(fixture.cache.borrow(fixture.scope, 'DO 3', context));
+        const blocked = await preparedFailureOf(fixture.cache.borrow(fixture.scope, 'DO 3'));
         expect(blocked !== null && blocked.kind === ArkDbErrorKind.Protocol).assertTrue();
         expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('8');
         expect(fixture.host.transport.writes.filter((frame: Uint8Array): boolean => frame[4] === 0x16).length)
@@ -689,15 +707,14 @@ export default function mySqlStatementCacheTest(): void {
 
     it('temporaryPrepareRejectionCannotStealTheBorrowedRetainedEntry', 0, async () => {
       const fixture = new CacheOwnedFixture(1, [prepareResponse(7), [errorPayload(1295, 'HY000')]]);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       try {
-        const retained = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
-        const failure = await cacheOperationFailure(fixture.cache.borrow(fixture.scope, 'DO 2', context));
+        const retained = await fixture.cache.borrow(fixture.scope, 'DO 1');
+        const failure = await cacheOperationFailure(fixture.cache.borrow(fixture.scope, 'DO 2'));
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
         expect(failure.nativeCode).assertEqual(1295);
         expect(retained.statement.closed).assertFalse();
         await fixture.cache.release(fixture.scope, retained, true);
-        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
+        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1');
         expect(hit.statement === retained.statement).assertTrue();
         await fixture.cache.release(fixture.scope, hit, true);
         expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('');
@@ -709,14 +726,24 @@ export default function mySqlStatementCacheTest(): void {
     it('foreignOrAlreadySettledBorrowsCannotCloseAnOwnedEntry', 0, async () => {
       const fixture = new CacheOwnedFixture(1, [prepareResponse(7)]);
       const other = new MySqlStatementCache(1, fixture.host.commandGate, fixture.session);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       try {
-        const borrowed = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
+        const borrowed = await fixture.cache.borrow(fixture.scope, 'DO 1');
+        const foreignGate = new MySqlCommandGate();
+        const foreignScope = foreignGate.reserve(MySqlCommandKind.Query);
+        let retirement: ArkDbError | null = null;
+        try { fixture.cache.retireOwned(foreignScope); } catch (error) {
+          if (!(error instanceof ArkDbError)) throw error as Error;
+          retirement = error;
+        } finally { foreignGate.release(foreignScope); }
+        expect(retirement !== null && retirement.kind === ArkDbErrorKind.Protocol).assertTrue();
         const foreign = await preparedFailureOf(other.release(fixture.scope, borrowed, false));
         expect(foreign !== null && foreign.kind === ArkDbErrorKind.Protocol).assertTrue();
         expect(borrowed.statement.closed).assertFalse();
         expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('');
-        await fixture.cache.release(fixture.scope, borrowed, false);
+        await fixture.cache.release(fixture.scope, borrowed, true);
+        const reused = await fixture.cache.borrow(fixture.scope, 'DO 1');
+        expect(reused.statement === borrowed.statement).assertTrue();
+        await fixture.cache.release(fixture.scope, reused, false);
         const duplicate = await preparedFailureOf(fixture.cache.release(fixture.scope, borrowed, false));
         expect(duplicate !== null && duplicate.kind === ArkDbErrorKind.Protocol).assertTrue();
         expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('7');
@@ -725,12 +752,11 @@ export default function mySqlStatementCacheTest(): void {
 
     it('anAlreadyClosedRetainedHandleIsNotReusedOrClosedTwice', 0, async () => {
       const fixture = new CacheOwnedFixture(1, [prepareResponse(7), prepareResponse(8)]);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       try {
-        const old = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
+        const old = await fixture.cache.borrow(fixture.scope, 'DO 1');
         await fixture.cache.release(fixture.scope, old, true);
         await fixture.session.closeOwned(fixture.scope, old.statement);
-        const replacement = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
+        const replacement = await fixture.cache.borrow(fixture.scope, 'DO 1');
         expect(replacement.statement === old.statement).assertFalse();
         expect(old.statement.closed).assertTrue();
         await fixture.cache.release(fixture.scope, replacement, true);
@@ -741,10 +767,9 @@ export default function mySqlStatementCacheTest(): void {
 
     it('borrowCannotBeReusedUntilOwnedExecutionAndItsConsumerAckSettle', 0, async () => {
       const fixture = new CacheOwnedFixture(1, [prepareResponse(7), binaryIntResult([42])]);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       const entered = new PreparedGate();
       const acknowledgement = new PreparedGate();
-      const borrowed = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
+      const borrowed = await fixture.cache.borrow(fixture.scope, 'DO 1');
       const executing = fixture.session.executeOwned(fixture.scope, borrowed.statement, encodeBinaryParameters([]),
         async (command: Uint8Array): Promise<MySqlQueryResult> => {
           const result = await cacheOwnedResult(fixture.host, fixture.scope, command);
@@ -755,14 +780,14 @@ export default function mySqlStatementCacheTest(): void {
       const settlement = preparedFailureOf(executing);
       try {
         await entered.promise;
-        const overlapping = await preparedFailureOf(fixture.cache.borrow(fixture.scope, 'DO 1', context));
+        const overlapping = await preparedFailureOf(fixture.cache.borrow(fixture.scope, 'DO 1'));
         expect(overlapping !== null && overlapping.kind === ArkDbErrorKind.Protocol).assertTrue();
         expect(fixture.host.transport.writes.length).assertEqual(2);
         expect(borrowed.statement.closed).assertFalse();
         acknowledgement.release();
         expect((await executing).rows[0][0]).assertEqual(42);
         await fixture.cache.release(fixture.scope, borrowed, true);
-        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
+        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1');
         expect(hit.statement === borrowed.statement).assertTrue();
         await fixture.cache.release(fixture.scope, hit, true);
         await fixture.cache.clearOwned(fixture.scope);
@@ -777,10 +802,9 @@ export default function mySqlStatementCacheTest(): void {
     it('temporaryExecuteRejectionClosesOnlyTheTemporaryHandle', 0, async () => {
       const fixture = new CacheOwnedFixture(1,
         [prepareResponse(7), prepareResponse(8), [errorPayload(1064, '42000')], [okPayload()]]);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       try {
-        const retained = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
-        const temporary = await fixture.cache.borrow(fixture.scope, 'DO 2', context);
+        const retained = await fixture.cache.borrow(fixture.scope, 'DO 1');
+        const temporary = await fixture.cache.borrow(fixture.scope, 'DO 2');
         const failure = await preparedFailureOf(fixture.execute(temporary));
         expect(failure !== null).assertTrue();
         if (failure === null) throw new Error('Expected the consumed temporary execution rejection.');
@@ -791,7 +815,7 @@ export default function mySqlStatementCacheTest(): void {
         expect(temporary.statement.closed).assertTrue();
         expect(retained.statement.closed).assertFalse();
         await fixture.cache.release(fixture.scope, retained, true);
-        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1', context);
+        const hit = await fixture.cache.borrow(fixture.scope, 'DO 1');
         expect(hit.statement === retained.statement).assertTrue();
         await fixture.execute(hit);
         await fixture.cache.release(fixture.scope, hit, true);
@@ -824,31 +848,32 @@ export default function mySqlStatementCacheTest(): void {
         expect(failure.primary === fixture.peer.failure).assertTrue();
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
         expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,22');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,22');
         expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
         const blocked = await preparedFailureOf(prepared.execute('DO 2', []));
         expect(blocked !== null && blocked.kind === ArkDbErrorKind.Protocol).assertTrue();
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,22');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,22');
       } finally { await fixture.close(); }
     });
 
-    it('fingerprintWriteUncertaintyCannotReplayOrReuseThePreviousContext', 0, async () => {
+    it('rawWriteUncertaintyCannotReplayOrReuseThePreviousContext', 0, async () => {
       const fixture = new CacheCoverageFixture();
       try {
         const prepared = await fixture.open();
         await prepared.execute('DO 1', []);
         fixture.peer.failCommand = 0x03;
-        const failure = await cacheOperationFailure(prepared.execute('DO 1', []));
+        fixture.peer.textReplies.push(new CacheTextReply('DO 2'));
+        const failure = await cacheOperationFailure(fixture.connection.query('DO 2'));
         expect(failure.primary === fixture.peer.failure).assertTrue();
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
         expect(fixture.connection.state).assertEqual(ConnectionState.Error);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,3');
         expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
         expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7');
       } finally { await fixture.close(); }
     });
 
-    it('probeCancellationSettlesBeforeCacheLookupAndExecution', 0, async () => {
+    it('rawCancellationHoldsAdmissionAndRetiresTheOldCacheContext', 0, async () => {
       await assertCacheCancellationBarrier(0x03);
     });
 
@@ -856,15 +881,15 @@ export default function mySqlStatementCacheTest(): void {
       await assertCacheCancellationBarrier(0x17);
     });
 
-    it('unknownProbeCancellationRetiresBeforeLookupAndForbidsReconnect', 0, async () => {
+    it('unknownCachedExecuteCancellationRetiresAndForbidsReconnect', 0, async () => {
       const control = new CacheControlConnection();
       const fixture = new CacheCoverageFixture(cacheCoverageConfig(1), (): DbConnection => control);
       const prepared = await fixture.open();
       await prepared.execute('DO 1', []);
-      fixture.peer.holdCommand = 0x03;
-      const probeEntered = cacheCommandGate(fixture.peer, 0x03);
+      fixture.peer.holdCommand = 0x17;
+      const executeEntered = cacheCommandGate(fixture.peer, 0x17);
       const running = preparedFailureOf(prepared.execute('DO 1', []));
-      await probeEntered.promise;
+      await executeEntered.promise;
       control.peer.holdCommand = 0x03;
       control.peer.textReplies.push(new CacheTextReply('KILL QUERY 42'));
       const killEntered = cacheCommandGate(control.peer, 0x03);
@@ -875,7 +900,7 @@ export default function mySqlStatementCacheTest(): void {
         fixture.peer.releaseHeldResponse();
         await flushPrepared();
         expect(commandFrames(fixture.peer, 0x16).length).assertEqual(1);
-        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7');
+        expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,7');
         control.peer.emitError();
         interrupted = true;
         const cancelled = await cancellation;
@@ -889,13 +914,13 @@ export default function mySqlStatementCacheTest(): void {
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
         expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
         expect(control.state).assertEqual(ConnectionState.Closed);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,23');
         expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
         const blocked = await preparedFailureOf(prepared.execute('DO 1', []));
         expect(blocked !== null && blocked.kind === ArkDbErrorKind.Protocol).assertTrue();
         const reconnect = await preparedFailureOf(fixture.connection.connect());
         expect(reconnect !== null && reconnect.kind === ArkDbErrorKind.Protocol).assertTrue();
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,23');
       } finally {
         if (!interrupted) control.peer.emitError();
         await fixture.close();
@@ -904,7 +929,7 @@ export default function mySqlStatementCacheTest(): void {
       }
     });
 
-    it('streamConsumerAckRetainsOwnershipAndRejectsBusyBeforeAnyNewProbe', 0, async () => {
+    it('streamConsumerAckRejectsBusyWithoutRetiringTheBorrow', 0, async () => {
       const fixture = new CacheCoverageFixture();
       const prepared = await fixture.open();
       fixture.peer.executeReplies.push(binaryIntResult([42]));
@@ -916,15 +941,20 @@ export default function mySqlStatementCacheTest(): void {
         await sink.entered.promise;
         expect(sink.chunks[0].rows[0][0]).assertEqual(42);
         expect(settled).assertFalse();
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23');
         const execute = await preparedFailureOf(prepared.execute('DO 1', []));
         const prepare = await preparedFailureOf(prepared.prepare('DO 2'));
         const ping = await preparedFailureOf(fixture.connection.ping());
+        const raw = await preparedFailureOf(fixture.connection.query('DO 2'));
+        const stream = await preparedFailureOf(fixture.connection.queryStream(
+          'DO 2', new QueryOptions(), new PreparedRecordingSink()));
         expect(execute !== null && execute.kind === ArkDbErrorKind.Protocol).assertTrue();
         expect(prepare !== null && prepare.kind === ArkDbErrorKind.Protocol).assertTrue();
         expect(ping !== null && ping.kind === ArkDbErrorKind.Protocol).assertTrue();
-        expect(cacheProbeFrames(fixture.peer).length).assertEqual(1);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23');
+        expect(raw !== null && raw.kind === ArkDbErrorKind.Protocol).assertTrue();
+        expect(stream !== null && stream.kind === ArkDbErrorKind.Protocol).assertTrue();
+        expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23');
         sink.acknowledgement.release();
         expect((await running) === null).assertTrue();
         await prepared.execute('DO 1', []);
@@ -934,8 +964,7 @@ export default function mySqlStatementCacheTest(): void {
         expect(fixture.connection.operationScopes.length).assertEqual(2);
         expect(fixture.connection.operationScopes[0].kind).assertEqual(MySqlCommandKind.QueryStream);
         expect(fixture.connection.operationScopes[1].kind).assertEqual(MySqlCommandKind.Query);
-        expect(fixture.connection.fingerprintScopes[0] === fixture.connection.operationScopes[0]).assertTrue();
-        expect(fixture.connection.fingerprintScopes[1] === fixture.connection.operationScopes[1]).assertTrue();
+        expect(fixture.connection.fingerprintScopes.length).assertEqual(0);
       } finally {
         sink.acknowledgement.release();
         await fixture.close();
@@ -962,10 +991,10 @@ export default function mySqlStatementCacheTest(): void {
         expect(sink.truncations.length).assertEqual(1);
         expect(sink.truncations[0].reason).assertEqual('rowLimit');
         expect(sink.ends.length).assertEqual(0);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23');
         const blocked = await preparedFailureOf(prepared.execute('DO 1', []));
         expect(blocked !== null && blocked.kind === ArkDbErrorKind.Protocol).assertTrue();
-        expect(cacheProbeFrames(fixture.peer).length).assertEqual(1);
+        expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
         fixture.peer.releaseHeldTail();
         const result = await execution;
         expect(result.resultSetCount).assertEqual(2);
@@ -999,11 +1028,11 @@ export default function mySqlStatementCacheTest(): void {
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
         expect(fixture.connection.state).assertEqual(ConnectionState.Error);
         expect(fixture.connection.sessionStatus.known).assertFalse();
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23');
         expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
         const blocked = await preparedFailureOf(prepared.execute('DO 1', []));
         expect(blocked !== null && blocked.kind === ArkDbErrorKind.Protocol).assertTrue();
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23');
       } finally { await fixture.close(); }
     });
 
@@ -1034,10 +1063,9 @@ export default function mySqlStatementCacheTest(): void {
     it('foreignPhysicalHandlesCannotExecuteOrCloseOnACacheChannelWithTheSameServerId', 0, async () => {
       const first = new CacheOwnedFixture(1, [prepareResponse(7)]);
       const second = new CacheOwnedFixture(1, [prepareResponse(7), [okPayload()]]);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       try {
-        const foreign = await first.cache.borrow(first.scope, 'DO 1', context);
-        const current = await second.cache.borrow(second.scope, 'DO 1', context);
+        const foreign = await first.cache.borrow(first.scope, 'DO 1');
+        const current = await second.cache.borrow(second.scope, 'DO 1');
         const execution = await preparedFailureOf(second.session.executeOwned(
           second.scope, foreign.statement, encodeBinaryParameters([]),
           (command: Uint8Array): Promise<MySqlQueryResult> => cacheOwnedResult(second.host, second.scope, command)));
@@ -1061,7 +1089,7 @@ export default function mySqlStatementCacheTest(): void {
       }
     });
 
-    it('invalidExecutionOptionsCannotProbeOrEvictARetainedEntry', 0, async () => {
+    it('prevalidationFailureCannotRetireARetainedEntry', 0, async () => {
       const fixture = new CacheCoverageFixture();
       try {
         const prepared = await fixture.open();
@@ -1071,10 +1099,10 @@ export default function mySqlStatementCacheTest(): void {
         const badOptions = await cacheOperationFailure(prepared.execute('DO 2', [], options));
         expect(badOptions.kind).assertEqual(ArkDbErrorKind.Validation);
         expect(badOptions.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23');
         expect(fixture.connection.operationScopes.length).assertEqual(1);
         await prepared.execute('DO 1', []);
-        expect(fixture.peer.commands().join(',')).assertEqual('3,22,23,3,23');
+        expect(fixture.peer.commands().join(',')).assertEqual('22,23,23');
         expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,7');
       } finally { await fixture.close(); }
     });
@@ -1084,9 +1112,8 @@ export default function mySqlStatementCacheTest(): void {
       const oldHost = new CacheOwnedHost([prepareResponse(7)], gate);
       const oldSession = new MySqlPreparedSession(oldHost);
       const oldCache = new MySqlStatementCache(1, gate, oldSession);
-      const context = new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
       const oldScope = gate.reserve(MySqlCommandKind.Query);
-      const borrowed = await oldCache.borrow(oldScope, 'DO 1', context);
+      const borrowed = await oldCache.borrow(oldScope, 'DO 1');
       gate.release(oldScope);
       gate.advanceGeneration();
       const currentScope = gate.reserve(MySqlCommandKind.Query);
@@ -1099,12 +1126,12 @@ export default function mySqlStatementCacheTest(): void {
         expect(oldHost.channel !== null).assertTrue();
         expect(oldSession.isAlive()).assertFalse();
         expect(borrowed.statement.closed).assertTrue();
-        const stale = await preparedFailureOf(oldCache.borrow(currentScope, 'DO 1', context));
+        const stale = await preparedFailureOf(oldCache.borrow(currentScope, 'DO 1'));
         expect(stale !== null && stale.kind === ArkDbErrorKind.Protocol).assertTrue();
         await oldCache.release(currentScope, borrowed, false);
         expect(oldHost.transport.writes.length).assertEqual(1);
         await oldHost.retire(ArkDbError.cancelled('Synthetic old physical channel replacement.'));
-        const current = await currentCache.borrow(currentScope, 'DO 1', context);
+        const current = await currentCache.borrow(currentScope, 'DO 1');
         await oldSession.closeOwned(currentScope, borrowed.statement);
         expect(newHost.transport.writes.length).assertEqual(1);
         await currentSession.executeOwned(currentScope, current.statement, encodeBinaryParameters([]),
@@ -1117,6 +1144,80 @@ export default function mySqlStatementCacheTest(): void {
       } finally {
         try { await currentCache.clearOwned(currentScope); } finally { gate.release(currentScope); }
       }
+    });
+
+    it('preservesPriorStatementStateOnCacheMissAndHit', 0, async () => {
+      const uncached = new CacheStatementStateFixture(0);
+      const cached = new CacheStatementStateFixture(2);
+      try {
+        const uncachedPrepared = await uncached.open();
+        const cachedPrepared = await cached.open();
+        const explicit = await cachedPrepared.prepare(CACHE_STATE_OBSERVER_SQL);
+        try {
+          await uncached.connection.query(CACHE_STATE_PRODUCER_SQL);
+          const baseline = await uncachedPrepared.execute(CACHE_STATE_OBSERVER_SQL, []);
+          await cached.connection.query(CACHE_STATE_PRODUCER_SQL);
+          const explicitControl = await explicit.execute([]);
+          await cached.connection.query(CACHE_STATE_PRODUCER_SQL);
+          const miss = await cachedPrepared.execute(CACHE_STATE_OBSERVER_SQL, []);
+          const cachedProducer = await cachedPrepared.execute(CACHE_STATE_PRODUCER_SQL, []);
+          const hit = await cachedPrepared.execute(CACHE_STATE_OBSERVER_SQL, []);
+
+          expect([
+            cacheStatementStateScalar(baseline), cacheStatementStateScalar(explicitControl),
+            cacheStatementStateScalar(miss), cacheStatementStateScalar(hit)
+          ].join(',')).assertEqual('3,3,3,3');
+          expect(cacheStatementStateScalar(cachedProducer)).assertEqual('10');
+          expect(commandFrames(cached.peer, 0x16).map(commandSql).join('|'))
+            .assertEqual(CACHE_STATE_OBSERVER_SQL + '|' + CACHE_STATE_OBSERVER_SQL + '|' + CACHE_STATE_PRODUCER_SQL);
+          expect(cacheStatementIds(cached.peer.writes, 0x17)).assertEqual('7,8,9,8');
+          expect(commandFrames(cached.peer, 0x03).map(commandSql).join('|'))
+            .assertEqual(CACHE_STATE_PRODUCER_SQL + '|' + CACHE_STATE_PRODUCER_SQL);
+        } finally { await explicit.close(); }
+      } finally {
+        try { await uncached.close(); } finally { await cached.close(); }
+      }
+    });
+
+    it('repreparesWhenOnlyConnectionCollationChanges', 0, async () => {
+      const fixture = new CacheStatementStateFixture(2);
+      try {
+        const prepared = await fixture.open();
+        await fixture.connection.query(CACHE_STATE_GENERAL_SQL);
+        const continuousWarm = await prepared.execute(CACHE_STATE_LITERAL_SQL, []);
+        await prepared.execute(CACHE_STATE_BINARY_SQL, []);
+        const continuousReuse = await prepared.execute(CACHE_STATE_LITERAL_SQL, []);
+        const continuousIds = cacheStatementIds(fixture.peer.writes, 0x17);
+        const freshReference = await prepared.prepare(CACHE_STATE_LITERAL_SQL);
+        let continuousFresh: MySqlQueryResult | null = null;
+        try {
+          continuousFresh = await freshReference.execute([]);
+        } finally { await freshReference.close(); }
+        if (continuousFresh === null) throw new Error('Expected the fresh explicit collation reference.');
+        await fixture.connection.query(CACHE_STATE_GENERAL_SQL);
+        const warm = await prepared.execute(CACHE_STATE_LITERAL_SQL, []);
+        const before = await fixture.connection.query(CACHE_FINGERPRINT_SQL);
+        await fixture.connection.query(CACHE_STATE_BINARY_SQL);
+        const after = await fixture.connection.query(CACHE_FINGERPRINT_SQL);
+        const reused = await prepared.execute(CACHE_STATE_LITERAL_SQL, []);
+        const explicit = await prepared.prepare(CACHE_STATE_LITERAL_SQL);
+        try {
+          const fresh = await explicit.execute([]);
+
+          expect(before.columns.length).assertEqual(4);
+          expect(after.columns.length).assertEqual(4);
+          expect(before.rows[0].join('|')).assertEqual(after.rows[0].join('|'));
+          expect([
+            cacheStatementStateScalar(continuousWarm), cacheStatementStateScalar(continuousReuse),
+            cacheStatementStateScalar(continuousFresh)
+          ].join(',')).assertEqual('1,1,0');
+          expect(continuousIds).assertEqual('7,8,7');
+          expect([
+            cacheStatementStateScalar(warm), cacheStatementStateScalar(reused),
+            cacheStatementStateScalar(fresh)
+          ].join(',')).assertEqual('1,0,0');
+        } finally { await explicit.close(); }
+      } finally { await fixture.close(); }
     });
   });
 }
@@ -1199,6 +1300,10 @@ class CacheCoverageSocket extends PreparedSocket {
         }
       } else if (command === 0x0e) {
         this.responses.push([okPayload()]);
+      } else if (command === 0x02) {
+        await super.send(options);
+        if (this.holdCommand !== command) this.emitResponse([okPayload()]);
+        return;
       } else if (command !== 0x19 && command !== 0x01) {
         throw new Error('Unexpected cache coverage wire command.');
       }
@@ -1441,8 +1546,10 @@ async function assertCacheCancellationBarrier(heldCommand: number): Promise<void
   await prepared.execute('DO 1', []);
   fixture.peer.holdCommand = heldCommand;
   const entered = cacheCommandGate(fixture.peer, heldCommand);
+  if (heldCommand === 0x03) fixture.peer.textReplies.push(new CacheTextReply('DO 2'));
   let settled = false;
-  const running = preparedFailureOf(prepared.execute('DO 1', []))
+  const running = preparedFailureOf(heldCommand === 0x03 ?
+    fixture.connection.query('DO 2') : prepared.execute('DO 1', []))
     .then((failure: ArkDbError | null): ArkDbError | null => { settled = true; return failure; });
   await entered.promise;
   control.peer.holdCommand = 0x03;
@@ -1454,17 +1561,17 @@ async function assertCacheCancellationBarrier(heldCommand: number): Promise<void
     await killEntered.promise;
     fixture.peer.releaseHeldResponse();
     await flushPrepared();
-    expect(settled).assertFalse();
+    if (heldCommand === 0x17) expect(settled).assertFalse();
     expect(commandFrames(fixture.peer, 0x16).length).assertEqual(1);
     expect(commandFrames(fixture.peer, 0x17).length).assertEqual(heldCommand === 0x03 ? 1 : 2);
-    expect(cacheProbeFrames(fixture.peer).length).assertEqual(2);
+    expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
     const blocked = await preparedFailureOf(prepared.execute('DO 1', []));
     expect(blocked !== null && blocked.kind === ArkDbErrorKind.Protocol).assertTrue();
-    expect(cacheProbeFrames(fixture.peer).length).assertEqual(2);
+    expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
     control.peer.releaseHeldResponse();
     await control.peer.closing.promise;
     await flushPrepared();
-    expect(settled).assertFalse();
+    if (heldCommand === 0x17) expect(settled).assertFalse();
     expect(commandFrames(fixture.peer, 0x17).length).assertEqual(heldCommand === 0x03 ? 1 : 2);
     expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
     controlClose.release();
@@ -1472,12 +1579,12 @@ async function assertCacheCancellationBarrier(heldCommand: number): Promise<void
     expect((await running) === null).assertTrue();
     expect(commandFrames(control.peer, 0x03).map(commandSql).join('|')).assertEqual('KILL QUERY 42');
     expect(commandFrames(control.peer, 0x01).length).assertEqual(1);
-    expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,7');
+    expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual(heldCommand === 0x03 ? '7' : '7,7');
     await prepared.execute('DO 1', []);
-    expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual('7,7,7');
-    expect(commandFrames(fixture.peer, 0x16).length).assertEqual(1);
-    expect(commandFrames(fixture.peer, 0x19).length).assertEqual(0);
-    expect(cacheProbeFrames(fixture.peer).length).assertEqual(3);
+    expect(cacheStatementIds(fixture.peer.writes, 0x17)).assertEqual(heldCommand === 0x03 ? '7,8' : '7,7,7');
+    expect(commandFrames(fixture.peer, 0x16).length).assertEqual(heldCommand === 0x03 ? 2 : 1);
+    expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual(heldCommand === 0x03 ? '7' : '');
+    expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
   } finally {
     controlClose.release();
     if (control.peer.responses.length > 0) control.peer.releaseHeldResponse();
@@ -1486,4 +1593,181 @@ async function assertCacheCancellationBarrier(heldCommand: number): Promise<void
     await cancellationObservation;
     await running;
   }
+}
+
+const CACHE_STATE_PRODUCER_SQL = 'SELECT SQL_CALC_FOUND_ROWS n FROM ' +
+  '(SELECT 10 AS n UNION ALL SELECT 20 UNION ALL SELECT 30) AS r LIMIT 1';
+const CACHE_STATE_OBSERVER_SQL = 'SELECT FOUND_ROWS()';
+const CACHE_STATE_LITERAL_SQL = "SELECT 'a' = 'A'";
+const CACHE_STATE_GENERAL_SQL = "SET SESSION collation_connection = 'utf8mb4_general_ci'";
+const CACHE_STATE_BINARY_SQL = "SET SESSION collation_connection = 'utf8mb4_bin'";
+
+class CacheStatementStateHandle {
+  readonly id: number;
+  readonly sql: string;
+  readonly collation: string;
+
+  constructor(id: number, sql: string, collation: string) {
+    this.id = id;
+    this.sql = sql;
+    this.collation = collation;
+  }
+}
+
+class CacheStatementStateCompletion {
+  readonly packets: Uint8Array[];
+  readonly foundRows: bigint | null;
+  readonly collation: string | null;
+
+  constructor(packets: Uint8Array[], foundRows: bigint | null = null, collation: string | null = null) {
+    this.packets = packets;
+    this.foundRows = foundRows;
+    this.collation = collation;
+  }
+}
+
+// Finite counter/collation wire model, not a SQL engine or a diagnostics model.
+class CacheStatementStateSocket extends PreparedSocket {
+  responding: boolean = false;
+  private readonly producerRows: bigint[] = [10n, 20n, 30n];
+  private readonly context: MySqlSessionFingerprint =
+    new MySqlSessionFingerprint('cache_schema', '', 'utf8mb4', '+00:00');
+  private handles: CacheStatementStateHandle[] = [];
+  private nextId: number = 7;
+  private foundRows: bigint = 0n;
+  private collation: string = 'utf8mb4_general_ci';
+  private completing: CacheStatementStateCompletion | null = null;
+
+  async send(options: Object): Promise<void> {
+    if (this.responding) {
+      if (this.completing !== null) throw new Error('A modeled command has not completed its response.');
+      const frame = new Uint8Array((options as CacheSentPacket).data);
+      const command = frame[4];
+      if (command === 0x03) {
+        this.queueCompletion(this.textCompletion(commandSql(frame)));
+      } else if (command === 0x16) {
+        const sql = commandSql(frame);
+        if (sql !== CACHE_STATE_OBSERVER_SQL && sql !== CACHE_STATE_LITERAL_SQL &&
+          sql !== CACHE_STATE_PRODUCER_SQL && sql !== CACHE_STATE_BINARY_SQL && sql !== CACHE_STATE_GENERAL_SQL) {
+          throw new Error('Unexpected SQL in the finite prepared-state model.');
+        }
+        const handle = new CacheStatementStateHandle(this.nextId, sql, this.collation);
+        this.nextId += 1;
+        this.handles.push(handle);
+        this.responses.push(sql === CACHE_STATE_BINARY_SQL || sql === CACHE_STATE_GENERAL_SQL ?
+          prepareResponse(handle.id) : prepareResponse(handle.id, 0, [cacheStatementStateColumn()]));
+      } else if (command === 0x17) {
+        const handle = this.handle(commandStatementId(frame));
+        if (handle.sql === CACHE_STATE_BINARY_SQL || handle.sql === CACHE_STATE_GENERAL_SQL) {
+          this.queueCompletion(this.textCompletion(handle.sql));
+        } else if (handle.sql === CACHE_STATE_PRODUCER_SQL) {
+          this.queueCompletion(new CacheStatementStateCompletion(
+            cacheStatementStateBinary(this.producerRows[0]), BigInt(this.producerRows.length)));
+        } else {
+          const value = handle.sql === CACHE_STATE_OBSERVER_SQL ? this.foundRows :
+            cacheStatementStateEqual('a', 'A', handle.collation);
+          this.queueCompletion(new CacheStatementStateCompletion(cacheStatementStateBinary(value), 1n));
+        }
+      } else if (command === 0x19) {
+        const handle = this.handle(commandStatementId(frame));
+        this.handles.splice(this.handles.indexOf(handle), 1);
+      } else if (command === 0x01) {
+        this.handles = [];
+      } else {
+        throw new Error('Unexpected command in the finite prepared-state model.');
+      }
+    }
+    await super.send(options);
+  }
+
+  emitResponse(packets: Uint8Array[]): void {
+    const completion = this.completing;
+    if (completion !== null) {
+      if (packets !== completion.packets) throw new Error('Modeled response ownership is inconsistent.');
+      if (completion.foundRows !== null) this.foundRows = completion.foundRows;
+      if (completion.collation !== null) this.collation = completion.collation;
+      this.completing = null;
+    }
+    super.emitResponse(packets);
+  }
+
+  private handle(id: number): CacheStatementStateHandle {
+    const handle = this.handles.find((entry: CacheStatementStateHandle): boolean => entry.id === id);
+    if (handle === undefined) throw new Error('The finite server model does not own this statement id.');
+    return handle;
+  }
+
+  private queueCompletion(completion: CacheStatementStateCompletion): void {
+    this.completing = completion;
+    this.responses.push(completion.packets);
+  }
+
+  private textCompletion(sql: string): CacheStatementStateCompletion {
+    if (sql === CACHE_FINGERPRINT_SQL) {
+      return new CacheStatementStateCompletion(cacheContextPackets(this.context), 1n);
+    }
+    if (sql === CACHE_STATE_PRODUCER_SQL) {
+      const packets = [new Uint8Array([1]), cacheStatementStateColumn(), eofPayload()];
+      packets.push(new PacketWriter().writeLenEncString(String(this.producerRows[0])).toUint8Array());
+      packets.push(eofPayload());
+      return new CacheStatementStateCompletion(packets, BigInt(this.producerRows.length));
+    }
+    if (sql === CACHE_STATE_GENERAL_SQL) {
+      return new CacheStatementStateCompletion([okPayload()], null, 'utf8mb4_general_ci');
+    }
+    if (sql === CACHE_STATE_BINARY_SQL) {
+      return new CacheStatementStateCompletion([okPayload()], null, 'utf8mb4_bin');
+    }
+    throw new Error('Unexpected text SQL in the finite prepared-state model.');
+  }
+}
+
+class CacheStatementStateFixture {
+  readonly peer: CacheStatementStateSocket = new CacheStatementStateSocket();
+  readonly connection: MySqlConnection;
+
+  constructor(capacity: number) {
+    this.connection = new MySqlConnection(cacheCoverageConfig(capacity), '', new TcpTransport());
+  }
+
+  async open(): Promise<MySqlPreparedExecutor> {
+    socket.nextTcp = this.peer;
+    const opening = this.connection.connect();
+    this.peer.emitMessage(new PacketWriter().writeBytes(handshake(Capabilities.PROTOCOL_41))
+      .writeBytes(framePacket(okPayload(), 2)).toUint8Array());
+    await opening;
+    this.peer.writes = [];
+    this.peer.responding = true;
+    const prepared = this.connection.mysqlFeatures.prepared;
+    if (prepared === undefined) throw new Error('Expected the public prepared feature.');
+    return prepared;
+  }
+
+  close(): Promise<void> { return this.connection.close(); }
+}
+
+function cacheStatementStateColumn(): Uint8Array {
+  return columnPayload('value', ColumnType.LONGLONG, 0, 0, Collation.BINARY);
+}
+
+function cacheStatementStateBinary(value: bigint): Uint8Array[] {
+  return [
+    new Uint8Array([1]), cacheStatementStateColumn(), eofPayload(),
+    new PacketWriter().writeUInt8(0).writeUInt8(0).writeInt64(value).toUint8Array(),
+    eofPayload()
+  ];
+}
+
+function cacheStatementStateEqual(left: string, right: string, collation: string): bigint {
+  if (collation === 'utf8mb4_general_ci') return left.toLowerCase() === right.toLowerCase() ? 1n : 0n;
+  if (collation === 'utf8mb4_bin') return left === right ? 1n : 0n;
+  throw new Error('Unsupported collation in the finite literal comparison model.');
+}
+
+function cacheStatementStateScalar(result: MySqlQueryResult): string {
+  if (result.columns.length !== 1 || result.rows.length !== 1 || result.rows[0].length !== 1 ||
+    typeof result.rows[0][0] !== 'bigint') {
+    throw new Error('Expected one complete signed BIGINT result from the modeled server.');
+  }
+  return String(result.rows[0][0]);
 }

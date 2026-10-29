@@ -6,7 +6,6 @@ import { MySqlParameter } from '../model/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';
 import { MySqlCommandKind, MySqlCommandScope } from '../execution/MySqlCommandGate';
-import { MySqlSessionFingerprint } from '../execution/MySqlSessionInitialization';
 import { MySqlStatementCache, MySqlStatementCacheBorrow } from '../execution/MySqlStatementCache';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
 import { EncodedBinaryParameters, encodeBinaryParameters } from '../value/BinaryParameterEncoder';
@@ -18,8 +17,8 @@ import { validateQueryOptions } from './ResultStream';
 
 export interface MySqlPreparedExecutorHost extends MySqlPreparedSessionHost {
   readonly preparedCacheSize: number;
-  readMySqlSessionFingerprint(scope: MySqlCommandScope): Promise<MySqlSessionFingerprint>;
-  runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T>;
+  runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
+    cachedConvenience?: boolean): Promise<T>;
   executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions): Promise<MySqlQueryResult>;
   streamPrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
@@ -38,6 +37,10 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
 
   invalidate(): void {
     this.cache.invalidate();
+  }
+
+  retireCacheContext(scope: MySqlCommandScope): void {
+    this.cache.retireOwned(scope);
   }
 
   prepare(sql: string): Promise<MySqlPreparedStatement> {
@@ -97,8 +100,7 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
       const cleanup: ArkDbError[] = [];
       try {
         if (this.cache.enabled) {
-          const fingerprint = await this.host.readMySqlSessionFingerprint(scope);
-          borrow = await this.cache.borrow(scope, sql, fingerprint);
+          borrow = await this.cache.borrow(scope, sql);
           statement = borrow.statement;
         } else {
           statement = await this.session.prepareOwned(scope, sql);
@@ -130,7 +132,7 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
           primary.outcome : MySqlExecutionOutcome.NotDispatched);
       }
       return value!;
-    });
+    }, this.cache.enabled);
   }
 }
 

@@ -2,7 +2,6 @@ import { ArkDbError } from '@arkdb/core';
 import { MySqlPreparedSession } from '../command/PreparedStatement';
 import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
 import { MySqlCommandGate, MySqlCommandScope } from './MySqlCommandGate';
-import { MySqlSessionFingerprint } from './MySqlSessionInitialization';
 
 export interface MySqlStatementCacheBorrow {
   readonly statement: MySqlPreparedStatement;
@@ -12,17 +11,14 @@ class CachedStatement implements MySqlStatementCacheBorrow {
   readonly owner: MySqlStatementCache;
   readonly sql: string;
   readonly generation: number;
-  readonly fingerprint: MySqlSessionFingerprint;
   readonly statement: MySqlPreparedStatement;
   borrowed: boolean = true;
   retired: boolean = false;
 
-  constructor(owner: MySqlStatementCache, sql: string, generation: number,
-    fingerprint: MySqlSessionFingerprint, statement: MySqlPreparedStatement) {
+  constructor(owner: MySqlStatementCache, sql: string, generation: number, statement: MySqlPreparedStatement) {
     this.owner = owner;
     this.sql = sql;
     this.generation = generation;
-    this.fingerprint = fingerprint;
     this.statement = statement;
   }
 }
@@ -43,16 +39,14 @@ export class MySqlStatementCache {
     return this.capacity > 0;
   }
 
-  async borrow(scope: MySqlCommandScope, sql: string,
-    fingerprint: MySqlSessionFingerprint): Promise<MySqlStatementCacheBorrow> {
+  async borrow(scope: MySqlCommandScope, sql: string): Promise<MySqlStatementCacheBorrow> {
     this.gate.assertOwner(scope);
     if (!this.session.isAlive()) {
       this.invalidate();
       throw ArkDbError.protocol('The statement cache belongs to an expired physical session.');
     }
     for (const entry of this.entries.slice()) {
-      if (entry.statement.closed || entry.generation !== scope.generation ||
-        !sameFingerprint(entry.fingerprint, fingerprint)) {
+      if (entry.statement.closed || entry.generation !== scope.generation) {
         entry.retired = true;
       }
       // Retired borrows still occupy capacity until their owner finishes.
@@ -73,7 +67,7 @@ export class MySqlStatementCache {
       else await this.removeAndClose(scope, victim);
     }
     const statement = await this.session.prepareOwned(scope, sql);
-    const entry = new CachedStatement(this, sql, scope.generation, fingerprint, statement);
+    const entry = new CachedStatement(this, sql, scope.generation, statement);
     if (retain) this.entries.push(entry);
     return entry;
   }
@@ -102,6 +96,11 @@ export class MySqlStatementCache {
     }
   }
 
+  retireOwned(scope: MySqlCommandScope): void {
+    this.gate.assertOwner(scope);
+    for (const entry of this.entries) entry.retired = true;
+  }
+
   invalidate(): void {
     for (const entry of this.entries) entry.retired = true;
     this.entries = [];
@@ -121,9 +120,4 @@ export class MySqlStatementCache {
     if (index >= 0) this.entries.splice(index, 1);
     await this.session.closeOwned(scope, entry.statement);
   }
-}
-
-function sameFingerprint(left: MySqlSessionFingerprint, right: MySqlSessionFingerprint): boolean {
-  return left.database === right.database && left.sqlMode === right.sqlMode &&
-    left.characterSetClient === right.characterSetClient && left.timeZone === right.timeZone;
 }

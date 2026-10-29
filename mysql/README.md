@@ -104,14 +104,27 @@ By default, `execute(sql, parameters, options?)` prepares, consumes or synchroni
 the results, and closes its statement without caching. Set
 `config.preparedCacheSize` to an integer from 1 to 256 before constructing the
 connection to retain a bounded, private LRU of convenience statements on that
-physical connection. Missing or zero keeps the uncached path and adds no
-fingerprint probe. Each enabled lookup, including a hit, first reads the actual
-database, SQL mode, client charset and timezone in the same owned command scope.
-Exact SQL, session generation and those current values determine reuse, including
-after raw `USE` or `SET`; context changes retire old entries. This adds a round
-trip and does not promise lower latency.
+physical connection. Missing or zero keeps the uncached path. Neither path adds
+fingerprint probes or other hidden SQL. Consecutive cached convenience calls can
+reuse a handle for the exact SQL in the same physical session and private reuse
+context. Enabling caching accepts that handle's prepare-time semantics: it does
+not promise fresh-prepare equivalence for arbitrary SQL or routines that
+indirectly change session state within a cached sequence. Use cache size zero or
+a new explicit `prepare` when the current server context must be parsed afresh.
 
-The cache closes only unborrowed LRU entries. If every retained entry is in use,
+Any non-cache operation that successfully reserves the command scope ends this
+reuse context, including text queries/streams, portable streaming, explicit
+prepare/execute/stream/close, ping, context/transaction control, and the metadata
+or metrics operations using those paths. This retirement does not inspect SQL
+keywords or compare returned session values; even a raw command whose context
+appears unchanged retires retained entries. Busy or prevalidation-failed calls
+that did not obtain a scope do not retire an in-flight borrow. No SESSION_TRACK
+support or transparent tracking of arbitrary session changes is implied.
+
+Live-session retirement keeps handles accounted for, closing idle retired entries
+under the next cache owner's scope rather than forgetting them or inserting an
+implicit command queue. Borrowed retired entries still count toward capacity and
+close only after their owner settles. The cache evicts only unborrowed LRU entries. If every retained entry is in use,
 the call uses a temporary statement instead of stealing a handle or exceeding
 retained capacity. Failed, retired or disconnected ownership is not returned;
 stream completion includes all results, drain, consumer acknowledgements and
@@ -251,7 +264,7 @@ coerced. The connection snapshots the capacity with its other options.
 
 Timezone and SQL-mode semantics belong to the server: local validation accepts empty and unknown names without checking a local timezone list. A server may reject a timezone name, for example when its timezone tables are unavailable; that error propagates without a local-timezone fallback. Configured values use checked UTF-8 byte expressions, not raw SQL interpolation or backslash-escaping assumptions. Initialization completes within the existing opening deadline before `connect()` reports Ready. Failure rejects connection opening and cleans up the partial connection, retaining primary and cleanup errors.
 
-Ordinary connection/query calls do not add hidden session-fingerprint probes or replay SQL. Only enabled convenience-statement cache lookups add the owned fingerprint probe; it reports actual database, SQL mode, client charset, and timezone, not configured defaults. It is not a new public connection method or reset API. Disconnect, retirement and a new physical session invalidate private cached ownership; failed or uncertain SQL is never replayed. Cancellation control connections retain authentication, TLS, and transport policy but skip the default database, `autocommit=false`, user session initialization, and recursive control creation.
+Neither ordinary commands nor enabled convenience-statement cache lookups add hidden session-fingerprint probes, restore previous-statement counters with SQL, or replay SQL. The existing internal four-field fingerprint utility remains a SQL operation, not a transparent cache guard or a new public connection method. Non-cache command admission retires the private prepared reuse context; disconnect, physical retirement and a new session invalidate physical ownership. Failed or uncertain SQL is never replayed. Cancellation control connections retain authentication, TLS, and transport policy but skip the default database, `autocommit=false`, user session initialization, and recursive control creation.
 
 Profile IDs, names, grouping, and credential storage belong to the host. Select the driver through its factory, not a tag inside connection options. Top-level SQL-mode/charset/compression/connection-attribute switches, file-engine paths, and generic future-option bags are not exposed; use only the typed `session.sqlMode` option described above for SQL mode.
 

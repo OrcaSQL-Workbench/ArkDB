@@ -1,5 +1,7 @@
 import { describe, expect, it } from '@ohos/hypium';
-import { ArkDbError, ArkDbErrorKind, ConnectionState } from '@arkdb/core';
+import {
+  ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryResult, ServerInfo
+} from '@arkdb/core';
 import { MySqlBatchExecutor } from '../../../main/ets/mysql/execution/MySqlBatchExecutor';
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult
@@ -12,7 +14,8 @@ import {
 import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
 import { Capabilities, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
 import {
-  PreparedExecutionFixture, PreparedGate, binaryIntResult, errorPayload, hex, okPayload, prepareResponse
+  PreparedExecutionFixture, PreparedGate, binaryIntResult, errorPayload, flushPrepared, hex, okPayload,
+  preparedFailureOf, prepareResponse
 } from '../command/PreparedExecutionFixture';
 
 class InvalidatedBatchParameter extends MySqlParameter {
@@ -22,6 +25,39 @@ class InvalidatedBatchParameter extends MySqlParameter {
 
   get value(): MySqlParameterValue {
     return 'not-an-integer';
+  }
+}
+
+class BatchCancellationControl implements DbConnection {
+  state: ConnectionState = ConnectionState.Idle;
+  readonly serverInfo: ServerInfo = new ServerInfo();
+  readonly commands: string[] = [];
+  readonly openingStarted: PreparedGate = new PreparedGate();
+  readonly cleaning: PreparedGate = new PreparedGate();
+  opening: PreparedGate | null = null;
+  closing: PreparedGate | null = null;
+  openingFailure: ArkDbError | null = null;
+  cleanupFailure: ArkDbError | null = null;
+  closed: boolean = false;
+
+  async connect(): Promise<void> {
+    this.openingStarted.release();
+    if (this.opening !== null) await this.opening.promise;
+    if (this.openingFailure !== null) throw this.openingFailure;
+    this.state = ConnectionState.Ready;
+  }
+
+  async query(sql: string): Promise<QueryResult> {
+    this.commands.push(sql);
+    return new QueryResult();
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.state = ConnectionState.Closed;
+    this.cleaning.release();
+    if (this.closing !== null) await this.closing.promise;
+    if (this.cleanupFailure !== null) throw this.cleanupFailure;
   }
 }
 
@@ -71,6 +107,38 @@ export default function mySqlBatchExecutorTest(): void {
       expect(failure.completedResults.length).assertEqual(0);
       expect(fixture.connection.state).assertEqual(ConnectionState.Idle);
       expect(fixture.peer.writes.length).assertEqual(0);
+    });
+
+    it('nonemptyInvalidOptionsRejectBeforeFirstUseReadiness', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      const options = new MySqlBatchOptions();
+      options.maxItems = 0;
+
+      const failure = expectBatchFailure(await batchFailureOf(batchFeature(fixture)
+        .execute('DO ?', [intRow(1)], options)));
+
+      expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+      expect(failure.failedOutcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+      expect(failure.failedIndex).assertEqual(0);
+      expect(failure.completedResults.length).assertEqual(0);
+      expect(fixture.peer.writes.length).assertEqual(0);
+      expect(fixture.connection.state).assertEqual(ConnectionState.Idle);
+    });
+
+    it('nonemptyExcessRowsRejectBeforeFirstUseReadiness', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      const options = new MySqlBatchOptions();
+      options.maxItems = 1;
+
+      const failure = expectBatchFailure(await batchFailureOf(batchFeature(fixture)
+        .execute('DO ?', [intRow(1), intRow(2)], options)));
+
+      expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+      expect(failure.failedOutcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+      expect(failure.failedIndex).assertEqual(0);
+      expect(failure.completedResults.length).assertEqual(0);
+      expect(fixture.peer.writes.length).assertEqual(0);
+      expect(fixture.connection.state).assertEqual(ConnectionState.Idle);
     });
 
     it('batchFailurePreservesCompletedItems', 0, async () => {
@@ -434,6 +502,116 @@ export default function mySqlBatchExecutorTest(): void {
       }
     });
 
+    it('completedControlOpenFailureRetainsCurrentBatchResult', 0, async () => {
+      const opening = new ArkDbError(ArkDbErrorKind.Timeout, 'Synthetic batch control opening timeout.',
+        'BATCH_CONTROL_OPEN', '08001');
+      const control = new BatchCancellationControl();
+      const openingGate = new PreparedGate();
+      control.opening = openingGate;
+      control.openingFailure = opening;
+      const fixture = new PreparedExecutionFixture(Capabilities.PROTOCOL_41, (): DbConnection => control);
+      await fixture.open();
+      fixture.peer.responses.push(prepareResponse(7));
+      fixture.peer.holdCommand = 0x17;
+      let executionSettled = false;
+      const executing = batchFailureOf(batchFeature(fixture).execute('DO completed_batch', [[], []])).then(
+        (failure: ArkDbError | null): ArkDbError | null => {
+          executionSettled = true;
+          return failure;
+        });
+      let cancelling: Promise<ArkDbError | null> | null = null;
+      try {
+        await flushPrepared();
+        cancelling = preparedFailureOf(fixture.connection.cancel());
+        await control.openingStarted.promise;
+        fixture.peer.emitResponse([completedBatchItemOkPayload()]);
+        await flushPrepared();
+        expect(fixture.connection.state).assertEqual(ConnectionState.Ready);
+        expect(executionSettled).assertFalse();
+        openingGate.release();
+
+        const cancellation = await cancelling;
+        expect(cancellation instanceof MySqlOperationError).assertTrue();
+        if (cancellation instanceof MySqlOperationError) {
+          expect(cancellation.primary === opening).assertTrue();
+          expect(cancellation.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+        }
+        const failure = expectBatchFailure(await executing);
+        expect(failure.primary === opening).assertTrue();
+        expect(failure.failedOutcome).assertEqual(MySqlExecutionOutcome.Completed);
+        expect(failure.failedIndex).assertEqual(0);
+        expect(failure.completedResults.length).assertEqual(1);
+        expect(failure.completedResults[0] instanceof MySqlQueryResult).assertTrue();
+        expect(failure.completedResults[0].affectedRows).assertEqual(3);
+        expect(failure.completedResults[0].lastInsertId).assertEqual(27n);
+        expect(control.commands.length).assertEqual(0);
+        const commands = fixture.peer.commands();
+        expect(commands.filter((command: number): boolean => command === 0x17).length).assertEqual(1);
+        expect(commands.join(',')).assertEqual('22,23,25');
+      } finally {
+        openingGate.release();
+        fixture.peer.holdCommand = -1;
+        await fixture.close();
+        if (cancelling !== null) await cancelling;
+        await executing;
+      }
+    });
+
+    it('completedControlCloseFailureRetainsCurrentBatchResult', 0, async () => {
+      const cleanup = new ArkDbError(ArkDbErrorKind.Network, 'Synthetic batch control cleanup failure.',
+        'BATCH_CONTROL_CLEANUP', '08S01');
+      const control = new BatchCancellationControl();
+      const closingGate = new PreparedGate();
+      control.closing = closingGate;
+      control.cleanupFailure = cleanup;
+      const fixture = new PreparedExecutionFixture(Capabilities.PROTOCOL_41, (): DbConnection => control);
+      await fixture.open();
+      fixture.peer.responses.push(prepareResponse(7));
+      fixture.peer.holdCommand = 0x17;
+      let executionSettled = false;
+      const executing = batchFailureOf(batchFeature(fixture).execute('DO completed_batch', [[], []])).then(
+        (failure: ArkDbError | null): ArkDbError | null => {
+          executionSettled = true;
+          return failure;
+        });
+      let cancelling: Promise<ArkDbError | null> | null = null;
+      try {
+        await flushPrepared();
+        cancelling = preparedFailureOf(fixture.connection.cancel());
+        await control.cleaning.promise;
+        fixture.peer.emitResponse([completedBatchItemOkPayload()]);
+        await flushPrepared();
+        expect(fixture.connection.state).assertEqual(ConnectionState.Ready);
+        expect(executionSettled).assertFalse();
+        closingGate.release();
+
+        const cancellation = await cancelling;
+        expect(cancellation instanceof MySqlOperationError).assertTrue();
+        if (cancellation instanceof MySqlOperationError) {
+          expect(cancellation.primary === cleanup).assertTrue();
+          expect(cancellation.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+        }
+        const failure = expectBatchFailure(await executing);
+        expect(failure.primary === cleanup).assertTrue();
+        expect(failure.failedOutcome).assertEqual(MySqlExecutionOutcome.Completed);
+        expect(failure.failedIndex).assertEqual(0);
+        expect(failure.completedResults.length).assertEqual(1);
+        expect(failure.completedResults[0] instanceof MySqlQueryResult).assertTrue();
+        expect(failure.completedResults[0].affectedRows).assertEqual(3);
+        expect(failure.completedResults[0].lastInsertId).assertEqual(27n);
+        expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
+        const commands = fixture.peer.commands();
+        expect(commands.filter((command: number): boolean => command === 0x17).length).assertEqual(1);
+        expect(commands.join(',')).assertEqual('22,23,25');
+      } finally {
+        closingGate.release();
+        fixture.peer.holdCommand = -1;
+        await fixture.close();
+        if (cancelling !== null) await cancelling;
+        await executing;
+      }
+    });
+
     it('itemPrimaryAndStatementCloseCleanupAreBothPreserved', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();
@@ -608,6 +786,10 @@ function batchFeature(fixture: PreparedExecutionFixture): MySqlBatchExecutor {
 
 function intRow(value: number): MySqlParameter[] {
   return [new MySqlParameter(MySqlParameterType.Int32, value)];
+}
+
+function completedBatchItemOkPayload(): Uint8Array {
+  return new Uint8Array([0, 3, 27, StatusFlags.AUTOCOMMIT, 0, 0, 0]);
 }
 
 function setNestedQueryMaximum(options: MySqlBatchOptions, field: number, value: number): void {

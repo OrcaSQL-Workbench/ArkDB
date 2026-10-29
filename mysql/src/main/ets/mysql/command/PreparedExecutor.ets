@@ -19,7 +19,8 @@ export interface MySqlPreparedExecutorHost extends MySqlPreparedSessionHost {
   readonly preparedCacheSize: number;
   runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
     cachedConvenience?: boolean): Promise<T>;
-  executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions): Promise<MySqlQueryResult>;
+  executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+    observer?: (result: MySqlQueryResult) => void): Promise<MySqlQueryResult>;
   streamPrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
 }

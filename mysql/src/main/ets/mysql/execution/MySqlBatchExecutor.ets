@@ -73,8 +73,19 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
               if (remainingBytes === 0) {
                 throw ArkDbError.validation('Prepared batch buffered result budget is exhausted.');
               }
-              const result = await this.executeItem(scope, statement, encodedRows[index],
-                batchItemOptions(snapshot.queryOptions, remainingBytes));
+              let capturedResult: MySqlQueryResult | null = null;
+              let result: MySqlQueryResult;
+              try {
+                result = await this.executeItem(scope, statement, encodedRows[index],
+                  batchItemOptions(snapshot.queryOptions, remainingBytes),
+                  (decoded: MySqlQueryResult): void => { capturedResult = decoded; });
+              } catch (error) {
+                if (error instanceof MySqlOperationError &&
+                  error.outcome === MySqlExecutionOutcome.Completed && capturedResult !== null) {
+                  completed.push(capturedResult);
+                }
+                throw error as Error;
+              }
               completed.push(result);
               const loadedBytes = batchResultBytes(result);
               remainingBytes = loadedBytes >= remainingBytes ? 0 : remainingBytes - loadedBytes;
@@ -109,10 +120,11 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
   }
 
   private executeItem(scope: MySqlCommandScope, statement: MySqlPreparedStatement,
-    encoded: EncodedBinaryParameters, options: QueryOptions): Promise<MySqlQueryResult> {
+    encoded: EncodedBinaryParameters, options: QueryOptions,
+    observer?: (result: MySqlQueryResult) => void): Promise<MySqlQueryResult> {
     return this.session.executeOwned(scope, statement, encoded,
       (command: Uint8Array): Promise<MySqlQueryResult> =>
-        this.host.executePrepared(scope, command, options));
+        this.host.executePrepared(scope, command, options, observer));
   }
 }
 

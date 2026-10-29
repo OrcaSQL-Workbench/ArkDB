@@ -19,7 +19,8 @@ export enum ConnectionConfigField {
   TlsVersions = 'tlsVersions',
   Session = 'session',
   SessionTimeZone = 'session.timeZone',
-  SessionSqlMode = 'session.sqlMode'
+  SessionSqlMode = 'session.sqlMode',
+  PreparedCacheSize = 'preparedCacheSize'
 }
 
 export class ConnectionValidationIssue {
@@ -66,6 +67,7 @@ export class ConnectionConfig {
   defaultSchema?: string;
   ssl: SslConfig = new SslConfig();
   session?: MySqlSessionOptions;
+  preparedCacheSize?: number;
 
   connectTimeoutMs: number = 10000;
   autocommit: boolean = true;
@@ -119,6 +121,7 @@ export class ConnectionConfig {
       }
     }
     appendSessionValidationIssues(issues, this.session);
+    appendPreparedCacheValidationIssues(issues, this.preparedCacheSize);
     return issues;
   }
 
@@ -140,7 +143,19 @@ export class ConnectionConfig {
     }
     c.connectTimeoutMs = this.connectTimeoutMs;
     c.autocommit = this.autocommit;
+    const cacheIssues: ConnectionValidationIssue[] = [];
+    appendPreparedCacheValidationIssues(cacheIssues, this.preparedCacheSize);
+    if (cacheIssues.length > 0) throw cacheIssues[0].error;
+    c.preparedCacheSize = this.preparedCacheSize;
     return c;
+  }
+}
+
+function appendPreparedCacheValidationIssues(issues: ConnectionValidationIssue[],
+  size: number | undefined): void {
+  if (size !== undefined && (!Number.isSafeInteger(size) || size < 0 || size > 256)) {
+    issues.push(new ConnectionValidationIssue(ConnectionConfigField.PreparedCacheSize,
+      ArkDbError.validation('Prepared cache size must be an integer between 0 and 256.')));
   }
 }
 

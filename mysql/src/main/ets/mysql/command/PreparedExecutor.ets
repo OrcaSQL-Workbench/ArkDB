@@ -6,6 +6,7 @@ import { MySqlParameter } from '../model/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';
 import { MySqlCommandKind, MySqlCommandScope } from '../execution/MySqlCommandGate';
+import { MySqlStatementCache, MySqlStatementCacheBorrow } from '../execution/MySqlStatementCache';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
 import { EncodedBinaryParameters, encodeBinaryParameters } from '../value/BinaryParameterEncoder';
 import {
@@ -15,7 +16,9 @@ import {
 import { validateQueryOptions } from './ResultStream';
 
 export interface MySqlPreparedExecutorHost extends MySqlPreparedSessionHost {
-  runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T>;
+  readonly preparedCacheSize: number;
+  runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
+    cachedConvenience?: boolean): Promise<T>;
   executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions): Promise<MySqlQueryResult>;
   streamPrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
@@ -24,10 +27,20 @@ export interface MySqlPreparedExecutorHost extends MySqlPreparedSessionHost {
 export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPreparedStatementRunner {
   private host: MySqlPreparedExecutorHost;
   private session: MySqlPreparedSession;
+  private cache: MySqlStatementCache;
 
   constructor(host: MySqlPreparedExecutorHost) {
     this.host = host;
     this.session = new MySqlPreparedSession(host, this);
+    this.cache = new MySqlStatementCache(host.preparedCacheSize, host.commandGate, this.session);
+  }
+
+  invalidate(): void {
+    this.cache.invalidate();
+  }
+
+  retireCacheContext(scope: MySqlCommandScope): void {
+    this.cache.retireOwned(scope);
   }
 
   prepare(sql: string): Promise<MySqlPreparedStatement> {
@@ -81,22 +94,36 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
     execute: (scope: MySqlCommandScope, statement: MySqlPreparedStatement) => Promise<T>): Promise<T> {
     return this.host.runCommand(kind, async (scope: MySqlCommandScope): Promise<T> => {
       let statement: MySqlPreparedStatement | null = null;
+      let borrow: MySqlStatementCacheBorrow | null = null;
       let value: T | undefined;
       let primary: Object | null = null;
       const cleanup: ArkDbError[] = [];
       try {
-        statement = await this.session.prepareOwned(scope, sql);
+        if (this.cache.enabled) {
+          borrow = await this.cache.borrow(scope, sql);
+          statement = borrow.statement;
+        } else {
+          statement = await this.session.prepareOwned(scope, sql);
+        }
         value = await execute(scope, statement);
       } catch (error) {
         primary = error as Object;
       }
       if (statement !== null) {
         try {
-          await this.session.closeOwned(scope, statement);
+          if (borrow !== null) await this.cache.release(scope, borrow, primary === null);
+          else await this.session.closeOwned(scope, statement);
         } catch (error) {
           if (primary === null) {
             throw preparedFailure(error as Object, [], MySqlExecutionOutcome.Completed);
           }
+          cleanup.push(preparedCleanup(error as Object));
+        }
+      }
+      if (primary !== null && this.cache.enabled && borrow === null) {
+        try {
+          await this.cache.clearOwned(scope);
+        } catch (error) {
           cleanup.push(preparedCleanup(error as Object));
         }
       }
@@ -105,7 +132,7 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
           primary.outcome : MySqlExecutionOutcome.NotDispatched);
       }
       return value!;
-    });
+    }, this.cache.enabled);
   }
 }
 

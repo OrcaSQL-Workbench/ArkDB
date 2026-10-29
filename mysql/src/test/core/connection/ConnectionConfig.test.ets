@@ -330,6 +330,97 @@ export default function connectionConfigTest(): void {
         }
       }
     });
+
+    it('preparedCacheAcceptsMissingZeroAndIntegerBounds', 0, () => {
+      const absent = validConfig();
+      expect(absent.preparedCacheSize === undefined).assertTrue();
+      expect(absent.validateIssues().length).assertEqual(0);
+      expect(absent.clone().preparedCacheSize === undefined).assertTrue();
+      for (const capacity of [0, 1, 256]) {
+        const config = validConfig();
+        config.preparedCacheSize = capacity;
+        expect(config.validateIssues().length).assertEqual(0);
+        expect(config.validate().length).assertEqual(0);
+        expect(config.clone().preparedCacheSize).assertEqual(capacity);
+      }
+    });
+
+    it('preparedCacheRejectsInvalidNumericSizesBeforeClone', 0, () => {
+      const invalid: number[] = [-1, -0.5, 0.5, 256.5, 257, 9007199254740992,
+        Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+      for (const capacity of invalid) {
+        const config = validConfig();
+        config.preparedCacheSize = capacity;
+        const issues = config.validateIssues();
+        const errors = config.validate();
+        expect(issues.length).assertEqual(1);
+        expect(issues[0].field).assertEqual(ConnectionConfigField.PreparedCacheSize);
+        expect(issues[0].error.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(issues[0].invalidValue === undefined).assertTrue();
+        expect(errors.length).assertEqual(1);
+        expect(errors[0].kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(errors[0].message).assertEqual(issues[0].error.message);
+        const failure = sessionCloneFailure(config);
+        expect(failure !== null).assertTrue();
+        if (failure === null) throw new Error('Invalid cache capacity must not be cloned.');
+        expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(failure.message).assertEqual(issues[0].error.message);
+      }
+    });
+
+    it('preparedCacheRejectsMalformedJsonValuesWithoutCoercion', 0, () => {
+      const values: string[] = ['null', 'true', 'false', '"1"', '""',
+        '"private-cache-value"', '[]', '{}', '{"private":"private-cache-value"}'];
+      for (const value of values) {
+        const input = cacheConfigFromUntrustedJsonFixture('{"preparedCacheSize":' + value + '}');
+        const config = validConfig();
+        config.preparedCacheSize = input.preparedCacheSize;
+        const issues = config.validateIssues();
+        expect(issues.length).assertEqual(1);
+        expect(issues[0].field).assertEqual(ConnectionConfigField.PreparedCacheSize);
+        expect(issues[0].error.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(issues[0].invalidValue === undefined).assertTrue();
+        expect(issues[0].error.message.indexOf('private-cache-value')).assertEqual(-1);
+        const failure = sessionCloneFailure(config);
+        expect(failure !== null).assertTrue();
+        if (failure === null) throw new Error('Malformed cache capacity must not be cloned.');
+        expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(failure.message).assertEqual(issues[0].error.message);
+      }
+    });
+
+    it('preparedCacheIssuesAppendWithoutChangingExistingValidationOrder', 0, () => {
+      const config = new ConnectionConfig();
+      config.session = sessionOptionsFromUntrustedJsonFixture('{"timeZone":null}');
+      config.preparedCacheSize = -1;
+      const issues = config.validateIssues();
+      const fields: ConnectionConfigField[] = [ConnectionConfigField.Host, ConnectionConfigField.User,
+        ConnectionConfigField.SessionTimeZone, ConnectionConfigField.PreparedCacheSize];
+      expect(issues.length).assertEqual(4);
+      const errors = config.validate();
+      expect(errors.length).assertEqual(4);
+      for (let index = 0; index < fields.length; index += 1) {
+        expect(issues[index].field).assertEqual(fields[index]);
+        expect(errors[index].kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(errors[index].message).assertEqual(issues[index].error.message);
+      }
+      const failure = sessionCloneFailure(config);
+      expect(failure !== null).assertTrue();
+      if (failure === null) throw new Error('Invalid session/cache options must not be cloned.');
+      expect(failure.message).assertEqual(issues[2].error.message);
+    });
+
+    it('preparedCacheCloneKeepsAnIndependentCapacitySnapshot', 0, () => {
+      const config = validConfig();
+      config.preparedCacheSize = 1;
+      const copy = config.clone();
+      config.preparedCacheSize = 256;
+      expect(copy.preparedCacheSize).assertEqual(1);
+      copy.preparedCacheSize = 0;
+      expect(config.preparedCacheSize).assertEqual(256);
+      expect(copy.validateIssues().length).assertEqual(0);
+      expect(config.validateIssues().length).assertEqual(0);
+    });
   });
 }
 
@@ -369,4 +460,8 @@ function sessionCloneFailure(config: ConnectionConfig): ArkDbError | null {
 
 function sessionOptionsFromUntrustedJsonFixture(source: string): MySqlSessionOptions {
   return JSON.parse(source) as MySqlSessionOptions;
+}
+
+function cacheConfigFromUntrustedJsonFixture(source: string): ConnectionConfig {
+  return JSON.parse(source) as ConnectionConfig;
 }

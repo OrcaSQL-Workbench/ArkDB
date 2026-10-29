@@ -6,6 +6,7 @@ import mySqlSessionInitializationTest from './connection/MySqlSessionInitializat
 import mySqlExecutionControllerTest from './execution/MySqlExecutionController.test';
 import mySqlCancellationTest from './execution/MySqlCancellation.test';
 import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
+import mySqlStatementCacheTest from './execution/MySqlStatementCache.test';
 import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';
 import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
 import queryStreamTest from './command/QueryStream.test';
@@ -28,6 +29,7 @@ export default function testsuite(): void {
   mySqlExecutionControllerTest();
   mySqlCancellationTest();
   mySqlCommandGateTest();
+  mySqlStatementCacheTest();
   mySqlServerMetricsProviderTest();
   mySqlMetadataProviderTest();
   queryStreamTest();

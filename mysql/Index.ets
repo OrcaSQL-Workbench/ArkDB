@@ -43,6 +43,11 @@ export { MySqlConnectionFeatures, requireMySqlFeatures } from
 export type { MySqlSession } from './src/main/ets/mysql/driver/MySqlSession';
 export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
   './src/main/ets/mysql/driver/MySqlPreparedContracts';
+export type { MySqlBatchExecutor } from './src/main/ets/mysql/execution/MySqlBatchExecutor';
+export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
+  './src/main/ets/mysql/model/MySqlBatch';
+export { MySqlExecutionOutcome, MySqlOperationError } from
+  './src/main/ets/mysql/model/MySqlOperationError';
 export { MySqlParameter, MySqlParameterType } from './src/main/ets/mysql/model/MySqlParameter';
 export type { MySqlParameterValue } from './src/main/ets/mysql/model/MySqlParameter';
 export { quoteMySqlIdentifier, mysqlPlaceholders } from './src/main/ets/mysql/value/MySqlSqlHelpers';

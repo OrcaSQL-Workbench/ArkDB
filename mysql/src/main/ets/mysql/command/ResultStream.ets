@@ -92,6 +92,7 @@ class QueryStreamState {
   truncationReason: string = '';
   drainStartedAtMs: number = -1;
   drainedBytes: number = 0;
+  loadedResultBytes: number = 0;
 }
 
 class TransportBoundSink implements QueryResultSink {
@@ -265,7 +266,7 @@ async function emitRowResult(source: MysqlPacketSource, first: MysqlPacket, capa
 
     const row = rowDecoder.decode(rowPacket.payload, columns);
     const rowBytes = estimateSqlRowBytes(row);
-    if (loadedBytes + rowBytes > options.maxResultBytes) {
+    if (streamState.loadedResultBytes + rowBytes > options.maxResultBytes) {
       truncationReason = 'resultBytes';
       beginStreamTruncation(streamState, truncationReason);
       recordTriggerPacket(streamState, rowPacket, options.maxDrainBytes);
@@ -292,6 +293,7 @@ async function emitRowResult(source: MysqlPacketSource, first: MysqlPacket, capa
     chunkBytes += rowPacket.payload.length;
     emittedRows += 1;
     loadedBytes += rowBytes;
+    streamState.loadedResultBytes += rowBytes;
   }
 }
 
@@ -585,26 +587,26 @@ export function validateQueryOptions(options: QueryOptions): void {
     throw ArkDbError.validation('statementTimeoutMs must be between 0 and ' +
       MAX_STATEMENT_TIMEOUT_MS);
   }
-  if (options.maxRows < 0 || Math.floor(options.maxRows) !== options.maxRows) {
+  if (!Number.isSafeInteger(options.maxRows) || options.maxRows < 0) {
     throw ArkDbError.validation('maxRows must be a non-negative integer');
   }
-  if (options.maxChunkRows < 1 || Math.floor(options.maxChunkRows) !== options.maxChunkRows) {
+  if (!Number.isSafeInteger(options.maxChunkRows) || options.maxChunkRows < 1) {
     throw ArkDbError.validation('maxChunkRows must be a positive integer');
   }
-  if (options.maxChunkBytes < 1 || Math.floor(options.maxChunkBytes) !== options.maxChunkBytes) {
+  if (!Number.isSafeInteger(options.maxChunkBytes) || options.maxChunkBytes < 1) {
     throw ArkDbError.validation('maxChunkBytes must be a positive integer');
   }
-  if (options.maxResultBytes < 1 || Math.floor(options.maxResultBytes) !== options.maxResultBytes) {
+  if (!Number.isSafeInteger(options.maxResultBytes) || options.maxResultBytes < 1) {
     throw ArkDbError.validation('maxResultBytes must be a positive integer');
   }
-  if (options.maxResultSets < 1 || Math.floor(options.maxResultSets) !== options.maxResultSets) {
+  if (!Number.isSafeInteger(options.maxResultSets) || options.maxResultSets < 1) {
     throw ArkDbError.validation('maxResultSets must be a positive integer');
   }
-  if (options.maxDrainBytes < 1 || Math.floor(options.maxDrainBytes) !== options.maxDrainBytes) {
+  if (!Number.isSafeInteger(options.maxDrainBytes) || options.maxDrainBytes < 1) {
     throw ArkDbError.validation('maxDrainBytes must be a positive integer');
   }
-  if (options.maxDrainTimeMs < 1 || options.maxDrainTimeMs > MAX_QUERY_DRAIN_TIME_MS ||
-    Math.floor(options.maxDrainTimeMs) !== options.maxDrainTimeMs) {
+  if (!Number.isSafeInteger(options.maxDrainTimeMs) || options.maxDrainTimeMs < 1 ||
+    options.maxDrainTimeMs > MAX_QUERY_DRAIN_TIME_MS) {
     throw ArkDbError.validation('maxDrainTimeMs must be between 1 and ' +
       MAX_QUERY_DRAIN_TIME_MS);
   }

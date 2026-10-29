@@ -140,7 +140,24 @@ For explicit reuse, `prepare(sql)` returns a `MySqlPreparedStatement` with
 metadata can differ from prepare-time metadata, and handles remain bound to their
 original physical session. Explicit handles never enter or borrow from the
 convenience cache. Close does not invent a server acknowledgement.
-No pool, cursor, batch, named binding, long-data upload or
+
+Prepared batches are available from the optional
+`requireMySqlFeatures(connection).batch` feature. The facade can be discovered
+before connect, but a nonempty `execute(sql, rows, options?)` requires a ready
+connection; empty rows return no results without network dispatch. One call owns
+one command scope, executes rows serially through one internally reused prepared
+statement and stops on the first failure. `maxItems` defaults to 1000 and accepts
+1..1000; `maxBufferedBytes` defaults to 33554432 and accepts 1..33554432, with
+all result sets sharing the remaining cumulative buffer budget.
+
+Successful items retain their native `MySqlQueryResult` values. A failure throws
+`MySqlBatchError` with `completedResults`, zero-based `failedIndex` and
+`failedOutcome`; completed writes are not retried or rolled back, and an
+`Unknown` outcome is never replayed automatically. Batch execution does not
+start, commit or roll back a transaction, and invocation inside an active
+transaction is rejected.
+
+No pool, cursor, named binding, long-data upload or
 automatic deadline is exposed; `statementTimeoutMs` remains validation-only.
 
 `MySqlSession` is a restricted borrowing interface with read-only feature,

@@ -7,7 +7,8 @@ import {
   ServerMetricsProvider, CoreDbConnection, ConnectionState, ServerInfo, QueryExecutionSummary,
   QueryResultSink, MySqlConnectionFeatures, requireMySqlFeatures, MySqlParameter,
   MySqlParameterType, MySqlParameterValue, MySqlPreparedExecutor, MySqlPreparedStatement,
-  MySqlSession, quoteMySqlIdentifier, mysqlPlaceholders, createMySqlConnection,
+  MySqlSession, MySqlBatchOptions, MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
+  mysqlPlaceholders, createMySqlConnection,
   CoreQueryResultSink, CoreQueryResultMeta, CoreQueryRowChunk, CoreQueryResultSummary
 } from '../../../Index';
 import {
@@ -125,6 +126,24 @@ export default function publicInterfaceTest(): void {
       expect(failure instanceof ArkDbError).assertTrue();
       if (!(failure instanceof ArkDbError)) throw new Error('Expected the public ArkDbError identity.');
       expect(failure.kind).assertEqual(ArkDbErrorKind.Unsupported);
+    });
+
+    it('batchFailureDependenciesCompileFromPublicIndex', 0, () => {
+      const primary = ArkDbError.protocol('Synthetic public batch failure.');
+      const failure: MySqlOperationError =
+        new MySqlOperationError(primary, [], MySqlExecutionOutcome.NotDispatched);
+
+      expect(failure.primary === primary).assertTrue();
+      expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+    });
+
+    it('batchOptionsValidateThroughPublicIndex', 0, () => {
+      const options: MySqlBatchOptions = new MySqlBatchOptions();
+      const errors: ArkDbError[] = options.validate();
+
+      expect(options.maxItems).assertEqual(1000);
+      expect(options.maxBufferedBytes).assertEqual(33554432);
+      expect(errors.length).assertEqual(0);
     });
 
     it('preparedPublicImportsCompile', 0, () => {

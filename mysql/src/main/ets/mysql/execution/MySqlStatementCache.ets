@@ -7,19 +7,36 @@ export interface MySqlStatementCacheBorrow {
   readonly statement: MySqlPreparedStatement;
 }
 
-class CachedStatement implements MySqlStatementCacheBorrow {
+class CachedStatement {
   readonly owner: MySqlStatementCache;
   readonly sql: string;
   readonly generation: number;
   readonly statement: MySqlPreparedStatement;
-  borrowed: boolean = true;
+  borrowed: boolean = false;
   retired: boolean = false;
+  checkoutSerial: number = 0;
+  activeBorrow: CachedStatementBorrow | null = null;
 
   constructor(owner: MySqlStatementCache, sql: string, generation: number, statement: MySqlPreparedStatement) {
     this.owner = owner;
     this.sql = sql;
     this.generation = generation;
     this.statement = statement;
+  }
+}
+
+class CachedStatementBorrow implements MySqlStatementCacheBorrow {
+  readonly owner: MySqlStatementCache;
+  readonly entry: CachedStatement;
+  readonly checkoutSerial: number;
+  readonly statement: MySqlPreparedStatement;
+  settled: boolean = false;
+
+  constructor(owner: MySqlStatementCache, entry: CachedStatement, checkoutSerial: number) {
+    this.owner = owner;
+    this.entry = entry;
+    this.checkoutSerial = checkoutSerial;
+    this.statement = entry.statement;
   }
 }
 
@@ -55,9 +72,9 @@ export class MySqlStatementCache {
     for (const entry of this.entries) {
       if (!entry.retired && !entry.borrowed && entry.sql === sql) {
         this.session.assertUsable(scope, entry.statement);
-        entry.borrowed = true;
+        const borrow = this.checkout(entry);
         this.touch(entry);
-        return entry;
+        return borrow;
       }
     }
     let retain = this.enabled;
@@ -69,23 +86,30 @@ export class MySqlStatementCache {
     const statement = await this.session.prepareOwned(scope, sql);
     const entry = new CachedStatement(this, sql, scope.generation, statement);
     if (retain) this.entries.push(entry);
-    return entry;
+    return this.checkout(entry);
   }
 
   async release(scope: MySqlCommandScope, borrow: MySqlStatementCacheBorrow,
     reusable: boolean): Promise<void> {
     this.gate.assertOwner(scope);
-    if (!(borrow instanceof CachedStatement) || borrow.owner !== this || !borrow.borrowed) {
+    if (!(borrow instanceof CachedStatementBorrow) || borrow.owner !== this || borrow.settled) {
       throw ArkDbError.protocol('The statement borrow does not belong to this cache or has already settled.');
     }
-    borrow.borrowed = false;
-    if (reusable && !borrow.retired && this.session.isAlive() && !borrow.statement.closed &&
-      this.entries.indexOf(borrow) >= 0) {
-      this.session.assertUsable(scope, borrow.statement);
-      this.touch(borrow);
+    const entry = borrow.entry;
+    if (entry.owner !== this || !entry.borrowed || entry.checkoutSerial !== borrow.checkoutSerial ||
+      entry.activeBorrow !== borrow) {
+      throw ArkDbError.protocol('The statement borrow does not belong to this cache or has already settled.');
+    }
+    borrow.settled = true;
+    entry.activeBorrow = null;
+    entry.borrowed = false;
+    if (reusable && !entry.retired && this.session.isAlive() && !entry.statement.closed &&
+      this.entries.indexOf(entry) >= 0) {
+      this.session.assertUsable(scope, entry.statement);
+      this.touch(entry);
       return;
     }
-    await this.removeAndClose(scope, borrow);
+    await this.removeAndClose(scope, entry);
   }
 
   async clearOwned(scope: MySqlCommandScope): Promise<void> {
@@ -104,6 +128,15 @@ export class MySqlStatementCache {
   invalidate(): void {
     for (const entry of this.entries) entry.retired = true;
     this.entries = [];
+  }
+
+  private checkout(entry: CachedStatement): CachedStatementBorrow {
+    const checkoutSerial = entry.checkoutSerial + 1;
+    const borrow = new CachedStatementBorrow(this, entry, checkoutSerial);
+    entry.checkoutSerial = checkoutSerial;
+    entry.activeBorrow = borrow;
+    entry.borrowed = true;
+    return borrow;
   }
 
   private touch(entry: CachedStatement): void {

@@ -742,11 +742,23 @@ export default function mySqlStatementCacheTest(): void {
         expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('');
         await fixture.cache.release(fixture.scope, borrowed, true);
         const reused = await fixture.cache.borrow(fixture.scope, 'DO 1');
+        const staleClose = await preparedFailureOf(fixture.cache.release(fixture.scope, borrowed, false));
+        expect(staleClose !== null && staleClose.kind === ArkDbErrorKind.Protocol).assertTrue();
+        expect(reused.statement.closed).assertFalse();
+        expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('');
+        const staleReturn = await preparedFailureOf(fixture.cache.release(fixture.scope, borrowed, true));
+        expect(staleReturn !== null && staleReturn.kind === ArkDbErrorKind.Protocol).assertTrue();
+        expect(reused.statement.closed).assertFalse();
+        expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('');
+        expect(reused === borrowed).assertFalse();
         expect(reused.statement === borrowed.statement).assertTrue();
         await fixture.cache.release(fixture.scope, reused, false);
+        expect(reused.statement.closed).assertTrue();
         const duplicate = await preparedFailureOf(fixture.cache.release(fixture.scope, borrowed, false));
         expect(duplicate !== null && duplicate.kind === ArkDbErrorKind.Protocol).assertTrue();
         expect(cacheStatementIds(fixture.host.transport.writes, 0x19)).assertEqual('7');
+        expect(fixture.host.transport.writes.filter((frame: Uint8Array): boolean => frame[4] === 0x16).length)
+          .assertEqual(1);
       } finally { await fixture.close(); }
     });
 

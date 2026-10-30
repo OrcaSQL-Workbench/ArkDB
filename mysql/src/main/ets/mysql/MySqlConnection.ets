@@ -37,6 +37,9 @@ import {
   MySqlBatchExecutor, MySqlPreparedBatchExecutor
 } from './execution/MySqlBatchExecutor';
 import {
+  MySqlConnectionTransactionRunner, MySqlTransactionRunnerHost
+} from './execution/MySqlTransactionRunner';
+import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from './execution/MySqlCommandGate';
 import {
@@ -95,6 +98,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private batch: MySqlPreparedBatchExecutor | null = null;
   private prepared: InternalPreparedExecutor | null = null;
   private preparedOperation: PreparedCommandSettlement | null = null;
+  private transactionOperation: PreparedCommandSettlement | null = null;
 
   constructor(config: ConnectionConfig, password: string, transport: TcpTransport = new TcpTransport(),
     timers: ConnectionTimerPort = new SystemConnectionTimerPort(),
@@ -118,6 +122,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       (): MySqlBatchExecutor => this.batchExecutor());
     this.mysqlFeatures.prepared = new MySqlConnectionPreparedExecutor(
       (): MySqlPreparedExecutor => this.preparedExecutor());
+    this.mysqlFeatures.transactions = new MySqlConnectionTransactionRunner(this.transactionHost());
   }
 
   get state(): ConnectionState {
@@ -177,6 +182,24 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.batch = new MySqlPreparedBatchExecutor(this.preparedHost(),
       (): DatabaseSessionStatus => this.status.clone());
     return this.batch;
+  }
+
+  private transactionHost(): MySqlTransactionRunnerHost {
+    return new TransactionConnectionHost(
+      (): ConnectionState => this.connState,
+      (): MySqlConnectionFeatures => this.mysqlFeatures,
+      (): ServerInfo => this.info,
+      (): MySqlDatabaseSessionStatus => this.sessionStatus,
+      (): MySqlCommandScope => this.reserveTransactionRunnerScope(),
+      (scope: MySqlCommandScope): Promise<ArkDbError[]> =>
+        this.settleTransactionOperation(scope),
+      (scope: MySqlCommandScope): Promise<ArkDbError[]> =>
+        this.finishTransactionRunnerScope(scope),
+      (scope: MySqlCommandScope, sql: string): Promise<QueryResult> =>
+        this.queryOwned(scope, sql),
+      (scope: MySqlCommandScope, sql: string, options: QueryOptions,
+        sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> =>
+        this.transactionQueryStreamOwned(scope, sql, options, sink));
   }
 
   private preparedHost(): MySqlPreparedExecutorHost {
@@ -541,6 +564,18 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.transactionCommand('ROLLBACK');
   }
 
+  async savepoint(_name: string): Promise<void> {
+    throw ArkDbError.validation('Savepoints are only available inside a transaction callback session.');
+  }
+
+  async rollbackTo(_name: string): Promise<void> {
+    throw ArkDbError.validation('Savepoints are only available inside a transaction callback session.');
+  }
+
+  async releaseSavepoint(_name: string): Promise<void> {
+    throw ArkDbError.validation('Savepoints are only available inside a transaction callback session.');
+  }
+
   private async transactionCommand(sql: string): Promise<MySqlDatabaseSessionStatus> {
     const scope = this.reserveCommand(MySqlCommandKind.Transaction);
     try {
@@ -549,6 +584,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } finally {
       this.finishCommand(scope);
     }
+  }
+
+  private async transactionQueryStreamOwned(scope: MySqlCommandScope, sql: string,
+    options: QueryOptions, sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> {
+    const executionOptions = options.clone();
+    validateQueryOptions(executionOptions);
+    return mysqlExecutionSummary(await this.queryStreamOwned(scope, sql, executionOptions,
+      new MySqlResultSinkAdapter(sink)));
   }
 
   cancel(): Promise<QueryCancellationResult> {
@@ -561,6 +604,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.cancelTask = task;
     if (this.preparedOperation !== null && this.preparedOperation.scope === scope) {
       this.preparedOperation.cancellations.push(task);
+    }
+    if (this.transactionOperation !== null && this.transactionOperation.scope === scope) {
+      this.transactionOperation.cancellations.push(task);
     }
     const settled = (): void => {
       this.cancelTask = null;
@@ -695,6 +741,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       this.closing = this.closeWithScope(scope, ownsScope, polite);
       const prepared = this.preparedOperation;
       if (prepared !== null && prepared.scope === scope) prepared.closeResult = this.closing;
+      const transaction = this.transactionOperation;
+      if (transaction !== null && transaction.scope === scope) transaction.closeResult = this.closing;
     }
     return this.closing;
   }
@@ -855,6 +903,59 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     const scope = this.commandGate.reserve(kind);
     if (!cachedConvenience && this.prepared !== null) this.prepared.retireCacheContext(scope);
     return scope;
+  }
+
+  private reserveTransactionRunnerScope(): MySqlCommandScope {
+    if (this.cancelTask !== null || this.connState !== ConnectionState.Ready || this.channel === null) {
+      throw ArkDbError.validation('Transaction callback requires a ready connection.');
+    }
+    if (this.status.known !== true) {
+      throw ArkDbError.validation('Transaction callback requires known session transaction status.');
+    }
+    if (this.status.inTransaction) {
+      throw ArkDbError.validation('Transaction callback cannot enter an existing transaction.');
+    }
+    if (!this.status.autocommit) {
+      throw ArkDbError.validation('Transaction callback requires autocommit to be enabled.');
+    }
+    const scope = this.reserveCommand(MySqlCommandKind.Transaction);
+    this.transactionOperation = new PreparedCommandSettlement(scope);
+    return scope;
+  }
+
+  private async settleTransactionOperation(scope: MySqlCommandScope): Promise<ArkDbError[]> {
+    const failures: ArkDbError[] = [];
+    const operation = this.transactionOperation;
+    if (operation === null || operation.scope !== scope) return failures;
+    while (operation.joinedCancellations < operation.cancellations.length) {
+      const cancellation = operation.cancellations[operation.joinedCancellations++];
+      try {
+        await cancellation;
+      } catch (error) {
+        failures.push(toCleanupError(error as Object));
+      }
+    }
+    const closeResult = operation.closeResult;
+    if (closeResult !== null && !operation.closeJoined) {
+      operation.closeJoined = true;
+      try {
+        await closeResult;
+      } catch (error) {
+        failures.push(toCleanupError(error as Object));
+      }
+    }
+    return failures;
+  }
+
+  private async finishTransactionRunnerScope(scope: MySqlCommandScope): Promise<ArkDbError[]> {
+    const failures = await this.settleTransactionOperation(scope);
+    try {
+      this.finishCommand(scope);
+    } catch (error) {
+      failures.push(toCleanupError(error as Object));
+    }
+    this.transactionOperation = null;
+    return failures;
   }
 
   private invalidatePreparedCache(): void {
@@ -1114,6 +1215,62 @@ class MySqlConnectionBatchExecutor implements MySqlBatchExecutor {
   }
 }
 
+class TransactionConnectionHost implements MySqlTransactionRunnerHost {
+  private readState: () => ConnectionState;
+  private readFeatures: () => MySqlConnectionFeatures;
+  private readServerInfo: () => ServerInfo;
+  private readSessionStatus: () => MySqlDatabaseSessionStatus;
+  private reserve: () => MySqlCommandScope;
+  private settle: (scope: MySqlCommandScope) => Promise<ArkDbError[]>;
+  private finish: (scope: MySqlCommandScope) => Promise<ArkDbError[]>;
+  private executeQuery: (scope: MySqlCommandScope, sql: string) => Promise<QueryResult>;
+  private executeStream: (scope: MySqlCommandScope, sql: string, options: QueryOptions,
+    sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
+
+  constructor(readState: () => ConnectionState,
+    readFeatures: () => MySqlConnectionFeatures,
+    readServerInfo: () => ServerInfo,
+    readSessionStatus: () => MySqlDatabaseSessionStatus,
+    reserve: () => MySqlCommandScope,
+    settle: (scope: MySqlCommandScope) => Promise<ArkDbError[]>,
+    finish: (scope: MySqlCommandScope) => Promise<ArkDbError[]>,
+    executeQuery: (scope: MySqlCommandScope, sql: string) => Promise<QueryResult>,
+    executeStream: (scope: MySqlCommandScope, sql: string, options: QueryOptions,
+      sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>) {
+    this.readState = readState;
+    this.readFeatures = readFeatures;
+    this.readServerInfo = readServerInfo;
+    this.readSessionStatus = readSessionStatus;
+    this.reserve = reserve;
+    this.settle = settle;
+    this.finish = finish;
+    this.executeQuery = executeQuery;
+    this.executeStream = executeStream;
+  }
+
+  get state(): ConnectionState { return this.readState(); }
+  get mysqlFeatures(): MySqlConnectionFeatures { return this.readFeatures(); }
+  get serverInfo(): ServerInfo { return this.readServerInfo(); }
+  get sessionStatus(): MySqlDatabaseSessionStatus { return this.readSessionStatus(); }
+
+  reserveTransaction(): MySqlCommandScope { return this.reserve(); }
+  settleTransaction(scope: MySqlCommandScope): Promise<ArkDbError[]> {
+    return this.settle(scope);
+  }
+  finishTransaction(scope: MySqlCommandScope): Promise<ArkDbError[]> {
+    return this.finish(scope);
+  }
+
+  query(scope: MySqlCommandScope, sql: string): Promise<QueryResult> {
+    return this.executeQuery(scope, sql);
+  }
+
+  queryStream(scope: MySqlCommandScope, sql: string, options: QueryOptions,
+    sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> {
+    return this.executeStream(scope, sql, options, sink);
+  }
+}
+
 type PreparedCommandRunner = <T>(kind: MySqlCommandKind,
   operation: (scope: MySqlCommandScope) => Promise<T>, cachedConvenience?: boolean) => Promise<T>;
 
@@ -1176,6 +1333,7 @@ class PreparedCommandSettlement {
   readonly cancellations: Promise<QueryCancellationResult>[] = [];
   joinedCancellations: number = 0;
   closeResult: Promise<void> | null = null;
+  closeJoined: boolean = false;
 
   constructor(scope: MySqlCommandScope) {
     this.scope = scope;

@@ -20,6 +20,17 @@ test('core is a real independent shared HAR, not an extra database driver', () =
   assert.deepEqual(driverVerification().nativeModules, ['core', 'mysql']);
 });
 
+test('shared contracts describe callback-scoped transaction sessions', async () => {
+  const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
+  assert.match(contracts, /\bmysqlFeatures\.transactions\b/);
+  assert.match(contracts, /\bMySqlTransactionRunner\b/);
+  assert.match(contracts, /\bcallback-scoped\b/i);
+  assert.match(contracts, /\b(?:savepoint|rollbackTo|releaseSavepoint)\b/);
+  assert.match(contracts, /\bintentional source-compatibility impact\b/i);
+  assert.match(contracts, /\bexisting `?MySqlSession`? implementers\b/i);
+  assert.doesNotMatch(contracts, /\bnot an implemented transaction scope\b/i);
+});
+
 test('adding an independently typed adapter changes registration only, not MySQL implementation', async (t) => {
   const root = await fixture(t);
   const mysql = await treeDigest(join(root, 'mysql'));

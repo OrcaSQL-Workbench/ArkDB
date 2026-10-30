@@ -13,4 +13,7 @@ export interface MySqlSession {
   query(sql: string): Promise<MySqlQueryResult>;
   queryStream(sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
+  savepoint(name: string): Promise<void>;
+  rollbackTo(name: string): Promise<void>;
+  releaseSavepoint(name: string): Promise<void>;
 }

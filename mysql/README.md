@@ -157,15 +157,44 @@ Successful items retain their native `MySqlQueryResult` values. A failure throws
 start, commit or roll back a transaction, and invocation inside an active
 transaction is rejected.
 
+Built-in connections also expose the optional
+`requireMySqlFeatures(connection).transactions` runner. Check that member
+separately. `MySqlTransactionOptions` defaults to
+`MySqlTransactionIsolation.Default`, leaves `readOnly` unset and sets
+`consistentSnapshot=false`. Entry requires a Ready connection, known session
+status, no existing transaction and `autocommit=true`; rejection occurs before
+transaction SQL. Explicit isolation/read-only characteristics use
+`SET TRANSACTION` before `START TRANSACTION`, while a consistent snapshot is a
+`START TRANSACTION` option. The helper does not change the caller's autocommit
+setting or retry SQL.
+
+The callback receives a scoped `MySqlSession`. Its query/stream and
+savepoint/rollback-to/release operations share one physical command owner. The
+facade expires as soon as the callback settles, waits for owned
+cancellation/control cleanup before later child commands or final settlement,
+and omits root prepared, batch and nested-transaction executors. The root
+connection's savepoint methods reject because only the callback facade may use
+that scope.
+
+Successful callbacks commit. Callback failures roll back when the target is
+synchronized and Ready, including after a consumed server error. A plain
+callback error is rethrown by identity after successful rollback. DDL can
+implicitly end and commit the transaction; that case is reported as completed
+rather than pretending rollback occurred. Unknown command, commit or
+cancellation outcomes remain `Unknown`. Rollback and control-cleanup failures
+are retained without replacing the original primary failure.
+
 No pool, cursor, named binding, long-data upload or
 automatic deadline is exposed; `statementTimeoutMs` remains validation-only.
 
 `MySqlSession` is a restricted borrowing interface with read-only feature,
-server-info and session-status properties plus native `query`/`queryStream`.
-It does not own connection creation/closure, implement a pool lease or enforce
-read-only SQL. `quoteMySqlIdentifier(parts)` quotes each nonempty identifier
-segment; `mysqlPlaceholders(count)` returns comma-separated `?` markers for
-1..65535 values. Neither interpolates values or implements text-protocol binding.
+server-info and session-status properties plus native `query`/`queryStream` and
+transaction-scoped savepoint methods. It does not own connection
+creation/closure, implement a pool lease or enforce read-only SQL. Savepoint
+methods reject on a root connection or an expired callback facade.
+`quoteMySqlIdentifier(parts)` quotes each nonempty identifier segment;
+`mysqlPlaceholders(count)` returns comma-separated `?` markers for 1..65535
+values. Neither interpolates values or implements text-protocol binding.
 
 ## Connect, query, close
 
@@ -217,7 +246,11 @@ export function configureOptionalSession(config: ConnectionConfig): void {
 
 Passwords are passed separately and must not be stored in `ConnectionConfig` or logged. `SslMode.VERIFY_IDENTITY` requires both certificate-chain and hostname verification. The preserved configuration default is `PREFERRED`, which can fall back to plaintext; choose your TLS policy explicitly.
 
-`close()` can itself fail. The simple function above propagates that failure; applications that must preserve both an operation error and a cleanup error should retain them separately, as the runnable sample and transaction example do. Do not automatically reconnect and replay SQL after an uncertain outcome.
+`close()` can itself fail. The simple function above propagates that failure;
+applications that must preserve both an operation error and a later
+connection-close error should retain them separately. Transaction callback
+rollback/control cleanup is already retained by the native transaction runner.
+Do not automatically reconnect and replay SQL after an uncertain outcome.
 
 When an idle connection sends QUIT, a failed or timed-out write now rejects `close()` even if socket shutdown succeeds. Socket shutdown is still attempted, and subsequent cleanup failures are retained with the original QUIT failure. Successful close and repeated calls remain idempotent.
 
@@ -419,59 +452,67 @@ Byte accounting is a driver estimate, not total application heap size. Exhausted
 
 ## Transactions
 
-Use a dedicated connection and transactional tables. MySQL DDL can implicitly commit; a common connection interface does not change server SQL semantics. The example accepts only application-owned statements, preserves primary/rollback/close failures, and never replays work.
+Use a dedicated connection and transactional tables. MySQL DDL can implicitly
+commit; the callback runner does not change server SQL semantics or replay
+work. The example uses the optional native feature, an explicit isolation
+option and the callback-scoped session.
 
 <!-- arkts-example: transactions -->
 ```typescript
-import { ConnectionConfig, ConnectionState, MySqlDriverFactory } from '@arkdb/mysql';
+import {
+  ArkDbError, ConnectionConfig, MySqlDriverFactory, MySqlSession,
+  MySqlTransactionIsolation, MySqlTransactionOptions, requireMySqlFeatures
+} from '@arkdb/mysql';
 
-export class TransactionFailure extends Error {
-  primaryFailure: Object | null;
-  rollbackFailure: Object | null;
-  cleanupFailure: Object | null;
-  rollbackAttempted: boolean;
+export class TransactionAndCloseFailure extends Error {
+  transactionFailure: Object;
+  closeFailure: Object;
 
-  constructor(primary: Object | null, rollback: Object | null,
-    cleanup: Object | null, attempted: boolean) {
-    super('Transaction or cleanup failed; inspect the retained failures without logging secrets.');
-    this.primaryFailure = primary;
-    this.rollbackFailure = rollback;
-    this.cleanupFailure = cleanup;
-    this.rollbackAttempted = attempted;
+  constructor(transactionFailure: Object, closeFailure: Object) {
+    super('Transaction and connection close both failed.');
+    this.transactionFailure = transactionFailure;
+    this.closeFailure = closeFailure;
   }
 }
 
 export async function runTransaction(config: ConnectionConfig, password: string,
   trustedStatements: string[]): Promise<void> {
-  const options = config.clone();
-  options.autocommit = false;
-  const errors = options.validate();
+  const connectionConfig = config.clone();
+  const errors = connectionConfig.validate();
   if (errors.length > 0) throw errors[0];
-  const connection = new MySqlDriverFactory().createConnection(options, password);
-  let primary: Object | null = null;
-  let rollback: Object | null = null;
-  let cleanup: Object | null = null;
-  let rollbackAttempted = false;
+  const connection = new MySqlDriverFactory().createConnection(connectionConfig, password);
+  let transactionFailure: Object | null = null;
+  let closeFailure: Object | null = null;
   try {
     await connection.connect();
-    for (const sql of trustedStatements) await connection.query(sql);
-    await connection.commit();
-  } catch (error) {
-    primary = error as Object;
-    if (connection.state === ConnectionState.Ready) {
-      rollbackAttempted = true;
-      try { await connection.rollback(); } catch (error) { rollback = error as Object; }
+    const transactions = requireMySqlFeatures(connection).transactions;
+    if (transactions === undefined) {
+      throw ArkDbError.unsupported('Transaction callbacks are unavailable.');
     }
-  } finally {
-    try { await connection.close(); } catch (error) { cleanup = error as Object; }
+    const options = new MySqlTransactionOptions();
+    options.isolation = MySqlTransactionIsolation.ReadCommitted;
+    await transactions.run(options, async (session: MySqlSession): Promise<void> => {
+      await session.savepoint('application_work');
+      for (const sql of trustedStatements) await session.query(sql);
+      await session.releaseSavepoint('application_work');
+    });
+  } catch (error) {
+    transactionFailure = error as Object;
   }
-  if (primary !== null || rollback !== null || cleanup !== null) {
-    throw new TransactionFailure(primary, rollback, cleanup, rollbackAttempted);
+  try { await connection.close(); } catch (error) { closeFailure = error as Object; }
+  if (transactionFailure !== null && closeFailure !== null) {
+    throw new TransactionAndCloseFailure(transactionFailure, closeFailure);
   }
+  if (transactionFailure !== null) throw transactionFailure as Error;
+  if (closeFailure !== null) throw closeFailure as Error;
 }
 ```
 
-If a commit response is lost, a rollback attempt does not prove the commit did not happen. A successful rollback also does not undo nontransactional-table writes or external side effects.
+The callback facade is invalid after `run` settles. Root savepoint methods and
+the callback's scoped prepared/batch/transaction features are intentionally
+unavailable. If a commit response is lost, rollback does not prove the commit
+did not happen. A successful rollback also does not undo implicit DDL commits,
+nontransactional-table writes or external side effects.
 
 ## Cancellation and deadlines
 
@@ -560,7 +601,7 @@ MySQL also exposes these through `features.metadata` and `features.metrics`; gen
 - **Bounded results.** `query()` uses the bounded streaming implementation and exposes `truncated`, `truncationReason`, and `additionalResults`. It is not an unlimited collector.
 - **Streaming.** `queryStream(sql, options, sink)` awaits each `QueryResultSink` callback. Set row/chunk/result/drain budgets in `QueryOptions`, handle truncation and unknown status explicitly, and avoid accumulating every chunk. Awaiting a sink does not pause socket delivery; the separate receive queue remains bounded and fails closed on overflow.
 - **Timeouts.** `connectTimeoutMs` covers connection opening. The low-level driver validates `QueryOptions.statementTimeoutMs` but does **not** start a statement-cancellation timer. Callers must own statement deadlines, cancellation orchestration, and cleanup; `Promise.race` alone does not cancel server execution.
-- **Transactions.** Generic features expose `begin`, `commit`, `rollback` and known session status. MySQL also retains native `setAutocommit`. Failure can invalidate status or leave an unknown execution outcome; never replay writes.
+- **Transactions.** Generic features expose `begin`, `commit`, `rollback` and known session status. MySQL also retains native `setAutocommit` and the optional `mysqlFeatures.transactions` callback runner with typed options and scoped savepoints. The callback facade expires at settlement and does not expose root prepared/batch/nested transaction executors. Failure can invalidate status or leave an unknown execution outcome; never replay writes.
 - **Cancellation.** The generic connection feature owns its MySQL control-session lifetime. The retained handle-based factory helper does not. Ownership is retained until required cancellation/close cleanup settles. Only the wire-query phase can be killed, not an interrupted-result end callback or an internal status-refresh ping. Status refresh waits for any pending control request and its cleanup; an unknown KILL outcome retires the target instead. Await the original query and request, then inspect reuse/status before another command.
 - **Errors.** `ArkDbError` and `ArkDbErrorKind` expose common categories and server error code/SQLSTATE. No Workbench-name compatibility aliases are exported. Server messages can contain sensitive data; do not copy them into public logs.
 - **Logging.** `Logger`, `LogSink`, and the five `ArkDB.*` subsystem tags describe driver activity only. Host UI, storage, and RPC logging stay outside the driver. File output remains an explicit opt-in convenience.

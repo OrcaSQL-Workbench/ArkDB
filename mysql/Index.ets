@@ -33,6 +33,8 @@ export type { MySqlValue as SqlValue } from './src/main/ets/mysql/model/MySqlQue
 export { ConnectionConfigField, ConnectionValidationIssue, SslMode, SslConfig, ConnectionConfig } from
   './src/main/ets/mysql/model/ConnectionConfig';
 export { MySqlSessionOptions } from './src/main/ets/mysql/model/MySqlSessionOptions';
+export { MySqlTransactionIsolation, MySqlTransactionOptions } from
+  './src/main/ets/mysql/model/MySqlTransactionOptions';
 export { ServerFamily, MySqlServerInfo, MySqlServerInfo as ServerInfo } from
   './src/main/ets/mysql/model/MySqlServerInfo';
 export { MySqlColumnDef, MySqlColumnDef as ColumnDef, MySqlQueryResult, MySqlQueryResult as QueryResult } from
@@ -44,6 +46,7 @@ export type { MySqlSession } from './src/main/ets/mysql/driver/MySqlSession';
 export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
   './src/main/ets/mysql/driver/MySqlPreparedContracts';
 export type { MySqlBatchExecutor } from './src/main/ets/mysql/execution/MySqlBatchExecutor';
+export type { MySqlTransactionRunner } from './src/main/ets/mysql/execution/MySqlTransactionRunner';
 export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
   './src/main/ets/mysql/model/MySqlBatch';
 export { MySqlExecutionOutcome, MySqlOperationError } from

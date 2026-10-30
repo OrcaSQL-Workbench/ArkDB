@@ -73,10 +73,24 @@ ready-only executor for each call instead of constructing or retaining a
 physical-session executor while disconnected. Native prepared streams retain
 native callback types; portable `features.streaming` remains text streaming.
 
-`MySqlSession` restricts borrowing to read-only feature/server/status properties
-and native query/stream methods. It is neither a read-only SQL policy nor an
-implemented transaction scope or pool lease. No future optional-feature types
-are required to use this interface.
+MySQL also exposes the optional `mysqlFeatures.transactions`
+`MySqlTransactionRunner`. It accepts `MySqlTransactionOptions`, owns one
+connection command scope across setup, callback query/stream/savepoint commands
+and commit/rollback, and returns a callback-scoped `MySqlSession`.
+
+The base `MySqlSession` borrowing view retains read-only
+feature/server/status properties and native query/stream methods. The
+transaction callback intentionally extends that public interface with
+`savepoint`, `rollbackTo` and `releaseSavepoint`. The facade expires when the
+callback settles, and its feature view omits root prepared, batch and nested
+transaction executors that cannot reuse the occupied scope. Root connection
+savepoint methods reject instead of borrowing the callback owner.
+
+Adding those required savepoint methods is an
+intentional source-compatibility impact for existing `MySqlSession` implementers. It does not change core's
+minimal connection or require custom `MySqlDbConnection` implementations to
+provide the optional `mysqlFeatures.transactions` member. `MySqlSession` remains
+neither a read-only SQL policy nor a pool lease.
 
 ## Semantics that must not become MySQL assumptions
 
@@ -93,6 +107,17 @@ autocommit is a MySQL convenience, not a required transaction interface.
 using session flags. Default or invalidated status is not evidence of autocommit
 or transaction state. MySQL invalidates status after a failed command and can
 refresh it with its health check.
+
+The native transaction runner requires a Ready connection, known status, no
+existing transaction and `autocommit=true`. Explicit isolation/read-only
+characteristics precede `START TRANSACTION`; a consistent snapshot is a start
+option. Successful callbacks commit. Callback failures roll back while the
+target remains synchronized and Ready. DDL implicit commit is reported as
+completed, unknown commit/cancellation outcomes remain Unknown, and
+rollback/control cleanup failures remain attached to the original primary. The
+callback scope settles cancellation/control cleanup before later child commands
+or public completion, preventing stale cancellation from targeting a later
+child.
 
 Cancellation is connection-bound and targets only the execution current at the
 call. `Requested` means a request was accepted, not that the query was interrupted.

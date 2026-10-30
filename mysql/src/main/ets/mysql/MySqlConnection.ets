@@ -928,7 +928,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return scope;
   }
 
-  private async settleTransactionOperation(scope: MySqlCommandScope): Promise<ArkDbError[]> {
+  private async settleTransactionOperation(scope: MySqlCommandScope,
+    completedCloseCleanup: boolean = false): Promise<ArkDbError[]> {
     const failures: ArkDbError[] = [];
     const operation = this.transactionOperation;
     if (operation === null || operation.scope !== scope) return failures;
@@ -946,7 +947,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       try {
         await closeResult;
       } catch (error) {
-        failures.push(toCleanupError(error as Object));
+        failures.push(completedCloseCleanup ?
+          operationFailure(error as Object, [], MySqlExecutionOutcome.Completed) :
+          toCleanupError(error as Object));
       }
     }
     return failures;
@@ -959,7 +962,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } catch (error) {
       failures.push(toCleanupError(error as Object));
     }
-    this.transactionOperation = null;
+    const lateFailures = await this.settleTransactionOperation(scope, true);
+    for (const failure of lateFailures) failures.push(failure);
+    if (this.transactionOperation !== null &&
+      this.transactionOperation.scope === scope) this.transactionOperation = null;
     return failures;
   }
 

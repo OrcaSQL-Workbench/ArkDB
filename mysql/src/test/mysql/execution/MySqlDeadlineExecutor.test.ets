@@ -136,12 +136,14 @@ class DeadlineControlConnection implements DbConnection {
   readonly closeEntered: Gate = new Gate();
   executing: Gate | null = null;
   closing: Gate | null = null;
+  connectFailure: ArkDbError | null = null;
   failure: ArkDbError | null = null;
   releaseExecutingOnClose: boolean = false;
   closed: boolean = false;
   closeCalls: number = 0;
 
   async connect(): Promise<void> {
+    if (this.connectFailure !== null) throw this.connectFailure;
     this.state = ConnectionState.Ready;
   }
 
@@ -760,6 +762,68 @@ export default function mySqlDeadlineExecutorTest(): void {
       }
     });
 
+    it('successfulSqlWithKnownCancellationFailureReportsCompleted', 0, async () => {
+      await knownCancellationFailureAfterSuccessfulSql(false);
+      await knownCancellationFailureAfterSuccessfulSql(true);
+    });
+
+    it('publicCancellationCannotBypassDeadlineBoundaries', 0, async () => {
+      const fixture = new DeadlineFixture();
+      const lost = new ArkDbError(ArkDbErrorKind.Network,
+        'Synthetic boundary cancellation acknowledgement loss.', 'BOUNDARY_KILL_LOST', '08S01');
+      fixture.control.executing = new Gate();
+      fixture.control.failure = lost;
+      fixture.control.releaseExecutingOnClose = true;
+      await fixture.open();
+      const options = new MySqlDeadlineOptions();
+      options.timeoutMs = 10;
+      options.cancellationGraceMs = 20;
+      fixture.peer.holdCommand = 0x03;
+      const observation = new DeadlineQueryObservation();
+      const running = observeDeadlineQuery(deadlineExecutor(fixture.connection).query(
+        'DO successful_sql_across_deadline_boundaries', options), observation);
+      const deadlineTimerId = fixture.timers.lastScheduledId;
+      const cancelling = deadlineFailure(fixture.connection.cancel());
+      let manuallyReleased = false;
+      try {
+        await fixture.control.queryEntered.promise;
+        fixture.peer.emitResponse([okPayload()]);
+        await flushDeadline();
+        const timerCancelledAfterSql = fixture.timers.wasCancelled(deadlineTimerId);
+        expect(observation.settled).assertFalse();
+
+        fixture.timers.advance(10);
+        fixture.timers.advance(20);
+        await flushDeadline();
+        if (!observation.settled && fixture.control.executing !== null) {
+          fixture.control.executing.release();
+          manuallyReleased = true;
+        }
+
+        const cancellationFailure = await cancelling;
+        expect(containsFailure(cancellationFailure, lost)).assertTrue();
+        await running;
+        expect(timerCancelledAfterSql).assertFalse();
+        expect(observation.results.length).assertEqual(0);
+        expect(observation.failures.length).assertEqual(1);
+        const failure = observation.failures[0];
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Timeout);
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          expect(containsFailure(failure, lost)).assertTrue();
+        }
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+      } finally {
+        if (!manuallyReleased && fixture.control.executing !== null) {
+          fixture.control.executing.release();
+        }
+        await fixture.close();
+        await cancelling;
+        await running;
+      }
+    });
+
     it('zeroTimeoutDoesNotScheduleTimer', 0, async () => {
       const fixture = new DeadlineFixture();
       await fixture.open();
@@ -836,6 +900,57 @@ function observeDeadlineQuery(task: Promise<QueryResult>,
       observation.failures.push(error);
       observation.settled = true;
     });
+}
+
+async function knownCancellationFailureAfterSuccessfulSql(
+  serverRejected: boolean): Promise<void> {
+  const control = new DeadlineControlConnection();
+  const primary = serverRejected ?
+    ArkDbError.server('Synthetic known KILL rejection.', 1227, '42000') :
+    ArkDbError.network('Synthetic known undispatched cancellation.');
+  if (serverRejected) {
+    control.executing = new Gate();
+    control.failure = primary;
+  } else {
+    control.connectFailure = primary;
+  }
+  const fixture = new DeadlineFixture([control]);
+  await fixture.open();
+  const options = new MySqlDeadlineOptions();
+  options.timeoutMs = 100000;
+  fixture.peer.holdCommand = 0x03;
+  const observation = new DeadlineQueryObservation();
+  const running = observeDeadlineQuery(deadlineExecutor(fixture.connection).query(
+    serverRejected ? 'DO known_kill_rejection' : 'DO undispatched_cancellation', options),
+    observation);
+  const cancelling = deadlineFailure(fixture.connection.cancel());
+  try {
+    if (serverRejected) await control.queryEntered.promise;
+    else await flushDeadline();
+    fixture.peer.emitResponse([okPayload()]);
+    await flushDeadline();
+    if (serverRejected && control.executing !== null) control.executing.release();
+
+    const cancellationFailure = await cancelling;
+    expect(containsFailure(cancellationFailure, primary)).assertTrue();
+    await running;
+    expect(observation.results.length).assertEqual(0);
+    expect(observation.failures.length).assertEqual(1);
+    const failure = observation.failures[0];
+    expect(failure instanceof MySqlOperationError).assertTrue();
+    if (failure instanceof MySqlOperationError) {
+      expect(failure.primary === primary).assertTrue();
+      expect(failure.primary.kind === ArkDbErrorKind.Timeout).assertFalse();
+      expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+      expect(failure.outcome === MySqlExecutionOutcome.NotDispatched).assertFalse();
+      expect(failure.outcome === MySqlExecutionOutcome.ServerRejected).assertFalse();
+    }
+  } finally {
+    if (control.executing !== null) control.executing.release();
+    await fixture.close();
+    await cancelling;
+    await running;
+  }
 }
 
 async function deadlineFailure<T>(task: Promise<T>): Promise<ArkDbError> {

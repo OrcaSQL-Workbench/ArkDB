@@ -1062,13 +1062,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         operationTask = Promise.reject<T>(error as Object);
       }
       const observed = new DeadlineObservation<T>(operationTask);
+      const completed = observed.settled.then(
+        (): Promise<void> => this.settleDeadlineCancellationAttempts(settlement));
       const first = await Promise.race<number>([
-        observed.settled.then((): number => 0),
+        completed.then((): number => 0),
         expired.then((): number => 1)
       ]);
       if (first === 0) {
-        deadlineTimer.cancel();
         await this.settleDeadlineCancellationAttempts(settlement);
+        deadlineTimer.cancel();
         const cancellationUnknown = this.retiredByCancellation || settlement.unknown;
         if (observed.failure !== null) {
           const cleanup: ArkDbError[] = [];
@@ -1081,9 +1083,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         if (settlement.failures.length > 0) {
           const primary = settlement.failures[0];
           const cleanup = settlement.failures.slice(1);
-          const outcome = cancellationUnknown ? MySqlExecutionOutcome.Unknown :
-            (primary instanceof MySqlOperationError ?
-              primary.outcome : MySqlExecutionOutcome.Completed);
+          const outcome = cancellationUnknown ?
+            MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.Completed;
           throw operationFailure(primary, cleanup, outcome);
         }
         return observed.value!;

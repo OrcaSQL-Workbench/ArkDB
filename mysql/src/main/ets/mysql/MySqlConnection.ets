@@ -37,6 +37,7 @@ import {
   MySqlBatchExecutor, MySqlPreparedBatchExecutor
 } from './execution/MySqlBatchExecutor';
 import {
+  MYSQL_COMMIT_NO_CHAIN_NO_RELEASE, MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE,
   MySqlConnectionTransactionRunner, MySqlTransactionRunnerHost
 } from './execution/MySqlTransactionRunner';
 import {
@@ -197,6 +198,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         this.finishTransactionRunnerScope(scope),
       (scope: MySqlCommandScope): Promise<void> =>
         this.refreshTransactionStatus(scope),
+      (scope: MySqlCommandScope, error: ArkDbError): Promise<void> =>
+        this.retireTransaction(scope, error),
       (scope: MySqlCommandScope, sql: string): Promise<QueryResult> =>
         this.queryOwned(scope, sql),
       (scope: MySqlCommandScope, sql: string, options: QueryOptions,
@@ -559,11 +562,11 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   async commit(): Promise<MySqlDatabaseSessionStatus> {
-    return this.transactionCommand('COMMIT');
+    return this.transactionCommand(MYSQL_COMMIT_NO_CHAIN_NO_RELEASE);
   }
 
   async rollback(): Promise<MySqlDatabaseSessionStatus> {
-    return this.transactionCommand('ROLLBACK');
+    return this.transactionCommand(MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE);
   }
 
   async savepoint(_name: string): Promise<void> {
@@ -965,6 +968,11 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.executeOkOwned(scope, command);
   }
 
+  private retireTransaction(scope: MySqlCommandScope, error: ArkDbError): Promise<void> {
+    this.commandGate.assertOwner(scope);
+    return this.retirePreparedSession(error);
+  }
+
   private invalidatePreparedCache(): void {
     this.batch = null;
     if (this.prepared !== null) this.prepared.invalidate();
@@ -1231,6 +1239,7 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
   private settle: (scope: MySqlCommandScope) => Promise<ArkDbError[]>;
   private finish: (scope: MySqlCommandScope) => Promise<ArkDbError[]>;
   private refreshStatus: (scope: MySqlCommandScope) => Promise<void>;
+  private retire: (scope: MySqlCommandScope, error: ArkDbError) => Promise<void>;
   private executeQuery: (scope: MySqlCommandScope, sql: string) => Promise<QueryResult>;
   private executeStream: (scope: MySqlCommandScope, sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
@@ -1243,6 +1252,7 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
     settle: (scope: MySqlCommandScope) => Promise<ArkDbError[]>,
     finish: (scope: MySqlCommandScope) => Promise<ArkDbError[]>,
     refreshStatus: (scope: MySqlCommandScope) => Promise<void>,
+    retire: (scope: MySqlCommandScope, error: ArkDbError) => Promise<void>,
     executeQuery: (scope: MySqlCommandScope, sql: string) => Promise<QueryResult>,
     executeStream: (scope: MySqlCommandScope, sql: string, options: QueryOptions,
       sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>) {
@@ -1254,6 +1264,7 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
     this.settle = settle;
     this.finish = finish;
     this.refreshStatus = refreshStatus;
+    this.retire = retire;
     this.executeQuery = executeQuery;
     this.executeStream = executeStream;
   }
@@ -1272,6 +1283,9 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
   }
   refreshTransactionStatus(scope: MySqlCommandScope): Promise<void> {
     return this.refreshStatus(scope);
+  }
+  retireTransaction(scope: MySqlCommandScope, error: ArkDbError): Promise<void> {
+    return this.retire(scope, error);
   }
 
   query(scope: MySqlCommandScope, sql: string): Promise<QueryResult> {

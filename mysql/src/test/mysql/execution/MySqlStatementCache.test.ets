@@ -598,10 +598,10 @@ export default function mySqlStatementCacheTest(): void {
         fixture.peer.textReplies.push(new CacheTextReply('SET autocommit = 1'));
         await fixture.connection.setAutocommit(true);
         await prepared.execute('DO 1', []);
-        fixture.peer.textReplies.push(new CacheTextReply('COMMIT'));
+        fixture.peer.textReplies.push(new CacheTextReply('COMMIT AND NO CHAIN NO RELEASE'));
         await fixture.connection.commit();
         await prepared.execute('DO 1', []);
-        fixture.peer.textReplies.push(new CacheTextReply('ROLLBACK'));
+        fixture.peer.textReplies.push(new CacheTextReply('ROLLBACK AND NO CHAIN NO RELEASE'));
         await fixture.connection.rollback();
         await prepared.execute('DO 1', []);
         const metadata = fixture.connection.features.metadata;
@@ -623,7 +623,8 @@ export default function mySqlStatementCacheTest(): void {
         expect(cacheStatementIds(fixture.peer.writes, 0x19)).assertEqual('7,8,9,10,11,12,13,14');
         expect(commandFrames(fixture.peer, 0x16).length).assertEqual(9);
         expect(commandFrames(fixture.peer, 0x03).map(commandSql).join('|'))
-          .assertEqual("START TRANSACTION|SET autocommit = 1|COMMIT|ROLLBACK|SHOW DATABASES|" +
+          .assertEqual("START TRANSACTION|SET autocommit = 1|COMMIT AND NO CHAIN NO RELEASE|" +
+            "ROLLBACK AND NO CHAIN NO RELEASE|SHOW DATABASES|" +
             "SHOW VARIABLES LIKE 'performance_schema'");
         expect(cacheProbeFrames(fixture.peer).length).assertEqual(0);
       } finally { await fixture.close(); }

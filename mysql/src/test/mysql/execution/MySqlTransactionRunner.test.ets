@@ -1,4 +1,5 @@
 import { describe, expect, it } from '@ohos/hypium';
+import { errorManager } from '@kit.AbilityKit';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryResult, ServerInfo
 } from '@arkdb/core';
@@ -6,6 +7,7 @@ import { MySqlSession } from '../../../main/ets/mysql/driver/MySqlSession';
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../../../main/ets/mysql/model/MySqlOperationError';
+import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
 import {
   MySqlTransactionIsolation, MySqlTransactionOptions
 } from '../../../main/ets/mysql/model/MySqlTransactionOptions';
@@ -59,7 +61,8 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(await running).assertEqual(0);
         expect(commandSql(fixture).join('|')).assertEqual(
           'START TRANSACTION|SAVEPOINT `owner`|DO inside|' +
-          'ROLLBACK TO SAVEPOINT `owner`|RELEASE SAVEPOINT `owner`|COMMIT');
+          'ROLLBACK TO SAVEPOINT `owner`|RELEASE SAVEPOINT `owner`|' +
+          'COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -81,7 +84,8 @@ export default function mySqlTransactionRunnerTest(): void {
           }));
 
         expect(failure instanceof ArkDbError).assertTrue();
-        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION|DO outer|ROLLBACK');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|DO outer|ROLLBACK AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -97,7 +101,7 @@ export default function mySqlTransactionRunnerTest(): void {
       try {
         const transactions = transactionFeature(fixture);
         wire = new TransactionWirePlan(fixture);
-        wire.failSql = 'COMMIT';
+        wire.failSql = 'COMMIT AND NO CHAIN NO RELEASE';
         wire.failure = commitFailure;
 
         const failure = operationFailure(await captureFailure(
@@ -106,11 +110,60 @@ export default function mySqlTransactionRunnerTest(): void {
 
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
         expect(failure.primary === commitFailure).assertTrue();
-        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION|COMMIT');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
       }
+    });
+
+    it('commitServerRejectionRollsBackOrRetiresBeforeOwnerRelease', 0, async () => {
+      const statements: string[] = [];
+      const states: ConnectionState[] = [];
+      const statusKnown: boolean[] = [];
+      const statusInTransaction: boolean[] = [];
+      const rollbackFailureRetained: boolean[] = [];
+      for (let mode = 0; mode < 2; mode += 1) {
+        const fixture = new PreparedExecutionFixture();
+        await fixture.open();
+        let wire: TransactionWirePlan | null = null;
+        try {
+          const transactions = transactionFeature(fixture);
+          wire = new TransactionWirePlan(fixture);
+          wire.commitServerError = true;
+          wire.rollbackServerError = mode === 1;
+          const failure = operationFailure(await captureFailure(
+            transactions.run(new TransactionOptionsFixture(),
+              async (_session: TransactionSessionView): Promise<void> => {})));
+
+          expect(failure.nativeCode).assertEqual(1064);
+          expect(failure.sqlState).assertEqual('42000');
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
+          statements.push(commandSql(fixture).join('|'));
+          states.push(fixture.connection.state);
+          const status = fixture.connection.sessionStatus;
+          statusKnown.push(status.known === true);
+          statusInTransaction.push(status.inTransaction === true);
+          rollbackFailureRetained.push(operationContainsNativeCode(failure, 1205));
+        } finally {
+          if (wire !== null) wire.dispose();
+          await fixture.close();
+        }
+      }
+
+      expect(statements[0]).assertEqual(
+        'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE|' +
+        'ROLLBACK AND NO CHAIN NO RELEASE');
+      expect(states[0]).assertEqual(ConnectionState.Ready);
+      expect(statusKnown[0]).assertTrue();
+      expect(statusInTransaction[0]).assertFalse();
+      expect(rollbackFailureRetained[0]).assertFalse();
+      expect(statements[1]).assertEqual(
+        'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE|' +
+        'ROLLBACK AND NO CHAIN NO RELEASE');
+      expect(states[1]).assertEqual(ConnectionState.Closed);
+      expect(rollbackFailureRetained[1]).assertTrue();
     });
 
     it('nullCallbackRejectionRollsBackWithoutCommit', 0, async () => {
@@ -129,7 +182,8 @@ export default function mySqlTransactionRunnerTest(): void {
         }
 
         expect(rejected).assertTrue();
-        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION|ROLLBACK');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|ROLLBACK AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -152,7 +206,8 @@ export default function mySqlTransactionRunnerTest(): void {
         const failure = await captureFailure<void>(expired.savepoint('late'));
         expect(failure instanceof ArkDbError).assertTrue();
         expect(fixture.peer.writes.length).assertEqual(before);
-        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION|COMMIT');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -167,7 +222,7 @@ export default function mySqlTransactionRunnerTest(): void {
       try {
         const transactions = transactionFeature(fixture);
         wire = new TransactionWirePlan(fixture);
-        wire.holdSql = 'ROLLBACK';
+        wire.holdSql = 'ROLLBACK AND NO CHAIN NO RELEASE';
         let settled = false;
         const running = captureFailure(transactions.run(new TransactionOptionsFixture(),
           async (_session: TransactionSessionView): Promise<void> => { throw callback; }))
@@ -182,7 +237,8 @@ export default function mySqlTransactionRunnerTest(): void {
         wire.releaseHeld();
 
         expect((await running) === callback).assertTrue();
-        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION|ROLLBACK');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|ROLLBACK AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -199,7 +255,7 @@ export default function mySqlTransactionRunnerTest(): void {
       try {
         const transactions = transactionFeature(fixture);
         wire = new TransactionWirePlan(fixture);
-        wire.failSql = 'ROLLBACK';
+        wire.failSql = 'ROLLBACK AND NO CHAIN NO RELEASE';
         wire.failure = rollback;
 
         const failure = operationFailure(await captureFailure(
@@ -209,7 +265,8 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(failure.originalCause === callback).assertTrue();
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
         expect(cleanupContains(failure, rollback)).assertTrue();
-        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION|ROLLBACK');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|ROLLBACK AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -244,7 +301,7 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(late.kind).assertEqual(ArkDbErrorKind.Validation);
         expect(fixture.peer.writes.length).assertEqual(before + 1);
         expect(commandSql(fixture).join('|')).assertEqual(
-          'START TRANSACTION|DO detached|ROLLBACK');
+          'START TRANSACTION|DO detached|ROLLBACK AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -280,6 +337,55 @@ export default function mySqlTransactionRunnerTest(): void {
       }
     });
 
+    it('detachedChildFailureDoesNotLeakUnhandledRejection', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      let detachedPromise: Promise<MySqlQueryResult> | null = null;
+      const unhandledReasons: Object[] = [];
+      const unhandledNativeCodes: string[] = [];
+      const observer: errorManager.UnhandledRejectionObserver =
+        (reason: ESObject, promise: Promise<ESObject>): void => {
+        if (detachedPromise !== null &&
+          (promise as Object) === (detachedPromise as Object)) {
+          unhandledReasons.push(reason as Object);
+          unhandledNativeCodes.push(reason instanceof ArkDbError ?
+            String(reason.nativeCode) : '');
+        }
+      };
+      errorManager.on('unhandledRejection', observer);
+      try {
+        const transactions = transactionFeature(fixture);
+        wire = new TransactionWirePlan(fixture);
+        wire.holdSql = 'DO detached_unhandled_failure';
+        const running = captureFailure(transactions.run(new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            detachedPromise = session.query('DO detached_unhandled_failure');
+          }));
+
+        await wire.entered.promise;
+        await flushPrepared();
+        wire.releaseHeldWith([errorPayload(1213, '40001')]);
+        const failure = operationFailure(await running);
+
+        expect(operationContainsNativeCode(failure, 1213)).assertTrue();
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|DO detached_unhandled_failure|' +
+          'ROLLBACK AND NO CHAIN NO RELEASE');
+        await flushPrepared();
+        await flushPrepared();
+        if (unhandledNativeCodes.length > 0) {
+          expect(unhandledNativeCodes[0]).assertEqual('1213');
+        }
+        expect(unhandledReasons.length).assertEqual(0);
+      } finally {
+        errorManager.off('unhandledRejection', observer);
+        if (detachedPromise !== null) await captureFailure<MySqlQueryResult>(detachedPromise);
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
     it('serverErrorInsideCallbackStillRollsBack', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();
@@ -301,7 +407,7 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(failure.sqlState).assertEqual('42000');
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
         expect(commandSql(fixture).join('|')).assertEqual(
-          'START TRANSACTION|DO server_error|ROLLBACK');
+          'START TRANSACTION|DO server_error|ROLLBACK AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -341,7 +447,7 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(fixture.peer.commands().join(',')).assertEqual('3,3,3,14,3,3');
         expect(commandSql(fixture).join('|')).assertEqual(
           'START TRANSACTION|SAVEPOINT `recover`|DO savepoint_server_error|' +
-          'ROLLBACK TO SAVEPOINT `recover`|COMMIT');
+          'ROLLBACK TO SAVEPOINT `recover`|COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -444,7 +550,8 @@ export default function mySqlTransactionRunnerTest(): void {
             expect(scopedFeatures.transactions === undefined).assertTrue();
           });
 
-        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION|COMMIT');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -526,7 +633,8 @@ export default function mySqlTransactionRunnerTest(): void {
 
         expect(commandSql(fixture).join('|')).assertEqual(
           'START TRANSACTION|SAVEPOINT `owner``scope`|' +
-          'ROLLBACK TO SAVEPOINT `owner``scope`|RELEASE SAVEPOINT `owner``scope`|COMMIT');
+          'ROLLBACK TO SAVEPOINT `owner``scope`|RELEASE SAVEPOINT `owner``scope`|' +
+          'COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -596,11 +704,49 @@ export default function mySqlTransactionRunnerTest(): void {
 
         expect(commandSql(fixture).join('|')).assertEqual(
           'SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY|' +
-          'START TRANSACTION WITH CONSISTENT SNAPSHOT|COMMIT');
+          'START TRANSACTION WITH CONSISTENT SNAPSHOT|COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
       }
+    });
+
+    it('transactionTerminatorsOverrideCompletionType', 0, async () => {
+      const statements: string[] = [];
+      const transactionEnded: boolean[] = [];
+      for (let mode = 0; mode < 2; mode += 1) {
+        const fixture = new PreparedExecutionFixture();
+        await fixture.open();
+        let wire: TransactionWirePlan | null = null;
+        const callback = new Error('Synthetic completion-type rollback.');
+        try {
+          const transactions = transactionFeature(fixture);
+          wire = new TransactionWirePlan(fixture);
+          wire.completionTypeChains = true;
+          const completion = await captureFailure(transactions.run(
+            new TransactionOptionsFixture(),
+            async (_session: TransactionSessionView): Promise<void> => {
+              if (mode === 1) throw callback;
+            }));
+
+          if (mode === 0) expect(completion).assertEqual(null);
+          else expect(completion === callback).assertTrue();
+          expect(fixture.connection.state).assertEqual(ConnectionState.Ready);
+          statements.push(commandSql(fixture).join('|'));
+          const status = fixture.connection.sessionStatus;
+          transactionEnded.push(status.known === true && !status.inTransaction);
+        } finally {
+          if (wire !== null) wire.dispose();
+          await fixture.close();
+        }
+      }
+
+      expect(statements[0]).assertEqual(
+        'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE');
+      expect(transactionEnded[0]).assertTrue();
+      expect(statements[1]).assertEqual(
+        'START TRANSACTION|ROLLBACK AND NO CHAIN NO RELEASE');
+      expect(transactionEnded[1]).assertTrue();
     });
 
     it('pendingCancellationForChildADoesNotKillChildB', 0, async () => {
@@ -639,7 +785,7 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(childBBeforeCancellationSettled).assertFalse();
         expect(controlCommands).assertEqual('');
         expect(commandSql(fixture).join('|')).assertEqual(
-          'START TRANSACTION|DO child_a|DO child_b|COMMIT');
+          'START TRANSACTION|DO child_a|DO child_b|COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         opening.release();
         if (wire !== null) wire.dispose();
@@ -693,7 +839,7 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Completed);
         expect(operationContainsNativeCode(failure, 'CONTROL_CLEANUP')).assertTrue();
         expect(commandSql(fixture).join('|')).assertEqual(
-          'START TRANSACTION|DO child_a|DO child_b|ROLLBACK');
+          'START TRANSACTION|DO child_a|DO child_b|ROLLBACK AND NO CHAIN NO RELEASE');
       } finally {
         opening.release();
         if (wire !== null) wire.dispose();
@@ -732,7 +878,8 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
         expect(operationContainsNativeCode(failure, 'CONTROL_CLEANUP')).assertTrue();
         expect(commandSql(fixture).join('|')).assertEqual(
-          'START TRANSACTION|DO cancellation_cleanup_rollback|ROLLBACK');
+          'START TRANSACTION|DO cancellation_cleanup_rollback|' +
+          'ROLLBACK AND NO CHAIN NO RELEASE');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -774,7 +921,8 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(startBeforeCancellationSettled).assertFalse();
         expect(controlCommands).assertEqual('');
         expect(commandSql(fixture).join('|')).assertEqual(
-          'SET TRANSACTION ISOLATION LEVEL READ COMMITTED|START TRANSACTION|COMMIT');
+          'SET TRANSACTION ISOLATION LEVEL READ COMMITTED|START TRANSACTION|' +
+          'COMMIT AND NO CHAIN NO RELEASE');
       } finally {
         opening.release();
         if (wire !== null) wire.dispose();
@@ -828,7 +976,7 @@ export default function mySqlTransactionRunnerTest(): void {
           expect(failure.sqlState).assertEqual('70100');
           expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
           expect(commandSql(fixture).join('|')).assertEqual(
-            'START TRANSACTION|' + sql + '|ROLLBACK');
+            'START TRANSACTION|' + sql + '|ROLLBACK AND NO CHAIN NO RELEASE');
           expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
         } finally {
           if (wire !== null) wire.dispose();
@@ -883,7 +1031,7 @@ export default function mySqlTransactionRunnerTest(): void {
           expect(failure.primary === cancellationFailure.primary).assertTrue();
           expect(operationContainsNativeCode(failure, expectedCancellationCode)).assertTrue();
           expect(commandSql(fixture).join('|')).assertEqual(
-            'START TRANSACTION|' + sql + '|COMMIT');
+            'START TRANSACTION|' + sql + '|COMMIT AND NO CHAIN NO RELEASE');
           expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
           observedOutcomes.push(failure.outcome);
         } finally {
@@ -933,6 +1081,9 @@ class TransactionWirePlan {
   holdSql: string | null = null;
   failSql: string | null = null;
   failure: ArkDbError | null = null;
+  commitServerError: boolean = false;
+  rollbackServerError: boolean = false;
+  completionTypeChains: boolean = false;
   private fixture: PreparedExecutionFixture;
 
   constructor(fixture: PreparedExecutionFixture) {
@@ -945,11 +1096,21 @@ class TransactionWirePlan {
         this.fixture.peer.failCommand = 0x03;
         return;
       }
+      if (this.commitServerError && sql === 'COMMIT AND NO CHAIN NO RELEASE') {
+        this.fixture.peer.responses.push([errorPayload(1064, '42000')]);
+        return;
+      }
+      if (this.rollbackServerError && sql === 'ROLLBACK AND NO CHAIN NO RELEASE') {
+        this.fixture.peer.responses.push([errorPayload(1205, 'HY000')]);
+        return;
+      }
       if (this.holdSql === sql) {
         this.entered.release();
         return;
       }
-      this.fixture.peer.responses.push([okPayload(statusAfter(sql))]);
+      const status = this.completionTypeChains && (sql === 'COMMIT' || sql === 'ROLLBACK') ?
+        StatusFlags.AUTOCOMMIT | StatusFlags.IN_TRANS : statusAfter(sql);
+      this.fixture.peer.responses.push([okPayload(status)]);
     };
   }
 
@@ -1052,7 +1213,10 @@ function currentCommandSql(fixture: PreparedExecutionFixture): string {
 }
 
 function statusAfter(sql: string): number {
-  if (sql === 'COMMIT' || sql === 'ROLLBACK' || sql.startsWith('SET TRANSACTION')) {
+  if (sql === 'COMMIT' || sql === 'ROLLBACK' ||
+    sql === 'COMMIT AND NO CHAIN NO RELEASE' ||
+    sql === 'ROLLBACK AND NO CHAIN NO RELEASE' ||
+    sql.startsWith('SET TRANSACTION')) {
     return StatusFlags.AUTOCOMMIT;
   }
   return StatusFlags.AUTOCOMMIT | StatusFlags.IN_TRANS;

@@ -31,6 +31,37 @@ test('shared contracts describe callback-scoped transaction sessions', async () 
   assert.doesNotMatch(contracts, /\bnot an implemented transaction scope\b/i);
 });
 
+test('transaction runner observes the same promise returned to detached callers', async () => {
+  const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'execution', 'MySqlTransactionRunner.ets'), 'utf8');
+  const scopedStart = source.indexOf('class ScopedMySqlTransactionSession');
+  const marker = 'runCommand<T>(operation: () => Promise<T>): Promise<T> {';
+  const markerIndex = source.indexOf(marker, scopedStart);
+  const runCommandStart = source.lastIndexOf('  private ', markerIndex);
+  const helperStart = source.indexOf('  private async runSettledCommand<T>', markerIndex);
+  assert.notEqual(scopedStart, -1);
+  assert.notEqual(markerIndex, -1);
+  assert.notEqual(runCommandStart, -1);
+  assert.notEqual(helperStart, -1);
+
+  const runCommand = source.slice(runCommandStart, helperStart);
+  assert.match(runCommand, /^  private runCommand<T>/);
+  assert.doesNotMatch(runCommand, /^  private async runCommand<T>/);
+  assert.equal(runCommand.split('this.runSettledCommand<T>(operation)').length - 1, 1);
+  assert.match(runCommand, /const task = this\.runSettledCommand<T>\(operation\);/);
+  assert.match(runCommand, /const settlement = task\.then\(/);
+  assert.match(runCommand, /this\.activeCommand = settlement;/);
+  assert.match(runCommand, /task\.catch\(\([^)]*\): void => \{\}\);/);
+  assert.match(runCommand, /return task;/);
+  assert.doesNotMatch(runCommand, /return task\.catch\(/);
+
+  const waitStart = source.indexOf('  async waitForActiveCommand()', scopedStart);
+  const waitEnd = source.indexOf('  takeRetainedCleanup()', waitStart);
+  const waitForActiveCommand = source.slice(waitStart, waitEnd);
+  assert.match(waitForActiveCommand, /const command = this\.activeCommand;/);
+  assert.match(waitForActiveCommand, /await command/);
+});
+
 test('adding an independently typed adapter changes registration only, not MySQL implementation', async (t) => {
   const root = await fixture(t);
   const mysql = await treeDigest(join(root, 'mysql'));

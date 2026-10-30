@@ -15,6 +15,9 @@ import {
 import { quoteMySqlIdentifier } from '../value/MySqlSqlHelpers';
 import { MySqlCommandScope } from './MySqlCommandGate';
 
+export const MYSQL_COMMIT_NO_CHAIN_NO_RELEASE = 'COMMIT AND NO CHAIN NO RELEASE';
+export const MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE = 'ROLLBACK AND NO CHAIN NO RELEASE';
+
 export interface MySqlTransactionRunner {
   run<T>(options: MySqlTransactionOptions,
     body: (session: MySqlSession) => Promise<T>): Promise<T>;
@@ -29,6 +32,7 @@ export interface MySqlTransactionRunnerHost {
   settleTransaction(scope: MySqlCommandScope): Promise<ArkDbError[]>;
   finishTransaction(scope: MySqlCommandScope): Promise<ArkDbError[]>;
   refreshTransactionStatus(scope: MySqlCommandScope): Promise<void>;
+  retireTransaction(scope: MySqlCommandScope, error: ArkDbError): Promise<void>;
   query(scope: MySqlCommandScope, sql: string): Promise<MySqlQueryResult>;
   queryStream(scope: MySqlCommandScope, sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
@@ -105,7 +109,7 @@ export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner 
           outcome = transactionFailureOutcome(retained, MySqlExecutionOutcome.Unknown);
         } else if (this.canRollback()) {
           try {
-            await this.host.query(scope, 'ROLLBACK');
+            await this.host.query(scope, MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE);
             exactCallbackFailure = retained;
           } catch (rollbackError) {
             primary = retained;
@@ -120,8 +124,17 @@ export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner 
           outcome = MySqlExecutionOutcome.Unknown;
         }
       } else if (primary === null) {
-        await this.host.query(scope, 'COMMIT');
-        outcome = MySqlExecutionOutcome.Completed;
+        try {
+          await this.host.query(scope, MYSQL_COMMIT_NO_CHAIN_NO_RELEASE);
+          outcome = MySqlExecutionOutcome.Completed;
+        } catch (commitError) {
+          const retained = commitError as Object;
+          primary = retained;
+          outcome = transactionFailureOutcome(retained, MySqlExecutionOutcome.Unknown);
+          if (outcome === MySqlExecutionOutcome.ServerRejected) {
+            await this.recoverRejectedCommit(scope, retained, cleanup);
+          }
+        }
       }
     } catch (error) {
       const caught = error as Object;
@@ -170,6 +183,27 @@ export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner 
     const status = this.host.sessionStatus;
     return this.host.state === ConnectionState.Ready &&
       status.known === true && !status.inTransaction;
+  }
+
+  private async recoverRejectedCommit(scope: MySqlCommandScope,
+    commitError: Object, cleanup: ArkDbError[]): Promise<void> {
+    const settlement = await this.host.settleTransaction(scope);
+    for (const failure of settlement) cleanup.push(failure);
+    if (!cleanupBlocksLaterTransactionSql(settlement) &&
+      this.host.state === ConnectionState.Ready) {
+      try {
+        await this.host.query(scope, MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE);
+      } catch (rollbackError) {
+        cleanup.push(toTransactionCleanupError(rollbackError as Object));
+      }
+    }
+    if (this.host.state === ConnectionState.Ready && !this.transactionKnownEnded()) {
+      try {
+        await this.host.retireTransaction(scope, toTransactionArkDbError(commitError));
+      } catch (retireError) {
+        cleanup.push(toTransactionCleanupError(retireError as Object));
+      }
+    }
   }
 }
 
@@ -278,34 +312,35 @@ class ScopedMySqlTransactionSession implements MySqlSession {
     }
   }
 
-  private async runCommand<T>(operation: () => Promise<T>): Promise<T> {
+  private runCommand<T>(operation: () => Promise<T>): Promise<T> {
+    const tracksActiveCommand = this.active && this.activeCommand === null;
+    const task = this.runSettledCommand<T>(operation);
+    if (tracksActiveCommand) {
+      const settlement = task.then(
+        (): Object | null => null,
+        (error: Object): Object | null => error);
+      this.activeCommand = settlement;
+      settlement.then((): void => {
+        if (this.activeCommand === settlement) this.activeCommand = null;
+      });
+    }
+    task.catch((_error: Object): void => {});
+    return task;
+  }
+
+  private async runSettledCommand<T>(operation: () => Promise<T>): Promise<T> {
     this.requireActive();
     if (this.activeCommand !== null) {
       throw ArkDbError.protocol('Another transaction callback command is already active.');
     }
-    let task: Promise<T>;
     try {
-      task = this.runSettledCommand<T>(operation);
-    } catch (error) {
-      throw error as Error;
-    }
-    const settlement = task.then(
-      (): Object | null => null,
-      (error: Object): Object | null => error);
-    this.activeCommand = settlement;
-    try {
-      return await task;
+      const cleanup = await this.host.settleTransaction(this.scope);
+      if (cleanupBlocksLaterTransactionSql(cleanup)) throw transactionCleanupFailure(cleanup);
+      for (const failure of cleanup) this.retainedCleanup.push(failure);
+      return await operation();
     } finally {
-      await settlement;
-      if (this.activeCommand === settlement) this.activeCommand = null;
+      this.activeCommand = null;
     }
-  }
-
-  private async runSettledCommand<T>(operation: () => Promise<T>): Promise<T> {
-    const cleanup = await this.host.settleTransaction(this.scope);
-    if (cleanupBlocksLaterTransactionSql(cleanup)) throw transactionCleanupFailure(cleanup);
-    for (const failure of cleanup) this.retainedCleanup.push(failure);
-    return await operation();
   }
 }
 

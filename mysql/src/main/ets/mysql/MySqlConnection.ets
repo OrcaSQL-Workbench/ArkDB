@@ -195,6 +195,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         this.settleTransactionOperation(scope),
       (scope: MySqlCommandScope): Promise<ArkDbError[]> =>
         this.finishTransactionRunnerScope(scope),
+      (scope: MySqlCommandScope): Promise<void> =>
+        this.refreshTransactionStatus(scope),
       (scope: MySqlCommandScope, sql: string): Promise<QueryResult> =>
         this.queryOwned(scope, sql),
       (scope: MySqlCommandScope, sql: string, options: QueryOptions,
@@ -958,6 +960,11 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return failures;
   }
 
+  private refreshTransactionStatus(scope: MySqlCommandScope): Promise<void> {
+    const command = new PacketWriter().writeUInt8(Command.PING).toUint8Array();
+    return this.executeOkOwned(scope, command);
+  }
+
   private invalidatePreparedCache(): void {
     this.batch = null;
     if (this.prepared !== null) this.prepared.invalidate();
@@ -1223,6 +1230,7 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
   private reserve: () => MySqlCommandScope;
   private settle: (scope: MySqlCommandScope) => Promise<ArkDbError[]>;
   private finish: (scope: MySqlCommandScope) => Promise<ArkDbError[]>;
+  private refreshStatus: (scope: MySqlCommandScope) => Promise<void>;
   private executeQuery: (scope: MySqlCommandScope, sql: string) => Promise<QueryResult>;
   private executeStream: (scope: MySqlCommandScope, sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
@@ -1234,6 +1242,7 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
     reserve: () => MySqlCommandScope,
     settle: (scope: MySqlCommandScope) => Promise<ArkDbError[]>,
     finish: (scope: MySqlCommandScope) => Promise<ArkDbError[]>,
+    refreshStatus: (scope: MySqlCommandScope) => Promise<void>,
     executeQuery: (scope: MySqlCommandScope, sql: string) => Promise<QueryResult>,
     executeStream: (scope: MySqlCommandScope, sql: string, options: QueryOptions,
       sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>) {
@@ -1244,6 +1253,7 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
     this.reserve = reserve;
     this.settle = settle;
     this.finish = finish;
+    this.refreshStatus = refreshStatus;
     this.executeQuery = executeQuery;
     this.executeStream = executeStream;
   }
@@ -1259,6 +1269,9 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
   }
   finishTransaction(scope: MySqlCommandScope): Promise<ArkDbError[]> {
     return this.finish(scope);
+  }
+  refreshTransactionStatus(scope: MySqlCommandScope): Promise<void> {
+    return this.refreshStatus(scope);
   }
 
   query(scope: MySqlCommandScope, sql: string): Promise<QueryResult> {

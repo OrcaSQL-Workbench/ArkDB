@@ -28,6 +28,7 @@ export interface MySqlTransactionRunnerHost {
   reserveTransaction(): MySqlCommandScope;
   settleTransaction(scope: MySqlCommandScope): Promise<ArkDbError[]>;
   finishTransaction(scope: MySqlCommandScope): Promise<ArkDbError[]>;
+  refreshTransactionStatus(scope: MySqlCommandScope): Promise<void>;
   query(scope: MySqlCommandScope, sql: string): Promise<MySqlQueryResult>;
   queryStream(scope: MySqlCommandScope, sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
@@ -70,7 +71,8 @@ export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner 
             'The transaction callback settled while a session command was still active.');
         }
       } catch (error) {
-        callbackFailure = error as Object;
+        callbackFailure = error === null ?
+          ArkDbError.protocol('The transaction callback rejected with null.') : error as Object;
       }
       session.expire();
       const outstandingFailure = await session.waitForActiveCommand();
@@ -152,10 +154,8 @@ export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner 
       throw retained as Error;
     }
     if (cleanup.length > 0) {
-      const cleanupOutcome = transactionFailureOutcome(
-        cleanup[0], MySqlExecutionOutcome.Completed);
       throw transactionFailure(cleanup[0], cleanup.slice(1),
-        outcomeWithCleanup(cleanupOutcome, cleanup));
+        outcomeWithCleanup(outcome, cleanup));
     }
     return value!;
   }
@@ -220,7 +220,7 @@ class ScopedMySqlTransactionSession implements MySqlSession {
   savepoint(name: string): Promise<void> {
     return this.runCommand<void>(
       async (): Promise<void> => {
-        this.requireActiveTransaction();
+        await this.requireActiveTransaction();
         await this.host.query(this.scope, 'SAVEPOINT ' + quoteMySqlIdentifier([name]));
       });
   }
@@ -228,7 +228,7 @@ class ScopedMySqlTransactionSession implements MySqlSession {
   rollbackTo(name: string): Promise<void> {
     return this.runCommand<void>(
       async (): Promise<void> => {
-        this.requireActiveTransaction();
+        await this.requireActiveTransaction();
         await this.host.query(this.scope, 'ROLLBACK TO SAVEPOINT ' + quoteMySqlIdentifier([name]));
       });
   }
@@ -236,7 +236,7 @@ class ScopedMySqlTransactionSession implements MySqlSession {
   releaseSavepoint(name: string): Promise<void> {
     return this.runCommand<void>(
       async (): Promise<void> => {
-        this.requireActiveTransaction();
+        await this.requireActiveTransaction();
         await this.host.query(this.scope, 'RELEASE SAVEPOINT ' + quoteMySqlIdentifier([name]));
       });
   }
@@ -262,9 +262,16 @@ class ScopedMySqlTransactionSession implements MySqlSession {
     }
   }
 
-  private requireActiveTransaction(): void {
+  private async requireActiveTransaction(): Promise<void> {
     this.requireActive();
-    const status = this.host.sessionStatus;
+    if (this.host.state !== ConnectionState.Ready) {
+      throw ArkDbError.validation('Savepoints require an active callback transaction.');
+    }
+    let status = this.host.sessionStatus;
+    if (status.known !== true) {
+      await this.host.refreshTransactionStatus(this.scope);
+      status = this.host.sessionStatus;
+    }
     if (this.host.state !== ConnectionState.Ready ||
       status.known !== true || !status.inTransaction) {
       throw ArkDbError.validation('Savepoints require an active callback transaction.');

@@ -113,6 +113,29 @@ export default function mySqlTransactionRunnerTest(): void {
       }
     });
 
+    it('nullCallbackRejectionRollsBackWithoutCommit', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      try {
+        const transactions = transactionFeature(fixture);
+        wire = new TransactionWirePlan(fixture);
+        let rejected = false;
+        try {
+          await transactions.run<void>(new TransactionOptionsFixture(),
+            (_session: TransactionSessionView): Promise<void> => Promise.reject<void>(null));
+        } catch (_error) {
+          rejected = true;
+        }
+
+        expect(rejected).assertTrue();
+        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION|ROLLBACK');
+      } finally {
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
     it('callbackSessionReuseOutsideScopeIsRejected', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();
@@ -279,6 +302,46 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
         expect(commandSql(fixture).join('|')).assertEqual(
           'START TRANSACTION|DO server_error|ROLLBACK');
+      } finally {
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
+    it('rollbackToRefreshesUnknownStatusAfterConsumedServerError', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      try {
+        const transactions = transactionFeature(fixture);
+        wire = new TransactionWirePlan(fixture);
+        wire.holdSql = 'DO savepoint_server_error';
+        const running = captureFailure(transactions.run(new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            await session.savepoint('recover');
+            const statementFailure = operationFailure(
+              await captureFailure(session.query('DO savepoint_server_error')));
+            expect(statementFailure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
+            expect(session.sessionStatus.known).assertFalse();
+
+            fixture.peer.responses.push([
+              okPayload(StatusFlags.AUTOCOMMIT | StatusFlags.IN_TRANS)
+            ]);
+            await session.rollbackTo('recover');
+            expect(session.sessionStatus.known).assertTrue();
+            expect(session.sessionStatus.inTransaction).assertTrue();
+          }));
+
+        await wire.entered.promise;
+        wire.releaseHeldWith([errorPayload(1064, '42000')]);
+        const completion = await running;
+
+        expect(completion).assertEqual(null);
+        expect(fixture.connection.state).assertEqual(ConnectionState.Ready);
+        expect(fixture.peer.commands().join(',')).assertEqual('3,3,3,14,3,3');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|SAVEPOINT `recover`|DO savepoint_server_error|' +
+          'ROLLBACK TO SAVEPOINT `recover`|COMMIT');
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
@@ -772,6 +835,66 @@ export default function mySqlTransactionRunnerTest(): void {
           await fixture.close();
         }
       }
+    });
+
+    it('acknowledgedCommitWithKnownCancellationCleanupReportsCompleted', 0, async () => {
+      const observedOutcomes: MySqlExecutionOutcome[] = [];
+      for (let mode = 0; mode < 2; mode += 1) {
+        const control = new TransactionControlConnection();
+        let expectedCancellationOutcome: MySqlExecutionOutcome;
+        let expectedCancellationCode: number | string;
+        let sql: string;
+        if (mode === 0) {
+          const notDispatched = new ArkDbError(ArkDbErrorKind.Network,
+            'Synthetic commit-path cancellation did not dispatch.',
+            'COMMIT_CONTROL_NOT_DISPATCHED', '08S01');
+          control.failure = new MySqlOperationError(notDispatched, [],
+            MySqlExecutionOutcome.NotDispatched);
+          expectedCancellationOutcome = MySqlExecutionOutcome.NotDispatched;
+          expectedCancellationCode = 'COMMIT_CONTROL_NOT_DISPATCHED';
+          sql = 'DO commit_after_cancellation_not_dispatched';
+        } else {
+          control.failure = ArkDbError.server(
+            'Synthetic commit-path cancellation rejection.', 1227, '42000');
+          expectedCancellationOutcome = MySqlExecutionOutcome.ServerRejected;
+          expectedCancellationCode = 1227;
+          sql = 'DO commit_after_cancellation_server_rejected';
+        }
+        const fixture = new PreparedExecutionFixture(Capabilities.PROTOCOL_41,
+          (): DbConnection => control);
+        await fixture.open();
+        let wire: TransactionWirePlan | null = null;
+        try {
+          const transactions = transactionFeature(fixture);
+          wire = new TransactionWirePlan(fixture);
+          wire.holdSql = sql;
+          const running = captureFailure(transactions.run(new TransactionOptionsFixture(),
+            async (session: TransactionSessionView): Promise<void> => {
+              await session.query(sql);
+            }));
+
+          await wire.entered.promise;
+          const cancellationFailure = operationFailure(
+            await captureFailure(fixture.connection.cancel()));
+          wire.releaseHeld();
+          const failure = operationFailure(await running);
+
+          expect(cancellationFailure.outcome).assertEqual(expectedCancellationOutcome);
+          expect(failure.primary === cancellationFailure.primary).assertTrue();
+          expect(operationContainsNativeCode(failure, expectedCancellationCode)).assertTrue();
+          expect(commandSql(fixture).join('|')).assertEqual(
+            'START TRANSACTION|' + sql + '|COMMIT');
+          expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
+          observedOutcomes.push(failure.outcome);
+        } finally {
+          if (wire !== null) wire.dispose();
+          await fixture.close();
+        }
+      }
+
+      expect(observedOutcomes.length).assertEqual(2);
+      expect(observedOutcomes[0]).assertEqual(MySqlExecutionOutcome.Completed);
+      expect(observedOutcomes[1]).assertEqual(MySqlExecutionOutcome.Completed);
     });
   });
 }

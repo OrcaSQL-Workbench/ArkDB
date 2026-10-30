@@ -81,13 +81,14 @@ Every cancellation attempt registered for that owned scope is joined, including
 later public cancellation after an earlier Requested attempt clears, and grace
 remains active until the operation plus all recorded attempts settle. Any
 unknown attempt or retirement forces final `Unknown` even after an original OK
-response and retains its failure. Grace expiry starts target abort before
-waiting for control cleanup; after abort and cancellation, one zero-delay
-event-loop turn boundedly observes prompt unwind without waiting forever.
-Expired prepared close remains idempotent and does not add a synthetic
-`Protocol` failure. This driver-local feature is the only statement interface
-that starts cancellation timers; core `QueryOptions.statementTimeoutMs` remains
-validation-only.
+response and retains its failure. Timeout and grace delays above the platform
+timer range are split into chunks of at most `2147483647` ms and re-armed from
+one monotonic absolute expiry. Grace expiry starts target abort before waiting
+for control cleanup; after abort and cancellation, one zero-delay event-loop
+turn boundedly observes prompt unwind without waiting forever. Expired prepared
+close remains idempotent and does not add a synthetic `Protocol` failure. This
+driver-local feature is the only statement interface that starts cancellation
+timers; core `QueryOptions.statementTimeoutMs` remains validation-only.
 
 MySQL also exposes the optional `mysqlFeatures.transactions`
 `MySqlTransactionRunner`. It accepts `MySqlTransactionOptions`, owns one

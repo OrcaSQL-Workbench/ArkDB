@@ -165,12 +165,14 @@ class DeadlineFixture {
   private controls: DeadlineControlConnection[];
   private nextControl: number = 0;
 
-  constructor(controls: DeadlineControlConnection[] = [new DeadlineControlConnection()]) {
+  constructor(controls: DeadlineControlConnection[] = [new DeadlineControlConnection()],
+    connectTimeoutMs: number = 10000) {
     this.controls = controls;
     this.control = controls[0];
     const config = new ConnectionConfig();
     config.host = 'synthetic.invalid';
     config.ssl.mode = SslMode.DISABLED;
+    config.connectTimeoutMs = connectTimeoutMs;
     this.connection = new MySqlConnection(config, '', new TcpTransport(), this.timers,
       (): DbConnection => {
         const index = Math.min(this.nextControl, this.controls.length - 1);
@@ -602,6 +604,110 @@ export default function mySqlDeadlineExecutorTest(): void {
       }
     });
 
+    it('graceJoinsPendingKillBeforeReturning', 0, async () => {
+      const fixture = new DeadlineFixture();
+      const lost = new ArkDbError(ArkDbErrorKind.Network,
+        'Synthetic overlapping drainer KILL loss.', 'OVERLAP_KILL_LOST', '08S01');
+      fixture.control.executing = new Gate();
+      fixture.control.closing = new Gate();
+      fixture.control.failure = lost;
+      await fixture.open();
+      const options = new MySqlDeadlineOptions();
+      options.timeoutMs = 10;
+      options.cancellationGraceMs = 20;
+      fixture.peer.holdCommand = 0x03;
+      let deadlineSettled = false;
+      const running = deadlineFailure(deadlineExecutor(fixture.connection)
+        .query('SELECT SLEEP(10)', options)).then(
+        (failure: ArkDbError): ArkDbError => {
+          deadlineSettled = true;
+          return failure;
+        });
+      let controlCloseReleased = false;
+      try {
+        await flushDeadline();
+        fixture.timers.advance(10);
+        await fixture.control.queryEntered.promise;
+        fixture.peer.emitResponse([okPayload()]);
+        await flushDeadline();
+
+        fixture.timers.advance(20);
+        await fixture.control.closeEntered.promise;
+        fixture.control.closing.release();
+        controlCloseReleased = true;
+        await flushDeadline();
+        expect(deadlineSettled).assertFalse();
+
+        fixture.control.executing.release();
+        const failure = await running;
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Timeout);
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          expect(containsFailure(failure, lost)).assertTrue();
+        }
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+      } finally {
+        if (!controlCloseReleased && fixture.control.closing !== null) {
+          fixture.control.closing.release();
+        }
+        if (fixture.control.executing !== null) fixture.control.executing.release();
+        await fixture.close();
+        await running;
+      }
+    });
+
+    it('longDeadlineDelaysAreChunkedWithinTimerRange', 0, async () => {
+      const maximumTimerDelay = 2147483647;
+      const longDelay = maximumTimerDelay + 1;
+      const control = new DeadlineControlConnection();
+      control.executing = new Gate();
+      control.failure = ArkDbError.network('Synthetic long deadline KILL loss.');
+      control.releaseExecutingOnClose = true;
+      const fixture = new DeadlineFixture([control], longDelay * 2);
+      await fixture.open();
+      const options = new MySqlDeadlineOptions();
+      options.timeoutMs = longDelay;
+      options.cancellationGraceMs = longDelay;
+      fixture.peer.holdCommand = 0x03;
+      let deadlineSettled = false;
+      const running = deadlineFailure(deadlineExecutor(fixture.connection)
+        .query('SELECT SLEEP(10)', options)).then(
+        (failure: ArkDbError): ArkDbError => {
+          deadlineSettled = true;
+          return failure;
+        });
+      try {
+        await flushDeadline();
+        expect(delaysFitTimerRange(fixture.timers, maximumTimerDelay)).assertTrue();
+        fixture.timers.advance(maximumTimerDelay);
+        await flushDeadline();
+        expect(deadlineSettled).assertFalse();
+        expect(control.commands.length).assertEqual(0);
+        expect(countScheduledDelay(fixture.timers, 1)).assertEqual(1);
+
+        fixture.timers.advance(1);
+        await control.queryEntered.promise;
+        expect(delaysFitTimerRange(fixture.timers, maximumTimerDelay)).assertTrue();
+        fixture.timers.advance(maximumTimerDelay);
+        await flushDeadline();
+        expect(deadlineSettled).assertFalse();
+        expect(countScheduledDelay(fixture.timers, 1) >= 2).assertTrue();
+
+        fixture.timers.advance(1);
+        const failure = await running;
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Timeout);
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        }
+      } finally {
+        if (control.executing !== null) control.executing.release();
+        await fixture.close();
+        await running;
+      }
+    });
+
     it('zeroTimeoutDoesNotScheduleTimer', 0, async () => {
       const fixture = new DeadlineFixture();
       await fixture.open();
@@ -649,6 +755,21 @@ function containsFailureKind(failure: ArkDbError, kind: ArkDbErrorKind): boolean
 
 function neverSettling(): Promise<void> {
   return new Promise<void>((_resolve: () => void): void => {});
+}
+
+function delaysFitTimerRange(timers: DeadlineTimers, maximum: number): boolean {
+  for (const delay of timers.scheduledDelays) {
+    if (delay > maximum) return false;
+  }
+  return true;
+}
+
+function countScheduledDelay(timers: DeadlineTimers, expected: number): number {
+  let count = 0;
+  for (const delay of timers.scheduledDelays) {
+    if (delay === expected) count += 1;
+  }
+  return count;
 }
 
 async function deadlineFailure<T>(task: Promise<T>): Promise<ArkDbError> {

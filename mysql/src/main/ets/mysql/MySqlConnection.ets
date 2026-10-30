@@ -67,6 +67,8 @@ import { parseBufferedResultStream, parseResultStream } from './command/ResultSt
 import { prepareServerError } from './command/PrepareResponse';
 import { BinaryRowDecoder } from './value/BinaryRowDecoder';
 
+const MAX_MYSQL_DEADLINE_TIMER_DELAY_MS: number = 2147483647;
+
 /**
  * A single MySQL/MariaDB connection over TCP with an optional in-handshake TLS upgrade.
  * Orchestrates: connect → handshake → mysql_native_password auth → commands.
@@ -1049,9 +1051,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         expire = resolve;
       });
       const serial = scope.serial;
-      const timerId = this.timers.schedule((): void => {
+      const deadlineTimer = new MySqlDeadlineTimer(options.timeoutMs, this.timers, (): void => {
         if (this.commandGate.expireDeadline(scope, serial)) expire();
-      }, options.timeoutMs);
+      });
 
       let operationTask: Promise<T>;
       try {
@@ -1065,21 +1067,22 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         expired.then((): number => 1)
       ]);
       if (first === 0) {
-        this.timers.cancel(timerId);
+        deadlineTimer.cancel();
         if (observed.failure !== null) throw observed.failure as Error;
         return observed.value!;
       }
 
-      this.timers.cancel(timerId);
+      deadlineTimer.cancel();
       const timeout = ArkDbError.timeout('MySQL operation deadline expired.');
       this.cancelScope(scope);
       let expireGrace: () => void = (): void => {};
       const graceExpired = new Promise<void>((resolve: () => void): void => {
         expireGrace = resolve;
       });
-      const graceTimerId = this.timers.schedule((): void => {
-        expireGrace();
-      }, options.cancellationGraceMs);
+      const graceTimer = new MySqlDeadlineTimer(
+        options.cancellationGraceMs, this.timers, (): void => {
+          expireGrace();
+        });
       const converged = observed.settled.then(
         (): Promise<void> => this.settleDeadlineCancellationAttempts(settlement));
       const convergence = await Promise.race<number>([
@@ -1087,7 +1090,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         graceExpired.then((): number => 1)
       ]);
       if (convergence === 0) {
-        this.timers.cancel(graceTimerId);
+        graceTimer.cancel();
         const cleanup: ArkDbError[] = [];
         if (observed.failure !== null) this.appendDeadlineCleanup(cleanup, observed.failure);
         this.appendDeadlineCancellationFailures(cleanup, settlement);
@@ -1100,7 +1103,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         throw new MySqlOperationError(timeout, cleanup, outcome);
       }
 
-      this.timers.cancel(graceTimerId);
+      graceTimer.cancel();
       const cleanup: ArkDbError[] = [
         ArkDbError.timeout('MySQL operation did not converge within the cancellation grace period.')
       ];
@@ -1134,7 +1137,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private async settleDeadlineCancellationAttempts(
     settlement: DeadlineCancellationSettlement): Promise<void> {
     while (settlement.joined < settlement.attempts.length) {
-      const attempt = settlement.attempts[settlement.joined++];
+      const index = settlement.joined;
+      const attempt = settlement.attempts[index];
       try {
         await attempt;
       } catch (error) {
@@ -1143,6 +1147,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
           failure.outcome === MySqlExecutionOutcome.Unknown) settlement.unknown = true;
         settlement.addFailure(failure);
       }
+      if (settlement.joined === index) settlement.joined = index + 1;
     }
   }
 
@@ -1652,6 +1657,58 @@ class DeadlineCancellationSettlement {
       if (existing === failure) return;
     }
     this.failures.push(failure);
+  }
+}
+
+class MySqlDeadlineTimer {
+  private timers: ConnectionTimerPort;
+  private expiresAtMs: number;
+  private callback: () => void;
+  private timerId: number = 0;
+  private generation: number = 0;
+  private active: boolean = true;
+
+  constructor(timeoutMs: number, timers: ConnectionTimerPort, callback: () => void) {
+    this.timers = timers;
+    this.callback = callback;
+    const now = this.nowMs();
+    this.expiresAtMs = timeoutMs > Number.MAX_SAFE_INTEGER - now ?
+      Number.MAX_SAFE_INTEGER : now + timeoutMs;
+    this.arm();
+  }
+
+  cancel(): void {
+    if (!this.active) return;
+    this.active = false;
+    this.generation += 1;
+    if (this.timerId !== 0) this.timers.cancel(this.timerId);
+    this.timerId = 0;
+  }
+
+  private arm(): void {
+    if (!this.active) return;
+    const remaining = Math.max(0, this.expiresAtMs - this.nowMs());
+    const delay = Math.min(remaining, MAX_MYSQL_DEADLINE_TIMER_DELAY_MS);
+    const generation = this.generation + 1;
+    this.generation = generation;
+    this.timerId = this.timers.schedule((): void => {
+      if (!this.active || this.generation !== generation) return;
+      this.timerId = 0;
+      if (this.expiresAtMs > this.nowMs()) {
+        this.arm();
+        return;
+      }
+      this.active = false;
+      this.callback();
+    }, delay);
+  }
+
+  private nowMs(): number {
+    const now = this.timers.nowMs();
+    if (!Number.isSafeInteger(now) || now < 0) {
+      throw ArkDbError.protocol('Connection clock is unavailable.');
+    }
+    return now;
   }
 }
 

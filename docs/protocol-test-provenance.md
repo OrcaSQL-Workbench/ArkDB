@@ -174,6 +174,9 @@ defaults. Consumer acknowledgements are awaited, and legacy
 Only the optional `mysqlFeatures.deadlines` query/execute interface starts
 cancellation timers. Its options default to timeout zero and a 2000 ms
 cancellation grace period, while retaining a cloned `QueryOptions` budget.
+Timeout and grace values above the platform timer range are scheduled in chunks
+no larger than `2147483647` ms. Each chunk re-computes the remaining budget from
+one monotonic absolute expiry rather than treating the first chunk as timeout.
 
 Only consumed valid server ERR packets establish reusable rejections.
 Malformed results, uncertain writes/reads and unsynchronized drain failures
@@ -207,9 +210,10 @@ unsigned BIGINT `18446744073709551615n`, DECIMAL
 in both EOF modes. Deadline regressions additionally prove exact scope/serial timer
 ownership, PREPARE expiry before EXECUTE, lost KILL acknowledgement retention,
 multiple cancellation-attempt joining, grace target-abort ordering, bounded
-post-abort observation, idempotent expired prepared close and joined close
-cleanup. They do not establish live-server or device timing interoperability,
-prepared CALL/OUT support, cursor, long-data, pooling or automatic retries.
+post-abort observation, platform-range timeout/grace chunking, idempotent
+expired prepared close and joined close cleanup. They do not establish
+live-server or device timing interoperability, prepared CALL/OUT support,
+cursor, long-data, pooling or automatic retries.
 
 ## Optional public prepared capability
 

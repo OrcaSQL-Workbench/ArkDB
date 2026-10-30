@@ -13,7 +13,9 @@ import { MySqlParameter } from '../../../main/ets/mysql/model/MySqlParameter';
 import {
   MySqlDeadlineExecutor
 } from '../../../main/ets/mysql/execution/MySqlDeadlineExecutor';
-import { TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
+import {
+  MAX_RECEIVE_BUFFER_BYTES, TcpTransport
+} from '../../../main/ets/mysql/transport/TcpTransport';
 import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
 import { socket } from '../../../mock/NetworkKit.mock';
@@ -173,7 +175,8 @@ class DeadlineFixture {
     config.host = 'synthetic.invalid';
     config.ssl.mode = SslMode.DISABLED;
     config.connectTimeoutMs = connectTimeoutMs;
-    this.connection = new MySqlConnection(config, '', new TcpTransport(), this.timers,
+    this.connection = new MySqlConnection(config, '',
+      new TcpTransport(null, MAX_RECEIVE_BUFFER_BYTES, this.timers), this.timers,
       (): DbConnection => {
         const index = Math.min(this.nextControl, this.controls.length - 1);
         this.nextControl += 1;

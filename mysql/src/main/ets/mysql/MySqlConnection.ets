@@ -1068,7 +1068,24 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       ]);
       if (first === 0) {
         deadlineTimer.cancel();
-        if (observed.failure !== null) throw observed.failure as Error;
+        await this.settleDeadlineCancellationAttempts(settlement);
+        const cancellationUnknown = this.retiredByCancellation || settlement.unknown;
+        if (observed.failure !== null) {
+          const cleanup: ArkDbError[] = [];
+          this.appendDeadlineCancellationFailures(cleanup, settlement);
+          const outcome = cancellationUnknown ? MySqlExecutionOutcome.Unknown :
+            (observed.failure instanceof MySqlOperationError ?
+              observed.failure.outcome : MySqlExecutionOutcome.Unknown);
+          throw operationFailure(observed.failure, cleanup, outcome);
+        }
+        if (settlement.failures.length > 0) {
+          const primary = settlement.failures[0];
+          const cleanup = settlement.failures.slice(1);
+          const outcome = cancellationUnknown ? MySqlExecutionOutcome.Unknown :
+            (primary instanceof MySqlOperationError ?
+              primary.outcome : MySqlExecutionOutcome.Completed);
+          throw operationFailure(primary, cleanup, outcome);
+        }
         return observed.value!;
       }
 

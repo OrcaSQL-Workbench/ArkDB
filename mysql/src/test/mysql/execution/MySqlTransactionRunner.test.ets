@@ -544,6 +544,67 @@ export default function mySqlTransactionRunnerTest(): void {
       }
     });
 
+    it('transactionSettlementWaitsForRacingRootCloseCleanup', 0, async () => {
+      const control = new TransactionControlConnection();
+      const cancellationClosing = new PreparedGate();
+      const socketClosing = new PreparedGate();
+      control.closing = cancellationClosing;
+      const fixture = new PreparedExecutionFixture(Capabilities.PROTOCOL_41,
+        (): DbConnection => control);
+      fixture.peer.closeResult = socketClosing.promise.then((): void => {
+        throw new Error('Synthetic racing root-close cleanup failure.');
+      });
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      let closing: Promise<Object | null> | null = null;
+      try {
+        const transactions = transactionFeature(fixture);
+        wire = new TransactionWirePlan(fixture);
+        wire.holdSql = 'COMMIT AND NO CHAIN NO RELEASE';
+        let transactionSettled = false;
+        const running = captureFailure(transactions.run(new TransactionOptionsFixture(),
+          async (_session: TransactionSessionView): Promise<void> => {}))
+          .then((failure: Object | null): Object | null => {
+            transactionSettled = true;
+            return failure;
+          });
+
+        await wire.entered.promise;
+        const cancelling = fixture.connection.cancel();
+        await control.cleaning.promise;
+        wire.releaseHeld();
+        await flushPrepared();
+        closing = cancelling.then(
+          (): Promise<Object | null> => captureFailure<void>(fixture.close()));
+        cancellationClosing.release();
+        await cancelling;
+        await flushPrepared();
+
+        const closeStarted = fixture.peer.closeCalls === 1;
+        const settledBeforeSocketCleanup = transactionSettled;
+        socketClosing.release();
+        const closeFailureValue = await closing;
+        const transactionFailureValue = await running;
+
+        expect(closeStarted).assertTrue();
+        expect(settledBeforeSocketCleanup).assertFalse();
+        expect(closeFailureValue instanceof MySqlOperationError).assertTrue();
+        expect(transactionFailureValue instanceof MySqlOperationError).assertTrue();
+        if (closeFailureValue instanceof MySqlOperationError &&
+          transactionFailureValue instanceof MySqlOperationError) {
+          expect(transactionFailureValue.primary === closeFailureValue.primary).assertTrue();
+          expect(transactionFailureValue.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+        }
+        expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
+      } finally {
+        cancellationClosing.release();
+        socketClosing.release();
+        if (closing !== null) await closing;
+        if (wire !== null) wire.dispose();
+        await captureFailure<void>(fixture.close());
+      }
+    });
+
     it('transactionCancellationCleanupFailureIsAggregated', 0, async () => {
       const control = new TransactionControlConnection();
       const cleanup = new ArkDbError(ArkDbErrorKind.Network,

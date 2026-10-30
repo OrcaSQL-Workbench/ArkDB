@@ -26,7 +26,10 @@
 - Add optional `mysqlFeatures.deadlines` buffered query/prepared execute support
   with `MySqlDeadlineOptions` defaults of timeout zero and 2000 ms cancellation
   grace. Bind timers to exact command scopes, retain cancellation/close failures,
-  retire unresolved targets without replay, and keep legacy
+  give unknown dispatched KILL priority over an original OK result, and start
+  target abort before control cleanup on grace expiry. Observe prompt post-abort
+  unwind for one bounded event-loop turn, keep expired prepared close
+  idempotent, retire unresolved targets without replay, and leave legacy
   `QueryOptions.statementTimeoutMs` validation-only.
 - Keep configuration, TCP/TLS, handshake/column details and InnoDB metrics in MySQL.
 - Add connection-owned cancellation lifetime and explicit reuse outcomes;

@@ -1085,9 +1085,13 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       if (observed.failure !== null) this.appendDeadlineCleanup(cleanup, observed.failure);
       if (cancellation.failure !== null) this.appendDeadlineCleanup(cleanup, cancellation.failure);
       await this.joinDeadlineClose(cleanup);
-      const outcome = observed.failure instanceof MySqlOperationError ?
-        observed.failure.outcome : (observed.failure === null ?
-          MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.Unknown);
+      const cancellationUnknown = this.retiredByCancellation ||
+        (cancellation.failure instanceof MySqlOperationError &&
+          cancellation.failure.outcome === MySqlExecutionOutcome.Unknown);
+      const outcome = cancellationUnknown ? MySqlExecutionOutcome.Unknown :
+        (observed.failure instanceof MySqlOperationError ?
+          observed.failure.outcome : (observed.failure === null ?
+            MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.Unknown));
       throw new MySqlOperationError(timeout, cleanup, outcome);
     }
 
@@ -1099,7 +1103,13 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     for (const failure of retirement) this.appendDeadlineCleanup(cleanup, failure);
     await cancellation.settled;
     if (cancellation.failure !== null) this.appendDeadlineCleanup(cleanup, cancellation.failure);
+    const operationSettled = await this.joinDeadlineOperationAfterAbort(observed);
+    this.invalidatePreparedCache();
     if (observed.failure !== null) this.appendDeadlineCleanup(cleanup, observed.failure);
+    if (!operationSettled) {
+      this.appendDeadlineCleanup(cleanup,
+        ArkDbError.timeout('MySQL operation did not settle during bounded post-abort cleanup.'));
+    }
     await this.joinDeadlineClose(cleanup);
     return Promise.reject<T>(
       new MySqlOperationError(timeout, cleanup, MySqlExecutionOutcome.Unknown));
@@ -1111,6 +1121,25 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       if (existing === failure) return;
     }
     cleanup.push(failure);
+  }
+
+  private joinDeadlineOperationAfterAbort<T>(
+    observation: DeadlineObservation<T>): Promise<boolean> {
+    if (observation.settledNow) return Promise.resolve<boolean>(true);
+    return new Promise<boolean>((resolve: (value: boolean) => void): void => {
+      let completed = false;
+      const timerId = setTimeout((): void => {
+        if (completed) return;
+        completed = true;
+        resolve(observation.settledNow);
+      }, 0);
+      observation.settled.then((): void => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timerId);
+        resolve(true);
+      });
+    });
   }
 
   private async joinDeadlineClose(cleanup: ArkDbError[]): Promise<void> {
@@ -1132,19 +1161,21 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.connState = ConnectionState.Closed;
     this.status.known = false;
     this.channel = null;
-    this.invalidatePreparedCache();
+    const target = new DeadlineObservation<void>(this.transport.abort(error));
     const control = this.cancellationControl;
+    let controlClose: DeadlineObservation<void> | null = null;
     if (control !== null) {
       try {
-        await control.close();
+        controlClose = new DeadlineObservation<void>(control.close());
       } catch (failure) {
-        cleanup.push(toCleanupError(failure as Object));
+        this.appendDeadlineCleanup(cleanup, failure as Object);
       }
     }
-    try {
-      await this.transport.abort(error);
-    } catch (failure) {
-      cleanup.push(toCleanupError(failure as Object));
+    await target.settled;
+    if (target.failure !== null) this.appendDeadlineCleanup(cleanup, target.failure);
+    if (controlClose !== null) {
+      await controlClose.settled;
+      if (controlClose.failure !== null) this.appendDeadlineCleanup(cleanup, controlClose.failure);
     }
     return cleanup;
   }
@@ -1547,14 +1578,17 @@ class DeadlineObservation<T> {
   readonly settled: Promise<void>;
   value: T | undefined = undefined;
   failure: Object | null = null;
+  settledNow: boolean = false;
 
   constructor(task: Promise<T>) {
     this.settled = task.then(
       (value: T): void => {
         this.value = value;
+        this.settledNow = true;
       },
       (error: Object): void => {
         this.failure = error;
+        this.settledNow = true;
       });
   }
 }

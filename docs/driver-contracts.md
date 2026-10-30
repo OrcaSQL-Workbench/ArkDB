@@ -77,9 +77,13 @@ MySQL also exposes the optional `mysqlFeatures.deadlines` interface for buffered
 text queries and prepared execution. `MySqlDeadlineOptions` defaults to
 `timeoutMs = 0` and `cancellationGraceMs = 2000`, clones its `QueryOptions`, and
 keeps command ownership until execution and cancellation cleanup converge.
-Grace expiry permanently retires an unresolved target without replay. This
-driver-local feature is the only statement interface that starts cancellation
-timers; core `QueryOptions.statementTimeoutMs` remains validation-only.
+An unknown dispatched KILL forces final `Unknown` even after an original OK
+response. Grace expiry starts target abort before waiting for control cleanup;
+after abort and cancellation, one zero-delay event-loop turn boundedly observes
+prompt unwind without waiting forever. Expired prepared close remains
+idempotent and does not add a synthetic `Protocol` failure. This driver-local
+feature is the only statement interface that starts cancellation timers; core
+`QueryOptions.statementTimeoutMs` remains validation-only.
 
 MySQL also exposes the optional `mysqlFeatures.transactions`
 `MySqlTransactionRunner`. It accepts `MySqlTransactionOptions`, owns one
@@ -144,9 +148,11 @@ The old handle-based helper is lower-level and still leaves lifetime management
 to its caller.
 
 After an uncertain dispatched MySQL cancellation, the target is closed and
-permanently retired, even if its original operation already completed. Closing
-the control socket alone does not acknowledge the server-side `KILL`. A definite
-server rejection is distinguishable and does not require retirement.
+permanently retired, even if its original operation already completed; the
+reported execution outcome remains `Unknown`. Closing the control socket alone
+does not acknowledge the server-side `KILL`. At deadline grace expiry, target
+abort begins before control cleanup. A definite server rejection is
+distinguishable and does not require retirement.
 
 Portable `ServerInfo` has no engine enum, handshake version, connection number,
 authentication plugin or capability bitmask. Portable `ColumnDef` has no wire

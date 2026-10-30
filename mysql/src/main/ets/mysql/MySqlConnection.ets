@@ -1064,10 +1064,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       const observed = new DeadlineObservation<T>(operationTask);
       const completed = observed.settled.then(
         (): Promise<void> => this.settleDeadlineCancellationAttempts(settlement));
-      const first = await Promise.race<number>([
+      let first = await Promise.race<number>([
         completed.then((): number => 0),
         expired.then((): number => 1)
       ]);
+      if (first === 0 && deadlineTimer.isExpired() &&
+        this.commandGate.expireDeadline(scope, serial)) {
+        first = 1;
+      }
       if (first === 0) {
         await this.settleDeadlineCancellationAttempts(settlement);
         deadlineTimer.cancel();
@@ -1701,6 +1705,10 @@ class MySqlDeadlineTimer {
     this.generation += 1;
     if (this.timerId !== 0) this.timers.cancel(this.timerId);
     this.timerId = 0;
+  }
+
+  isExpired(): boolean {
+    return this.expiresAtMs <= this.nowMs();
   }
 
   private arm(): void {

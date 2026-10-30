@@ -113,6 +113,10 @@ class DeadlineTimers implements ConnectionTimerPort {
     }
   }
 
+  elapseWithoutFiring(deltaMs: number): void {
+    this.now += deltaMs;
+  }
+
   fireEvenIfCancelled(id: number): void {
     const task = this.tasks.get(id);
     if (task === undefined || task.fired) {
@@ -784,7 +788,6 @@ export default function mySqlDeadlineExecutorTest(): void {
         'DO successful_sql_across_deadline_boundaries', options), observation);
       const deadlineTimerId = fixture.timers.lastScheduledId;
       const cancelling = deadlineFailure(fixture.connection.cancel());
-      let manuallyReleased = false;
       try {
         await fixture.control.queryEntered.promise;
         fixture.peer.emitResponse([okPayload()]);
@@ -793,12 +796,13 @@ export default function mySqlDeadlineExecutorTest(): void {
         expect(observation.settled).assertFalse();
 
         fixture.timers.advance(10);
+        await waitForScheduledDelay(fixture.timers, 20, 1);
         fixture.timers.advance(20);
+        await fixture.control.closeEntered.promise;
         await flushDeadline();
-        if (!observation.settled && fixture.control.executing !== null) {
-          fixture.control.executing.release();
-          manuallyReleased = true;
-        }
+        expect(fixture.peer.closeCalls).assertEqual(1);
+        expect(fixture.control.closed).assertTrue();
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
 
         const cancellationFailure = await cancelling;
         expect(containsFailure(cancellationFailure, lost)).assertTrue();
@@ -815,11 +819,87 @@ export default function mySqlDeadlineExecutorTest(): void {
         }
         expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
       } finally {
-        if (!manuallyReleased && fixture.control.executing !== null) {
-          fixture.control.executing.release();
-        }
+        if (fixture.control.executing !== null) fixture.control.executing.release();
         await fixture.close();
         await cancelling;
+        await running;
+      }
+    });
+
+    it('completionAfterAbsoluteExpiryIsTimeout', 0, async () => {
+      const fixture = new DeadlineFixture();
+      await fixture.open();
+      const options = new MySqlDeadlineOptions();
+      options.timeoutMs = 10;
+      options.cancellationGraceMs = 20;
+      fixture.peer.holdCommand = 0x03;
+      const observation = new DeadlineQueryObservation();
+      const running = observeDeadlineQuery(deadlineExecutor(fixture.connection).query(
+        'DO completes_after_absolute_expiry', options), observation);
+      try {
+        await flushDeadline();
+        fixture.timers.elapseWithoutFiring(11);
+        fixture.peer.emitResponse([okPayload()]);
+        await running;
+
+        expect(observation.results.length).assertEqual(0);
+        expect(observation.failures.length).assertEqual(1);
+        const failure = observation.failures[0];
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Timeout);
+        }
+      } finally {
+        await fixture.close();
+        await running;
+      }
+    });
+
+    it('closeBeforeDeadlineWaitsForCleanup', 0, async () => {
+      const fixture = new DeadlineFixture();
+      const socketClose = new RejectingGate();
+      const closeCause = new Error('Synthetic close-before-deadline cleanup failure.');
+      fixture.peer.closeResult = socketClose.promise;
+      await fixture.open();
+      const options = new MySqlDeadlineOptions();
+      options.timeoutMs = 10;
+      options.cancellationGraceMs = 20;
+      fixture.peer.holdCommand = 0x03;
+      const observation = new DeadlineQueryObservation();
+      const running = observeDeadlineQuery(deadlineExecutor(fixture.connection).query(
+        'SELECT close_before_deadline', options), observation);
+      const deadlineTimerId = fixture.timers.lastScheduledId;
+      const closing = deadlineFailure(fixture.connection.close());
+      let cleanupReleased = false;
+      try {
+        await flushDeadline();
+        expect(observation.settled).assertFalse();
+        expect(fixture.timers.wasCancelled(deadlineTimerId)).assertFalse();
+
+        fixture.timers.advance(10);
+        await waitForScheduledDelay(fixture.timers, 20, 1);
+        fixture.timers.advance(20);
+        await flushDeadline();
+        expect(observation.settled).assertFalse();
+        expect(fixture.peer.closeCalls).assertEqual(1);
+
+        socketClose.reject(closeCause);
+        cleanupReleased = true;
+        const closeFailure = await closing;
+        await running;
+        expect(observation.results.length).assertEqual(0);
+        expect(observation.failures.length).assertEqual(1);
+        const failure = observation.failures[0];
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Timeout);
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          expect(containsFailure(failure, closeFailure)).assertTrue();
+        }
+      } finally {
+        if (!cleanupReleased) socketClose.reject(closeCause);
+        await fixture.close();
+        await closing;
         await running;
       }
     });
@@ -886,6 +966,15 @@ function countScheduledDelay(timers: DeadlineTimers, expected: number): number {
     if (delay === expected) count += 1;
   }
   return count;
+}
+
+async function waitForScheduledDelay(timers: DeadlineTimers,
+  expected: number, minimumCount: number): Promise<void> {
+  for (let turn = 0; turn < 16; turn += 1) {
+    if (countScheduledDelay(timers, expected) >= minimumCount) return;
+    await flushDeadline();
+  }
+  throw new Error('Expected deadline timer was not scheduled.');
 }
 
 function observeDeadlineQuery(task: Promise<QueryResult>,

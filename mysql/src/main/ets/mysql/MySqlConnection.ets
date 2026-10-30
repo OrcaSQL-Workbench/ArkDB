@@ -1062,10 +1062,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         operationTask = Promise.reject<T>(error as Object);
       }
       const observed = new DeadlineObservation<T>(operationTask);
-      const completed = observed.settled.then(
-        (): Promise<void> => this.settleDeadlineCancellationAttempts(settlement));
+      const closeCleanup: ArkDbError[] = [];
+      const converged = this.settleDeadlineConvergence(observed, settlement, closeCleanup);
       let first = await Promise.race<number>([
-        completed.then((): number => 0),
+        converged.then((): number => 0),
         expired.then((): number => 1)
       ]);
       if (first === 0 && deadlineTimer.isExpired() &&
@@ -1073,12 +1073,12 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         first = 1;
       }
       if (first === 0) {
-        await this.settleDeadlineCancellationAttempts(settlement);
         deadlineTimer.cancel();
         const cancellationUnknown = this.retiredByCancellation || settlement.unknown;
         if (observed.failure !== null) {
           const cleanup: ArkDbError[] = [];
           this.appendDeadlineCancellationFailures(cleanup, settlement);
+          for (const failure of closeCleanup) this.appendDeadlineCleanup(cleanup, failure);
           const outcome = cancellationUnknown ? MySqlExecutionOutcome.Unknown :
             (observed.failure instanceof MySqlOperationError ?
               observed.failure.outcome : MySqlExecutionOutcome.Unknown);
@@ -1087,9 +1087,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         if (settlement.failures.length > 0) {
           const primary = settlement.failures[0];
           const cleanup = settlement.failures.slice(1);
+          for (const failure of closeCleanup) this.appendDeadlineCleanup(cleanup, failure);
           const outcome = cancellationUnknown ?
             MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.Completed;
           throw operationFailure(primary, cleanup, outcome);
+        }
+        if (closeCleanup.length > 0) {
+          const outcome = cancellationUnknown ?
+            MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.Completed;
+          throw operationFailure(closeCleanup[0], closeCleanup, outcome);
         }
         return observed.value!;
       }
@@ -1105,8 +1111,6 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         options.cancellationGraceMs, this.timers, (): void => {
           expireGrace();
         });
-      const converged = observed.settled.then(
-        (): Promise<void> => this.settleDeadlineCancellationAttempts(settlement));
       const convergence = await Promise.race<number>([
         converged.then((): number => 0),
         graceExpired.then((): number => 1)
@@ -1116,7 +1120,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         const cleanup: ArkDbError[] = [];
         if (observed.failure !== null) this.appendDeadlineCleanup(cleanup, observed.failure);
         this.appendDeadlineCancellationFailures(cleanup, settlement);
-        await this.joinDeadlineClose(cleanup);
+        for (const failure of closeCleanup) this.appendDeadlineCleanup(cleanup, failure);
         const cancellationUnknown = this.retiredByCancellation || settlement.unknown;
         const outcome = cancellationUnknown ? MySqlExecutionOutcome.Unknown :
           (observed.failure instanceof MySqlOperationError ?
@@ -1148,6 +1152,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       if (this.deadlineCancellation === settlement &&
         settlement.scope === scope) this.deadlineCancellation = null;
     }
+  }
+
+  private async settleDeadlineConvergence<T>(
+    observation: DeadlineObservation<T>, settlement: DeadlineCancellationSettlement,
+    closeCleanup: ArkDbError[]): Promise<void> {
+    await observation.settled;
+    await this.settleDeadlineCancellationAttempts(settlement);
+    await this.joinDeadlineClose(closeCleanup);
+    await this.settleDeadlineCancellationAttempts(settlement);
   }
 
   private retainDeadlineCancellation(scope: MySqlCommandScope,

@@ -60,6 +60,17 @@ class DeadlineQueryObservation {
   settled: boolean = false;
 }
 
+class GatedCloseTransport extends TcpTransport {
+  readonly closeEntered: Gate = new Gate();
+  readonly closeAllowed: Gate = new Gate();
+
+  async close(): Promise<void> {
+    this.closeEntered.release();
+    await this.closeAllowed.promise;
+    await super.close();
+  }
+}
+
 class DeadlineTimerTask {
   readonly dueAtMs: number;
   readonly handler: () => void;
@@ -180,7 +191,7 @@ class DeadlineFixture {
   private nextControl: number = 0;
 
   constructor(controls: DeadlineControlConnection[] = [new DeadlineControlConnection()],
-    connectTimeoutMs: number = 10000) {
+    connectTimeoutMs: number = 10000, transport: TcpTransport | null = null) {
     this.controls = controls;
     this.control = controls[0];
     const config = new ConnectionConfig();
@@ -188,7 +199,9 @@ class DeadlineFixture {
     config.ssl.mode = SslMode.DISABLED;
     config.connectTimeoutMs = connectTimeoutMs;
     this.connection = new MySqlConnection(config, '',
-      new TcpTransport(null, MAX_RECEIVE_BUFFER_BYTES, this.timers), this.timers,
+      transport === null ?
+        new TcpTransport(null, MAX_RECEIVE_BUFFER_BYTES, this.timers) : transport,
+      this.timers,
       (): DbConnection => {
         const index = Math.min(this.nextControl, this.controls.length - 1);
         this.nextControl += 1;
@@ -898,6 +911,51 @@ export default function mySqlDeadlineExecutorTest(): void {
         }
       } finally {
         if (!cleanupReleased) socketClose.reject(closeCause);
+        await fixture.close();
+        await closing;
+        await running;
+      }
+    });
+
+    it('successfulResponseDuringCloseWaitsForCleanup', 0, async () => {
+      const transport = new GatedCloseTransport();
+      const fixture = new DeadlineFixture(
+        [new DeadlineControlConnection()], 10000, transport);
+      const closeCause = new Error('Synthetic close cleanup after successful SQL.');
+      await fixture.open();
+      fixture.peer.closeFailure = closeCause;
+      const options = new MySqlDeadlineOptions();
+      options.timeoutMs = 100000;
+      options.cancellationGraceMs = 2000;
+      fixture.peer.holdCommand = 0x03;
+      const observation = new DeadlineQueryObservation();
+      const running = observeDeadlineQuery(deadlineExecutor(fixture.connection).query(
+        'DO successful_response_during_close', options), observation);
+      const deadlineTimerId = fixture.timers.lastScheduledId;
+      const closing = deadlineFailure(fixture.connection.close());
+      let cleanupReleased = false;
+      try {
+        await transport.closeEntered.promise;
+        fixture.peer.emitResponse([okPayload()]);
+        await flushDeadline();
+        expect(observation.settled).assertFalse();
+        expect(fixture.timers.wasCancelled(deadlineTimerId)).assertFalse();
+
+        transport.closeAllowed.release();
+        cleanupReleased = true;
+        const closeFailure = await closing;
+        await running;
+        expect(observation.results.length).assertEqual(0);
+        expect(observation.failures.length).assertEqual(1);
+        const failure = observation.failures[0];
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary.kind === ArkDbErrorKind.Timeout).assertFalse();
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+          expect(containsFailure(failure, closeFailure)).assertTrue();
+        }
+      } finally {
+        if (!cleanupReleased) transport.closeAllowed.release();
         await fixture.close();
         await closing;
         await running;

@@ -1,10 +1,10 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionConfig, ConnectionState, MySqlConnection,
-  MySqlConnectionFeatures, MySqlDriverFactory, MySqlParameter, MySqlParameterType,
-  MySqlParameterValue, MySqlPreparedExecutor, MySqlPreparedStatement, MySqlSession,
-  QueryOptions, QueryResult, QueryResultSink, mysqlPlaceholders, quoteMySqlIdentifier,
-  requireMySqlFeatures
+  MySqlConnectionFeatures, MySqlDeadlineExecutor, MySqlDeadlineOptions, MySqlDriverFactory,
+  MySqlParameter, MySqlParameterType, MySqlParameterValue, MySqlPreparedExecutor,
+  MySqlPreparedStatement, MySqlSession, QueryOptions, QueryResult, QueryResultSink,
+  mysqlPlaceholders, quoteMySqlIdentifier, requireMySqlFeatures
 } from '@arkdb/mysql';
 import { LegacyCustomConnection } from './LegacyPublicInterface.test';
 
@@ -16,7 +16,9 @@ export default function preparedPublicInterfaceTest(): void {
       const session: MySqlSession = connection;
       const features: MySqlConnectionFeatures = requireMySqlFeatures(connection);
       const executor: MySqlPreparedExecutor | undefined = features.prepared;
+      const deadlines: MySqlDeadlineExecutor | undefined = features.deadlines;
       expect(executor !== undefined).assertTrue();
+      expect(deadlines !== undefined).assertTrue();
       expect(session.mysqlFeatures === features).assertTrue();
       expect(session.serverInfo === connection.serverInfo).assertTrue();
       expect(factory.capabilities.supportsPreparedStatements).assertTrue();
@@ -29,6 +31,16 @@ export default function preparedPublicInterfaceTest(): void {
       expect(value instanceof Uint8Array).assertTrue();
       if (!(value instanceof Uint8Array)) throw new Error('Expected a binary input snapshot.');
       expect(value[0]).assertEqual(1);
+      const deadlineOptions: MySqlDeadlineOptions = new MySqlDeadlineOptions();
+      expect(deadlineOptions.timeoutMs).assertEqual(0);
+      expect(deadlineOptions.cancellationGraceMs).assertEqual(2000);
+      deadlineOptions.timeoutMs = 25;
+      deadlineOptions.queryOptions.maxRows = 1;
+      const deadlineCopy: MySqlDeadlineOptions = deadlineOptions.clone();
+      deadlineCopy.timeoutMs = 50;
+      deadlineCopy.queryOptions.maxRows = 2;
+      expect(deadlineOptions.timeoutMs).assertEqual(25);
+      expect(deadlineOptions.queryOptions.maxRows).assertEqual(1);
       await connection.close();
     });
 
@@ -80,4 +92,10 @@ async function preparedSignatures(executor: MySqlPreparedExecutor, session: MySq
   } finally {
     await statement.close();
   }
+}
+
+async function deadlineSignatures(executor: MySqlDeadlineExecutor,
+  options: MySqlDeadlineOptions, parameters: MySqlParameter[]): Promise<QueryResult> {
+  await executor.query('SELECT 1', options);
+  return executor.execute('SELECT ?', parameters, options);
 }

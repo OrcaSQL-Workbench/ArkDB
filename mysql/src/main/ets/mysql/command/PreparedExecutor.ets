@@ -44,6 +44,10 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
     this.cache.retireOwned(scope);
   }
 
+  get cacheEnabled(): boolean {
+    return this.cache.enabled;
+  }
+
   prepare(sql: string): Promise<MySqlPreparedStatement> {
     return this.session.prepare(sql);
   }
@@ -53,6 +57,14 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
     return this.convenience(MySqlCommandKind.Query, sql,
       (scope: MySqlCommandScope, statement: MySqlPreparedStatement): Promise<MySqlQueryResult> =>
         this.bufferedOwned(scope, statement, input));
+  }
+
+  async executeOwned(scope: MySqlCommandScope, sql: string, parameters: MySqlParameter[],
+    options?: QueryOptions): Promise<MySqlQueryResult> {
+    const input = preparedInput(parameters, options);
+    return this.convenienceOwned(scope, sql,
+      (owned: MySqlCommandScope, statement: MySqlPreparedStatement): Promise<MySqlQueryResult> =>
+        this.bufferedOwned(owned, statement, input));
   }
 
   async executeStream(sql: string, parameters: MySqlParameter[], options: QueryOptions,
@@ -93,47 +105,53 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
 
   private convenience<T>(kind: MySqlCommandKind, sql: string,
     execute: (scope: MySqlCommandScope, statement: MySqlPreparedStatement) => Promise<T>): Promise<T> {
-    return this.host.runCommand(kind, async (scope: MySqlCommandScope): Promise<T> => {
-      let statement: MySqlPreparedStatement | null = null;
-      let borrow: MySqlStatementCacheBorrow | null = null;
-      let value: T | undefined;
-      let primary: Object | null = null;
-      const cleanup: ArkDbError[] = [];
+    return this.host.runCommand(kind,
+      (scope: MySqlCommandScope): Promise<T> => this.convenienceOwned(scope, sql, execute),
+      this.cache.enabled);
+  }
+
+  private async convenienceOwned<T>(scope: MySqlCommandScope, sql: string,
+    execute: (scope: MySqlCommandScope, statement: MySqlPreparedStatement) => Promise<T>): Promise<T> {
+    let statement: MySqlPreparedStatement | null = null;
+    let borrow: MySqlStatementCacheBorrow | null = null;
+    let value: T | undefined;
+    let primary: Object | null = null;
+    const cleanup: ArkDbError[] = [];
+    try {
+      if (this.cache.enabled) {
+        borrow = await this.cache.borrow(scope, sql);
+        statement = borrow.statement;
+      } else {
+        statement = await this.session.prepareOwned(scope, sql);
+      }
+      this.host.commandGate.assertDeadlineActive(scope);
+      value = await execute(scope, statement);
+    } catch (error) {
+      primary = error as Object;
+    }
+    if (statement !== null) {
       try {
-        if (this.cache.enabled) {
-          borrow = await this.cache.borrow(scope, sql);
-          statement = borrow.statement;
-        } else {
-          statement = await this.session.prepareOwned(scope, sql);
-        }
-        value = await execute(scope, statement);
+        if (borrow !== null) await this.cache.release(scope, borrow, primary === null);
+        else await this.session.closeOwned(scope, statement);
       } catch (error) {
-        primary = error as Object;
-      }
-      if (statement !== null) {
-        try {
-          if (borrow !== null) await this.cache.release(scope, borrow, primary === null);
-          else await this.session.closeOwned(scope, statement);
-        } catch (error) {
-          if (primary === null) {
-            throw preparedFailure(error as Object, [], MySqlExecutionOutcome.Completed);
-          }
-          cleanup.push(preparedCleanup(error as Object));
+        if (primary === null) {
+          throw preparedFailure(error as Object, [], MySqlExecutionOutcome.Completed);
         }
+        cleanup.push(preparedCleanup(error as Object));
       }
-      if (primary !== null && this.cache.enabled && borrow === null) {
-        try {
-          await this.cache.clearOwned(scope);
-        } catch (error) {
-          cleanup.push(preparedCleanup(error as Object));
-        }
+    }
+    if (primary !== null && this.cache.enabled && borrow === null) {
+      try {
+        await this.cache.clearOwned(scope);
+      } catch (error) {
+        cleanup.push(preparedCleanup(error as Object));
       }
-      if (primary !== null) {
-        throw preparedFailure(primary, cleanup, primary instanceof MySqlOperationError ?
-          primary.outcome : MySqlExecutionOutcome.NotDispatched);
-      }
-      return value!;
-    }, this.cache.enabled);
+    }
+    if (primary !== null) {
+      throw preparedFailure(primary, cleanup, primary instanceof MySqlOperationError ?
+        primary.outcome : MySqlExecutionOutcome.NotDispatched);
+    }
+    return value!;
   }
 }
 

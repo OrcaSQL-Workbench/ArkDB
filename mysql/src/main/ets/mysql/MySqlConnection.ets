@@ -26,7 +26,9 @@ import {
   buildHandshakeResponse, buildSslRequest, computeClientCapabilities, HandshakeResponseParams
 } from './auth/HandshakeResponse';
 import { parseErr, parseOk } from './command/ResultPackets';
-import { buildComQuery, parseQueryStream, parseResultSet, validateQueryOptions } from './command/Query';
+import {
+  buildComQuery, parseQueryStream, parseResultSet, TextRowDecoder, validateQueryOptions
+} from './command/Query';
 import { mysqlContextPolicy, mysqlDatabaseForContext } from './model/MySqlContext';
 import { MySqlMetadataProvider } from './metadata/MySqlMetadataProvider';
 import { MySqlServerMetricsProvider } from './metrics/MySqlServerMetricsProvider';
@@ -36,6 +38,7 @@ import {
 import {
   MySqlBatchExecutor, MySqlPreparedBatchExecutor
 } from './execution/MySqlBatchExecutor';
+import { MySqlConnectionDeadlineExecutor } from './execution/MySqlDeadlineExecutor';
 import {
   MYSQL_COMMIT_NO_CHAIN_NO_RELEASE, MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE,
   MySqlConnectionTransactionRunner, MySqlTransactionRunnerHost
@@ -52,6 +55,7 @@ import {
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
 } from './model/MySqlBatch';
+import { MySqlDeadlineOptions } from './model/MySqlDeadlineOptions';
 import { MySqlPreparedExecutor, MySqlPreparedStatement } from './driver/MySqlPreparedContracts';
 import { MySqlConnectionFeatures } from './driver/MySqlConnectionFeatures';
 import { MySqlSession } from './driver/MySqlSession';
@@ -87,6 +91,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private info: ServerInfo = new ServerInfo();
   private status: DatabaseSessionStatus = new MySqlDatabaseSessionStatus();
   private cancelTask: Promise<QueryCancellationResult> | null = null;
+  private cancellationControl: DbConnection | null = null;
   private retiredByCancellation: boolean = false;
   private commandGate: MySqlCommandGate = new MySqlCommandGate();
   private completedScope: MySqlCommandScope | null = null;
@@ -121,6 +126,12 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.features.metrics = new MySqlServerMetricsProvider(this.features.streaming);
     this.mysqlFeatures.batch = new MySqlConnectionBatchExecutor(
       (): MySqlBatchExecutor => this.batchExecutor());
+    this.mysqlFeatures.deadlines = new MySqlConnectionDeadlineExecutor(
+      (sql: string, options: MySqlDeadlineOptions): Promise<QueryResult> =>
+        this.queryWithDeadline(sql, options),
+      (sql: string, parameters: MySqlParameter[],
+        options: MySqlDeadlineOptions): Promise<QueryResult> =>
+        this.executeWithDeadline(sql, parameters, options));
     this.mysqlFeatures.prepared = new MySqlConnectionPreparedExecutor(
       (): MySqlPreparedExecutor => this.preparedExecutor());
     this.mysqlFeatures.transactions = new MySqlConnectionTransactionRunner(this.transactionHost());
@@ -170,6 +181,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   protected preparedExecutor(): MySqlPreparedExecutor {
+    return this.internalPreparedExecutor();
+  }
+
+  private internalPreparedExecutor(): InternalPreparedExecutor {
     this.requireReady();
     if (this.prepared === null) {
       this.prepared = new InternalPreparedExecutor(this.preparedHost());
@@ -385,10 +400,39 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
   }
 
+  private async queryWithDeadline(sql: string, options: MySqlDeadlineOptions): Promise<QueryResult> {
+    const scope = this.reserveCommand(MySqlCommandKind.Query);
+    try {
+      return await this.runMySqlDeadline<QueryResult>(scope, options,
+        (): Promise<QueryResult> => this.queryOwnedWithOptions(scope, sql, options.queryOptions));
+    } finally {
+      this.finishCommand(scope);
+    }
+  }
+
+  private executeWithDeadline(sql: string, parameters: MySqlParameter[],
+    options: MySqlDeadlineOptions): Promise<QueryResult> {
+    const executor = this.internalPreparedExecutor();
+    return this.runPreparedCommand<QueryResult>(MySqlCommandKind.Query,
+      (scope: MySqlCommandScope): Promise<QueryResult> =>
+        this.runMySqlDeadline<QueryResult>(scope, options,
+          (): Promise<QueryResult> =>
+            executor.executeOwned(scope, sql, parameters, options.queryOptions)),
+      executor.cacheEnabled);
+  }
+
   private async queryOwned(scope: MySqlCommandScope, sql: string): Promise<QueryResult> {
     const command = buildComQuery(sql);
     return this.bufferedCommandOwned(scope, command,
       (channel: PacketChannel): Promise<QueryResult> => parseResultSet(channel, this.clientCaps));
+  }
+
+  private async queryOwnedWithOptions(scope: MySqlCommandScope, sql: string,
+    options: QueryOptions): Promise<QueryResult> {
+    const command = buildComQuery(sql);
+    return this.bufferedCommandOwned(scope, command,
+      (channel: PacketChannel): Promise<QueryResult> =>
+        parseBufferedResultStream(channel, this.clientCaps, new TextRowDecoder(), options, this.status));
   }
 
   private async bufferedCommandOwned(scope: MySqlCommandScope, command: Uint8Array,
@@ -600,9 +644,16 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   cancel(): Promise<QueryCancellationResult> {
-    if (this.cancelTask !== null) return this.cancelTask;
     const scope = this.commandGate.current;
-    if (scope === null || !this.canCancelScope(scope)) {
+    if (scope === null) {
+      return Promise.resolve(new QueryCancellationResult(CancellationOutcome.NotRunning, this.reuseState()));
+    }
+    return this.cancelScope(scope);
+  }
+
+  private cancelScope(scope: MySqlCommandScope): Promise<QueryCancellationResult> {
+    if (this.cancelTask !== null) return this.cancelTask;
+    if (!this.canCancelScope(scope)) {
       return Promise.resolve(new QueryCancellationResult(CancellationOutcome.NotRunning, this.reuseState()));
     }
     const task = this.cancelCurrentQuery(scope, this.cancellationHandle, this.queryWrite);
@@ -651,6 +702,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         throw ArkDbError.validation('MySQL cancellation requires a distinct control connection.');
       }
       control = ownedControl;
+      this.cancellationControl = ownedControl;
       const budget = new ConnectionDeadline(this.config.connectTimeoutMs, this.timers);
       deadline = budget;
       await budget.wait((): Promise<void> => ownedControl.connect());
@@ -684,7 +736,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       }
     }
     // Closing the control socket cannot rule out a delayed server-side KILL.
-    if (dispatched && !outcomeKnown) {
+    if (dispatched && !outcomeKnown && !this.retiredByCancellation) {
       this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
       this.retiredByCancellation = true;
       this.connState = ConnectionState.Closed;
@@ -708,6 +760,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         Logger.w(LogTag.Conn, 'cancellation cleanup failed error=' + Logger.errorToken(cleanup));
         cleanupErrors.push(toCleanupError(cleanup as Object));
       }
+      if (this.cancellationControl === control) this.cancellationControl = null;
     }
     if (primary !== null) {
       const failure = toArkDbError(primary);
@@ -977,6 +1030,123 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private retireTransaction(scope: MySqlCommandScope, error: ArkDbError): Promise<void> {
     this.commandGate.assertOwner(scope);
     return this.retirePreparedSession(error);
+  }
+
+  private async runMySqlDeadline<T>(scope: MySqlCommandScope, options: MySqlDeadlineOptions,
+    operation: () => Promise<T>): Promise<T> {
+    if (options.timeoutMs === 0) return operation();
+
+    let expire: () => void = (): void => {};
+    const expired = new Promise<void>((resolve: () => void): void => {
+      expire = resolve;
+    });
+    const serial = scope.serial;
+    const timerId = this.timers.schedule((): void => {
+      if (this.commandGate.expireDeadline(scope, serial)) expire();
+    }, options.timeoutMs);
+
+    let operationTask: Promise<T>;
+    try {
+      operationTask = operation();
+    } catch (error) {
+      operationTask = Promise.reject<T>(error as Object);
+    }
+    const observed = new DeadlineObservation<T>(operationTask);
+    const first = await Promise.race<number>([
+      observed.settled.then((): number => 0),
+      expired.then((): number => 1)
+    ]);
+    if (first === 0) {
+      this.timers.cancel(timerId);
+      if (observed.failure !== null) throw observed.failure as Error;
+      return observed.value!;
+    }
+
+    this.timers.cancel(timerId);
+    const timeout = ArkDbError.timeout('MySQL operation deadline expired.');
+    const cancellationTask = this.cancelScope(scope);
+    const cancellation = new DeadlineObservation<QueryCancellationResult>(cancellationTask);
+    let expireGrace: () => void = (): void => {};
+    const graceExpired = new Promise<void>((resolve: () => void): void => {
+      expireGrace = resolve;
+    });
+    const graceTimerId = this.timers.schedule((): void => {
+      expireGrace();
+    }, options.cancellationGraceMs);
+    const converged = observed.settled.then(
+      (): Promise<void> => cancellation.settled);
+    const convergence = await Promise.race<number>([
+      converged.then((): number => 0),
+      graceExpired.then((): number => 1)
+    ]);
+    if (convergence === 0) {
+      this.timers.cancel(graceTimerId);
+      const cleanup: ArkDbError[] = [];
+      if (observed.failure !== null) this.appendDeadlineCleanup(cleanup, observed.failure);
+      if (cancellation.failure !== null) this.appendDeadlineCleanup(cleanup, cancellation.failure);
+      await this.joinDeadlineClose(cleanup);
+      const outcome = observed.failure instanceof MySqlOperationError ?
+        observed.failure.outcome : (observed.failure === null ?
+          MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.Unknown);
+      throw new MySqlOperationError(timeout, cleanup, outcome);
+    }
+
+    this.timers.cancel(graceTimerId);
+    const cleanup: ArkDbError[] = [
+      ArkDbError.timeout('MySQL operation did not converge within the cancellation grace period.')
+    ];
+    const retirement = await this.retireDeadlineScope(scope, timeout);
+    for (const failure of retirement) this.appendDeadlineCleanup(cleanup, failure);
+    await cancellation.settled;
+    if (cancellation.failure !== null) this.appendDeadlineCleanup(cleanup, cancellation.failure);
+    if (observed.failure !== null) this.appendDeadlineCleanup(cleanup, observed.failure);
+    await this.joinDeadlineClose(cleanup);
+    return Promise.reject<T>(
+      new MySqlOperationError(timeout, cleanup, MySqlExecutionOutcome.Unknown));
+  }
+
+  private appendDeadlineCleanup(cleanup: ArkDbError[], error: Object): void {
+    const failure = toCleanupError(error);
+    for (const existing of cleanup) {
+      if (existing === failure) return;
+    }
+    cleanup.push(failure);
+  }
+
+  private async joinDeadlineClose(cleanup: ArkDbError[]): Promise<void> {
+    const closing = this.closing;
+    if (closing === null) return;
+    try {
+      await closing;
+    } catch (failure) {
+      this.appendDeadlineCleanup(cleanup, failure as Object);
+    }
+  }
+
+  private async retireDeadlineScope(scope: MySqlCommandScope,
+    error: ArkDbError): Promise<ArkDbError[]> {
+    const cleanup: ArkDbError[] = [];
+    if (!this.commandGate.isOwner(scope)) return cleanup;
+    this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+    this.retiredByCancellation = true;
+    this.connState = ConnectionState.Closed;
+    this.status.known = false;
+    this.channel = null;
+    this.invalidatePreparedCache();
+    const control = this.cancellationControl;
+    if (control !== null) {
+      try {
+        await control.close();
+      } catch (failure) {
+        cleanup.push(toCleanupError(failure as Object));
+      }
+    }
+    try {
+      await this.transport.abort(error);
+    } catch (failure) {
+      cleanup.push(toCleanupError(failure as Object));
+    }
+    return cleanup;
   }
 
   private invalidatePreparedCache(): void {
@@ -1370,6 +1540,22 @@ class PreparedCommandSettlement {
 
   constructor(scope: MySqlCommandScope) {
     this.scope = scope;
+  }
+}
+
+class DeadlineObservation<T> {
+  readonly settled: Promise<void>;
+  value: T | undefined = undefined;
+  failure: Object | null = null;
+
+  constructor(task: Promise<T>) {
+    this.settled = task.then(
+      (value: T): void => {
+        this.value = value;
+      },
+      (error: Object): void => {
+        this.failure = error;
+      });
   }
 }
 

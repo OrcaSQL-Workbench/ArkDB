@@ -23,6 +23,11 @@
 - Enable the built-in factory's prepared capability hint without adding required
   methods to core or old custom connections. Add a restricted `MySqlSession`
   borrowing interface and retain native/portable text-stream defaults.
+- Add optional `mysqlFeatures.deadlines` buffered query/prepared execute support
+  with `MySqlDeadlineOptions` defaults of timeout zero and 2000 ms cancellation
+  grace. Bind timers to exact command scopes, retain cancellation/close failures,
+  retire unresolved targets without replay, and keep legacy
+  `QueryOptions.statementTimeoutMs` validation-only.
 - Keep configuration, TCP/TLS, handshake/column details and InnoDB metrics in MySQL.
 - Add connection-owned cancellation lifetime and explicit reuse outcomes;
   retain the lower-level handle-based control-session primitive.

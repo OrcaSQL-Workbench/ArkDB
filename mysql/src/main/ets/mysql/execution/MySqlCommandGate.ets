@@ -30,6 +30,7 @@ export interface MySqlCommandScope {
   readonly generation: number;
   readonly kind: MySqlCommandKind;
   readonly phase: MySqlCommandPhase;
+  readonly deadlineExpired: boolean;
   readonly ownerToken: Object;
 }
 
@@ -41,6 +42,7 @@ class CommandScope implements MySqlCommandScope {
   readonly kind: MySqlCommandKind;
   readonly ownerToken: Object = new CommandOwnerToken();
   phase: MySqlCommandPhase = MySqlCommandPhase.Reserved;
+  deadlineExpired: boolean = false;
 
   constructor(serial: number, generation: number, kind: MySqlCommandKind) {
     this.serial = serial;
@@ -92,6 +94,19 @@ export class MySqlCommandGate {
   setPhase(scope: MySqlCommandScope, phase: MySqlCommandPhase): void {
     this.assertOwner(scope);
     this.active!.phase = phase;
+  }
+
+  expireDeadline(scope: MySqlCommandScope, serial: number): boolean {
+    if (!this.isOwner(scope) || scope.serial !== serial) return false;
+    this.active!.deadlineExpired = true;
+    return true;
+  }
+
+  assertDeadlineActive(scope: MySqlCommandScope): void {
+    this.assertOwner(scope);
+    if (scope.deadlineExpired) {
+      throw ArkDbError.timeout('MySQL operation deadline expired.');
+    }
   }
 
   release(scope: MySqlCommandScope): void {

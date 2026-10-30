@@ -7,8 +7,8 @@ import {
   ServerMetricsProvider, CoreDbConnection, ConnectionState, ServerInfo, QueryExecutionSummary,
   QueryResultSink, MySqlConnectionFeatures, requireMySqlFeatures, MySqlParameter,
   MySqlParameterType, MySqlParameterValue, MySqlPreparedExecutor, MySqlPreparedStatement,
-  MySqlSession, MySqlBatchOptions, MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
-  mysqlPlaceholders, createMySqlConnection,
+  MySqlSession, MySqlBatchOptions, MySqlDeadlineOptions, MySqlDeadlineExecutor,
+  MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier, mysqlPlaceholders, createMySqlConnection,
   CoreQueryResultSink, CoreQueryResultMeta, CoreQueryRowChunk, CoreQueryResultSummary
 } from '../../../Index';
 import {
@@ -144,6 +144,32 @@ export default function publicInterfaceTest(): void {
       expect(options.maxItems).assertEqual(1000);
       expect(options.maxBufferedBytes).assertEqual(33554432);
       expect(errors.length).assertEqual(0);
+    });
+
+    it('deadlinePublicImportsCloneAndRemainOptional', 0, async () => {
+      const options: MySqlDeadlineOptions = new MySqlDeadlineOptions();
+      expect(options.timeoutMs).assertEqual(0);
+      expect(options.cancellationGraceMs).assertEqual(2000);
+      options.timeoutMs = 25;
+      options.cancellationGraceMs = 75;
+      options.queryOptions.maxRows = 1;
+      const copy: MySqlDeadlineOptions = options.clone();
+      copy.timeoutMs = 50;
+      copy.cancellationGraceMs = 100;
+      copy.queryOptions.maxRows = 2;
+      expect(options.timeoutMs).assertEqual(25);
+      expect(options.cancellationGraceMs).assertEqual(75);
+      expect(options.queryOptions.maxRows).assertEqual(1);
+
+      const optional: MySqlConnectionFeatures = new MySqlConnectionFeatures();
+      const omitted: MySqlDeadlineExecutor | undefined = optional.deadlines;
+      expect(omitted === undefined).assertTrue();
+
+      const connection = new MySqlDriverFactory().createConnection(new ConnectionConfig(), '');
+      const deadlines: MySqlDeadlineExecutor | undefined =
+        requireMySqlFeatures(connection).deadlines;
+      expect(deadlines !== undefined).assertTrue();
+      await connection.close();
     });
 
     it('preparedPublicImportsCompile', 0, () => {

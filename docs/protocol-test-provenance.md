@@ -171,6 +171,9 @@ actual execution metadata, not the defensive prepare-time column snapshot.
 Chunk, row, decoded-byte, result-set and drain limits retain their existing
 defaults. Consumer acknowledgements are awaited, and legacy
 `statementTimeoutMs` remains validation-only rather than an automatic deadline.
+Only the optional `mysqlFeatures.deadlines` query/execute interface starts
+cancellation timers. Its options default to timeout zero and a 2000 ms
+cancellation grace period, while retaining a cloned `QueryOptions` budget.
 
 Only consumed valid server ERR packets establish reusable rejections.
 Malformed results, uncertain writes/reads and unsynchronized drain failures
@@ -192,9 +195,11 @@ connection, gate, packet channel, checked encoder and shared decoders through
 the deterministic socket/control boundary. Exact scalar fixtures include
 unsigned BIGINT `18446744073709551615n`, DECIMAL
 `"12345678901234567890.1234567890"`, TIME `"-838:59:59.000001"`, bytes and SQL NULL
-in both EOF modes. They do not establish live-server/device interoperability,
-prepared CALL/OUT support, public capability availability, cursor, long-data,
-caching, deadlines or automatic retries.
+in both EOF modes. Deadline regressions additionally prove exact scope/serial timer
+ownership, PREPARE expiry before EXECUTE, lost KILL acknowledgement retention,
+grace retirement and joined close cleanup. They do not establish live-server or
+device timing interoperability, prepared CALL/OUT support, cursor, long-data,
+pooling or automatic retries.
 
 ## Optional public prepared capability
 

@@ -964,7 +964,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
     const lateFailures = await this.settleTransactionOperation(scope, true);
     for (const failure of lateFailures) failures.push(failure);
-    this.transactionOperation = null;
+    if (this.transactionOperation !== null &&
+      this.transactionOperation.scope === scope) this.transactionOperation = null;
     return failures;
   }
 

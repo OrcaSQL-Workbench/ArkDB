@@ -605,6 +605,92 @@ export default function mySqlTransactionRunnerTest(): void {
       }
     });
 
+    it('finishingTransactionDoesNotClearSuccessorSettlement', 0, async () => {
+      const firstControl = new TransactionControlConnection();
+      const firstClosing = new PreparedGate();
+      firstControl.closing = firstClosing;
+      const successorControl = new TransactionControlConnection();
+      const successorClosing = new PreparedGate();
+      const successorCleanup = new ArkDbError(ArkDbErrorKind.Network,
+        'Synthetic successor control cleanup failure.', 'SUCCESSOR_CONTROL_CLEANUP', '08S01');
+      successorControl.closing = successorClosing;
+      successorControl.cleanupFailure = successorCleanup;
+      let controlIndex = 0;
+      const fixture = new PreparedExecutionFixture(Capabilities.PROTOCOL_41,
+        (): DbConnection => {
+          controlIndex += 1;
+          return controlIndex === 1 ? firstControl : successorControl;
+        });
+      await fixture.open();
+      let firstWire: TransactionWirePlan | null = null;
+      const successorWires: TransactionWirePlan[] = [];
+      const successorTasks: Promise<Object | null>[] = [];
+      let successorSettled = false;
+      const successorScheduled = new PreparedGate();
+      try {
+        const transactions = transactionFeature(fixture);
+        firstWire = new TransactionWirePlan(fixture);
+        firstWire.holdSql = 'COMMIT AND NO CHAIN NO RELEASE';
+        const firstRunning = captureFailure(transactions.run(new TransactionOptionsFixture(),
+          async (_session: TransactionSessionView): Promise<void> => {}));
+
+        await firstWire.entered.promise;
+        const firstCancelling = fixture.connection.cancel();
+        await firstControl.cleaning.promise;
+        firstWire.releaseHeld();
+        await flushPrepared();
+        firstCancelling.then((): void => {
+          Promise.resolve<void>(undefined).then((): void => {
+            if (firstWire !== null) firstWire.dispose();
+            const nextWire = new TransactionWirePlan(fixture);
+            nextWire.holdSql = 'DO successor_cancellation_wait';
+            successorWires.push(nextWire);
+            successorTasks.push(captureFailure(transactions.run(
+              new TransactionOptionsFixture(),
+              async (session: TransactionSessionView): Promise<void> => {
+                await session.query('DO successor_cancellation_wait');
+              })).then((failure: Object | null): Object | null => {
+              successorSettled = true;
+              return failure;
+            }));
+            successorScheduled.release();
+          });
+        });
+        firstClosing.release();
+        await firstCancelling;
+        await successorScheduled.promise;
+        expect(await firstRunning).assertEqual(null);
+
+        if (successorWires.length !== 1 || successorTasks.length !== 1) {
+          throw new Error('Expected the successor transaction to start.');
+        }
+        const activeWire = successorWires[0];
+        const activeSuccessor = successorTasks[0];
+        await activeWire.entered.promise;
+        const successorCancelling = captureFailure(fixture.connection.cancel());
+        await successorControl.cleaning.promise;
+        activeWire.releaseHeldWith([errorPayload(1317, '70100')]);
+        await flushPrepared();
+        const settledBeforeCleanup = successorSettled;
+        successorClosing.release();
+        const cancellationFailure = operationFailure(await successorCancelling);
+        const successorFailure = operationFailure(await activeSuccessor);
+
+        expect(settledBeforeCleanup).assertFalse();
+        expect(cancellationFailure.primary === successorCleanup).assertTrue();
+        expect(operationContainsNativeCode(
+          successorFailure, 'SUCCESSOR_CONTROL_CLEANUP')).assertTrue();
+        expect(successorControl.commands.join(',')).assertEqual('KILL QUERY 42');
+      } finally {
+        firstClosing.release();
+        successorClosing.release();
+        if (firstWire !== null) firstWire.dispose();
+        for (const wire of successorWires) wire.dispose();
+        for (const task of successorTasks) await task;
+        await captureFailure<void>(fixture.close());
+      }
+    });
+
     it('transactionCancellationCleanupFailureIsAggregated', 0, async () => {
       const control = new TransactionControlConnection();
       const cleanup = new ArkDbError(ArkDbErrorKind.Network,

@@ -5,6 +5,7 @@ import connectionStateTest from './connection/ConnectionState.test';
 import mySqlSessionInitializationTest from './connection/MySqlSessionInitialization.test';
 import mySqlExecutionControllerTest from './execution/MySqlExecutionController.test';
 import mySqlCancellationTest from './execution/MySqlCancellation.test';
+import mySqlBatchExecutorTest from './execution/MySqlBatchExecutor.test';
 import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
 import mySqlStatementCacheTest from './execution/MySqlStatementCache.test';
 import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';
@@ -28,6 +29,7 @@ export default function testsuite(): void {
   mySqlSessionInitializationTest();
   mySqlExecutionControllerTest();
   mySqlCancellationTest();
+  mySqlBatchExecutorTest();
   mySqlCommandGateTest();
   mySqlStatementCacheTest();
   mySqlServerMetricsProviderTest();

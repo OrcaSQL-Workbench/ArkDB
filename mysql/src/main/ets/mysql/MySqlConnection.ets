@@ -34,6 +34,9 @@ import {
   MySqlExecutionController, isMySqlInterruptionError, mysqlKillQueryForHandle
 } from './execution/MySqlExecutionController';
 import {
+  MySqlBatchExecutor, MySqlPreparedBatchExecutor
+} from './execution/MySqlBatchExecutor';
+import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from './execution/MySqlCommandGate';
 import {
@@ -42,6 +45,9 @@ import {
 import {
   MySqlExecutionOutcome, MySqlOperationError, isMySqlServerRejection
 } from './model/MySqlOperationError';
+import {
+  MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
+} from './model/MySqlBatch';
 import { MySqlPreparedExecutor, MySqlPreparedStatement } from './driver/MySqlPreparedContracts';
 import { MySqlConnectionFeatures } from './driver/MySqlConnectionFeatures';
 import { MySqlSession } from './driver/MySqlSession';
@@ -86,6 +92,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private cancellationHandle: string = '';
   private createControlConnection: () => DbConnection;
   private skipAutocommitSetup: boolean = false;
+  private batch: MySqlPreparedBatchExecutor | null = null;
   private prepared: InternalPreparedExecutor | null = null;
   private preparedOperation: PreparedCommandSettlement | null = null;
 
@@ -107,6 +114,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.features.cancellation = this;
     this.features.metadata = new MySqlMetadataProvider(this);
     this.features.metrics = new MySqlServerMetricsProvider(this.features.streaming);
+    this.mysqlFeatures.batch = new MySqlConnectionBatchExecutor(
+      (): MySqlBatchExecutor => this.batchExecutor());
     this.mysqlFeatures.prepared = new MySqlConnectionPreparedExecutor(
       (): MySqlPreparedExecutor => this.preparedExecutor());
   }
@@ -157,29 +166,45 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   protected preparedExecutor(): MySqlPreparedExecutor {
     this.requireReady();
     if (this.prepared === null) {
-      const host = new PreparedConnectionHost(this.commandGate,
-        (): PacketChannel | null => this.channel, (): number => this.clientCaps,
-        (): ConnectionState => this.connState,
-        (error: ArkDbError): Promise<void> => this.retirePreparedSession(error),
-        <T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
-          cachedConvenience?: boolean): Promise<T> =>
-          this.runPreparedCommand<T>(kind, operation, cachedConvenience),
-        (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions): Promise<QueryResult> =>
-          this.awaitPreparedExecution(scope,
-            this.bufferedCommandOwned(scope, command, (channel: PacketChannel): Promise<QueryResult> =>
-              parseBufferedResultStream(new PreparedPacketSource(channel, this.clientCaps),
-                this.clientCaps, new BinaryRowDecoder(), options, this.status))),
-        async (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
-          sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> =>
-          mysqlExecutionSummary(await this.awaitPreparedExecution(scope,
-            this.streamCommandOwned(scope, command, new MySqlResultSinkAdapter(sink),
-              (channel: PacketChannel, guarded: QueryResultSink): Promise<QueryExecutionSummary> =>
-                parseResultStream(new PreparedPacketSource(channel, this.clientCaps),
-                  this.clientCaps, options, guarded, new BinaryRowDecoder(), this.status)))),
-        this.config.preparedCacheSize === undefined ? 0 : this.config.preparedCacheSize);
-      this.prepared = new InternalPreparedExecutor(host);
+      this.prepared = new InternalPreparedExecutor(this.preparedHost());
     }
     return this.prepared;
+  }
+
+  protected batchExecutor(): MySqlBatchExecutor {
+    if (this.batch !== null) return this.batch;
+    this.requireReady();
+    this.batch = new MySqlPreparedBatchExecutor(this.preparedHost(),
+      (): DatabaseSessionStatus => this.status.clone());
+    return this.batch;
+  }
+
+  private preparedHost(): MySqlPreparedExecutorHost {
+    return new PreparedConnectionHost(this.commandGate,
+      (): PacketChannel | null => this.channel, (): number => this.clientCaps,
+      (): ConnectionState => this.connState,
+      (error: ArkDbError): Promise<void> => this.retirePreparedSession(error),
+      <T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
+        cachedConvenience?: boolean): Promise<T> =>
+        this.runPreparedCommand<T>(kind, operation, cachedConvenience),
+      (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+        observer?: (result: QueryResult) => void): Promise<QueryResult> =>
+        this.awaitPreparedExecution(scope,
+          this.bufferedCommandOwned(scope, command, (channel: PacketChannel): Promise<QueryResult> =>
+            parseBufferedResultStream(new PreparedPacketSource(channel, this.clientCaps),
+              this.clientCaps, new BinaryRowDecoder(), options, this.status))
+            .then((result: QueryResult): QueryResult => {
+              if (observer !== undefined) observer(result);
+              return result;
+            })),
+      async (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+        sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> =>
+        mysqlExecutionSummary(await this.awaitPreparedExecution(scope,
+          this.streamCommandOwned(scope, command, new MySqlResultSinkAdapter(sink),
+            (channel: PacketChannel, guarded: QueryResultSink): Promise<QueryExecutionSummary> =>
+              parseResultStream(new PreparedPacketSource(channel, this.clientCaps),
+                this.clientCaps, options, guarded, new BinaryRowDecoder(), this.status)))),
+      this.config.preparedCacheSize === undefined ? 0 : this.config.preparedCacheSize);
   }
 
   /** Connect, read the handshake, and authenticate. */
@@ -833,6 +858,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   private invalidatePreparedCache(): void {
+    this.batch = null;
     if (this.prepared !== null) this.prepared.invalidate();
   }
 
@@ -1059,6 +1085,35 @@ class MySqlConnectionPreparedExecutor implements MySqlPreparedExecutor {
   }
 }
 
+class MySqlConnectionBatchExecutor implements MySqlBatchExecutor {
+  private getExecutor: () => MySqlBatchExecutor;
+
+  constructor(getExecutor: () => MySqlBatchExecutor) {
+    this.getExecutor = getExecutor;
+  }
+
+  async execute(sql: string, rows: MySqlParameter[][],
+    options?: MySqlBatchOptions): Promise<MySqlBatchResult> {
+    const snapshot = options === undefined ? new MySqlBatchOptions() : options.clone();
+    const errors = validateMySqlBatchOptions(snapshot, rows.length);
+    if (errors.length > 0) {
+      throw new MySqlBatchError(
+        operationFailure(errors[0], [], MySqlExecutionOutcome.NotDispatched), [], 0);
+    }
+    if (rows.length === 0) {
+      return new MySqlBatchResult();
+    }
+    let executor: MySqlBatchExecutor;
+    try {
+      executor = this.getExecutor();
+    } catch (error) {
+      throw new MySqlBatchError(
+        operationFailure(error as Object, [], MySqlExecutionOutcome.NotDispatched), [], 0);
+    }
+    return executor.execute(sql, rows, snapshot);
+  }
+}
+
 type PreparedCommandRunner = <T>(kind: MySqlCommandKind,
   operation: (scope: MySqlCommandScope) => Promise<T>, cachedConvenience?: boolean) => Promise<T>;
 
@@ -1070,14 +1125,16 @@ class PreparedConnectionHost implements MySqlPreparedExecutorHost {
   private readState: () => ConnectionState;
   private retireSession: (error: ArkDbError) => Promise<void>;
   private run: PreparedCommandRunner;
-  private buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions) => Promise<QueryResult>;
+  private buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+    observer?: (result: QueryResult) => void) => Promise<QueryResult>;
   private stream: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
 
   constructor(gate: MySqlCommandGate, readChannel: () => PacketChannel | null,
     readCapabilities: () => number, readState: () => ConnectionState,
     retire: (error: ArkDbError) => Promise<void>, run: PreparedCommandRunner,
-    buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions) => Promise<QueryResult>,
+    buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+      observer?: (result: QueryResult) => void) => Promise<QueryResult>,
     stream: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
       sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>,
     preparedCacheSize: number) {
@@ -1103,8 +1160,9 @@ class PreparedConnectionHost implements MySqlPreparedExecutorHost {
     return this.run<T>(kind, operation, cachedConvenience);
   }
 
-  executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions): Promise<QueryResult> {
-    return this.buffered(scope, command, options);
+  executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
+    observer?: (result: QueryResult) => void): Promise<QueryResult> {
+    return this.buffered(scope, command, options, observer);
   }
 
   streamPrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,

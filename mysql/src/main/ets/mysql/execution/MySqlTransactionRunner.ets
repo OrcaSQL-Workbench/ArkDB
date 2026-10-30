@@ -136,6 +136,9 @@ export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner 
           }
         }
       }
+      if (primary !== null && outcome === MySqlExecutionOutcome.Unknown) {
+        await this.retireReadyUnresolvedTransaction(scope, primary, cleanup);
+      }
     } catch (error) {
       const caught = error as Object;
       if (primary === null && exactCallbackFailure === null) {
@@ -183,6 +186,16 @@ export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner 
     const status = this.host.sessionStatus;
     return this.host.state === ConnectionState.Ready &&
       status.known === true && !status.inTransaction;
+  }
+
+  private async retireReadyUnresolvedTransaction(scope: MySqlCommandScope,
+    primary: Object, cleanup: ArkDbError[]): Promise<void> {
+    if (this.host.state !== ConnectionState.Ready || this.transactionKnownEnded()) return;
+    try {
+      await this.host.retireTransaction(scope, toTransactionArkDbError(primary));
+    } catch (retireError) {
+      cleanup.push(toTransactionCleanupError(retireError as Object));
+    }
   }
 
   private async recoverRejectedCommit(scope: MySqlCommandScope,

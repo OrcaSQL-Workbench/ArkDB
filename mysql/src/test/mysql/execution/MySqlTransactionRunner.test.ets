@@ -166,6 +166,55 @@ export default function mySqlTransactionRunnerTest(): void {
       expect(rollbackFailureRetained[1]).assertTrue();
     });
 
+    it('skippedRollbackRetiresReadyUnknownTransaction', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      const primary = new ArkDbError(ArkDbErrorKind.Network,
+        'Synthetic unknown callback outcome.', 'CALLBACK_UNKNOWN', '08S01');
+      const unknown = new MySqlOperationError(primary, [], MySqlExecutionOutcome.Unknown);
+      try {
+        const transactions = transactionFeature(fixture);
+        wire = new TransactionWirePlan(fixture);
+        const failure = operationFailure(await captureFailure(
+          transactions.run(new TransactionOptionsFixture(),
+            async (_session: TransactionSessionView): Promise<void> => { throw unknown; })));
+
+        expect(failure.primary === primary).assertTrue();
+        expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION');
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+      } finally {
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
+    it('rollbackServerRejectionRetiresReadyConnectionBeforeOwnerRelease', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      const callback = new Error('Synthetic callback before rollback rejection.');
+      try {
+        const transactions = transactionFeature(fixture);
+        wire = new TransactionWirePlan(fixture);
+        wire.rollbackServerError = true;
+        const failure = operationFailure(await captureFailure(
+          transactions.run(new TransactionOptionsFixture(),
+            async (_session: TransactionSessionView): Promise<void> => { throw callback; })));
+
+        expect(failure.originalCause === callback).assertTrue();
+        expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(operationContainsNativeCode(failure, 1205)).assertTrue();
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|ROLLBACK AND NO CHAIN NO RELEASE');
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+      } finally {
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
     it('nullCallbackRejectionRollsBackWithoutCommit', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();

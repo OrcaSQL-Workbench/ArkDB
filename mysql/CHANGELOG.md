@@ -28,9 +28,12 @@
   grace. Bind timers to exact command scopes, retain cancellation/close failures,
   give unknown dispatched KILL priority over an original OK result, and start
   target abort before control cleanup on grace expiry. Observe prompt post-abort
-  unwind for one bounded event-loop turn, keep expired prepared close
-  idempotent, retire unresolved targets without replay, and leave legacy
-  `QueryOptions.statementTimeoutMs` validation-only.
+  unwind for one bounded event-loop turn, join every cancellation attempt
+  recorded for the owned scope (including later public cancellation), and keep
+  grace active through all attempts. Retain any unknown attempt and force final
+  `Unknown`, keep expired prepared close idempotent, retire unresolved targets
+  without replay, and leave legacy `QueryOptions.statementTimeoutMs`
+  validation-only.
 - Keep configuration, TCP/TLS, handshake/column details and InnoDB metrics in MySQL.
 - Add connection-owned cancellation lifetime and explicit reuse outcomes;
   retain the lower-level handle-based control-session primitive.

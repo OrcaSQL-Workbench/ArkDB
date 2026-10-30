@@ -160,15 +160,23 @@ class DeadlineControlConnection implements DbConnection {
 class DeadlineFixture {
   readonly timers: DeadlineTimers = new DeadlineTimers();
   readonly peer: PreparedSocket = new PreparedSocket();
-  readonly control: DeadlineControlConnection = new DeadlineControlConnection();
+  readonly control: DeadlineControlConnection;
   readonly connection: MySqlConnection;
+  private controls: DeadlineControlConnection[];
+  private nextControl: number = 0;
 
-  constructor() {
+  constructor(controls: DeadlineControlConnection[] = [new DeadlineControlConnection()]) {
+    this.controls = controls;
+    this.control = controls[0];
     const config = new ConnectionConfig();
     config.host = 'synthetic.invalid';
     config.ssl.mode = SslMode.DISABLED;
     this.connection = new MySqlConnection(config, '', new TcpTransport(), this.timers,
-      (): DbConnection => this.control);
+      (): DbConnection => {
+        const index = Math.min(this.nextControl, this.controls.length - 1);
+        this.nextControl += 1;
+        return this.controls[index];
+      });
   }
 
   async open(): Promise<void> {
@@ -182,7 +190,10 @@ class DeadlineFixture {
   }
 
   async close(): Promise<void> {
-    if (this.control.executing !== null) this.control.executing.release();
+    for (const control of this.controls) {
+      if (control.executing !== null) control.executing.release();
+      if (control.closing !== null) control.closing.release();
+    }
     await this.connection.close().then(
       (): void => {},
       (_error: Object): void => {}
@@ -529,6 +540,64 @@ export default function mySqlDeadlineExecutorTest(): void {
         }
       } finally {
         await fixture.close();
+        await running;
+      }
+    });
+
+    it('deadlineJoinsSecondCancellationAttempt', 0, async () => {
+      const first = new DeadlineControlConnection();
+      const second = new DeadlineControlConnection();
+      const lost = new ArkDbError(ArkDbErrorKind.Network,
+        'Synthetic lost second KILL acknowledgement.', 'SECOND_KILL_LOST', '08S01');
+      second.executing = new Gate();
+      second.failure = lost;
+      const fixture = new DeadlineFixture([first, second]);
+      await fixture.open();
+      const options = new MySqlDeadlineOptions();
+      options.timeoutMs = 10;
+      options.cancellationGraceMs = 2000;
+      fixture.peer.holdCommand = 0x03;
+      let deadlineSettled = false;
+      const running = deadlineFailure(deadlineExecutor(fixture.connection)
+        .query('SELECT SLEEP(10)', options)).then(
+        (failure: ArkDbError): ArkDbError => {
+          deadlineSettled = true;
+          return failure;
+        });
+      let secondCancellation: Promise<ArkDbError> | null = null;
+      try {
+        await flushDeadline();
+        fixture.timers.advance(10);
+        await first.closeEntered.promise;
+        await flushDeadline();
+        expect(first.commands.join(',')).assertEqual('KILL QUERY 42');
+
+        secondCancellation = deadlineFailure(fixture.connection.cancel());
+        await second.queryEntered.promise;
+        expect(second.commands.join(',')).assertEqual('KILL QUERY 42');
+
+        fixture.peer.emitResponse([okPayload()]);
+        await flushDeadline();
+        expect(deadlineSettled).assertFalse();
+        fixture.timers.advance(1999);
+        await flushDeadline();
+        expect(deadlineSettled).assertFalse();
+
+        second.executing.release();
+        const secondFailure = await secondCancellation;
+        expect(containsFailure(secondFailure, lost)).assertTrue();
+        const failure = await running;
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Timeout);
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          expect(containsFailure(failure, lost)).assertTrue();
+        }
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+      } finally {
+        if (second.executing !== null) second.executing.release();
+        await fixture.close();
+        if (secondCancellation !== null) await secondCancellation;
         await running;
       }
     });

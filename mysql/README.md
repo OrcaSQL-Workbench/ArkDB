@@ -572,14 +572,17 @@ The optional `mysqlFeatures.deadlines` feature is the only statement interface
 that starts cancellation timers. `MySqlDeadlineOptions.timeoutMs` defaults to
 zero (disabled), `cancellationGraceMs` defaults to 2000, and `queryOptions`
 retains the existing result budgets. On expiry, the feature keeps command
-ownership until the original operation and control cancellation converge; if
-the grace period expires, it starts target transport abort before waiting for
-control cleanup and permanently retires the connection. An unknown dispatched
-`KILL` forces final outcome `Unknown` even when the original SQL consumed an OK
-response. After abort and cancellation, one bounded zero-delay event-loop turn
-collects prompt operation cleanup; a genuinely unsettled operation is still
-observed but never blocks public settlement forever. Closing an expired prepared
-handle remains idempotent and need not add a separate `Protocol` cleanup.
+ownership until the original operation and every cancellation attempt registered
+for that owned scope converge, including a later public `cancel()` after the
+deadline's first request settles. The grace period remains active through all
+recorded attempts. If grace expires, the feature starts target transport abort
+before waiting for control cleanup and permanently retires the connection. Any
+unknown attempt or retirement forces final outcome `Unknown`, even when the
+original SQL consumed an OK response, and its failure is retained. After abort
+and cancellation, one bounded zero-delay event-loop turn collects prompt
+operation cleanup; a genuinely unsettled operation is still observed but never
+blocks public settlement forever. Closing an expired prepared handle remains
+idempotent and need not add a separate `Protocol` cleanup.
 `QueryOptions.statementTimeoutMs` is still validation-only and never arms this
 timer.
 
@@ -617,7 +620,7 @@ MySQL also exposes these through `features.metadata` and `features.metrics`; gen
 - **Typed values.** Rows are arrays aligned with `columns`. SQL NULL is `null`; BIGINT is `bigint`; DECIMAL and temporal values remain strings; binary values are `Uint8Array`. Preserve these types when designing your own Worker DTOs.
 - **Bounded results.** `query()` uses the bounded streaming implementation and exposes `truncated`, `truncationReason`, and `additionalResults`. It is not an unlimited collector.
 - **Streaming.** `queryStream(sql, options, sink)` awaits each `QueryResultSink` callback. Set row/chunk/result/drain budgets in `QueryOptions`, handle truncation and unknown status explicitly, and avoid accumulating every chunk. Awaiting a sink does not pause socket delivery; the separate receive queue remains bounded and fails closed on overflow.
-- **Timeouts.** `connectTimeoutMs` covers connection opening. Only the optional `mysqlFeatures.deadlines` query/execute interface starts a statement-cancellation timer and owns its convergence/grace cleanup. Unknown dispatched cancellation has priority over an original OK result; grace starts target abort before control cleanup, then allows one bounded event-loop turn for prompt unwind. The low-level driver still validates `QueryOptions.statementTimeoutMs` without activating it.
+- **Timeouts.** `connectTimeoutMs` covers connection opening. Only the optional `mysqlFeatures.deadlines` query/execute interface starts a statement-cancellation timer and owns its convergence/grace cleanup. It joins every cancellation attempt registered for the owned scope, including later public calls, and keeps grace active until the operation and all recorded attempts settle. Any unknown attempt or retirement has priority over an original OK result and retains its failure; grace starts target abort before control cleanup, then allows one bounded event-loop turn for prompt unwind. The low-level driver still validates `QueryOptions.statementTimeoutMs` without activating it.
 - **Transactions.** Generic features expose `begin`, `commit`, `rollback` and known session status. MySQL also retains native `setAutocommit` and the optional `mysqlFeatures.transactions` callback runner with typed options and scoped savepoints. The callback facade expires at settlement and does not expose root prepared/batch/nested transaction executors. Failure can invalidate status or leave an unknown execution outcome; never replay writes.
 - **Cancellation.** The generic connection feature owns its MySQL control-session lifetime. The retained handle-based factory helper does not. Ownership is retained until required cancellation/close cleanup settles. Only the wire-query phase can be killed, not an interrupted-result end callback or an internal status-refresh ping. Status refresh waits for any pending control request and its cleanup; an unknown KILL outcome retires the target and keeps final execution outcome `Unknown`, even after an original OK response. Await the original query and request, then inspect reuse/status before another command.
 - **Errors.** `ArkDbError` and `ArkDbErrorKind` expose common categories and server error code/SQLSTATE. No Workbench-name compatibility aliases are exported. Server messages can contain sensitive data; do not copy them into public logs.

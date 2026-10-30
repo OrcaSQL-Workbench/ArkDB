@@ -181,14 +181,17 @@ retire the physical protocol path without retrying SQL or writing CLOSE into
 an unread response. Cancellation is available in EXECUTE's query phases, not
 PREPARE, synchronization PING or statement CLOSE. Control cancellation and its
 cleanup settle before convenience CLOSE and scope release, including failures
-that finish before the original result. Unknown dispatched KILL outcomes retain
-the existing permanent physical-retirement rule and force final outcome
-`Unknown`, even if the original command consumed OK. On grace expiry, target
-transport abort starts before control cleanup is awaited. After abort and
-cancellation, one zero-delay event-loop turn gives queued operation/prepared
-unwind a bounded chance to contribute its real failure; settlement never waits
-forever. An expired prepared handle CLOSE is intentionally idempotent and does
-not invent a separate `Protocol` cleanup.
+that finish before the original result. Deadline convergence records and joins
+every cancellation attempt for the owned scope, including a later public
+`cancel()` after an earlier Requested attempt clears; grace remains active until
+the operation and all recorded attempts settle. Any unknown attempt or target
+retirement forces final outcome `Unknown`, even if the original command consumed
+OK, and retains the failure. On grace expiry, target transport abort starts
+before control cleanup is awaited. After abort and cancellation, one zero-delay
+event-loop turn gives queued operation/prepared unwind a bounded chance to
+contribute its real failure; settlement never waits forever. An expired prepared
+handle CLOSE is intentionally idempotent and does not invent a separate
+`Protocol` cleanup.
 
 Operation errors retain the execution primary, native code, SQLSTATE, ordinary
 consumer cause, cleanup errors and execution outcome. A CLOSE failure after a
@@ -203,10 +206,10 @@ unsigned BIGINT `18446744073709551615n`, DECIMAL
 `"12345678901234567890.1234567890"`, TIME `"-838:59:59.000001"`, bytes and SQL NULL
 in both EOF modes. Deadline regressions additionally prove exact scope/serial timer
 ownership, PREPARE expiry before EXECUTE, lost KILL acknowledgement retention,
-grace target-abort ordering, bounded post-abort observation, idempotent expired
-prepared close and joined close cleanup. They do not establish live-server or
-device timing interoperability, prepared CALL/OUT support, cursor, long-data,
-pooling or automatic retries.
+multiple cancellation-attempt joining, grace target-abort ordering, bounded
+post-abort observation, idempotent expired prepared close and joined close
+cleanup. They do not establish live-server or device timing interoperability,
+prepared CALL/OUT support, cursor, long-data, pooling or automatic retries.
 
 ## Optional public prepared capability
 

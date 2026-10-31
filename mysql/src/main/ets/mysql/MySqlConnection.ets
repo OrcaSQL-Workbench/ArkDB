@@ -713,10 +713,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     const channel = this.requireOwnedChannel(scope);
     this.commandGate.setPhase(scope, MySqlCommandPhase.Resetting);
     channel.resetSequence();
-    await deadline.wait((): Promise<void> => channel.writePacket(command, deadline.remainingMs()));
+    await deadline.wait((): Promise<void> => channel.writePacket(command));
     deadline.remainingMs();
-    const response = await deadline.wait((): Promise<MysqlPacket> =>
-      channel.readPacket(deadline.remainingMs()));
+    const response = await deadline.wait((): Promise<MysqlPacket> => channel.readPacket());
     deadline.remainingMs();
     if (resetCommand) this.expectResetOk(response);
     else this.expectOk(response);

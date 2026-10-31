@@ -9,7 +9,9 @@ import {
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
 import { StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
-import { TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
+import {
+  MAX_RECEIVE_BUFFER_BYTES, TcpTransport
+} from '../../../main/ets/mysql/transport/TcpTransport';
 import { socket } from '../../../mock/NetworkKit.mock';
 import {
   PreparedSocket, columnPayload, eofPayload, errorPayload, flushPrepared, framePacket,
@@ -71,6 +73,7 @@ class ResetTimerTask {
 
 class ResetTimers implements ConnectionTimerPort {
   now: number = 0;
+  scheduledDelays: number[] = [];
   private nextId: number = 1;
   private tasks: Map<number, ResetTimerTask> = new Map();
 
@@ -79,12 +82,17 @@ class ResetTimers implements ConnectionTimerPort {
   schedule(handler: () => void, timeoutMs: number): number {
     const id = this.nextId++;
     this.tasks.set(id, new ResetTimerTask(this.now + timeoutMs, handler));
+    this.scheduledDelays.push(timeoutMs);
     return id;
   }
 
   cancel(id: number): void {
     const task = this.tasks.get(id);
     if (task !== undefined) task.cancelled = true;
+  }
+
+  resetHistory(): void {
+    this.scheduledDelays = [];
   }
 
   advance(deltaMs: number): void {
@@ -95,6 +103,30 @@ class ResetTimers implements ConnectionTimerPort {
         task.handler();
       }
     });
+  }
+}
+
+class ResetRecordingTransport extends TcpTransport {
+  readonly readTimeouts: number[] = [];
+  readonly writeTimeouts: number[] = [];
+
+  constructor(timers: ConnectionTimerPort) {
+    super(null, MAX_RECEIVE_BUFFER_BYTES, timers);
+  }
+
+  read(length: number, timeoutMs: number = 0): Promise<Uint8Array> {
+    this.readTimeouts.push(timeoutMs);
+    return super.read(length, timeoutMs);
+  }
+
+  async write(data: Uint8Array, timeoutMs: number = 0): Promise<void> {
+    this.writeTimeouts.push(timeoutMs);
+    await super.write(data, timeoutMs);
+  }
+
+  resetHistory(): void {
+    this.readTimeouts.length = 0;
+    this.writeTimeouts.length = 0;
   }
 }
 
@@ -162,12 +194,14 @@ class ResetFixture {
   readonly connection: MySqlConnection;
 
   constructor(cacheSize: number = 0, configured?: ConnectionConfig,
-    timers?: ConnectionTimerPort, control?: () => CoreDbConnection) {
+    timers?: ConnectionTimerPort, control?: () => CoreDbConnection,
+    transport?: TcpTransport) {
     const config = configured === undefined ? new ConnectionConfig() : configured;
     config.host = 'synthetic.invalid';
     config.ssl.mode = SslMode.DISABLED;
     config.preparedCacheSize = cacheSize;
-    this.connection = new MySqlConnection(config, '', new TcpTransport(), timers, control);
+    this.connection = new MySqlConnection(config, '',
+      transport === undefined ? new TcpTransport() : transport, timers, control);
   }
 
   async open(): Promise<void> {
@@ -560,6 +594,45 @@ export default function mySqlSessionResetTest(): void {
       } finally {
         await preparedFailureOf(timed.close());
         if (observation !== null) await observation.finished;
+      }
+
+      const largeTimers = new ResetTimers();
+      const largeTransport = new ResetRecordingTransport(largeTimers);
+      const largeConfig = new ConnectionConfig();
+      largeConfig.connectTimeoutMs = 2147483672;
+      const large = new ResetFixture(0, largeConfig, largeTimers, undefined, largeTransport);
+      large.peer.autoFingerprint = false;
+      let largeObservation: ResetObservation | null = null;
+      try {
+        await large.open();
+        largeTimers.resetHistory();
+        largeTransport.resetHistory();
+        large.peer.responses.push([okPayload(StatusFlags.AUTOCOMMIT)],
+          [okPayload(StatusFlags.AUTOCOMMIT)]);
+        largeObservation = new ResetObservation(sessionFeature(large.connection).reset());
+        await flushPrepared();
+
+        expect(large.peer.commands().join(',')).assertEqual('31,3,3');
+        expect(largeObservation.settled).assertFalse();
+        expect(largeTimers.scheduledDelays.join(',')).assertEqual('2147483647');
+        expect(largeTransport.writeTimeouts.every((timeout: number): boolean => timeout === 0)).assertTrue();
+        expect(largeTransport.readTimeouts.every((timeout: number): boolean => timeout === 0)).assertTrue();
+
+        largeTimers.advance(2147483647);
+        await flushPrepared();
+        expect(largeObservation.settled).assertFalse();
+        expect(large.connection.state).assertEqual(ConnectionState.Querying);
+        expect(largeTimers.scheduledDelays.join(',')).assertEqual('2147483647,25');
+
+        large.peer.emitResponse(resetFingerprintResponse(null, 'utf8mb4', StatusFlags.AUTOCOMMIT));
+        await largeObservation.finished;
+        expect(largeObservation.failure === null).assertTrue();
+        expect(large.connection.state).assertEqual(ConnectionState.Ready);
+        expect(largeTransport.writeTimeouts.every((timeout: number): boolean => timeout === 0)).assertTrue();
+        expect(largeTransport.readTimeouts.every((timeout: number): boolean => timeout === 0)).assertTrue();
+      } finally {
+        await preparedFailureOf(large.close());
+        if (largeObservation !== null) await largeObservation.finished;
       }
 
       const racing = new ResetFixture();

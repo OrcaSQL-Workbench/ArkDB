@@ -145,6 +145,41 @@ metadata can differ from prepare-time metadata, and handles remain bound to thei
 original physical session. Explicit handles never enter or borrow from the
 convenience cache. Close does not invent a server acknowledgement.
 
+### SQL-mode-aware named parameters
+
+Built-in connections expose `requireMySqlFeatures(connection).named` as an
+optional MySQL feature. `MySqlNamedParameter` pairs a case-sensitive ASCII name
+matching `[A-Za-z_][A-Za-z0-9_]*` with an existing typed `MySqlParameter`.
+`execute(sql, parameters, options?)` and `executeStream(sql, parameters, options,
+sink)` accept only `:name` value markers. Repeating one name in SQL emits the
+same typed value at every positional occurrence. Input names must be unique;
+missing, duplicate and unused inputs are rejected.
+
+Each named call owns one command scope and deliberately reads the current
+session fingerprint first to obtain `@@SESSION.sql_mode`. It then scans the
+template, converts executable `:name` markers to positional `?`, prepares that
+SQL, binds binary-protocol values, consumes or synchronizes the result, and
+closes the statement. SQL mode, compiled templates and statements are not
+cached, so a completed `SET SESSION sql_mode = ...` affects the next named call.
+The probe and prepared operation cannot be interleaved with another command on
+the connection. A named call also ends any positional convenience-cache reuse
+context.
+
+The scanner treats single quotes, backticks, double quotes under both ordinary
+and `ANSI_QUOTES` modes, `#` comments, ordinary `/* ... */` comments and MySQL
+`--` comments followed by whitespace/control as opaque. It honors
+`NO_BACKSLASH_ESCAPES`, preserves source text including newlines, NUL and
+Unicode, rejects executable `?` markers, and rejects executable/version
+comments and optimizer-hint comments. Named and positional markers cannot be
+mixed in executable SQL. Values are never interpolated into SQL and named
+markers never quote identifiers; use `quoteMySqlIdentifier` separately for
+trusted identifier segments.
+
+Named streaming uses the same bounded results, awaited native sink callbacks,
+drain behavior, cancellation settlement and error outcomes as positional
+prepared streaming. Discovering the feature performs no I/O, but execution
+requires the connection to be Ready.
+
 Prepared batches are available from the optional
 `requireMySqlFeatures(connection).batch` feature. The facade can be discovered
 before connect, but a nonempty `execute(sql, rows, options?)` requires a ready
@@ -188,7 +223,7 @@ rather than pretending rollback occurred. Unknown command, commit or
 cancellation outcomes remain `Unknown`. Rollback and control-cleanup failures
 are retained without replacing the original primary failure.
 
-No pool, cursor, named binding or long-data upload is exposed. Opt-in buffered
+No pool, server cursor or long-data upload is exposed. Opt-in buffered
 text-query and prepared-execute deadlines are available through
 `mysqlFeatures.deadlines`; legacy `QueryOptions.statementTimeoutMs` remains
 validation-only.
@@ -320,7 +355,7 @@ coerced. The connection snapshots the capacity with its other options.
 
 Timezone and SQL-mode semantics belong to the server: local validation accepts empty and unknown names without checking a local timezone list. A server may reject a timezone name, for example when its timezone tables are unavailable; that error propagates without a local-timezone fallback. Configured values use checked UTF-8 byte expressions, not raw SQL interpolation or backslash-escaping assumptions. Initialization completes within the existing opening deadline before `connect()` reports Ready. Failure rejects connection opening and cleans up the partial connection, retaining primary and cleanup errors.
 
-Neither ordinary commands nor enabled convenience-statement cache lookups add hidden session-fingerprint probes, restore previous-statement counters with SQL, or replay SQL. The existing internal four-field fingerprint utility remains a SQL operation, not a transparent cache guard or a new public connection method. Non-cache command admission retires the private prepared reuse context; disconnect, physical retirement and a new session invalidate physical ownership. Failed or uncertain SQL is never replayed. Cancellation control connections retain authentication, TLS, and transport policy but skip the default database, `autocommit=false`, user session initialization, and recursive control creation.
+Neither ordinary commands nor enabled convenience-statement cache lookups add hidden session-fingerprint probes, restore previous-statement counters with SQL, or replay SQL. Named execution is the explicit exception: every call uses the internal four-field fingerprint SQL to obtain the current session mode before scanning its template. The utility is not a transparent cache guard or a new public connection method. Non-cache command admission retires the private prepared reuse context; disconnect, physical retirement and a new session invalidate physical ownership. Failed or uncertain SQL is never replayed. Cancellation control connections retain authentication, TLS, and transport policy but skip the default database, `autocommit=false`, user session initialization, and recursive control creation.
 
 Profile IDs, names, grouping, and credential storage belong to the host. Select the driver through its factory, not a tag inside connection options. Top-level SQL-mode/charset/compression/connection-attribute switches, file-engine paths, and generic future-option bags are not exposed; use only the typed `session.sqlMode` option described above for SQL mode.
 

@@ -20,6 +20,11 @@
   and positional placeholder helpers from the single package entry. Resolve the
   connection-owned executor lazily on every call, preserving ready/busy checks,
   physical-session ownership and the shared streaming/cleanup pipeline.
+- Add optional SQL-mode-aware named parameters through `mysqlFeatures.named`.
+  Probe the current owned session mode for every call, scan only executable
+  `:name` markers, reject mixed positional markers and executable comments, bind
+  repeated names in source order through the binary prepared protocol, and keep
+  values separate from identifier quoting without caching modes or templates.
 - Expose positional `mapMySqlRows` projection without changing native value types
   or coercing exact decimal, temporal, JSON, NULL or byte values.
 - Add optional native `affectedRowsExact` bigint observations while preserving the

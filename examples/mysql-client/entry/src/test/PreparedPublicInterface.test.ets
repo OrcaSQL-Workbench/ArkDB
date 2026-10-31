@@ -2,7 +2,8 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionConfig, ConnectionState, MySqlConnection,
   MySqlConnectionFeatures, MySqlDeadlineExecutor, MySqlDeadlineOptions, MySqlDriverFactory,
-  MySqlParameter, MySqlParameterType, MySqlParameterValue, MySqlPreparedExecutor,
+  MySqlNamedExecutor, MySqlNamedParameter, MySqlParameter, MySqlParameterType,
+  MySqlParameterValue, MySqlPreparedExecutor,
   MySqlPreparedStatement, MySqlSession, QueryOptions, QueryResult, QueryResultSink,
   mysqlPlaceholders, quoteMySqlIdentifier, requireMySqlFeatures
 } from '@arkdb/mysql';
@@ -16,8 +17,10 @@ export default function preparedPublicInterfaceTest(): void {
       const session: MySqlSession = connection;
       const features: MySqlConnectionFeatures = requireMySqlFeatures(connection);
       const executor: MySqlPreparedExecutor | undefined = features.prepared;
+      const namedExecutor: MySqlNamedExecutor | undefined = features.named;
       const deadlines: MySqlDeadlineExecutor | undefined = features.deadlines;
       expect(executor !== undefined).assertTrue();
+      expect(namedExecutor !== undefined).assertTrue();
       expect(deadlines !== undefined).assertTrue();
       expect(session.mysqlFeatures === features).assertTrue();
       expect(session.serverInfo === connection.serverInfo).assertTrue();
@@ -26,11 +29,16 @@ export default function preparedPublicInterfaceTest(): void {
       expect(mysqlPlaceholders(2)).assertEqual('?,?');
       const source = new Uint8Array([1, 2]);
       const parameter = new MySqlParameter(MySqlParameterType.Binary, source);
+      const namedParameter = new MySqlNamedParameter('payload', parameter);
       source[0] = 9;
       const value: MySqlParameterValue = parameter.value;
+      const namedValue: MySqlParameterValue = namedParameter.parameter.value;
       expect(value instanceof Uint8Array).assertTrue();
+      expect(namedValue instanceof Uint8Array).assertTrue();
       if (!(value instanceof Uint8Array)) throw new Error('Expected a binary input snapshot.');
+      if (!(namedValue instanceof Uint8Array)) throw new Error('Expected a named binary input snapshot.');
       expect(value[0]).assertEqual(1);
+      expect(namedValue[0]).assertEqual(1);
       const deadlineOptions: MySqlDeadlineOptions = new MySqlDeadlineOptions();
       expect(deadlineOptions.timeoutMs).assertEqual(0);
       expect(deadlineOptions.cancellationGraceMs).assertEqual(2000);
@@ -98,4 +106,12 @@ async function deadlineSignatures(executor: MySqlDeadlineExecutor,
   options: MySqlDeadlineOptions, parameters: MySqlParameter[]): Promise<QueryResult> {
   await executor.query('SELECT 1', options);
   return executor.execute('SELECT ?', parameters, options);
+}
+
+async function namedSignatures(executor: MySqlNamedExecutor, options: QueryOptions,
+  sink: QueryResultSink): Promise<QueryResult> {
+  const parameters = [new MySqlNamedParameter('value',
+    new MySqlParameter(MySqlParameterType.UInt64, 18446744073709551615n))];
+  await executor.executeStream('SELECT :value', parameters, options, sink);
+  return executor.execute('SELECT :value', parameters, options);
 }

@@ -48,6 +48,7 @@ export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
   './src/main/ets/mysql/driver/MySqlPreparedContracts';
 export type { MySqlBatchExecutor } from './src/main/ets/mysql/execution/MySqlBatchExecutor';
 export type { MySqlDeadlineExecutor } from './src/main/ets/mysql/execution/MySqlDeadlineExecutor';
+export type { MySqlNamedExecutor } from './src/main/ets/mysql/execution/MySqlNamedExecutor';
 export type { MySqlTransactionRunner } from './src/main/ets/mysql/execution/MySqlTransactionRunner';
 export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
   './src/main/ets/mysql/model/MySqlBatch';
@@ -55,6 +56,7 @@ export { MySqlExecutionOutcome, MySqlOperationError } from
   './src/main/ets/mysql/model/MySqlOperationError';
 export { MySqlParameter, MySqlParameterType } from './src/main/ets/mysql/model/MySqlParameter';
 export type { MySqlParameterValue } from './src/main/ets/mysql/model/MySqlParameter';
+export { MySqlNamedParameter } from './src/main/ets/mysql/model/MySqlNamedParameter';
 export { mapMySqlRows } from './src/main/ets/mysql/value/MySqlRowMapper';
 export { quoteMySqlIdentifier, mysqlPlaceholders } from './src/main/ets/mysql/value/MySqlSqlHelpers';
 export { MySqlConnection, createMySqlConnection } from './src/main/ets/mysql/MySqlConnection';

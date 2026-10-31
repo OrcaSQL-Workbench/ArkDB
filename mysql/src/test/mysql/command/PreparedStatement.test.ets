@@ -5,7 +5,7 @@ import {
 } from '../../../main/ets/mysql/command/PreparedStatement';
 import { MySqlPreparedStatement } from '../../../main/ets/mysql/driver/MySqlPreparedContracts';
 import {
-  MySqlCommandGate, MySqlCommandKind, MySqlCommandScope
+  MySqlCommandGate, MySqlCommandKind, MySqlCommandLifecycleObserver, MySqlCommandScope
 } from '../../../main/ets/mysql/execution/MySqlCommandGate';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperationError';
 import {
@@ -159,6 +159,38 @@ class RecordingSink implements MySqlQueryResultSink {
   async onResultStart(meta: MySqlQueryResultMeta): Promise<void> { this.calls += 1; }
   async onRows(chunk: MySqlQueryRowChunk): Promise<void> { this.calls += 1; }
   async onResultEnd(summary: MySqlQueryResultSummary): Promise<void> { this.calls += 1; }
+}
+
+class StatementCloseStartObserver implements MySqlCommandLifecycleObserver {
+  statement: MySqlPreparedStatement | null = null;
+  repeated: Promise<void> | null = null;
+  closeStarts: number = 0;
+  closeTerminals: number = 0;
+
+  onStart(scope: MySqlCommandScope): void {
+    if (scope.kind !== MySqlCommandKind.StatementClose || this.statement === null) return;
+    this.closeStarts += 1;
+    if (this.repeated === null) this.repeated = this.statement.close();
+  }
+
+  onTerminal(scope: MySqlCommandScope): void {
+    if (scope.kind === MySqlCommandKind.StatementClose) this.closeTerminals += 1;
+  }
+}
+
+class SessionCloseStartObserver implements MySqlCommandLifecycleObserver {
+  session: MySqlPreparedSession | null = null;
+  statement: MySqlPreparedStatement | null = null;
+  repeated: Promise<void> | null = null;
+
+  onStart(scope: MySqlCommandScope): void {
+    if (scope.kind !== MySqlCommandKind.StatementClose ||
+      this.session === null || this.statement === null ||
+      this.repeated !== null) return;
+    this.repeated = this.session.close(this.statement);
+  }
+
+  onTerminal(_scope: MySqlCommandScope): void {}
 }
 
 export default function preparedStatementTest(): void {
@@ -439,7 +471,7 @@ export default function preparedStatementTest(): void {
       expect(host.transport.writes.length).assertEqual(2);
       host.transport.releaseWrite();
       const second = await pending;
-      await first.close();
+      await session.close(first);
       expect(second.closed).assertFalse();
       expect(host.transport.writes.length).assertEqual(3);
       expect(host.commandGate.current === null).assertTrue();
@@ -467,6 +499,143 @@ export default function preparedStatementTest(): void {
       expect(host.transport.writes.length).assertEqual(2);
       expect(host.transport.readAttempts).assertEqual(2);
       expect(host.commandGate.current === null).assertTrue();
+    });
+
+    it('memoizesExpiredHandleClosePromiseExactly', 0, async () => {
+      const host = new PreparedHost([[prepareOk(1, 0, 0)]]);
+      const session = new MySqlPreparedSession(host);
+      const statement = await prepareSuccessfully(session, 'DO 1');
+      session.invalidate();
+
+      const first = statement.close();
+      const second = statement.close();
+      expect(first === second).assertTrue();
+      await first;
+      await second;
+      const third = statement.close();
+      expect(third === first).assertTrue();
+      await third;
+      expect(host.transport.writes.length).assertEqual(1);
+    });
+
+    it('memoizesBusyHandleCloseRejectionAndErrorIdentity', 0, async () => {
+      const host = new PreparedHost([[prepareOk(1, 0, 0)]]);
+      const session = new MySqlPreparedSession(host);
+      const statement = await prepareSuccessfully(session, 'DO 1');
+      const scope = host.commandGate.reserve(MySqlCommandKind.Transaction);
+
+      const first = statement.close();
+      const second = statement.close();
+      expect(first === second).assertTrue();
+      const firstError = await captureCommandFailure(first);
+      const secondError = await captureCommandFailure(second);
+      expect(firstError instanceof ArkDbError).assertTrue();
+      expect(firstError === secondError).assertTrue();
+      const third = statement.close();
+      expect(third === first).assertTrue();
+      expect((await captureCommandFailure(third)) === firstError).assertTrue();
+
+      host.commandGate.release(scope);
+      const retried = await captureCommandFailure(session.close(statement));
+      expect(retried === null).assertTrue();
+      expect(statement.closed).assertTrue();
+    });
+
+    it('publishesStatementCloseBeforeStartObserverReentry', 0, async () => {
+      const observer = new StatementCloseStartObserver();
+      const gate = new MySqlCommandGate(observer);
+      const host = new PreparedHost([[prepareOk(1, 0, 0)]],
+        Capabilities.PROTOCOL_41, [], gate);
+      const session = new MySqlPreparedSession(host);
+      const statement = await prepareSuccessfully(session, 'DO 1');
+      observer.statement = statement;
+      const primary = ArkDbError.network('Synthetic reentrant CLOSE write failure.');
+      const cleanup = ArkDbError.timeout('Synthetic reentrant CLOSE retirement failure.');
+      host.transport.failWriteAt = 2;
+      host.transport.writeFailure = primary;
+      host.retirementFailure = cleanup;
+      host.holdRetirement = true;
+
+      const first = statement.close();
+      const repeated = observer.repeated;
+      if (repeated === null) throw new Error('Expected statement close start reentry.');
+      const firstObservation = new CloseObservation(first);
+      const repeatedObservation = new CloseObservation(repeated);
+      await nextTask();
+      try {
+        expect(first === repeated).assertTrue();
+        expect(firstObservation.settled).assertFalse();
+        expect(repeatedObservation.settled).assertFalse();
+        expect(host.transport.writes.length).assertEqual(2);
+        expect(observer.closeStarts).assertEqual(1);
+        expect(observer.closeTerminals).assertEqual(0);
+
+        host.releaseRetirement();
+        await firstObservation.done;
+        await repeatedObservation.done;
+        expect(firstObservation.error instanceof MySqlOperationError).assertTrue();
+        if (!(firstObservation.error instanceof MySqlOperationError)) {
+          throw new Error('Expected reentrant statement close operation failure.');
+        }
+        expect(firstObservation.error.primary === primary).assertTrue();
+        expect(firstObservation.error.cleanupErrors.length).assertEqual(1);
+        expect(firstObservation.error.cleanupErrors[0] === cleanup).assertTrue();
+        expect(repeatedObservation.error === firstObservation.error).assertTrue();
+        expect(observer.closeTerminals).assertEqual(1);
+      } finally {
+        host.releaseRetirement();
+        await firstObservation.done;
+        await repeatedObservation.done;
+      }
+    });
+
+    it('sessionCloseReentryJoinsPendingHandleBridge', 0, async () => {
+      const observer = new SessionCloseStartObserver();
+      const gate = new MySqlCommandGate(observer);
+      const host = new PreparedHost([[prepareOk(2, 0, 0)]],
+        Capabilities.PROTOCOL_41, [], gate);
+      const session = new MySqlPreparedSession(host);
+      const statement = await prepareSuccessfully(session, 'DO 2');
+      observer.session = session;
+      observer.statement = statement;
+      const primary = ArkDbError.network('Synthetic session reentry CLOSE write failure.');
+      const cleanup = ArkDbError.timeout('Synthetic session reentry CLOSE retirement failure.');
+      host.transport.failWriteAt = 2;
+      host.transport.writeFailure = primary;
+      host.retirementFailure = cleanup;
+      host.holdRetirement = true;
+
+      const first = statement.close();
+      const repeated = observer.repeated;
+      if (repeated === null) throw new Error('Expected session close start reentry.');
+      const firstObservation = new CloseObservation(first);
+      const repeatedObservation = new CloseObservation(repeated);
+      await nextTask();
+      try {
+        expect(first === repeated).assertTrue();
+        expect(firstObservation.settled).assertFalse();
+        expect(repeatedObservation.settled).assertFalse();
+        expect(host.transport.writes.length).assertEqual(2);
+
+        host.releaseRetirement();
+        await firstObservation.done;
+        await repeatedObservation.done;
+        expect(firstObservation.error instanceof MySqlOperationError).assertTrue();
+        if (!(firstObservation.error instanceof MySqlOperationError)) {
+          throw new Error('Expected session reentry statement close failure.');
+        }
+        expect(firstObservation.error.primary === primary).assertTrue();
+        expect(firstObservation.error.cleanupErrors.length).assertEqual(1);
+        expect(firstObservation.error.cleanupErrors[0] === cleanup).assertTrue();
+        expect(repeatedObservation.error === firstObservation.error).assertTrue();
+        expect(host.transport.writes.length).assertEqual(2);
+        expect(statement.close() === first).assertTrue();
+        expect(session.close(statement) === first).assertTrue();
+      } finally {
+        host.releaseRetirement();
+        await firstObservation.done;
+        await repeatedObservation.done;
+      }
     });
 
     it('usesTheCallerOwnedScopeForComposedPrepareAndCloseWithoutReentry', 0, async () => {

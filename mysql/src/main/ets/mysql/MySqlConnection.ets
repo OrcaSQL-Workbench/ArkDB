@@ -345,17 +345,19 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
     this.commandGate.advanceGeneration();
     this.invalidatePreparedState();
+    const deadline = new ConnectionDeadline(this.config.connectTimeoutMs, this.timers);
+    this.opening = deadline;
     const scope = this.commandGate.reserve(MySqlCommandKind.Connect);
+    this.commandGate.start(scope);
     try {
-      await this.connectOwned(scope);
+      await this.connectOwned(scope, deadline);
     } finally {
       this.finishCommand(scope);
     }
   }
 
-  private async connectOwned(scope: MySqlCommandScope): Promise<void> {
-    const deadline = new ConnectionDeadline(this.config.connectTimeoutMs, this.timers);
-    this.opening = deadline;
+  private async connectOwned(scope: MySqlCommandScope,
+    deadline: ConnectionDeadline): Promise<void> {
     let primary: Object | null = null;
     const cleanupErrors: ArkDbError[] = [];
     let dispatched = false;
@@ -672,6 +674,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       throw error as Error;
     }
     this.resetting = deadline;
+    this.commandGate.start(scope);
     let accepted = false;
     let primary: Object | null = null;
     let reusableRejection = false;
@@ -1021,11 +1024,20 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       const polite = ownsScope && this.opening === null && this.connState === ConnectionState.Ready;
       this.closePending = true;
       this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
-      this.closing = this.closeWithScope(scope, ownsScope, polite);
+      let begin: () => void = (): void => {};
+      const closing = new Promise<void>((resolve: () => void,
+        reject: (reason?: Object) => void): void => {
+        begin = (): void => {
+          this.closeWithScope(scope, ownsScope, polite).then(resolve, reject);
+        };
+      });
+      this.closing = closing;
       const prepared = this.preparedOperation;
-      if (prepared !== null && prepared.scope === scope) prepared.closeResult = this.closing;
+      if (prepared !== null && prepared.scope === scope) prepared.closeResult = closing;
       const transaction = this.transactionOperation;
-      if (transaction !== null && transaction.scope === scope) transaction.closeResult = this.closing;
+      if (transaction !== null && transaction.scope === scope) transaction.closeResult = closing;
+      if (ownsScope) this.commandGate.start(scope);
+      begin();
     }
     return this.closing;
   }
@@ -1189,11 +1201,24 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.channel;
   }
 
-  private reserveCommand(kind: MySqlCommandKind, cachedConvenience: boolean = false): MySqlCommandScope {
+  private reserveCommandOwnership(kind: MySqlCommandKind): MySqlCommandScope {
     this.requireReady();
-    const scope = this.commandGate.reserve(kind);
-    if (!cachedConvenience && this.prepared !== null) this.prepared.retireCacheContext(scope);
-    return scope;
+    return this.commandGate.reserve(kind);
+  }
+
+  private reserveCommand(kind: MySqlCommandKind,
+    cachedConvenience: boolean = false): MySqlCommandScope {
+    const scope = this.reserveCommandOwnership(kind);
+    this.commandGate.start(scope);
+    try {
+      if (!cachedConvenience && this.prepared !== null) {
+        this.prepared.retireCacheContext(scope);
+      }
+      return scope;
+    } catch (error) {
+      this.finishCommand(scope);
+      throw error as Error;
+    }
   }
 
   private reserveTransactionRunnerScope(): MySqlCommandScope {
@@ -1209,9 +1234,18 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     if (!this.status.autocommit) {
       throw ArkDbError.validation('Transaction callback requires autocommit to be enabled.');
     }
-    const scope = this.reserveCommand(MySqlCommandKind.Transaction);
-    this.transactionOperation = new PreparedCommandSettlement(scope);
-    return scope;
+    const scope = this.reserveCommandOwnership(MySqlCommandKind.Transaction);
+    const settlement = new PreparedCommandSettlement(scope);
+    this.transactionOperation = settlement;
+    this.commandGate.start(scope);
+    try {
+      if (this.prepared !== null) this.prepared.retireCacheContext(scope);
+      return scope;
+    } catch (error) {
+      this.finishCommand(scope);
+      if (this.transactionOperation === settlement) this.transactionOperation = null;
+      throw error as Error;
+    }
   }
 
   private async settleTransactionOperation(scope: MySqlCommandScope,
@@ -1499,14 +1533,35 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   protected async runPreparedCommand<T>(kind: MySqlCommandKind,
-    operation: (scope: MySqlCommandScope) => Promise<T>, cachedConvenience: boolean = false): Promise<T> {
-    const scope = this.reserveCommand(kind, cachedConvenience);
+    operation: (scope: MySqlCommandScope) => Promise<T>,
+    cachedConvenience: boolean = false): Promise<T> {
+    const scope = this.reserveCommandOwnership(kind);
     const settlement = new PreparedCommandSettlement(scope);
     this.preparedOperation = settlement;
+    let begin: () => void = (): void => {};
+    const task = new Promise<T>((resolve: (value: T) => void,
+      reject: (reason?: Object) => void): void => {
+      begin = (): void => {
+        this.runPreparedCommandOwned(scope, settlement, operation, cachedConvenience)
+          .then(resolve, reject);
+      };
+    });
+    this.commandGate.start(scope);
+    begin();
+    return task;
+  }
+
+  private async runPreparedCommandOwned<T>(scope: MySqlCommandScope,
+    settlement: PreparedCommandSettlement,
+    operation: (scope: MySqlCommandScope) => Promise<T>,
+    cachedConvenience: boolean): Promise<T> {
     let value: T | undefined;
     let primary: Object | null = null;
     const cleanup: ArkDbError[] = [];
     try {
+      if (!cachedConvenience && this.prepared !== null) {
+        this.prepared.retireCacheContext(scope);
+      }
       let task: Promise<T>;
       try { task = operation(scope); } catch (error) { task = Promise.reject<T>(error as Object); }
       value = await this.awaitPreparedExecution(scope, task, MySqlExecutionOutcome.NotDispatched);
@@ -1844,7 +1899,8 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
 }
 
 type PreparedCommandRunner = <T>(kind: MySqlCommandKind,
-  operation: (scope: MySqlCommandScope) => Promise<T>, cachedConvenience?: boolean) => Promise<T>;
+  operation: (scope: MySqlCommandScope) => Promise<T>,
+  cachedConvenience?: boolean) => Promise<T>;
 
 class PreparedConnectionHost implements MySqlNamedExecutorHost {
   readonly commandGate: MySqlCommandGate;

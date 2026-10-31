@@ -84,15 +84,40 @@ consumer subclasses. A wrong capability, repeated initialization, or
 initialization after the first command reservation is rejected without replacing
 the existing command gate, serial or generation.
 
-Each accepted physical-connection command produces one start event after gate
-reservation and one terminal event after ownership release. Cancellation,
-deadlines, close cleanup, session reset and the final awaited stream sink must
-converge before the terminal event. Events contain only the fixed fields
+Each accepted physical-connection command first installs gate ownership and its
+serial. The driver then publishes any shared opening/reset/settlement/close
+promise state before delivering the one start event and before running the wire
+or operation body. Reentrant close calls therefore join the published operation
+instead of stealing or skipping it. A duplicate start is rejected. One terminal
+event follows ownership release. Cancellation, deadlines, close cleanup, session
+reset and the final awaited stream sink must converge before the terminal event.
+Events contain only the fixed fields
 `type`, connection-local `serial`, `generation`, `commandKind`,
 `monotonicTimeMs` and `durationMs`. They contain no SQL, parameters, credentials,
 connection identity, result data, errors, native codes, SQLSTATE or arbitrary
 metadata. Serial values are local to one physical connection; a pool that needs
 cross-connection correlation owns its own envelope.
+
+`MySqlPreparedStatement.close()` memoizes the exact promise returned for every
+public handle close attempt, including an already-expired handle and a busy
+connection preflight rejection. Repeated handle closes therefore preserve both
+promise and error identity. A caller that intentionally retries after a busy
+preflight uses the session/owned close entry point; those entry points clear only
+the handle-preflight memo and retain their established retry behavior.
+The handle-owned deferred is installed before invoking session or connection
+overrides and bridges the returned owner task. Publication does not add an
+argument to the legacy three-argument `runPreparedCommand` override, so existing
+subclasses cannot silently drop start-reentry protection.
+The bridge distinguishes pending, live and settled-preflight states. Handle and
+session close reentry always join a pending or live bridge. Session/owned retry
+clears the retained handle bridge only after it has settled as a pre-start
+rejection; it never clears a live operation or a successful/failed live result.
+
+The legacy three-argument `runPreparedCommand` override retains its async
+boundary. Busy, not-ready, reservation and start preflight failures return a
+rejected Promise rather than throwing before return. Subclass `.catch()` and
+`.finally()` hooks therefore observe the original `ArkDbError` identity for
+prepared, named and batch command entry.
 
 Observer exceptions never change or replay the database operation. The failing
 observer is removed before the driver emits a tokenized warning, and it receives

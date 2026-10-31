@@ -79,11 +79,16 @@ test('shared contracts describe the privacy-safe execution observer', async () =
     'MySqlConnection.ets'), 'utf8');
   const factory = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'driver', 'MySqlDriverFactory.ets'), 'utf8');
+  const gate = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'execution', 'MySqlCommandGate.ets'), 'utf8');
+  const preparedStatement = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'command', 'PreparedStatement.ets'), 'utf8');
   const observer = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'diagnostics', 'MySqlExecutionObserver.ets'), 'utf8');
   assert.match(contracts, /\bMySqlConnectionExtensions\b/);
   assert.match(contracts, /\bMySqlExecutionObserver\.onEvent\b/);
-  assert.match(contracts, /\bone start\b[\s\S]{0,160}\bone terminal\b/i);
+  assert.match(contracts, /\bone start\b/i);
+  assert.match(contracts, /\bone terminal\b/i);
   assert.match(contracts, /\bmonotonicTimeMs\b/);
   assert.match(contracts, /\bdurationMs\b/);
   assert.match(contracts, /\bno SQL\b[\s\S]{0,180}\bcredentials\b/i);
@@ -94,6 +99,21 @@ test('shared contracts describe the privacy-safe execution observer', async () =
   assert.match(contracts, /\bno public or protected observer initializer\b/i);
   assert.match(contracts, /\bwrong capability\b/i);
   assert.match(contracts, /\bserial or generation\b/i);
+  assert.match(contracts, /\binstalls gate ownership\b/i);
+  assert.match(contracts, /\bshared opening\/reset\/settlement\/close\b/i);
+  assert.match(contracts, /\bstart event\b/i);
+  assert.match(contracts, /\bMySqlPreparedStatement\.close\(\)`? memoizes\b/);
+  assert.match(contracts, /\bpromise and error identity\b/);
+  assert.match(contracts, /\bsession\/owned close entry point\b/i);
+  assert.match(contracts, /\bhandle-owned deferred\b/i);
+  assert.match(contracts, /\blegacy three-argument `runPreparedCommand`/i);
+  assert.match(contracts, /\bpending, live and settled-preflight states\b/i);
+  assert.match(contracts, /\bnever clears a live operation\b/i);
+  assert.match(contracts,
+    /\blegacy three-argument `runPreparedCommand` override retains its async\b/i);
+  assert.match(contracts, /\brejected Promise rather than throwing before return\b/i);
+  assert.match(contracts, /`\.catch\(\)`/i);
+  assert.match(contracts, /`\.finally\(\)`/i);
   assert.match(index, /\bMySqlConnectionExtensions\b/);
   assert.match(index, /\bMySqlExecutionObserver\b/);
   assert.match(index, /\bMySqlExecutionEventType\b/);
@@ -114,6 +134,41 @@ test('shared contracts describe the privacy-safe execution observer', async () =
     /initializeMySqlExecutionObserverInternal\([\s\S]{0,160}extensions\.executionObserver[\s\S]{0,80}executionClock\)/);
   assert.match(connection,
     /createDefaultControlConnection\(\): MySqlConnection[\s\S]{0,420}new MySqlConnection\(controlConfig, this\.password/);
+  const reserveStart = gate.indexOf('reserve(kind: MySqlCommandKind)');
+  const startStart = gate.indexOf('start(scope: MySqlCommandScope)');
+  const ownerStart = gate.indexOf('isOwner(scope: MySqlCommandScope)');
+  assert.notEqual(reserveStart, -1);
+  assert.notEqual(startStart, -1);
+  assert.notEqual(ownerStart, -1);
+  assert.doesNotMatch(gate.slice(reserveStart, startStart), /\bonStart\(/);
+  assert.match(gate.slice(startStart, ownerStart), /\bonStart\(scope\)/);
+  const preparedSettlement = connection.indexOf('this.preparedOperation = settlement');
+  const preparedStart = connection.indexOf('this.commandGate.start(scope)', preparedSettlement);
+  const closingPublish = connection.indexOf('this.closing = closing');
+  const closingStart = connection.indexOf(
+    'if (ownsScope) this.commandGate.start(scope)', closingPublish);
+  const handleDeferred = preparedStatement.indexOf(
+    'const bridge = this.beginCloseResult(true)');
+  const ownerClose = preparedStatement.indexOf('this.owner.close(this)', handleDeferred);
+  const bridgeResult = preparedStatement.indexOf(
+    'this.bridgeCloseResult(bridge, task)', ownerClose);
+  assert.notEqual(preparedSettlement, -1);
+  assert.ok(preparedStart > preparedSettlement);
+  assert.notEqual(closingPublish, -1);
+  assert.ok(closingStart > closingPublish);
+  assert.notEqual(handleDeferred, -1);
+  assert.ok(ownerClose > handleDeferred);
+  assert.ok(bridgeResult > ownerClose);
+  assert.match(preparedStatement,
+    /canRetryPreflightRejection\(\): boolean[\s\S]{0,180}this\.handlePreflight[\s\S]{0,80}!this\.started[\s\S]{0,80}this\.settled[\s\S]{0,80}this\.rejected/);
+  assert.match(preparedStatement,
+    /if \(result !== null\) \{[\s\S]{0,100}!handle\.clearSettledPreflightRejection\(\)[\s\S]{0,40}return result/);
+  const preparedRunner = connection.match(
+    /protected async runPreparedCommand<T>\(kind: MySqlCommandKind,[\s\S]*?cachedConvenience: boolean = false\): Promise<T>/);
+  assert.notEqual(preparedRunner, null);
+  assert.doesNotMatch(preparedRunner[0], /\bpublish\b/);
+  assert.doesNotMatch(preparedStatement,
+    /runCommand\?<T>\([\s\S]{0,180}\bpublish\b/);
   assert.doesNotMatch(index,
     /\b(?:ObservedMySqlConnection|initializeExecutionObserver|initializeMySqlExecutionObserverInternal|MySqlExecutionObserverCapability|MySqlExecutionDispatcher)\b/);
   const eventStart = observer.indexOf('export class MySqlExecutionEvent');

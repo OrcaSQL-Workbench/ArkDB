@@ -23,7 +23,8 @@ export interface MySqlPreparedSessionHost {
   readonly capabilities: number;
   readonly state: ConnectionState;
   retire(error: ArkDbError): Promise<void>;
-  runCommand?<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T>;
+  runCommand?<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
+    cachedConvenience?: boolean): Promise<T>;
 }
 
 export interface MySqlPreparedStatementRunner {
@@ -130,24 +131,48 @@ export class MySqlPreparedSession {
     return this.runner.streamStatement(statement, parameters, options, sink);
   }
 
-  async close(statement: MySqlPreparedStatement): Promise<void> {
-    const handle = this.ownedHandle(statement);
-    const result = handle.closeResult;
-    if (result !== null) return result;
-    if (handle.closed) {
-      this.forget(handle);
-      return;
+  close(statement: MySqlPreparedStatement): Promise<void> {
+    try {
+      const handle = this.ownedHandle(statement);
+      const handleCall = handle.consumeOwnerClosePending();
+      if (!handleCall) {
+        const result = handle.closeResult;
+        if (result !== null) {
+          if (!handle.clearSettledPreflightRejection()) return result;
+        }
+      }
+      if (handle.closed) {
+        this.forget(handle);
+        return Promise.resolve();
+      }
+      this.requireReady();
+      let bridge: PreparedCloseBridge | null = null;
+      if (!handleCall) bridge = handle.beginSessionClose();
+      let task: Promise<void>;
+      try {
+        task = this.runCommand(MySqlCommandKind.StatementClose,
+          (scope: MySqlCommandScope): Promise<void> => {
+            handle.markCloseStarted();
+            return this.closeReserved(scope, handle);
+          });
+      } catch (error) {
+        task = Promise.reject<void>(error as Object);
+      }
+      if (bridge === null) return task;
+      handle.bridgeCloseResult(bridge, task);
+      return bridge.task;
+    } catch (error) {
+      return Promise.reject<void>(error as Object);
     }
-    this.requireReady();
-    return handle.retainCloseResult(this.runCommand(MySqlCommandKind.StatementClose,
-      (scope: MySqlCommandScope): Promise<void> => this.closeOwned(scope, handle)));
   }
 
   async closeOwned(scope: MySqlCommandScope, statement: MySqlPreparedStatement): Promise<void> {
     this.gate.assertOwner(scope);
     const handle = this.ownedHandle(statement);
     const result = handle.closeResult;
-    if (result !== null) return result;
+    if (result !== null) {
+      if (!handle.clearSettledPreflightRejection()) return result;
+    }
     if (handle.closed) {
       this.forget(handle);
       return;
@@ -172,6 +197,18 @@ export class MySqlPreparedSession {
     } finally {
       pendingPreparedChannels.delete(channel);
     }
+  }
+
+  private closeReserved(scope: MySqlCommandScope,
+    handle: PreparedHandle): Promise<void> {
+    this.gate.assertOwner(scope);
+    if (handle.closed) {
+      this.forget(handle);
+      return Promise.resolve();
+    }
+    const channel = this.requireOwnedSession(scope);
+    beginPreparedCommand(channel);
+    return this.closeOnChannel(scope, handle, channel);
   }
 
   isAlive(): boolean {
@@ -252,34 +289,90 @@ export class MySqlPreparedSession {
     return failure;
   }
 
-  private async runCommand<T>(kind: MySqlCommandKind,
-    operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
-    if (this.host.runCommand !== undefined) return this.host.runCommand<T>(kind, operation);
-    const scope = this.gate.reserve(kind);
-    let task: Promise<T>;
-    try {
-      task = operation(scope);
-    } catch (error) {
-      task = Promise.reject<T>(error as Object);
+  private runCommand<T>(kind: MySqlCommandKind,
+    operation: (scope: MySqlCommandScope) => Promise<T>,
+    cachedConvenience: boolean = false): Promise<T> {
+    if (this.host.runCommand !== undefined) {
+      return this.host.runCommand<T>(kind, operation, cachedConvenience);
     }
-    return task.then((value: T): T => {
-      try { this.gate.release(scope); } catch (error) {
-        throw preparedFailure(preparedCleanup(error as Object), [], MySqlExecutionOutcome.Completed);
-      }
-      return value;
-    }, (error: Object): T => {
-      const cleanupErrors: ArkDbError[] = [];
-      try { this.gate.release(scope); } catch (cleanup) {
-        cleanupErrors.push(preparedCleanup(cleanup as Object));
-      }
-      if (cleanupErrors.length > 0) {
-        throw preparedFailure(error, cleanupErrors,
-          error instanceof MySqlOperationError ? error.outcome : MySqlExecutionOutcome.Unknown);
-      }
-      const failure: ArkDbError = error instanceof ArkDbError ? error :
-        preparedFailure(error, [], MySqlExecutionOutcome.Unknown);
-      throw failure;
+    const scope = this.gate.reserve(kind);
+    let begin: () => void = (): void => {};
+    const result = new Promise<T>((resolve: (value: T) => void,
+      reject: (reason?: Object) => void): void => {
+      begin = (): void => {
+        let task: Promise<T>;
+        try {
+          task = operation(scope);
+        } catch (error) {
+          task = Promise.reject<T>(error as Object);
+        }
+        task.then((value: T): void => {
+          try {
+            this.gate.release(scope);
+            resolve(value);
+          } catch (error) {
+            reject(preparedFailure(preparedCleanup(error as Object), [],
+              MySqlExecutionOutcome.Completed));
+          }
+        }, (error: Object): void => {
+          const cleanupErrors: ArkDbError[] = [];
+          try { this.gate.release(scope); } catch (cleanup) {
+            cleanupErrors.push(preparedCleanup(cleanup as Object));
+          }
+          if (cleanupErrors.length > 0) {
+            reject(preparedFailure(error, cleanupErrors,
+              error instanceof MySqlOperationError ?
+                error.outcome : MySqlExecutionOutcome.Unknown));
+            return;
+          }
+          const failure: ArkDbError = error instanceof ArkDbError ? error :
+            preparedFailure(error, [], MySqlExecutionOutcome.Unknown);
+          reject(failure);
+        });
+      };
     });
+    this.gate.start(scope);
+    begin();
+    return result;
+  }
+}
+
+class PreparedCloseBridge {
+  readonly task: Promise<void>;
+  handlePreflight: boolean;
+  started: boolean = false;
+  settled: boolean = false;
+  rejected: boolean = false;
+  private complete: () => void = (): void => {};
+  private fail: (reason?: Object) => void = (_reason?: Object): void => {};
+
+  constructor(handlePreflight: boolean) {
+    this.handlePreflight = handlePreflight;
+    this.task = new Promise<void>((resolve: () => void,
+      reject: (reason?: Object) => void): void => {
+      this.complete = resolve;
+      this.fail = reject;
+    });
+  }
+
+  markStarted(): void {
+    this.started = true;
+    this.handlePreflight = false;
+  }
+
+  resolve(): void {
+    this.settled = true;
+    this.complete();
+  }
+
+  reject(error: Object): void {
+    this.settled = true;
+    this.rejected = true;
+    this.fail(error);
+  }
+
+  canRetryPreflightRejection(): boolean {
+    return this.handlePreflight && !this.started && this.settled && this.rejected;
   }
 }
 
@@ -288,6 +381,9 @@ class PreparedHandle implements MySqlPreparedStatement {
   private response: PrepareResponse;
   private invalid: boolean = false;
   private closeTask: Promise<void> | null = null;
+  private handlePreflightClose: boolean = false;
+  private closeBridge: PreparedCloseBridge | null = null;
+  private ownerClosePending: boolean = false;
 
   constructor(owner: MySqlPreparedSession, response: PrepareResponse) {
     this.owner = owner;
@@ -339,19 +435,78 @@ class PreparedHandle implements MySqlPreparedStatement {
 
   close(): Promise<void> {
     if (this.closeTask !== null) return this.closeTask;
-    return this.retainCloseResult(this.owner.close(this));
+    const bridge = this.beginCloseResult(true);
+    this.ownerClosePending = true;
+    let task: Promise<void>;
+    try {
+      task = this.owner.close(this);
+    } catch (error) {
+      task = Promise.reject<void>(error as Object);
+    }
+    this.ownerClosePending = false;
+    this.bridgeCloseResult(bridge, task);
+    return bridge.task;
   }
 
   get closeResult(): Promise<void> | null {
     return this.closeTask;
   }
 
-  retainCloseResult(task: Promise<void>): Promise<void> {
+  retainCloseResult(task: Promise<void>,
+    handlePreflightClose: boolean = false): Promise<void> {
+    this.closeBridge = null;
     this.closeTask = task;
+    this.handlePreflightClose = handlePreflightClose;
     task.then((): void => {}, (): void => {
-      if (!this.invalid) this.closeTask = null;
+      if (!this.invalid && !handlePreflightClose && this.closeTask === task) {
+        this.closeTask = null;
+      }
     });
     return task;
+  }
+
+  clearSettledPreflightRejection(): boolean {
+    const bridge = this.closeBridge;
+    if (bridge === null || !bridge.canRetryPreflightRejection()) return false;
+    this.closeBridge = null;
+    this.closeTask = null;
+    this.handlePreflightClose = false;
+    return true;
+  }
+
+  consumeOwnerClosePending(): boolean {
+    const pending = this.ownerClosePending;
+    this.ownerClosePending = false;
+    return pending;
+  }
+
+  beginSessionClose(): PreparedCloseBridge {
+    return this.beginCloseResult(false);
+  }
+
+  markCloseStarted(): void {
+    this.handlePreflightClose = false;
+    if (this.closeBridge !== null) this.closeBridge.markStarted();
+  }
+
+  bridgeCloseResult(bridge: PreparedCloseBridge, task: Promise<void>): void {
+    task.then((): void => { bridge.resolve(); },
+      (error: Object): void => { bridge.reject(error); });
+  }
+
+  private beginCloseResult(handlePreflight: boolean): PreparedCloseBridge {
+    const bridge = new PreparedCloseBridge(handlePreflight);
+    this.closeBridge = bridge;
+    this.closeTask = bridge.task;
+    this.handlePreflightClose = handlePreflight;
+    bridge.task.then((): void => {}, (): void => {
+      if (!this.invalid && !bridge.handlePreflight &&
+        this.closeTask === bridge.task) {
+        this.closeBridge = null;
+        this.closeTask = null;
+      }
+    });
+    return bridge;
   }
 }
 

@@ -46,6 +46,20 @@
   non-entry-exported one-shot capability helper. Reject wrong-capability,
   repeated and post-reservation initialization without replacing the command
   gate, serial or generation.
+  Separate ownership reservation from start delivery so connection/prepared
+  settlement and memoized close promises are published before observer reentry.
+  Deliver start once before the operation body, reject duplicate starts, and
+  preserve one terminal after converged release.
+  Preserve exact public prepared-handle close promise/error identity for expired
+  and busy-preflight results while keeping session/owned close retries available.
+  Move close publication into a handle-owned deferred and preserve the legacy
+  three-argument `runPreparedCommand` override signature.
+  Track pending/live/settled-preflight bridge state so session close reentry
+  joins the live handle operation and only a settled pre-start rejection is
+  eligible for explicit session/owned retry.
+  Restore the async boundary of the legacy three-argument
+  `runPreparedCommand` override so busy/not-ready preflight rejects through the
+  returned Promise and preserves subclass catch/finally hooks and error identity.
 - Expose positional `mapMySqlRows` projection without changing native value types
   or coercing exact decimal, temporal, JSON, NULL or byte values.
 - Add optional native `affectedRowsExact` bigint observations while preserving the

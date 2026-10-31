@@ -50,6 +50,7 @@ class CommandScope implements MySqlCommandScope {
   phase: MySqlCommandPhase = MySqlCommandPhase.Reserved;
   deadlineExpired: boolean = false;
   advanceGeneration: boolean = false;
+  started: boolean = false;
 
   constructor(serial: number, generation: number, kind: MySqlCommandKind) {
     this.serial = serial;
@@ -99,8 +100,16 @@ export class MySqlCommandGate {
     this.serial += 1;
     const scope = new CommandScope(this.serial, this.sessionGeneration, kind);
     this.active = scope;
-    if (this.lifecycleObserver !== null) this.lifecycleObserver.onStart(scope);
     return scope;
+  }
+
+  start(scope: MySqlCommandScope): void {
+    this.assertOwner(scope);
+    if (this.active!.started) {
+      throw ArkDbError.protocol('The command scope start was already delivered.');
+    }
+    this.active!.started = true;
+    if (this.lifecycleObserver !== null) this.lifecycleObserver.onStart(scope);
   }
 
   isOwner(scope: MySqlCommandScope): boolean {
@@ -133,6 +142,9 @@ export class MySqlCommandGate {
 
   release(scope: MySqlCommandScope): void {
     this.assertOwner(scope);
+    if (this.lifecycleObserver !== null && !this.active!.started) {
+      throw ArkDbError.protocol('The command scope must start before it can settle.');
+    }
     const advanceGeneration = this.active!.advanceGeneration;
     this.active!.phase = MySqlCommandPhase.Settled;
     this.active = null;

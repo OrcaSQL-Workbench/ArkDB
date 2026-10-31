@@ -2,16 +2,20 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionConfig, ConnectionState,
   ConnectionTimerPort, CoreDbConnection, LogLevel, LogSink, Logger, MySqlCommandKind,
-  MySqlConnectionExtensions, MySqlConnectionOptions,
+  MySqlBatchError, MySqlBatchExecutor, MySqlConnectionExtensions, MySqlConnectionOptions,
   MySqlDeadlineOptions, MySqlDriverFactory, MySqlExecutionEvent, MySqlExecutionEventType,
-  MySqlExecutionObserver, MySqlExecutionOutcome, MySqlNamedParameter, MySqlOperationError,
-  MySqlParameter, MySqlParameterDirection, MySqlParameterType, MySqlProcedureArgument,
+  MySqlExecutionObserver, MySqlExecutionOutcome, MySqlNamedExecutor, MySqlNamedParameter,
+  MySqlOperationError,
+  MySqlParameter, MySqlParameterDirection, MySqlParameterType, MySqlPreparedStatement,
+  MySqlProcedureArgument,
   QueryOptions, QueryResult, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
   ServerInfo, SslMode, requireMySqlFeatures
 } from '../../../../Index';
 import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
 import { MySqlExecutionDispatcher } from '../../../main/ets/mysql/diagnostics/MySqlExecutionObserver';
-import { MySqlCommandGate } from '../../../main/ets/mysql/execution/MySqlCommandGate';
+import {
+  MySqlCommandGate, MySqlCommandScope
+} from '../../../main/ets/mysql/execution/MySqlCommandGate';
 import {
   initializeMySqlExecutionObserverInternal,
   initializeMySqlExecutionObserverWithCapabilityInternal
@@ -60,6 +64,42 @@ class RecordingLogSink implements LogSink {
 
   write(_level: LogLevel, _tag: string, message: string, _timestampMs: number): void {
     this.messages.push(message);
+  }
+}
+
+class StartCloseObserver implements MySqlExecutionObserver {
+  readonly entered: ObserverGate = new ObserverGate();
+  target: PreparedTestConnection | null = null;
+  kind: MySqlCommandKind | null = null;
+  reenteredClose: Promise<void> | null = null;
+  starts: number = 0;
+  terminals: number = 0;
+
+  onEvent(event: MySqlExecutionEvent): void {
+    if (this.kind === null || event.commandKind !== this.kind) return;
+    if (event.type === MySqlExecutionEventType.Terminal) {
+      this.terminals += 1;
+      return;
+    }
+    this.starts += 1;
+    if (this.target !== null && this.reenteredClose === null) {
+      this.reenteredClose = this.target.close();
+      this.entered.release();
+    }
+  }
+}
+
+class StatementStartCloseObserver implements MySqlExecutionObserver {
+  readonly entered: ObserverGate = new ObserverGate();
+  statement: MySqlPreparedStatement | null = null;
+  repeated: Promise<void> | null = null;
+
+  onEvent(event: MySqlExecutionEvent): void {
+    if (event.type !== MySqlExecutionEventType.Start ||
+      event.commandKind !== MySqlCommandKind.StatementClose ||
+      this.statement === null || this.repeated !== null) return;
+    this.repeated = this.statement.close();
+    this.entered.release();
   }
 }
 
@@ -183,6 +223,34 @@ class ObserverTimers implements ConnectionTimerPort {
   }
 }
 
+class GatedFailingCloseTransport extends TcpTransport {
+  readonly closeEntered: ObserverGate = new ObserverGate();
+  readonly closeAllowed: ObserverGate = new ObserverGate();
+  failure: Error | null = null;
+  closeCalls: number = 0;
+
+  async close(): Promise<void> {
+    this.closeCalls += 1;
+    this.closeEntered.release();
+    await this.closeAllowed.promise;
+    if (this.failure !== null) throw this.failure;
+    await super.close();
+  }
+}
+
+class GatedFailingPreparedSocket extends PreparedSocket {
+  readonly closeEntered: ObserverGate = new ObserverGate();
+  readonly closeAllowed: ObserverGate = new ObserverGate();
+  closeFailureValue: Error | null = null;
+
+  async close(): Promise<void> {
+    this.closeCalls += 1;
+    this.closeEntered.release();
+    await this.closeAllowed.promise;
+    if (this.closeFailureValue !== null) throw this.closeFailureValue;
+  }
+}
+
 class FinalAcknowledgementSink implements QueryResultSink {
   readonly entered: ObserverGate = new ObserverGate();
   readonly acknowledgement: ObserverGate = new ObserverGate();
@@ -234,18 +302,42 @@ class HeldRowsSink implements QueryResultSink {
   async onResultEnd(_summary: QueryResultSummary): Promise<void> {}
 }
 
+class LegacyPreparedOverrideConnection extends PreparedTestConnection {
+  preparedCalls: number = 0;
+  caughtErrors: Object[] = [];
+  finallyCalls: number = 0;
+
+  protected runPreparedCommand<T>(kind: MySqlCommandKind,
+    operation: (scope: MySqlCommandScope) => Promise<T>,
+    cachedConvenience: boolean = false): Promise<T> {
+    this.preparedCalls += 1;
+    return super.runPreparedCommand<T>(kind, operation, cachedConvenience)
+      .catch((error: Object): T => {
+        this.caughtErrors.push(error);
+        if (error instanceof Error) throw error;
+        throw new Error('Expected prepared command error identity.');
+      }).finally((): void => {
+        this.finallyCalls += 1;
+      });
+  }
+
+  internalNamed(): MySqlNamedExecutor { return this.namedExecutor(); }
+  internalBatch(): MySqlBatchExecutor { return this.batchExecutor(); }
+}
+
 class ObserverFixture {
   readonly peer: PreparedSocket = new PreparedSocket();
   readonly connection: PreparedTestConnection;
 
   constructor(observer: MySqlExecutionObserver,
     control?: () => CoreDbConnection,
-    timers?: ConnectionTimerPort) {
+    timers?: ConnectionTimerPort,
+    transport: TcpTransport = new TcpTransport()) {
     const config = new ConnectionConfig();
     config.host = 'synthetic.invalid';
     config.ssl.mode = SslMode.DISABLED;
     this.connection = new PreparedTestConnection(
-      config, '', new TcpTransport(), timers, control);
+      config, '', transport, timers, control);
     initializeMySqlExecutionObserverInternal(this.connection, observer);
   }
 
@@ -458,6 +550,10 @@ export default function mySqlExecutionObserverTest(): void {
       gate.advanceGeneration();
 
       const reset = gate.reserve(MySqlCommandKind.Reset);
+      gate.start(reset);
+      expectProtocolFailure((): void => {
+        gate.start(reset);
+      });
       expectProtocolFailure((): void => {
         gate.reserve(MySqlCommandKind.Query);
       });
@@ -468,6 +564,7 @@ export default function mySqlExecutionObserverTest(): void {
       });
 
       const ping = gate.reserve(MySqlCommandKind.Ping);
+      gate.start(ping);
       gate.release(ping);
 
       expect(observer.events.length).assertEqual(4);
@@ -736,7 +833,234 @@ export default function mySqlExecutionObserverTest(): void {
           late, rejectedObserver, (): number => 1);
       });
     });
+
+    it('preparedStartReentryWaitsForRootCloseCleanup', 0, async () => {
+      const observer = new StartCloseObserver();
+      const transport = new GatedFailingCloseTransport();
+      transport.failure = new Error('Synthetic prepared start root close failure.');
+      const fixture = new ObserverFixture(
+        observer, undefined, undefined, transport);
+      observer.target = fixture.connection;
+      await fixture.open();
+      observer.kind = MySqlCommandKind.Query;
+      const executor = fixture.connection.internalPrepared();
+      let settled = false;
+      const executing = preparedFailureOf(executor.execute('DO start_reentry', []))
+        .then((failure: ArkDbError | null): ArkDbError | null => {
+          settled = true;
+          return failure;
+        });
+      try {
+        await observer.entered.promise;
+        await transport.closeEntered.promise;
+        await flushPrepared();
+        expect(settled).assertFalse();
+        const closeTask = observer.reenteredClose;
+        if (closeTask === null) throw new Error('Expected root close start reentry.');
+
+        transport.closeAllowed.release();
+        const closeFailure = await executionFailure(closeTask);
+        const failure = await executing;
+        expect(closeFailure instanceof MySqlOperationError).assertTrue();
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError &&
+          closeFailure instanceof MySqlOperationError) {
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+          expect(failure.cleanupErrors.length).assertEqual(1);
+          expect(failure.cleanupErrors[0] === closeFailure).assertTrue();
+        }
+        expect(observer.starts).assertEqual(1);
+        expect(observer.terminals).assertEqual(1);
+      } finally {
+        transport.closeAllowed.release();
+        await executing;
+        if (observer.reenteredClose !== null) {
+          await executionFailure(observer.reenteredClose);
+        }
+      }
+    });
+
+    it('connectionCloseStartReentrySharesOnePromiseAndTerminal', 0, async () => {
+      const observer = new StartCloseObserver();
+      const transport = new GatedFailingCloseTransport();
+      const fixture = new ObserverFixture(
+        observer, undefined, undefined, transport);
+      observer.target = fixture.connection;
+      await fixture.open();
+      observer.kind = MySqlCommandKind.Close;
+      const first = fixture.connection.close();
+      try {
+        await observer.entered.promise;
+        await transport.closeEntered.promise;
+        const repeated = observer.reenteredClose;
+        if (repeated === null) throw new Error('Expected connection close start reentry.');
+        expect(first === repeated).assertTrue();
+        expect(transport.closeCalls).assertEqual(1);
+        expect(observer.starts).assertEqual(1);
+        expect(observer.terminals).assertEqual(0);
+
+        transport.closeAllowed.release();
+        await first;
+        await repeated;
+        expect(observer.terminals).assertEqual(1);
+      } finally {
+        transport.closeAllowed.release();
+        await first;
+      }
+    });
+
+    it('ordinaryFastCommandStartsAndTerminatesOnce', 0, async () => {
+      const observer = new RecordingExecutionObserver();
+      const fixture = new ObserverFixture(observer);
+      await fixture.open();
+      observer.events.length = 0;
+      fixture.peer.responses.push([okPayload()]);
+      await fixture.connection.ping();
+      expect(observer.events.length).assertEqual(2);
+      expect(observer.events[0].type).assertEqual(MySqlExecutionEventType.Start);
+      expect(observer.events[0].commandKind).assertEqual(MySqlCommandKind.Ping);
+      expect(observer.events[1].type).assertEqual(MySqlExecutionEventType.Terminal);
+      expect(observer.events[1].serial).assertEqual(observer.events[0].serial);
+      await fixture.connection.close();
+    });
+
+    it('legacyPreparedOverrideCannotDropStatementClosePublication', 0, async () => {
+      const observer = new StatementStartCloseObserver();
+      const config = new ConnectionConfig();
+      config.host = 'synthetic.invalid';
+      config.ssl.mode = SslMode.DISABLED;
+      const connection = new LegacyPreparedOverrideConnection(
+        config, '', new TcpTransport());
+      initializeMySqlExecutionObserverInternal(connection, observer);
+      const peer = new GatedFailingPreparedSocket();
+      peer.closeFailureValue = new Error('Synthetic legacy override retirement failure.');
+      socket.nextTcp = peer;
+      const opening = connection.connect();
+      peer.emitMessage(new PacketWriter().writeBytes(handshake(Capabilities.PROTOCOL_41))
+        .writeBytes(framePacket(okPayload(), 2)).toUint8Array());
+      await opening;
+      peer.writes = [];
+      const executor = connection.internalPrepared();
+      peer.responses.push(prepareResponse(17));
+      const statement = await executor.prepare('DO legacy_override_close');
+      observer.statement = statement;
+      peer.failCommand = 0x19;
+      peer.failure = ArkDbError.network('Synthetic legacy override CLOSE write failure.');
+
+      const first = statement.close();
+      await observer.entered.promise;
+      const repeated = observer.repeated;
+      if (repeated === null) throw new Error('Expected legacy override start reentry.');
+      const firstResult = preparedFailureOf(first);
+      const repeatedResult = preparedFailureOf(repeated);
+      try {
+        expect(first === repeated).assertTrue();
+        await peer.closeEntered.promise;
+        peer.closeAllowed.release();
+        const firstFailure = await firstResult;
+        const repeatedFailure = await repeatedResult;
+        expect(firstFailure instanceof MySqlOperationError).assertTrue();
+        expect(firstFailure === repeatedFailure).assertTrue();
+        if (firstFailure instanceof MySqlOperationError) {
+          expect(firstFailure.primary === peer.failure).assertTrue();
+          expect(firstFailure.cleanupErrors.length).assertEqual(1);
+        }
+        expect(peer.commands().filter((command: number): boolean =>
+          command === 0x19).length).assertEqual(1);
+        expect(connection.preparedCalls >= 2).assertTrue();
+      } finally {
+        peer.closeAllowed.release();
+        await firstResult;
+        await repeatedResult;
+        await executionFailure(connection.close());
+      }
+    });
+
+    it('legacyPreparedOverrideObservesPromisePreflightFailures', 0, async () => {
+      const config = new ConnectionConfig();
+      config.host = 'synthetic.invalid';
+      config.ssl.mode = SslMode.DISABLED;
+      const connection = new LegacyPreparedOverrideConnection(
+        config, '', new TcpTransport());
+      const peer = new PreparedSocket();
+      socket.nextTcp = peer;
+      const opening = connection.connect();
+      peer.emitMessage(new PacketWriter().writeBytes(handshake(Capabilities.PROTOCOL_41))
+        .writeBytes(framePacket(okPayload(), 2)).toUint8Array());
+      await opening;
+      peer.writes = [];
+      const prepared = connection.internalPrepared();
+      const named = connection.internalNamed();
+      const batch = connection.internalBatch();
+      peer.holdCommand = 0x03;
+      const busy = connection.query('DO hold_prepared_family');
+      await flushPrepared();
+
+      const preparedCall = capturePromise(() => prepared.execute(
+        'DO prepared_busy', []));
+      const namedCall = capturePromise(() => named.execute(
+        'DO :value', [new MySqlNamedParameter('value',
+          new MySqlParameter(MySqlParameterType.Int32, 1))]));
+      const batchCall = capturePromise(() => batch.execute(
+        'DO batch_busy', [[]]));
+      try {
+        expect(preparedCall.synchronousError === null).assertTrue();
+        expect(namedCall.synchronousError === null).assertTrue();
+        expect(batchCall.synchronousError === null).assertTrue();
+        const preparedFailure = await promiseFailure(preparedCall.requireTask());
+        const namedFailure = await promiseFailure(namedCall.requireTask());
+        const batchFailure = await promiseFailure(batchCall.requireTask());
+        expect(connection.caughtErrors.length).assertEqual(3);
+        expect(connection.finallyCalls).assertEqual(3);
+        expect(preparedFailure === connection.caughtErrors[0]).assertTrue();
+        expect(namedFailure === connection.caughtErrors[1]).assertTrue();
+        expect(batchFailure instanceof MySqlBatchError).assertTrue();
+        if (batchFailure instanceof MySqlBatchError) {
+          expect(batchFailure.primary === connection.caughtErrors[2]).assertTrue();
+        }
+
+        peer.emitResponse([okPayload()]);
+        await busy;
+        await connection.close();
+        const afterClose = capturePromise(() => prepared.execute(
+          'DO prepared_closed', []));
+        expect(afterClose.synchronousError === null).assertTrue();
+        const closedFailure = await promiseFailure(afterClose.requireTask());
+        expect(connection.finallyCalls).assertEqual(4);
+        expect(closedFailure === connection.caughtErrors[3]).assertTrue();
+        expect(closedFailure instanceof ArkDbError).assertTrue();
+      } finally {
+        peer.emitResponse([okPayload()]);
+        await executionFailure(busy);
+        await executionFailure(connection.close());
+      }
+    });
   });
+}
+
+class PromiseCapture<T> {
+  task: Promise<T> | null = null;
+  synchronousError: Object | null = null;
+
+  requireTask(): Promise<T> {
+    if (this.task === null) throw new Error('Expected a Promise result.');
+    return this.task;
+  }
+}
+
+function capturePromise<T>(operation: () => Promise<T>): PromiseCapture<T> {
+  const capture = new PromiseCapture<T>();
+  try {
+    capture.task = operation();
+  } catch (error) {
+    capture.synchronousError = error as Object;
+  }
+  return capture;
+}
+
+function promiseFailure<T>(operation: Promise<T>): Promise<Object | null> {
+  return operation.then((): Object | null => null,
+    (error: Object): Object | null => error);
 }
 
 function executionFailure<T>(operation: Promise<T>): Promise<Object | null> {

@@ -103,11 +103,30 @@ export function createObservedConnection(config: ConnectionConfig,
 }
 ```
 
-Each accepted command has one start event and one terminal event. The terminal
-event occurs only after the final awaited stream sink and any cancellation,
-deadline or close cleanup have converged. Session reset reports its original
-generation; a later command observes the advanced generation. Event serials are
-monotonic only within one physical connection.
+Each accepted command reserves ownership and a serial, publishes any shared
+opening/reset/settlement/close promise needed by reentrant callers, and then
+delivers one start event before the operation body. A duplicate start is
+rejected. One terminal event occurs only after the final awaited stream sink and
+any cancellation, deadline or close cleanup have converged. Session reset
+reports its original generation; a later command observes the advanced
+generation. Event serials are monotonic only within one physical connection.
+
+`MySqlPreparedStatement.close()` is exactly idempotent even when it resolves
+immediately for an expired handle or rejects during busy-connection preflight:
+repeated handle calls return the same promise and the same rejection object.
+Code that deliberately retries after a busy preflight uses the session/owned
+close entry point rather than the memoized public handle call.
+The handle installs and owns its deferred before calling session/connection
+overrides, then bridges the returned close task. Existing three-argument
+`runPreparedCommand` overrides remain unchanged and cannot bypass publication.
+Pending and live bridges are joined by both handle and session close reentry.
+Only a settled pre-start rejection can be cleared by a deliberate session/owned
+retry; live success or failure remains memoized with the original identity.
+
+The three-argument `runPreparedCommand` override also keeps its async boundary.
+Busy or not-ready preflight returns a rejected Promise, so subclass
+`.catch()`/`.finally()` hooks run and receive the original driver error instead
+of a synchronous throw.
 
 The event contains exactly `type`, `serial`, `generation`, `commandKind`,
 `monotonicTimeMs` and `durationMs`. It never contains SQL, parameter values or

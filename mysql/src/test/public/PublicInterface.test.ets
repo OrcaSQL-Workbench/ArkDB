@@ -6,7 +6,8 @@ import {
   DatabaseContext, ForeignKeyInfo, DbConnection, DbDriverFactory, MetadataProvider, DbExecutionController,
   ServerMetricsProvider, CoreDbConnection, ConnectionState, ServerInfo, QueryExecutionSummary, QueryResultSummary,
   QueryResultSink, MySqlConnectionFeatures, requireMySqlFeatures, MySqlParameter,
-  MySqlParameterType, MySqlParameterValue, MySqlPreparedExecutor, MySqlPreparedStatement,
+  MySqlNamedExecutor, MySqlNamedParameter, MySqlParameterType, MySqlParameterValue,
+  MySqlPreparedExecutor, MySqlPreparedStatement,
   MySqlSession, MySqlBatchOptions, MySqlDeadlineOptions, MySqlDeadlineExecutor,
   MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
   mysqlPlaceholders, mapMySqlRows, createMySqlConnection,
@@ -191,13 +192,19 @@ export default function publicInterfaceTest(): void {
     it('preparedPublicImportsCompile', 0, () => {
       const features: MySqlConnectionFeatures = new MySqlConnectionFeatures();
       expect(features.prepared === undefined).assertTrue();
+      expect(features.named === undefined).assertTrue();
       const bytes = new Uint8Array([1, 2]);
       const parameter: MySqlParameter = new MySqlParameter(MySqlParameterType.Binary, bytes);
+      const named: MySqlNamedParameter = new MySqlNamedParameter('payload', parameter);
       bytes[0] = 9;
       const value: MySqlParameterValue = parameter.value;
+      const namedValue: MySqlParameterValue = named.parameter.value;
       expect(value instanceof Uint8Array).assertTrue();
+      expect(namedValue instanceof Uint8Array).assertTrue();
       if (!(value instanceof Uint8Array)) throw new Error('Expected a public binary parameter.');
+      if (!(namedValue instanceof Uint8Array)) throw new Error('Expected a public named binary parameter.');
       expect(value[0]).assertEqual(1);
+      expect(namedValue[0]).assertEqual(1);
       expect(quoteMySqlIdentifier(['schema', 'a`b'])).assertEqual('`schema`.`a``b`');
       expect(mysqlPlaceholders(2)).assertEqual('?,?');
     });
@@ -209,7 +216,50 @@ export default function publicInterfaceTest(): void {
       expect(connection.mysqlFeatures !== undefined).assertTrue();
       const features: MySqlConnectionFeatures = requireMySqlFeatures(connection);
       expect(features.prepared !== undefined).assertTrue();
+      expect(features.named !== undefined).assertTrue();
       await connection.close();
+    });
+
+    it('checksEveryPublicNamedMethodForAllCreationPathsBeforeConnectAndAfterClose', 0, async () => {
+      const factory = new MySqlDriverFactory();
+      const nativeFactory: DbDriverFactory = factory;
+      const config = publicConfig();
+      const connections: DbConnection[] = [
+        new MySqlConnection(config, ''), createMySqlConnection(config, ''),
+        factory.create(new MySqlConnectionOptions(config, '')),
+        nativeFactory.createConnection(config, '')
+      ];
+      const parameters = [new MySqlNamedParameter('value',
+        new MySqlParameter(MySqlParameterType.Int32, 7))];
+      for (const connection of connections) {
+        const named = publicNamed(connection);
+        for (let phase = 0; phase < 2; phase += 1) {
+          expect(connection.state).assertEqual(phase === 0 ? ConnectionState.Idle : ConnectionState.Closed);
+          const executing = await publicFailure((): Promise<QueryResult> =>
+            named.execute('SELECT :value', parameters));
+          const streaming = await publicFailure((): Promise<QueryExecutionSummary> =>
+            named.executeStream('SELECT :value', parameters,
+              new QueryOptions(), new PreparedRecordingSink()));
+          expect(executing.kind).assertEqual(ArkDbErrorKind.Protocol);
+          expect(streaming.kind).assertEqual(ArkDbErrorKind.Protocol);
+          await connection.close();
+        }
+      }
+    });
+
+    it('executesNamedValuesThroughThePublicFeatureWithoutInterpolation', 0, async () => {
+      const connection = createMySqlConnection(publicConfig(), '');
+      const peer = new PreparedSocket();
+      await openPublicConnection(connection, peer);
+      try {
+        peer.responses.push(publicFingerprintResult('NO_BACKSLASH_ESCAPES'),
+          prepareResponse(7, 2), binaryIntResult([42]));
+        const result = await publicNamed(connection).execute('SELECT :value + :value',
+          [new MySqlNamedParameter('value',
+            new MySqlParameter(MySqlParameterType.Int32, 21))]);
+        expect(result.rows[0][0]).assertEqual(42);
+        expect(peer.commands().join(',')).assertEqual('3,22,23,25');
+      } finally { await connection.close(); }
     });
 
     it('checksEveryPublicPreparedMethodForAllCreationPathsBeforeConnectAndAfterClose', 0, async () => {
@@ -381,6 +431,7 @@ export default function publicInterfaceTest(): void {
       const features = requireMySqlFeatures(connection);
       expect(features === connection.mysqlFeatures).assertTrue();
       expect(features.prepared === undefined).assertTrue();
+      expect(features.named === undefined).assertTrue();
     });
   });
 }
@@ -432,6 +483,12 @@ function publicPrepared(connection: DbConnection): MySqlPreparedExecutor {
   return prepared;
 }
 
+function publicNamed(connection: DbConnection): MySqlNamedExecutor {
+  const named = requireMySqlFeatures(connection).named;
+  if (named === undefined) throw ArkDbError.unsupported('Expected public named-parameter support.');
+  return named;
+}
+
 async function openPublicConnection(connection: DbConnection, peer: PreparedSocket): Promise<void> {
   socket.nextTcp = peer;
   const opening = connection.connect();
@@ -444,6 +501,16 @@ async function openPublicConnection(connection: DbConnection, peer: PreparedSock
 function textIntResult(value: string): Uint8Array[] {
   return [new Uint8Array([1]), columnPayload('value', ColumnType.LONG), eofPayload(),
     new PacketWriter().writeLenEncString(value).toUint8Array(), eofPayload()];
+}
+
+function publicFingerprintResult(sqlMode: string): Uint8Array[] {
+  const row = new PacketWriter().writeLenEncString('public_schema').writeLenEncString(sqlMode)
+    .writeLenEncString('utf8mb4').writeLenEncString('+00:00').toUint8Array();
+  return [
+    new Uint8Array([4]), columnPayload('database'), columnPayload('sql_mode'),
+    columnPayload('character_set_client'), columnPayload('time_zone'), eofPayload(),
+    row, eofPayload()
+  ];
 }
 
 async function publicFailure<T>(operation: () => Promise<T>): Promise<ArkDbError> {

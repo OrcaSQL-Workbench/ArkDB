@@ -734,6 +734,7 @@ export default function mySqlTransactionRunnerTest(): void {
         const rootFeatures = fixture.connection.mysqlFeatures;
         expect(rootFeatures.prepared !== undefined).assertTrue();
         expect(rootFeatures.batch !== undefined).assertTrue();
+        expect(rootFeatures.named !== undefined).assertTrue();
         expect(rootFeatures.transactions !== undefined).assertTrue();
         wire = new TransactionWirePlan(fixture);
 
@@ -743,6 +744,7 @@ export default function mySqlTransactionRunnerTest(): void {
             expect(scopedFeatures === rootFeatures).assertFalse();
             expect(scopedFeatures.prepared === undefined).assertTrue();
             expect(scopedFeatures.batch === undefined).assertTrue();
+            expect(scopedFeatures.named === undefined).assertTrue();
             expect(scopedFeatures.transactions === undefined).assertTrue();
           });
 

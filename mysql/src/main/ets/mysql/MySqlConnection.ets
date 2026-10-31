@@ -264,7 +264,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
               parseResultStream(new PreparedPacketSource(channel, this.clientCaps),
                 this.clientCaps, options, guarded, new BinaryRowDecoder(), this.status)))),
       async (scope: MySqlCommandScope): Promise<string> =>
-        (await this.readMySqlSessionFingerprint(scope)).sqlMode,
+        (await this.awaitPreparedExecution(scope,
+          this.readMySqlSessionFingerprint(scope),
+          MySqlExecutionOutcome.NotDispatched,
+          MySqlExecutionOutcome.NotDispatched)).sqlMode,
       this.config.preparedCacheSize === undefined ? 0 : this.config.preparedCacheSize);
   }
 
@@ -1321,7 +1324,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   private async awaitPreparedExecution<T>(scope: MySqlCommandScope, task: Promise<T>,
-    fallbackOutcome: MySqlExecutionOutcome = MySqlExecutionOutcome.Unknown): Promise<T> {
+    fallbackOutcome: MySqlExecutionOutcome = MySqlExecutionOutcome.Unknown,
+    cleanupOnlyOutcome: MySqlExecutionOutcome = MySqlExecutionOutcome.Completed): Promise<T> {
     let value: T | undefined;
     let primary: Object | null = null;
     try { value = await task; } catch (error) { primary = error as Object; }
@@ -1333,7 +1337,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
     if (cleanup.length > 0) {
       // Consuming SQL does not acknowledge an unknown dispatched KILL.
-      const outcome = this.retiredByCancellation ? MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.Completed;
+      const outcome = this.retiredByCancellation ?
+        MySqlExecutionOutcome.Unknown : cleanupOnlyOutcome;
       throw operationFailure(cleanup[0], cleanup.slice(1), outcome);
     }
     return value!;

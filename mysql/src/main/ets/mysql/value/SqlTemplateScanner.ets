@@ -89,7 +89,7 @@ export class SqlTemplateScanner {
       }
 
       if (state === SqlTemplateState.HashComment || state === SqlTemplateState.DashComment) {
-        if (code === 0x0a || code === 0x0d) state = SqlTemplateState.Code;
+        if (code === 0x0a) state = SqlTemplateState.Code;
         index += 1;
         continue;
       }

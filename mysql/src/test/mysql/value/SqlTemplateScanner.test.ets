@@ -56,6 +56,24 @@ export default function sqlTemplateScannerTest(): void {
       expect(compiled.parameterNames.join(',')).assertEqual('a,b,c,d,e');
     });
 
+    it('endsLineCommentsOnlyAtLineFeed', 0, () => {
+      const scanner = new SqlTemplateScanner();
+
+      const hashCr = scanner.compile('# ignored\r:hidden\n :live', '');
+      const dashCr = scanner.compile('-- ignored\r:hidden\n :live', '');
+      const hashCrlf = scanner.compile('# ignored\r\n :live', '');
+      const dashCrlf = scanner.compile('-- ignored\r\n :live', '');
+
+      expect(hashCr.sql).assertEqual('# ignored\r:hidden\n ?');
+      expect(hashCr.parameterNames.join(',')).assertEqual('live');
+      expect(dashCr.sql).assertEqual('-- ignored\r:hidden\n ?');
+      expect(dashCr.parameterNames.join(',')).assertEqual('live');
+      expect(hashCrlf.sql).assertEqual('# ignored\r\n ?');
+      expect(hashCrlf.parameterNames.join(',')).assertEqual('live');
+      expect(dashCrlf.sql).assertEqual('-- ignored\r\n ?');
+      expect(dashCrlf.parameterNames.join(',')).assertEqual('live');
+    });
+
     it('preservesNewlinesNulEmojiAndLiteralColons', 0, () => {
       const sql = 'SELECT :_first9, :1, :=, :\uD83D\uDC2C, ' +
         "'\u0000:inside\uD83D\uDC2C'\r\n,:last_\uD83D\uDC2C";

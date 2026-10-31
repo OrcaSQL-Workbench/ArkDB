@@ -1,4 +1,6 @@
-import { ArkDbError, ArkDbErrorKind, QueryOptions } from '@arkdb/core';
+import {
+  ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryOptions, QueryResult, ServerInfo
+} from '@arkdb/core';
 import { describe, expect, it } from '@ohos/hypium';
 import { MySqlNamedExecutor } from '../../../main/ets/mysql/execution/MySqlNamedExecutor';
 import { MySqlNamedParameter } from '../../../main/ets/mysql/model/MySqlNamedParameter';
@@ -10,6 +12,7 @@ import {
 import { MySqlQueryResultSummary } from '../../../main/ets/mysql/model/MySqlQueryStream';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
+import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
 import {
   PreparedExecutionFixture, PreparedGate, PreparedRecordingSink, binaryIntResult, columnPayload,
   eofPayload, flushPrepared, hex, okPayload, prepareResponse, preparedFailureOf
@@ -23,6 +26,33 @@ class HoldingEndSink extends PreparedRecordingSink {
     this.ends.push(summary);
     this.entered.release();
     await this.acknowledgement.promise;
+  }
+}
+
+class NamedCancellationControl implements DbConnection {
+  state: ConnectionState = ConnectionState.Idle;
+  readonly serverInfo: ServerInfo = new ServerInfo();
+  readonly commands: string[] = [];
+  readonly dispatched: PreparedGate = new PreparedGate();
+  executing: PreparedGate | null = null;
+  failure: ArkDbError | null = null;
+  cleanupFailure: ArkDbError | null = null;
+
+  async connect(): Promise<void> {
+    this.state = ConnectionState.Ready;
+  }
+
+  async query(sql: string): Promise<QueryResult> {
+    this.commands.push(sql);
+    this.dispatched.release();
+    if (this.executing !== null) await this.executing.promise;
+    if (this.failure !== null) throw this.failure;
+    return new QueryResult();
+  }
+
+  async close(): Promise<void> {
+    this.state = ConnectionState.Closed;
+    if (this.cleanupFailure !== null) throw this.cleanupFailure;
   }
 }
 
@@ -89,6 +119,121 @@ export default function mySqlNamedExecutorTest(): void {
         expect(hex(commandFrames(fixture, 0x17)[0].subarray(4))).assertEqual(
           '170700000000010000000001030003000700000007000000');
       } finally { await fixture.close(); }
+    });
+
+    it('settlesFingerprintCancellationBeforePreparing', 0, async () => {
+      const control = new NamedCancellationControl();
+      control.executing = new PreparedGate();
+      control.failure = ArkDbError.network('Synthetic lost named fingerprint KILL acknowledgement.');
+      const fixture = new PreparedExecutionFixture(
+        Capabilities.PROTOCOL_41, (): DbConnection => control);
+      await fixture.open();
+      const named = namedFeature(fixture);
+      const fingerprintEntered = new PreparedGate();
+      fixture.peer.holdCommand = 0x03;
+      fixture.peer.onCommand = (command: number): void => {
+        if (command === 0x03) fingerprintEntered.release();
+      };
+      let settled = false;
+      const running = preparedFailureOf(named.execute('SELECT :value', [namedInt('value', 7)]))
+        .then((failure: ArkDbError | null): ArkDbError | null => {
+          settled = true;
+          return failure;
+        });
+      let cancelling: Promise<ArkDbError | null> | null = null;
+
+      try {
+        await fingerprintEntered.promise;
+        cancelling = preparedFailureOf(fixture.connection.cancel());
+        await control.dispatched.promise;
+        fixture.peer.emitResponse(fingerprintResponse(''));
+        await flushPrepared();
+
+        expect(settled).assertFalse();
+        expect(fixture.peer.commands().join(',')).assertEqual('3');
+        expect(commandFrames(fixture, 0x16).length).assertEqual(0);
+        expect(commandFrames(fixture, 0x17).length).assertEqual(0);
+
+        control.executing.release();
+        const cancellation = await cancelling;
+        const failure = await running;
+        expect(cancellation instanceof MySqlOperationError).assertTrue();
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (!(cancellation instanceof MySqlOperationError) ||
+          !(failure instanceof MySqlOperationError)) {
+          throw new Error('Expected unknown named fingerprint cancellation failures.');
+        }
+        expect(cancellation.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+        expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
+        expect(fixture.peer.commands().join(',')).assertEqual('3');
+      } finally {
+        if (control.executing !== null) control.executing.release();
+        fixture.peer.holdCommand = -1;
+        await preparedFailureOf(fixture.close());
+        if (cancelling !== null) await cancelling;
+        await running;
+      }
+    });
+
+    it('reportsFingerprintCancellationCleanupAsNotDispatched', 0, async () => {
+      const cleanup = ArkDbError.network('Synthetic named fingerprint control cleanup failure.');
+      const control = new NamedCancellationControl();
+      control.executing = new PreparedGate();
+      control.cleanupFailure = cleanup;
+      const fixture = new PreparedExecutionFixture(
+        Capabilities.PROTOCOL_41, (): DbConnection => control);
+      await fixture.open();
+      const named = namedFeature(fixture);
+      const fingerprintEntered = new PreparedGate();
+      fixture.peer.holdCommand = 0x03;
+      fixture.peer.onCommand = (command: number): void => {
+        if (command === 0x03) fingerprintEntered.release();
+      };
+      let settled = false;
+      const running = preparedFailureOf(named.execute('SELECT :value', [namedInt('value', 7)]))
+        .then((failure: ArkDbError | null): ArkDbError | null => {
+          settled = true;
+          return failure;
+        });
+      let cancelling: Promise<ArkDbError | null> | null = null;
+
+      try {
+        await fingerprintEntered.promise;
+        cancelling = preparedFailureOf(fixture.connection.cancel());
+        await control.dispatched.promise;
+        fixture.peer.emitResponse(fingerprintResponse(''));
+        await flushPrepared();
+
+        expect(settled).assertFalse();
+        expect(fixture.peer.commands().join(',')).assertEqual('3');
+        expect(commandFrames(fixture, 0x16).length).assertEqual(0);
+        expect(commandFrames(fixture, 0x17).length).assertEqual(0);
+
+        control.executing.release();
+        const cancellation = await cancelling;
+        const failure = await running;
+        expect(cancellation instanceof MySqlOperationError).assertTrue();
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (!(cancellation instanceof MySqlOperationError) ||
+          !(failure instanceof MySqlOperationError)) {
+          throw new Error('Expected named fingerprint control cleanup failures.');
+        }
+        expect(cancellation.primary === cleanup).assertTrue();
+        expect(cancellation.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+        expect(failure.primary === cleanup).assertTrue();
+        expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+        expect(fixture.connection.state).assertEqual(ConnectionState.Ready);
+        expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
+        expect(fixture.peer.commands().join(',')).assertEqual('3');
+      } finally {
+        if (control.executing !== null) control.executing.release();
+        fixture.peer.holdCommand = -1;
+        await fixture.close();
+        if (cancelling !== null) await cancelling;
+        await running;
+      }
     });
 
     it('rejectsMissingDuplicateAndUnusedInputsBeforePrepare', 0, async () => {

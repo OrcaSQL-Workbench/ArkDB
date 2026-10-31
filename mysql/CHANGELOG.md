@@ -33,6 +33,15 @@
   `outValues`, share text/byte classification with binary row decoding, reject
   unknown or truncated OUT cardinality after full drain, and avoid session
   variables or a text-protocol fallback.
+- Add optional restricted multi-row INSERT through `mysqlFeatures.insertRows`.
+  Quote table and column identifiers, bind only typed prepared parameters,
+  snapshot every request before dispatch, and greedily group rows by exact
+  PREPARE/EXECUTE payload bytes with a 16 MiB ceiling and 65535-parameter limit.
+  Reuse `MySqlBatchResult`/`MySqlBatchError` partial outcomes, reject raw SQL and
+  upsert fragments, support caller-owned manual and callback transactions
+  without lifecycle SQL, join callback cancellation cleanup between emitted
+  groups, retain decoded results on Unknown retirement, and recreate physical
+  execution state after reset.
 - Expose positional `mapMySqlRows` projection without changing native value types
   or coercing exact decimal, temporal, JSON, NULL or byte values.
 - Add optional native `affectedRowsExact` bigint observations while preserving the

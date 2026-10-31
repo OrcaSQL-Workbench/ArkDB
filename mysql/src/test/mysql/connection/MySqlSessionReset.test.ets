@@ -3,7 +3,8 @@ import {
   ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionConfig, ConnectionState,
   ConnectionTimerPort, CoreDbConnection, MySqlBatchExecutor, MySqlConnection,
   MySqlDeadlineExecutor, MySqlExecutionOutcome, MySqlNamedExecutor, MySqlNamedParameter,
-  MySqlOperationError, MySqlParameter, MySqlPreparedExecutor, MySqlSessionController,
+  MySqlInsertRowsExecutor, MySqlOperationError, MySqlParameter, MySqlParameterType,
+  MySqlPreparedExecutor, MySqlSessionController,
   MySqlSessionOptions, QueryResult, ServerInfo, SslMode, requireMySqlFeatures
 } from '../../../../Index';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
@@ -428,13 +429,14 @@ export default function mySqlSessionResetTest(): void {
     });
 
     it('resetRejectsLazyExecutorCreationDuringReinitialization', 0, async () => {
-      for (let mode = 0; mode < 4; mode += 1) {
+      for (let mode = 0; mode < 5; mode += 1) {
         const fixture = new ResetFixture(1);
         try {
           await fixture.open();
           const prepared = preparedFeature(fixture.connection);
           const deadlines = deadlineFeature(fixture.connection);
           const batch = batchFeature(fixture.connection);
+          const insertRows = insertRowsFeature(fixture.connection);
           const named = namedFeature(fixture.connection);
           fixture.peer.holdCommand = 0x03;
           fixture.peer.responses.push([okPayload(StatusFlags.AUTOCOMMIT)],
@@ -452,9 +454,13 @@ export default function mySqlSessionResetTest(): void {
           } else if (mode === 2) {
             const rows: MySqlParameter[][] = [[]];
             overlap = await preparedFailureOf(batch.execute('DO overlap', rows));
-          } else {
+          } else if (mode === 3) {
             const parameters: MySqlNamedParameter[] = [];
             overlap = await preparedFailureOf(named.execute('DO overlap', parameters));
+          } else {
+            overlap = await preparedFailureOf(insertRows.execute(
+              ['t'], ['a'],
+              [[new MySqlParameter(MySqlParameterType.Int32, 1)]]));
           }
           expect(overlap !== null && overlap.kind === ArkDbErrorKind.Protocol).assertTrue();
           expect(fixture.peer.writes.length).assertEqual(writesBeforeOverlap);
@@ -465,7 +471,9 @@ export default function mySqlSessionResetTest(): void {
           fixture.peer.emitResponse(held);
           expect((await resetting) === null).assertTrue();
 
-          fixture.peer.responses.push(prepareResponse(20 + mode), [okPayload()]);
+          fixture.peer.responses.push(
+            prepareResponse(20 + mode, mode === 4 ? 1 : 0),
+            [okPayload()]);
           if (mode === 0) {
             await prepared.execute('DO after_reset', []);
           } else if (mode === 1) {
@@ -473,17 +481,46 @@ export default function mySqlSessionResetTest(): void {
           } else if (mode === 2) {
             const rows: MySqlParameter[][] = [[]];
             await batch.execute('DO after_reset', rows);
-          } else {
+          } else if (mode === 3) {
             const parameters: MySqlNamedParameter[] = [];
             await named.execute('DO after_reset', parameters);
+          } else {
+            await insertRows.execute(
+              ['t'], ['a'],
+              [[new MySqlParameter(MySqlParameterType.Int32, 1)]]);
           }
           expect(fixture.peer.commands().join(',')).assertEqual(
-            mode === 2 ? '31,3,3,22,23,25' :
+            (mode === 2 || mode === 4) ? '31,3,3,22,23,25' :
               (mode === 3 ? '31,3,3,3,22,23,25' : '31,3,3,22,23'));
         } finally {
           fixture.peer.holdCommand = -1;
           await preparedFailureOf(fixture.close());
         }
+      }
+    });
+
+    it('resetInvalidatesInsertRowsPhysicalExecutorAndRecreatesOnNextUse', 0, async () => {
+      const fixture = new ResetFixture();
+      try {
+        await fixture.open();
+        const insertRows = insertRowsFeature(fixture.connection);
+        fixture.peer.responses.push(prepareResponse(7, 1), [okPayload()]);
+        await insertRows.execute(
+          ['t'], ['a'],
+          [[new MySqlParameter(MySqlParameterType.Int32, 1)]]);
+
+        fixture.peer.responses.push([okPayload()], [okPayload()]);
+        await sessionFeature(fixture.connection).reset();
+
+        fixture.peer.responses.push(prepareResponse(8, 1), [okPayload()]);
+        await insertRows.execute(
+          ['t'], ['a'],
+          [[new MySqlParameter(MySqlParameterType.Int32, 2)]]);
+
+        expect(fixture.peer.commands().join(',')).assertEqual(
+          '22,23,25,31,3,3,22,23,25');
+      } finally {
+        await fixture.close();
       }
     });
 
@@ -686,6 +723,14 @@ function batchFeature(connection: MySqlConnection): MySqlBatchExecutor {
   const batch = requireMySqlFeatures(connection).batch;
   if (batch === undefined) throw ArkDbError.unsupported('Expected batch support.');
   return batch;
+}
+
+function insertRowsFeature(connection: MySqlConnection): MySqlInsertRowsExecutor {
+  const insertRows = requireMySqlFeatures(connection).insertRows;
+  if (insertRows === undefined) {
+    throw ArkDbError.unsupported('Expected insertRows support.');
+  }
+  return insertRows;
 }
 
 function namedFeature(connection: MySqlConnection): MySqlNamedExecutor {

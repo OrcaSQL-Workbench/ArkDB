@@ -72,6 +72,32 @@ test('shared contracts describe binary procedure output parameters', async () =>
   assert.doesNotMatch(index, /\bMySqlProcedureOutput\b/);
 });
 
+test('shared contracts describe restricted prepared insert rows', async () => {
+  const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
+  const index = await readFile(join(ROOT, 'mysql', 'Index.ets'), 'utf8');
+  const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'execution', 'MySqlInsertRowsExecutor.ets'), 'utf8');
+  assert.match(contracts, /\bmysqlFeatures\.insertRows\b/);
+  assert.match(contracts, /\bMySqlInsertRowsOptions\b/);
+  assert.match(contracts, /\bINSERT INTO \.\.\. VALUES\b/);
+  assert.match(contracts, /\b16777216-byte\b/);
+  assert.match(contracts, /\b65535\b/);
+  assert.match(contracts, /\bMySqlBatchError\b/);
+  assert.match(contracts, /\bmanual transaction\b/i);
+  assert.match(contracts, /\bcallback-scoped adapter\b/i);
+  assert.match(contracts, /\bafter each emitted statement\b/i);
+  assert.match(contracts, /\bjoin counter\b/i);
+  assert.match(contracts, /\bpartial\s+`MySqlBatchError`/i);
+  assert.match(contracts, /\buncertain retirement retains\b/i);
+  assert.match(contracts, /\bCOM_RESET_CONNECTION\b/);
+  assert.match(index, /\bMySqlInsertRowsExecutor\b/);
+  assert.match(index, /\bMySqlInsertRowsOptions\b/);
+  assert.match(source, /'INSERT INTO '/);
+  assert.doesNotMatch(source, /\bON DUPLICATE KEY UPDATE\b/);
+  assert.doesNotMatch(source, /\bINSERT IGNORE\b/);
+  assert.doesNotMatch(source, /\bREPLACE INTO\b/);
+});
+
 test('transaction runner observes the same promise returned to detached callers', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'execution', 'MySqlTransactionRunner.ets'), 'utf8');

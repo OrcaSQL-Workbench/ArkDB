@@ -383,11 +383,18 @@ class ScopedMySqlInsertRowsExecutor implements MySqlInsertRowsExecutor {
     this.executeInput = executeInput;
   }
 
-  async execute(tableParts: string[], columns: string[],
+  execute(tableParts: string[], columns: string[],
     rows: MySqlParameter[][],
     options?: MySqlInsertRowsOptions): Promise<MySqlBatchResult> {
-    const input = snapshotMySqlInsertRowsInput(
-      tableParts, columns, rows, options);
+    let input: MySqlInsertRowsInput;
+    try {
+      input = snapshotMySqlInsertRowsInput(
+        tableParts, columns, rows, options);
+    } catch (error) {
+      const task = Promise.reject<MySqlBatchResult>(error as Object);
+      task.catch((_error: Object): void => {});
+      return task;
+    }
     return this.executeInput(input);
   }
 }

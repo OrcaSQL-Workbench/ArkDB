@@ -129,6 +129,23 @@ test('transaction runner observes the same promise returned to detached callers'
   assert.match(waitForActiveCommand, /await command/);
 });
 
+test('transaction-scoped insert rows returns the exact observed promise', async () => {
+  const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'execution', 'MySqlTransactionRunner.ets'), 'utf8');
+  const scopedStart = source.indexOf('class ScopedMySqlInsertRowsExecutor');
+  const scopedEnd = source.indexOf('function snapshotTransactionOptions', scopedStart);
+  assert.notEqual(scopedStart, -1);
+  assert.notEqual(scopedEnd, -1);
+  const scoped = source.slice(scopedStart, scopedEnd);
+  assert.match(scoped, /\n  execute\(tableParts:/);
+  assert.doesNotMatch(scoped, /\n  async execute\(tableParts:/);
+  assert.match(scoped, /const task = Promise\.reject<MySqlBatchResult>\(error as Object\);/);
+  assert.match(scoped, /task\.catch\(\(_error: Object\): void => \{\}\);/);
+  assert.match(scoped, /return task;/);
+  assert.match(scoped, /return this\.executeInput\(input\);/);
+  assert.doesNotMatch(scoped, /return this\.executeInput\(input\)\.then/);
+});
+
 test('adding an independently typed adapter changes registration only, not MySQL implementation', async (t) => {
   const root = await fixture(t);
   const mysql = await treeDigest(join(root, 'mysql'));

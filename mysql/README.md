@@ -277,6 +277,13 @@ the `insertRows` call as a partial `MySqlBatchError`; a decoded completed group
 is retained even when uncertain cancellation retires the connection and forces
 an `Unknown` outcome.
 
+The callback-scoped `execute` method returns the exact promise tracked by the
+transaction session rather than an async wrapper. If snapshot validation fails
+before command tracking begins, it returns the same rejected
+`MySqlBatchError` promise with an internal nontransforming rejection observer.
+Awaiting callers receive the original error identity and outcome, while ignored
+calls do not leak an unhandled rejection.
+
 Built-in connections also expose the optional
 `requireMySqlFeatures(connection).transactions` runner. Check that member
 separately. `MySqlTransactionOptions` defaults to

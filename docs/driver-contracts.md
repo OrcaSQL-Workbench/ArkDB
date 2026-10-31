@@ -123,6 +123,11 @@ dispatch. The transaction join counter makes final settlement idempotent.
 Known cleanup failure is returned at the `insertRows` interface as a partial
 `MySqlBatchError`; uncertain retirement retains any already decoded statement
 result while preserving final `Unknown` and prohibiting replay.
+The callback-scoped method returns the exact promise registered with the
+transaction session. Pre-command snapshot failures are converted to one
+observed rejected promise and returned unchanged, preserving exact error
+identity for awaiting callers without leaking an unhandled rejection when a
+caller ignores it.
 
 MySQL also exposes the optional `mysqlFeatures.deadlines` interface for buffered
 text queries and prepared execution. `MySqlDeadlineOptions` defaults to

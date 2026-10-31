@@ -41,7 +41,9 @@
   upsert fragments, support caller-owned manual and callback transactions
   without lifecycle SQL, join callback cancellation cleanup between emitted
   groups, retain decoded results on Unknown retirement, and recreate physical
-  execution state after reset.
+  execution state after reset. Return the exact transaction-tracked promise
+  from callback-scoped execution and observe pre-command snapshot rejections
+  without changing their error identity.
 - Expose positional `mapMySqlRows` projection without changing native value types
   or coercing exact decimal, temporal, JSON, NULL or byte values.
 - Add optional native `affectedRowsExact` bigint observations while preserving the

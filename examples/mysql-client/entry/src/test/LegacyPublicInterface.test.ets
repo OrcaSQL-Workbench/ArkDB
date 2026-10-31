@@ -107,6 +107,7 @@ export default function legacyPublicInterfaceTest(): void {
       const connection: DbConnection = new LegacyCustomConnection();
       expect((await connection.query('SELECT 1')).rows.length).assertEqual(0);
       expect(connection.sessionStatus.autocommit).assertTrue();
+      expect(connection.mysqlFeatures === undefined).assertTrue();
       await connection.close();
     });
   });

@@ -4,7 +4,9 @@ import {
   MySqlConnectionFeatures, MySqlDeadlineExecutor, MySqlDeadlineOptions, MySqlDriverFactory,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameter, MySqlParameterType,
   MySqlParameterValue, MySqlPreparedExecutor,
-  MySqlPreparedStatement, MySqlSession, MySqlSessionController, QueryOptions, QueryResult, QueryResultSink,
+  MySqlPreparedStatement, MySqlProcedureCaller, MySqlProcedureArgument,
+  MySqlParameterDirection, MySqlProcedureResult, MySqlSession,
+  MySqlSessionController, QueryOptions, QueryResult, QueryResultSink,
   mysqlPlaceholders, quoteMySqlIdentifier, requireMySqlFeatures
 } from '@arkdb/mysql';
 import { LegacyCustomConnection } from './LegacyPublicInterface.test';
@@ -18,10 +20,12 @@ export default function preparedPublicInterfaceTest(): void {
       const features: MySqlConnectionFeatures = requireMySqlFeatures(connection);
       const executor: MySqlPreparedExecutor | undefined = features.prepared;
       const namedExecutor: MySqlNamedExecutor | undefined = features.named;
+      const procedures: MySqlProcedureCaller | undefined = features.procedures;
       const deadlines: MySqlDeadlineExecutor | undefined = features.deadlines;
       const sessionController: MySqlSessionController | undefined = features.session;
       expect(executor !== undefined).assertTrue();
       expect(namedExecutor !== undefined).assertTrue();
+      expect(procedures !== undefined).assertTrue();
       expect(deadlines !== undefined).assertTrue();
       expect(sessionController !== undefined).assertTrue();
       expect(session.mysqlFeatures === features).assertTrue();
@@ -32,15 +36,30 @@ export default function preparedPublicInterfaceTest(): void {
       const source = new Uint8Array([1, 2]);
       const parameter = new MySqlParameter(MySqlParameterType.Binary, source);
       const namedParameter = new MySqlNamedParameter('payload', parameter);
+      const procedureParameter = new MySqlProcedureArgument(
+        MySqlParameterDirection.InOut, parameter);
+      const pureOut = new MySqlProcedureArgument(
+        MySqlParameterDirection.Out,
+        new MySqlParameter(MySqlParameterType.Int32, 99));
+      const procedureResult = new MySqlProcedureResult([], -1, []);
       source[0] = 9;
       const value: MySqlParameterValue = parameter.value;
       const namedValue: MySqlParameterValue = namedParameter.parameter.value;
+      const procedureValue: MySqlParameterValue = procedureParameter.parameter.value;
       expect(value instanceof Uint8Array).assertTrue();
       expect(namedValue instanceof Uint8Array).assertTrue();
+      expect(procedureValue instanceof Uint8Array).assertTrue();
       if (!(value instanceof Uint8Array)) throw new Error('Expected a binary input snapshot.');
       if (!(namedValue instanceof Uint8Array)) throw new Error('Expected a named binary input snapshot.');
+      if (!(procedureValue instanceof Uint8Array)) {
+        throw new Error('Expected a procedure binary input snapshot.');
+      }
       expect(value[0]).assertEqual(1);
       expect(namedValue[0]).assertEqual(1);
+      expect(procedureValue[0]).assertEqual(1);
+      expect(pureOut.parameter.value === null).assertTrue();
+      expect(procedureResult.outResultIndex).assertEqual(-1);
+      expect(procedureResult.outValues.length).assertEqual(0);
       const deadlineOptions: MySqlDeadlineOptions = new MySqlDeadlineOptions();
       expect(deadlineOptions.timeoutMs).assertEqual(0);
       expect(deadlineOptions.cancellationGraceMs).assertEqual(2000);
@@ -122,4 +141,17 @@ async function namedSignatures(executor: MySqlNamedExecutor, options: QueryOptio
     new MySqlParameter(MySqlParameterType.UInt64, 18446744073709551615n))];
   await executor.executeStream('SELECT :value', parameters, options, sink);
   return executor.execute('SELECT :value', parameters, options);
+}
+
+async function procedureSignatures(caller: MySqlProcedureCaller,
+  options: QueryOptions): Promise<MySqlProcedureResult> {
+  const parameters = [
+    new MySqlProcedureArgument(MySqlParameterDirection.In,
+      new MySqlParameter(MySqlParameterType.Int32, 7)),
+    new MySqlProcedureArgument(MySqlParameterDirection.Out,
+      new MySqlParameter(MySqlParameterType.Int32, null)),
+    new MySqlProcedureArgument(MySqlParameterDirection.InOut,
+      new MySqlParameter(MySqlParameterType.UInt64, 9n))
+  ];
+  return caller.call(['app', 'read_values'], parameters, options);
 }

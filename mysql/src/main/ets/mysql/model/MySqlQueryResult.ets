@@ -1,6 +1,17 @@
 import { ArkDbError, ColumnDef, QueryResult, SqlValue as CoreSqlValue } from '@arkdb/core';
+import { Collation, ColumnType } from '../protocol/Constants';
 
 export type MySqlValue = string | number | bigint | Uint8Array | null;
+
+export function mysqlColumnDecodesAsBytes(type: number, charset: number): boolean {
+  if (type === ColumnType.BIT || type === ColumnType.GEOMETRY) return true;
+  if (charset !== Collation.BINARY) return false;
+  return type === ColumnType.VARCHAR || type === ColumnType.VAR_STRING ||
+    type === ColumnType.STRING || type === ColumnType.ENUM ||
+    type === ColumnType.SET || type === ColumnType.TINY_BLOB ||
+    type === ColumnType.MEDIUM_BLOB || type === ColumnType.LONG_BLOB ||
+    type === ColumnType.BLOB;
+}
 
 export function mysqlValues(values: CoreSqlValue[]): MySqlValue[] {
   const row: MySqlValue[] = [];

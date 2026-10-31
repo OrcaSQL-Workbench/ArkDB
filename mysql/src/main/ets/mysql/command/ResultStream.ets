@@ -16,10 +16,30 @@ export interface MySqlRowDecoder {
   decode(payload: Uint8Array, columns: ColumnDef[]): MySqlValue[];
 }
 
+export class MySqlResultTerminatorObservation {
+  resultIndex: number = 0;
+  hasRows: boolean = false;
+  rowCount: number = 0;
+  rowCountKnown: boolean = true;
+  loadedRowCount: number = 0;
+  truncated: boolean = false;
+  truncationReason: string = '';
+  metadataStatusFlags: number = 0;
+  completionStatusFlags: number = 0;
+}
+
 /** Consume one command response using the actual metadata of each result. */
 export async function parseResultStream(source: MysqlPacketSource, capabilities: number,
   options: QueryOptions, sink: QueryResultSink, rowDecoder: MySqlRowDecoder,
   fallbackStatus: DatabaseSessionStatus = new DatabaseSessionStatus()): Promise<QueryExecutionSummary> {
+  return parseResultStreamInternal(source, capabilities, options, sink,
+    rowDecoder, fallbackStatus, null);
+}
+
+async function parseResultStreamInternal(source: MysqlPacketSource, capabilities: number,
+  options: QueryOptions, sink: QueryResultSink, rowDecoder: MySqlRowDecoder,
+  fallbackStatus: DatabaseSessionStatus,
+  observations: MySqlResultTerminatorObservation[] | null): Promise<QueryExecutionSummary> {
   validateQueryOptions(options);
   const started = monotonicNowMs();
   const execution = new QueryExecutionSummary();
@@ -51,7 +71,21 @@ export async function parseResultStream(source: MysqlPacketSource, capabilities:
     execution.status = result.status.clone();
     execution.statusKnown = execution.statusKnown && result.statusKnown;
     execution.truncationInterrupted = execution.truncationInterrupted || result.truncationInterrupted;
-    hasMoreResults = (result.statusFlags & StatusFlags.MORE_RESULTS_EXISTS) !== 0;
+    if (observations !== null) {
+      const observation = new MySqlResultTerminatorObservation();
+      observation.resultIndex = resultIndex;
+      observation.hasRows = result.hasRows;
+      observation.rowCount = result.rowCount;
+      observation.rowCountKnown = result.rowCountKnown;
+      observation.loadedRowCount = result.loadedRowCount;
+      observation.truncated = result.truncated;
+      observation.truncationReason = result.truncationReason;
+      observation.metadataStatusFlags = result.metadataStatusFlags;
+      observation.completionStatusFlags = result.completionStatusFlags;
+      observations.push(observation);
+    }
+    hasMoreResults = (result.continuationStatusFlags &
+      StatusFlags.MORE_RESULTS_EXISTS) !== 0;
     resultIndex += 1;
     if (hasMoreResults) {
       if (execution.resultSetCount >= options.maxResultSets) {
@@ -70,18 +104,27 @@ export async function parseResultStream(source: MysqlPacketSource, capabilities:
 
 export async function parseBufferedResultStream(source: MysqlPacketSource, capabilities: number,
   rowDecoder: MySqlRowDecoder, options: QueryOptions = new QueryOptions(),
-  fallbackStatus: DatabaseSessionStatus = new DatabaseSessionStatus()): Promise<QueryResult> {
+  fallbackStatus: DatabaseSessionStatus = new DatabaseSessionStatus(),
+  observations?: MySqlResultTerminatorObservation[]): Promise<QueryResult> {
   const collector = new BufferedResultCollector();
-  const execution = await parseResultStream(source, capabilities, options, collector, rowDecoder, fallbackStatus);
+  const execution = await parseResultStreamInternal(source, capabilities, options,
+    collector, rowDecoder, fallbackStatus,
+    observations === undefined ? null : observations);
   return collector.result(execution);
 }
 
 class ParsedResult {
   statusFlags: number = 0;
+  continuationStatusFlags: number = 0;
+  hasRows: boolean = false;
+  metadataStatusFlags: number = 0;
+  completionStatusFlags: number = 0;
   rowCount: number = 0;
   rowCountKnown: boolean = true;
   loadedRowCount: number = 0;
   loadedBytes: number = 0;
+  truncated: boolean = false;
+  truncationReason: string = '';
   statusKnown: boolean = true;
   truncationInterrupted: boolean = false;
   status: DatabaseSessionStatus = new DatabaseSessionStatus();
@@ -175,6 +218,8 @@ async function emitOkResult(packet: MysqlPacket, capabilities: number, sink: Que
 
   const parsed = new ParsedResult();
   parsed.statusFlags = ok.statusFlags;
+  parsed.continuationStatusFlags = ok.statusFlags;
+  parsed.completionStatusFlags = ok.statusFlags;
   parsed.status = summary.status.clone();
   Logger.d(LogTag.Query, 'ok affectedRows=' + summary.affectedRows + ' warnings=' + summary.warningCount);
   return parsed;
@@ -198,6 +243,7 @@ async function emitRowResult(source: MysqlPacketSource, first: MysqlPacket, capa
   }
 
   const deprecateEof = (capabilities & Capabilities.DEPRECATE_EOF) !== 0;
+  let metadataStatusFlags = 0;
   if (!deprecateEof) {
     const columnTerminator = await readStreamPacket(source, capabilities, options, streamState);
     if (packetFirstByte(columnTerminator) === PacketType.ERR) {
@@ -209,6 +255,7 @@ async function emitRowResult(source: MysqlPacketSource, first: MysqlPacket, capa
       columnTerminator.payload.length !== metadataEofLength) {
       throw ArkDbError.protocol('Expected the result metadata EOF packet.');
     }
+    metadataStatusFlags = parseEof(columnTerminator.payload).statusFlags;
   }
 
   const meta = new QueryResultMeta();
@@ -231,8 +278,11 @@ async function emitRowResult(source: MysqlPacketSource, first: MysqlPacket, capa
     if (rowFirstByte === PacketType.ERR) {
       const error = parseErr(rowPacket.payload, capabilities);
       if (streamState.cancellationRequested && error.code === 1317) {
-        return await finishCancelledRowResult(sink, resultIndex, totalRows,
+        const cancelled = await finishCancelledRowResult(sink, resultIndex, totalRows,
           emittedRows, loadedBytes, truncationReason, fallbackStatus);
+        cancelled.hasRows = true;
+        cancelled.metadataStatusFlags = metadataStatusFlags;
+        return cancelled;
       }
       throwServerError(rowPacket.payload, capabilities);
     }
@@ -240,8 +290,16 @@ async function emitRowResult(source: MysqlPacketSource, first: MysqlPacket, capa
       if (chunkRows.length > 0) {
         await emitChunk(sink, resultIndex, emittedRows - chunkRows.length, chunkBytes, chunkRows);
       }
-      return await finishRowResult(rowPacket, capabilities, sink, resultIndex,
+      const finished = await finishRowResult(rowPacket, capabilities, sink, resultIndex,
         totalRows, emittedRows, loadedBytes, truncationReason);
+      finished.hasRows = true;
+      finished.metadataStatusFlags = metadataStatusFlags;
+      if (!deprecateEof &&
+        (metadataStatusFlags & StatusFlags.PS_OUT_PARAMS) !== 0) {
+        finished.continuationStatusFlags |=
+          metadataStatusFlags & StatusFlags.MORE_RESULTS_EXISTS;
+      }
+      return finished;
     }
 
     totalRows += 1;
@@ -321,6 +379,8 @@ async function finishCancelledRowResult(sink: QueryResultSink, resultIndex: numb
   parsed.rowCountKnown = false;
   parsed.loadedRowCount = emittedRows;
   parsed.loadedBytes = loadedBytes;
+  parsed.truncated = true;
+  parsed.truncationReason = truncationReason;
   parsed.statusKnown = false;
   parsed.truncationInterrupted = true;
   parsed.status = summary.status.clone();
@@ -487,9 +547,13 @@ async function finishRowResult(terminator: MysqlPacket, capabilities: number, si
 
   const parsed = new ParsedResult();
   parsed.statusFlags = statusFlags;
+  parsed.continuationStatusFlags = statusFlags;
+  parsed.completionStatusFlags = statusFlags;
   parsed.rowCount = totalRows;
   parsed.loadedRowCount = emittedRows;
   parsed.loadedBytes = loadedBytes;
+  parsed.truncated = truncationReason.length > 0;
+  parsed.truncationReason = truncationReason;
   parsed.status = summary.status.clone();
   return parsed;
 }

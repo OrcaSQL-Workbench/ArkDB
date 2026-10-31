@@ -4,6 +4,7 @@ import { MySqlPreparedExecutor } from './MySqlPreparedContracts';
 import { MySqlBatchExecutor } from '../execution/MySqlBatchExecutor';
 import { MySqlDeadlineExecutor } from '../execution/MySqlDeadlineExecutor';
 import { MySqlNamedExecutor } from '../execution/MySqlNamedExecutor';
+import { MySqlProcedureCaller } from '../execution/MySqlProcedureCaller';
 import { MySqlSessionController } from '../execution/MySqlSessionController';
 import { MySqlTransactionRunner } from '../execution/MySqlTransactionRunner';
 
@@ -12,6 +13,7 @@ export class MySqlConnectionFeatures {
   deadlines?: MySqlDeadlineExecutor;
   named?: MySqlNamedExecutor;
   prepared?: MySqlPreparedExecutor;
+  procedures?: MySqlProcedureCaller;
   session?: MySqlSessionController;
   transactions?: MySqlTransactionRunner;
 }

@@ -13,14 +13,17 @@ import {
   MySqlPreparedSession, MySqlPreparedSessionHost, MySqlPreparedStatementRunner,
   preparedCleanup, preparedFailure
 } from './PreparedStatement';
-import { validateQueryOptions } from './ResultStream';
+import {
+  MySqlResultTerminatorObservation, validateQueryOptions
+} from './ResultStream';
 
 export interface MySqlPreparedExecutorHost extends MySqlPreparedSessionHost {
   readonly preparedCacheSize: number;
   runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
     cachedConvenience?: boolean): Promise<T>;
   executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
-    observer?: (result: MySqlQueryResult) => void): Promise<MySqlQueryResult>;
+    observer?: (result: MySqlQueryResult) => void,
+    observations?: MySqlResultTerminatorObservation[]): Promise<MySqlQueryResult>;
   streamPrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
 }

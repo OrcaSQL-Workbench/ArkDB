@@ -61,6 +61,7 @@ export class StatusFlags {
   static readonly NO_GOOD_INDEX_USED = 0x0010;
   static readonly CURSOR_EXISTS = 0x0040;
   static readonly LAST_ROW_SENT = 0x0080;
+  static readonly PS_OUT_PARAMS = 0x1000;
 }
 
 /** MySQL column type codes. */

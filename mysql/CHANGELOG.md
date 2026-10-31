@@ -25,6 +25,14 @@
   `:name` markers, reject mixed positional markers and executable comments, bind
   repeated names in source order through the binary prepared protocol, and keep
   values separate from identifier quoting without caching modes or templates.
+- Add optional binary stored procedure calls through `mysqlFeatures.procedures`.
+  Model typed `In`, `Out` and `InOut` arguments with `MySqlProcedureArgument` and
+  `MySqlParameterDirection`, encode pure OUT values as typed NULL, recognize the
+  single-row output result through `SERVER_PS_OUT_PARAMS` in either EOF mode,
+  preserve every result and final OK in wire order with `outResultIndex` and
+  `outValues`, share text/byte classification with binary row decoding, reject
+  unknown or truncated OUT cardinality after full drain, and avoid session
+  variables or a text-protocol fallback.
 - Expose positional `mapMySqlRows` projection without changing native value types
   or coercing exact decimal, temporal, JSON, NULL or byte values.
 - Add optional native `affectedRowsExact` bigint observations while preserving the

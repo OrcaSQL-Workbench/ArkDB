@@ -8,6 +8,8 @@ import {
   QueryResultSink, MySqlConnectionFeatures, requireMySqlFeatures, MySqlParameter,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameterType, MySqlParameterValue,
   MySqlPreparedExecutor, MySqlPreparedStatement,
+  MySqlProcedureCaller, MySqlProcedureArgument, MySqlParameterDirection,
+  MySqlProcedureResult,
   MySqlSession, MySqlBatchOptions, MySqlDeadlineOptions, MySqlDeadlineExecutor, MySqlSessionController,
   MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
   mysqlPlaceholders, mapMySqlRows, createMySqlConnection,
@@ -212,18 +214,37 @@ export default function publicInterfaceTest(): void {
       const features: MySqlConnectionFeatures = new MySqlConnectionFeatures();
       expect(features.prepared === undefined).assertTrue();
       expect(features.named === undefined).assertTrue();
+      expect(features.procedures === undefined).assertTrue();
       const bytes = new Uint8Array([1, 2]);
       const parameter: MySqlParameter = new MySqlParameter(MySqlParameterType.Binary, bytes);
       const named: MySqlNamedParameter = new MySqlNamedParameter('payload', parameter);
+      const procedure = new MySqlProcedureArgument(
+        MySqlParameterDirection.InOut, parameter);
+      const pureOut = new MySqlProcedureArgument(
+        MySqlParameterDirection.Out,
+        new MySqlParameter(MySqlParameterType.Int32, 99));
+      const procedureResult = new MySqlProcedureResult([], -1, []);
       bytes[0] = 9;
       const value: MySqlParameterValue = parameter.value;
       const namedValue: MySqlParameterValue = named.parameter.value;
+      const procedureValue: MySqlParameterValue = procedure.parameter.value;
       expect(value instanceof Uint8Array).assertTrue();
       expect(namedValue instanceof Uint8Array).assertTrue();
+      expect(procedureValue instanceof Uint8Array).assertTrue();
       if (!(value instanceof Uint8Array)) throw new Error('Expected a public binary parameter.');
       if (!(namedValue instanceof Uint8Array)) throw new Error('Expected a public named binary parameter.');
+      if (!(procedureValue instanceof Uint8Array)) {
+        throw new Error('Expected a public procedure binary parameter.');
+      }
       expect(value[0]).assertEqual(1);
       expect(namedValue[0]).assertEqual(1);
+      expect(procedureValue[0]).assertEqual(1);
+      expect(procedure.direction).assertEqual(MySqlParameterDirection.InOut);
+      expect(pureOut.parameter.type).assertEqual(MySqlParameterType.Int32);
+      expect(pureOut.parameter.value === null).assertTrue();
+      expect(procedureResult.results.length).assertEqual(0);
+      expect(procedureResult.outResultIndex).assertEqual(-1);
+      expect(procedureResult.outValues.length).assertEqual(0);
       expect(quoteMySqlIdentifier(['schema', 'a`b'])).assertEqual('`schema`.`a``b`');
       expect(mysqlPlaceholders(2)).assertEqual('?,?');
     });
@@ -236,7 +257,33 @@ export default function publicInterfaceTest(): void {
       const features: MySqlConnectionFeatures = requireMySqlFeatures(connection);
       expect(features.prepared !== undefined).assertTrue();
       expect(features.named !== undefined).assertTrue();
+      expect(features.procedures !== undefined).assertTrue();
       await connection.close();
+    });
+
+    it('checksEveryPublicProcedureCallForAllCreationPathsBeforeConnectAndAfterClose', 0, async () => {
+      const factory = new MySqlDriverFactory();
+      const nativeFactory: DbDriverFactory = factory;
+      const config = publicConfig();
+      const connections: DbConnection[] = [
+        new MySqlConnection(config, ''), createMySqlConnection(config, ''),
+        factory.create(new MySqlConnectionOptions(config, '')),
+        nativeFactory.createConnection(config, '')
+      ];
+      const parameters = [new MySqlProcedureArgument(
+        MySqlParameterDirection.In,
+        new MySqlParameter(MySqlParameterType.Int32, 7))];
+      for (const connection of connections) {
+        const procedures = publicProcedures(connection);
+        for (let phase = 0; phase < 2; phase += 1) {
+          expect(connection.state).assertEqual(
+            phase === 0 ? ConnectionState.Idle : ConnectionState.Closed);
+          const failure = await publicFailure((): Promise<MySqlProcedureResult> =>
+            procedures.call(['public_procedure'], parameters));
+          expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+          await connection.close();
+        }
+      }
     });
 
     it('checksEveryPublicNamedMethodForAllCreationPathsBeforeConnectAndAfterClose', 0, async () => {
@@ -506,6 +553,14 @@ function publicNamed(connection: DbConnection): MySqlNamedExecutor {
   const named = requireMySqlFeatures(connection).named;
   if (named === undefined) throw ArkDbError.unsupported('Expected public named-parameter support.');
   return named;
+}
+
+function publicProcedures(connection: DbConnection): MySqlProcedureCaller {
+  const procedures = requireMySqlFeatures(connection).procedures;
+  if (procedures === undefined) {
+    throw ArkDbError.unsupported('Expected public procedure-call support.');
+  }
+  return procedures;
 }
 
 async function openPublicConnection(connection: DbConnection, peer: PreparedSocket): Promise<void> {

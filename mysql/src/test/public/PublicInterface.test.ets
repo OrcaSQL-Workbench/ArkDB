@@ -2,7 +2,9 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ConnectionConfig, DatabaseSessionStatus, CoreDbDriverFactory, estimateSqlRowBytes, LogTag,
   MySqlDriverFactory, ArkDbError, ArkDbErrorKind, QueryOptions, QueryResult, SqlValue, SslMode,
-  MySqlConnection, MySqlConnectionOptions, ColumnDef, DbValueKind, DriverCapabilities,
+  MySqlCommandKind, MySqlConnection, MySqlConnectionExtensions, MySqlConnectionOptions,
+  MySqlExecutionEvent, MySqlExecutionEventType, MySqlExecutionObserver,
+  ColumnDef, DbValueKind, DriverCapabilities,
   DatabaseContext, ForeignKeyInfo, DbConnection, DbDriverFactory, MetadataProvider, DbExecutionController,
   ServerMetricsProvider, CoreDbConnection, ConnectionState, ServerInfo, QueryExecutionSummary, QueryResultSummary,
   QueryResultSink, MySqlConnectionFeatures, requireMySqlFeatures, MySqlParameter,
@@ -52,6 +54,63 @@ export default function publicInterfaceTest(): void {
       expect(config.validate().length).assertEqual(0);
       expect(config.clone().ssl.mode).assertEqual(SslMode.VERIFY_IDENTITY);
       expect(JSON.stringify(config).indexOf('password')).assertEqual(-1);
+    });
+
+    it('executionObserverIsOptionalAndFactoryScoped', 0, async () => {
+      const config = publicConfig();
+      const legacy = new MySqlConnectionOptions(config, '');
+      expect(legacy.extensions === undefined).assertTrue();
+
+      const observer = new PublicExecutionObserver();
+      const extensions = new MySqlConnectionExtensions(observer);
+      const options = new MySqlConnectionOptions(config, '', extensions);
+      expect(options.extensions === extensions).assertTrue();
+      const factory = new MySqlDriverFactory();
+      const observed = factory.create(options);
+      await observed.close();
+      expect(observer.events.length).assertEqual(2);
+      expect(observer.events[0].type).assertEqual(MySqlExecutionEventType.Start);
+      expect(observer.events[0].commandKind).assertEqual(MySqlCommandKind.Close);
+      expect(observer.events[1].type).assertEqual(MySqlExecutionEventType.Terminal);
+      expect(observer.events[1].serial).assertEqual(observer.events[0].serial);
+
+      const native = factory.createConnection(config, '');
+      const convenience = createMySqlConnection(config, '');
+      const direct = new MySqlConnection(config, '');
+      await native.close();
+      await convenience.close();
+      await direct.close();
+      expect(observer.events.length).assertEqual(2);
+    });
+
+    it('genericCreationPreservesFactorySubclassHooks', 0, async () => {
+      const factory = new HookedMySqlDriverFactory();
+      const config = publicConfig();
+
+      const ordinary = factory.create(new MySqlConnectionOptions(config, ''));
+      expect(ordinary === factory.ordinaryConnection).assertTrue();
+      expect(factory.createConnectionCalls).assertEqual(1);
+      expect(factory.createObservedConnectionCalls).assertEqual(0);
+
+      const emptyExtensions = factory.create(new MySqlConnectionOptions(config, '',
+        new MySqlConnectionExtensions()));
+      expect(emptyExtensions === factory.ordinaryConnection).assertTrue();
+      expect(factory.createConnectionCalls).assertEqual(2);
+      expect(factory.createObservedConnectionCalls).assertEqual(0);
+
+      const observer = new PublicExecutionObserver();
+      const observed = factory.create(new MySqlConnectionOptions(config, '',
+        new MySqlConnectionExtensions(observer)));
+      expect(observed === factory.ordinaryConnection).assertFalse();
+      expect(factory.createConnectionCalls).assertEqual(2);
+      expect(factory.createObservedConnectionCalls).assertEqual(1);
+      await observed.close();
+      expect(observer.events.length).assertEqual(2);
+      expect(observer.events[0].monotonicTimeMs).assertEqual(100);
+      expect(observer.events[1].monotonicTimeMs).assertEqual(160);
+      expect(observer.events[1].durationMs).assertEqual(60);
+
+      await ordinary.close();
     });
 
     it('usesOnlyDriverOwnedLogTags', 0, () => {
@@ -525,6 +584,42 @@ class LegacyCustomConnection extends QueryOnlyConnection implements DbConnection
 
 class FeatureOnlyConnection extends LegacyCustomConnection {
   readonly mysqlFeatures: MySqlConnectionFeatures = new MySqlConnectionFeatures();
+}
+
+class PublicExecutionObserver implements MySqlExecutionObserver {
+  readonly events: MySqlExecutionEvent[] = [];
+
+  onEvent(event: MySqlExecutionEvent): void {
+    this.events.push(event);
+  }
+}
+
+class HookedMySqlDriverFactory extends MySqlDriverFactory {
+  readonly ordinaryConnection: MySqlConnection =
+    new MySqlConnection(publicConfig(), '');
+  createConnectionCalls: number = 0;
+  createObservedConnectionCalls: number = 0;
+  private clockValues: number[] = [100, 160];
+  private clockIndex: number = 0;
+
+  createConnection(_config: ConnectionConfig, _password: string): MySqlConnection {
+    this.createConnectionCalls += 1;
+    return this.ordinaryConnection;
+  }
+
+  protected createObservedConnection(config: ConnectionConfig, password: string,
+    extensions: MySqlConnectionExtensions,
+    _executionClock?: () => number): MySqlConnection {
+    this.createObservedConnectionCalls += 1;
+    return super.createObservedConnection(config, password, extensions,
+      (): number => this.readClock());
+  }
+
+  private readClock(): number {
+    const value = this.clockValues[this.clockIndex];
+    this.clockIndex += 1;
+    return value;
+  }
 }
 
 class PublicPortableSink implements CoreQueryResultSink {

@@ -73,6 +73,64 @@ Use `CoreDbConnection`, `CoreDbDriverFactory`, `CoreQueryResultSink` and the oth
 The reserved `ServerFamily.PostgreSQL` value is retained only for source
 compatibility; it does not mean a PostgreSQL driver exists.
 
+## Privacy-safe execution observation
+
+The generic `MySqlDriverFactory.create(options)` path accepts an optional
+`MySqlConnectionExtensions` value on `MySqlConnectionOptions`. Its
+`executionObserver` receives synchronous lifecycle events without receiving the
+SQL operation payload.
+
+```typescript
+import {
+  ConnectionConfig, MySqlConnection, MySqlConnectionExtensions,
+  MySqlConnectionOptions, MySqlDriverFactory, MySqlExecutionEvent,
+  MySqlExecutionObserver
+} from '@arkdb/mysql';
+
+class LifecycleObserver implements MySqlExecutionObserver {
+  lastEvent: MySqlExecutionEvent | null = null;
+
+  onEvent(event: MySqlExecutionEvent): void {
+    this.lastEvent = event;
+  }
+}
+
+export function createObservedConnection(config: ConnectionConfig,
+  password: string): MySqlConnection {
+  const extensions = new MySqlConnectionExtensions(new LifecycleObserver());
+  return new MySqlDriverFactory().create(
+    new MySqlConnectionOptions(config, password, extensions));
+}
+```
+
+Each accepted command has one start event and one terminal event. The terminal
+event occurs only after the final awaited stream sink and any cancellation,
+deadline or close cleanup have converged. Session reset reports its original
+generation; a later command observes the advanced generation. Event serials are
+monotonic only within one physical connection.
+
+The event contains exactly `type`, `serial`, `generation`, `commandKind`,
+`monotonicTimeMs` and `durationMs`. It never contains SQL, parameter values or
+names, credentials, host/user/schema identity, connection handles, result data,
+errors, messages, native codes, SQLSTATE or arbitrary metadata. A throwing
+observer is removed before a tokenized warning is logged; the operation is not
+failed or replayed, and the observer receives no later events. Driver-created
+cancellation control connections are unobserved. The legacy direct constructor,
+`createConnection(config, password)` and `createMySqlConnection(config, password)`
+remain unchanged and observer-free. The public constructor does not accept
+extensions or a custom execution clock; observation is configured only by
+`MySqlDriverFactory.create(options)`.
+
+Factory subclasses keep their established generic-creation behavior:
+`create(options)` delegates to an overridden `createConnection(config, password)`
+when no observer is present, including an empty extensions container. Observed
+creation uses the protected `createObservedConnection` hook, which subclasses
+can override for specialized connection construction or deterministic tests.
+That hook routes through a one-shot internal capability helper that is not
+exported by the package entry. `MySqlConnection` subclasses have no observer
+initializer. Wrong-capability, repeated, and post-reservation initialization
+attempts reject without replacing the connection's command serial or generation.
+
 ## Optional typed prepared statements
 
 Built-in connections expose `mysqlFeatures.prepared`; the factory's

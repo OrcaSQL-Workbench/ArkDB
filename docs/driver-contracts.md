@@ -62,6 +62,43 @@ compatible with 1.0.1, not replacements by their minimal/generic core counterpar
 Portable consumers use the distinct `CoreDbConnection`, `CoreDbDriverFactory`,
 `CoreDbExecutionController` and `CoreMetadataProvider` exports from the same HAR.
 
+`MySqlConnectionOptions` has an optional third `MySqlConnectionExtensions`
+argument. Its `executionObserver` is invoked synchronously through
+`MySqlExecutionObserver.onEvent(event)` for connections created by the generic
+`factory.create(options)` path. The native
+`createConnection(config, password)` and `createMySqlConnection(config, password)`
+interfaces remain observer-free. The exported `MySqlConnection` constructor
+retains its established config/password plus internal transport/timer/control
+test seams; it accepts neither extensions nor a custom execution clock.
+When no observer is configured, generic `create(options)` still delegates to
+the factory's overridable `createConnection(config, password)` method exactly as
+before. The opt-in observer path uses the protected overridable
+`createObservedConnection` hook, so factory subclasses can retain specialized
+construction and deterministic test clocks without widening the public
+connection constructor.
+
+Observer activation is a one-shot internal capability operation. The capability
+identity and helper are not exported by `mysql/Index.ets`, and
+`MySqlConnection` exposes no public or protected observer initializer to
+consumer subclasses. A wrong capability, repeated initialization, or
+initialization after the first command reservation is rejected without replacing
+the existing command gate, serial or generation.
+
+Each accepted physical-connection command produces one start event after gate
+reservation and one terminal event after ownership release. Cancellation,
+deadlines, close cleanup, session reset and the final awaited stream sink must
+converge before the terminal event. Events contain only the fixed fields
+`type`, connection-local `serial`, `generation`, `commandKind`,
+`monotonicTimeMs` and `durationMs`. They contain no SQL, parameters, credentials,
+connection identity, result data, errors, native codes, SQLSTATE or arbitrary
+metadata. Serial values are local to one physical connection; a pool that needs
+cross-connection correlation owns its own envelope.
+
+Observer exceptions never change or replay the database operation. The failing
+observer is removed before the driver emits a tokenized warning, and it receives
+no retry or later event. Internal cancellation control connections do not inherit
+the target connection's observer.
+
 MySQL-specific prepared statements use the separate optional
 `mysqlFeatures.prepared` interface. `requireMySqlFeatures` reports a missing
 container with the canonical `Unsupported` error; callers still check the

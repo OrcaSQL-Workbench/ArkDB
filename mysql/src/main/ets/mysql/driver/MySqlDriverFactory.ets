@@ -1,10 +1,13 @@
 import {
-  DbConnection, DbStreamingConnection, DbDriverFactory
+  DbConnection, DbStreamingConnection, DbDriverFactory, monotonicNowMs
 } from '@arkdb/core';
 import { ConnectionConfig } from '../model/ConnectionConfig';
+import { MySqlConnectionExtensions } from './MySqlConnectionExtensions';
 import { MySqlConnectionOptions } from './MySqlConnectionOptions';
 import { MySqlDbConnection, MySqlDbDriverFactory, MySqlDriverCapabilities } from './MySqlContracts';
-import { MySqlConnection } from '../MySqlConnection';
+import {
+  MySqlConnection, initializeMySqlExecutionObserverInternal
+} from '../MySqlConnection';
 import { MySqlExecutionController } from '../execution/MySqlExecutionController';
 import { MySqlMetadataProvider } from '../metadata/MySqlMetadataProvider';
 import { MySqlServerMetricsProvider } from '../metrics/MySqlServerMetricsProvider';
@@ -15,11 +18,26 @@ export class MySqlDriverFactory implements DbDriverFactory<MySqlConnectionOption
   readonly capabilities: MySqlDriverCapabilities = mysqlCapabilities();
 
   create(options: MySqlConnectionOptions): MySqlConnection {
-    return this.createConnection(options.config, options.password);
+    const extensions = options.extensions;
+    if (extensions === undefined || extensions.executionObserver === undefined) {
+      return this.createConnection(options.config, options.password);
+    }
+    return this.createObservedConnection(options.config, options.password, extensions);
   }
 
   createConnection(config: ConnectionConfig, password: string): MySqlConnection {
     return new MySqlConnection(config, password);
+  }
+
+  protected createObservedConnection(config: ConnectionConfig, password: string,
+    extensions: MySqlConnectionExtensions,
+    executionClock: () => number = monotonicNowMs): MySqlConnection {
+    const connection = new MySqlConnection(config, password);
+    if (extensions.executionObserver !== undefined) {
+      initializeMySqlExecutionObserverInternal(
+        connection, extensions.executionObserver, executionClock);
+    }
+    return connection;
   }
 
   createMetadataProvider(connection: DbConnection): MySqlMetadataProvider {

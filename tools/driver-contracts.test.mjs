@@ -72,6 +72,57 @@ test('shared contracts describe binary procedure output parameters', async () =>
   assert.doesNotMatch(index, /\bMySqlProcedureOutput\b/);
 });
 
+test('shared contracts describe the privacy-safe execution observer', async () => {
+  const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
+  const index = await readFile(join(ROOT, 'mysql', 'Index.ets'), 'utf8');
+  const connection = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'MySqlConnection.ets'), 'utf8');
+  const factory = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'driver', 'MySqlDriverFactory.ets'), 'utf8');
+  const observer = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'diagnostics', 'MySqlExecutionObserver.ets'), 'utf8');
+  assert.match(contracts, /\bMySqlConnectionExtensions\b/);
+  assert.match(contracts, /\bMySqlExecutionObserver\.onEvent\b/);
+  assert.match(contracts, /\bone start\b[\s\S]{0,160}\bone terminal\b/i);
+  assert.match(contracts, /\bmonotonicTimeMs\b/);
+  assert.match(contracts, /\bdurationMs\b/);
+  assert.match(contracts, /\bno SQL\b[\s\S]{0,180}\bcredentials\b/i);
+  assert.match(contracts, /\bremoved before\b[\s\S]{0,120}\btokenized warning\b/i);
+  assert.match(contracts, /\boverridable `createConnection\b/);
+  assert.match(contracts, /\bprotected overridable[\s\S]{0,80}`createObservedConnection`/);
+  assert.match(contracts, /\bone-shot internal capability\b/i);
+  assert.match(contracts, /\bno public or protected observer initializer\b/i);
+  assert.match(contracts, /\bwrong capability\b/i);
+  assert.match(contracts, /\bserial or generation\b/i);
+  assert.match(index, /\bMySqlConnectionExtensions\b/);
+  assert.match(index, /\bMySqlExecutionObserver\b/);
+  assert.match(index, /\bMySqlExecutionEventType\b/);
+  assert.match(index, /\bMySqlCommandKind\b/);
+  const constructor = connection.match(
+    /constructor\(config: ConnectionConfig, password: string,[\s\S]*?createControlConnection\?: \(\) => DbConnection\) \{/);
+  assert.notEqual(constructor, null);
+  assert.doesNotMatch(constructor[0], /\b(?:extensions|executionClock)\b/);
+  assert.doesNotMatch(connection, /\bprotected initializeExecutionObserver\b/);
+  assert.match(connection, /class MySqlExecutionObserverCapability/);
+  assert.match(connection, /const mysqlExecutionObserverCapability/);
+  assert.match(connection, /export function initializeMySqlExecutionObserverInternal\(/);
+  assert.match(connection, /export function initializeMySqlExecutionObserverWithCapabilityInternal\(/);
+  assert.match(factory,
+    /if \(extensions === undefined \|\| extensions\.executionObserver === undefined\)[\s\S]{0,100}return this\.createConnection\(options\.config, options\.password\)/);
+  assert.match(factory, /protected createObservedConnection\(/);
+  assert.match(factory,
+    /initializeMySqlExecutionObserverInternal\([\s\S]{0,160}extensions\.executionObserver[\s\S]{0,80}executionClock\)/);
+  assert.match(connection,
+    /createDefaultControlConnection\(\): MySqlConnection[\s\S]{0,420}new MySqlConnection\(controlConfig, this\.password/);
+  assert.doesNotMatch(index,
+    /\b(?:ObservedMySqlConnection|initializeExecutionObserver|initializeMySqlExecutionObserverInternal|MySqlExecutionObserverCapability|MySqlExecutionDispatcher)\b/);
+  const eventStart = observer.indexOf('export class MySqlExecutionEvent');
+  const observerStart = observer.indexOf('export interface MySqlExecutionObserver');
+  const eventShape = observer.slice(eventStart, observerStart);
+  assert.doesNotMatch(eventShape,
+    /\b(?:sql|parameters?|password|host|user|schema|config|error|message|code|sqlState|metadata)\b/i);
+});
+
 test('transaction runner observes the same promise returned to detached callers', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'execution', 'MySqlTransactionRunner.ets'), 'utf8');

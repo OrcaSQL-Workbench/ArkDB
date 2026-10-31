@@ -2,6 +2,7 @@ import authenticationTest from './auth/Authentication.test';
 import connectionDiagnosticsTest from './connection/ConnectionDiagnostics.test';
 import connectionOpeningTest from './connection/ConnectionOpening.test';
 import connectionStateTest from './connection/ConnectionState.test';
+import mySqlExecutionObserverTest from './connection/MySqlExecutionObserver.test';
 import mySqlSessionInitializationTest from './connection/MySqlSessionInitialization.test';
 import mySqlSessionResetTest from './connection/MySqlSessionReset.test';
 import mySqlExecutionControllerTest from './execution/MySqlExecutionController.test';
@@ -33,6 +34,7 @@ export default function testsuite(): void {
   connectionDiagnosticsTest();
   connectionOpeningTest();
   connectionStateTest();
+  mySqlExecutionObserverTest();
   mySqlSessionInitializationTest();
   mySqlSessionResetTest();
   mySqlExecutionControllerTest();

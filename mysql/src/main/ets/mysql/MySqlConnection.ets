@@ -14,6 +14,9 @@ import {
   MySqlQueryResultSink, MySqlResultSinkAdapter, mysqlExecutionSummary, mysqlSessionStatus
 } from './model/MySqlQueryStream';
 import { MySqlDbConnection } from './driver/MySqlContracts';
+import {
+  MySqlExecutionDispatcher, MySqlExecutionObserver
+} from './diagnostics/MySqlExecutionObserver';
 import { TcpTransport } from './transport/TcpTransport';
 import { PacketChannel, MysqlPacket, MysqlPacketSource } from './protocol/PacketChannel';
 import { PacketWriter } from './protocol/PacketWriter';
@@ -81,6 +84,19 @@ import { BinaryRowDecoder } from './value/BinaryRowDecoder';
 
 const MAX_MYSQL_DEADLINE_TIMER_DELAY_MS: number = 2147483647;
 
+class MySqlExecutionObserverCapability {}
+
+const mysqlExecutionObserverCapability: Object =
+  new MySqlExecutionObserverCapability();
+
+type MySqlExecutionObserverBinding =
+  (capability: Object, observer: MySqlExecutionObserver,
+    executionClock: () => number) => void;
+
+const mySqlExecutionObserverBindings:
+  WeakMap<MySqlConnection, MySqlExecutionObserverBinding> =
+  new WeakMap<MySqlConnection, MySqlExecutionObserverBinding>();
+
 /**
  * A single MySQL/MariaDB connection over TCP with an optional in-handshake TLS upgrade.
  * Orchestrates: connect → handshake → mysql_native_password auth → commands.
@@ -131,6 +147,21 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.password = password;
     this.transport = transport;
     this.timers = timers;
+    mySqlExecutionObserverBindings.set(this,
+      (capability: Object, observer: MySqlExecutionObserver,
+        executionClock: () => number): void => {
+        if (capability !== mysqlExecutionObserverCapability) {
+          throw ArkDbError.protocol('Invalid MySQL execution observer capability.');
+        }
+        if (this.commandGate.hasReserved) {
+          mySqlExecutionObserverBindings.delete(this);
+          throw ArkDbError.protocol(
+            'Execution observation must be configured before the first command.');
+        }
+        mySqlExecutionObserverBindings.delete(this);
+        this.commandGate = new MySqlCommandGate(
+          new MySqlExecutionDispatcher(observer, executionClock));
+      });
     this.createControlConnection = createControlConnection !== undefined ? createControlConnection :
       (): DbConnection => this.createDefaultControlConnection();
     this.features.streaming = new MySqlCoreStreamingConnection(this,
@@ -1494,7 +1525,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     try { this.finishCommand(scope); } catch (error) {
       cleanup.push(toCleanupError(error as Object));
     }
-    this.preparedOperation = null;
+    if (this.preparedOperation === settlement) this.preparedOperation = null;
     if (primary !== null) {
       throw operationFailure(primary, cleanup, executionOutcome);
     }
@@ -1557,8 +1588,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private releaseCompletedCommand(): void {
     const scope = this.completedScope;
     if (scope !== null && this.cancelTask === null && !this.closePending) {
-      this.commandGate.release(scope);
       this.completedScope = null;
+      this.commandGate.release(scope);
     }
   }
 
@@ -2121,6 +2152,25 @@ export function synchronizationRefreshFailure(error: Object): ArkDbError {
 /** Convenience factory mirroring the documented public API. */
 export function createMySqlConnection(config: ConnectionConfig, password: string): MySqlConnection {
   return new MySqlConnection(config, password);
+}
+
+export function initializeMySqlExecutionObserverInternal(connection: MySqlConnection,
+  observer: MySqlExecutionObserver,
+  executionClock: () => number = monotonicNowMs): void {
+  initializeMySqlExecutionObserverWithCapabilityInternal(connection,
+    mysqlExecutionObserverCapability, observer, executionClock);
+}
+
+export function initializeMySqlExecutionObserverWithCapabilityInternal(
+  connection: MySqlConnection, capability: Object,
+  observer: MySqlExecutionObserver,
+  executionClock: () => number = monotonicNowMs): void {
+  const binding = mySqlExecutionObserverBindings.get(connection);
+  if (binding === undefined) {
+    throw ArkDbError.protocol(
+      'Execution observation is unavailable after initialization or command reservation.');
+  }
+  binding(capability, observer, executionClock);
 }
 
 function firstByte(payload: Uint8Array): number {

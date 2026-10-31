@@ -35,6 +35,11 @@ export interface MySqlCommandScope {
   readonly ownerToken: Object;
 }
 
+export interface MySqlCommandLifecycleObserver {
+  onStart(scope: MySqlCommandScope): void;
+  onTerminal(scope: MySqlCommandScope): void;
+}
+
 class CommandOwnerToken {}
 
 class CommandScope implements MySqlCommandScope {
@@ -57,6 +62,11 @@ export class MySqlCommandGate {
   private serial: number = 0;
   private sessionGeneration: number = 0;
   private active: CommandScope | null = null;
+  private lifecycleObserver: MySqlCommandLifecycleObserver | null;
+
+  constructor(lifecycleObserver?: MySqlCommandLifecycleObserver) {
+    this.lifecycleObserver = lifecycleObserver === undefined ? null : lifecycleObserver;
+  }
 
   get current(): MySqlCommandScope | null {
     return this.active;
@@ -64,6 +74,10 @@ export class MySqlCommandGate {
 
   get generation(): number {
     return this.sessionGeneration;
+  }
+
+  get hasReserved(): boolean {
+    return this.serial > 0;
   }
 
   advanceGeneration(): void {
@@ -85,6 +99,7 @@ export class MySqlCommandGate {
     this.serial += 1;
     const scope = new CommandScope(this.serial, this.sessionGeneration, kind);
     this.active = scope;
+    if (this.lifecycleObserver !== null) this.lifecycleObserver.onStart(scope);
     return scope;
   }
 
@@ -122,5 +137,6 @@ export class MySqlCommandGate {
     this.active!.phase = MySqlCommandPhase.Settled;
     this.active = null;
     if (advanceGeneration) this.sessionGeneration += 1;
+    if (this.lifecycleObserver !== null) this.lifecycleObserver.onTerminal(scope);
   }
 }

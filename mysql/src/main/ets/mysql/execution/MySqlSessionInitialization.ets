@@ -7,6 +7,11 @@ import { Collation, ColumnType } from '../protocol/Constants';
 import { PacketReader } from '../protocol/PacketReader';
 import { mysqlUtf8BytesExpression } from '../value/MySqlSqlHelpers';
 
+export const MYSQL_SESSION_CHARACTER_SET_SQL =
+  'SET NAMES utf8mb4 COLLATE utf8mb4_general_ci';
+export const MYSQL_SESSION_FINGERPRINT_SQL =
+  'SELECT DATABASE(), @@SESSION.sql_mode, @@SESSION.character_set_client, @@SESSION.time_zone';
+
 export class MySqlSessionFingerprint {
   readonly database: string | null;
   readonly sqlMode: string;

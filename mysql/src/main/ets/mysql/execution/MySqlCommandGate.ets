@@ -9,6 +9,7 @@ export enum MySqlCommandKind {
   Transaction = 'transaction',
   Prepare = 'prepare',
   StatementClose = 'statement_close',
+  Reset = 'reset',
   Close = 'close'
 }
 
@@ -43,6 +44,7 @@ class CommandScope implements MySqlCommandScope {
   readonly ownerToken: Object = new CommandOwnerToken();
   phase: MySqlCommandPhase = MySqlCommandPhase.Reserved;
   deadlineExpired: boolean = false;
+  advanceGeneration: boolean = false;
 
   constructor(serial: number, generation: number, kind: MySqlCommandKind) {
     this.serial = serial;
@@ -69,6 +71,11 @@ export class MySqlCommandGate {
       throw ArkDbError.protocol('The current command must settle before changing the session generation.');
     }
     this.sessionGeneration += 1;
+  }
+
+  advanceGenerationOnRelease(scope: MySqlCommandScope): void {
+    this.assertOwner(scope);
+    this.active!.advanceGeneration = true;
   }
 
   reserve(kind: MySqlCommandKind): MySqlCommandScope {
@@ -111,7 +118,9 @@ export class MySqlCommandGate {
 
   release(scope: MySqlCommandScope): void {
     this.assertOwner(scope);
+    const advanceGeneration = this.active!.advanceGeneration;
     this.active!.phase = MySqlCommandPhase.Settled;
     this.active = null;
+    if (advanceGeneration) this.sessionGeneration += 1;
   }
 }

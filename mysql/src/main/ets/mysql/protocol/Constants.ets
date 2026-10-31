@@ -40,6 +40,7 @@ export class Command {
   static readonly PING = 0x0e;
   static readonly STMT_PREPARE = 0x16;
   static readonly STMT_CLOSE = 0x19;
+  static readonly RESET_CONNECTION = 0x1f;
 }
 
 /** Generic packet-type sentinels (first payload byte of a response). */

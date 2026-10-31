@@ -3,6 +3,7 @@ import connectionDiagnosticsTest from './connection/ConnectionDiagnostics.test';
 import connectionOpeningTest from './connection/ConnectionOpening.test';
 import connectionStateTest from './connection/ConnectionState.test';
 import mySqlSessionInitializationTest from './connection/MySqlSessionInitialization.test';
+import mySqlSessionResetTest from './connection/MySqlSessionReset.test';
 import mySqlExecutionControllerTest from './execution/MySqlExecutionController.test';
 import mySqlCancellationTest from './execution/MySqlCancellation.test';
 import mySqlBatchExecutorTest from './execution/MySqlBatchExecutor.test';
@@ -32,6 +33,7 @@ export default function testsuite(): void {
   connectionOpeningTest();
   connectionStateTest();
   mySqlSessionInitializationTest();
+  mySqlSessionResetTest();
   mySqlExecutionControllerTest();
   mySqlCancellationTest();
   mySqlBatchExecutorTest();

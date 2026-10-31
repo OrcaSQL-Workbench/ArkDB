@@ -8,7 +8,7 @@ import {
   QueryResultSink, MySqlConnectionFeatures, requireMySqlFeatures, MySqlParameter,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameterType, MySqlParameterValue,
   MySqlPreparedExecutor, MySqlPreparedStatement,
-  MySqlSession, MySqlBatchOptions, MySqlDeadlineOptions, MySqlDeadlineExecutor,
+  MySqlSession, MySqlBatchOptions, MySqlDeadlineOptions, MySqlDeadlineExecutor, MySqlSessionController,
   MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
   mysqlPlaceholders, mapMySqlRows, createMySqlConnection,
   CoreQueryResultSink, CoreQueryResultMeta, CoreQueryRowChunk, CoreQueryResultSummary
@@ -187,6 +187,25 @@ export default function publicInterfaceTest(): void {
         requireMySqlFeatures(connection).deadlines;
       expect(deadlines !== undefined).assertTrue();
       await connection.close();
+    });
+
+    it('sessionResetPublicImportsRemainOptionalAndStateChecked', 0, async () => {
+      const optional: MySqlConnectionFeatures = new MySqlConnectionFeatures();
+      const omitted: MySqlSessionController | undefined = optional.session;
+      expect(omitted === undefined).assertTrue();
+
+      const connection = new MySqlDriverFactory().createConnection(new ConnectionConfig(), '');
+      const session: MySqlSessionController | undefined =
+        requireMySqlFeatures(connection).session;
+      expect(session !== undefined).assertTrue();
+      if (session === undefined) throw ArkDbError.unsupported('Expected session reset support.');
+      const beforeConnect = await publicFailure((): Promise<void> => session.reset());
+      expect(beforeConnect.kind).assertEqual(ArkDbErrorKind.Protocol);
+      expect(connection.state).assertEqual(ConnectionState.Idle);
+      await connection.close();
+      const afterClose = await publicFailure((): Promise<void> => session.reset());
+      expect(afterClose.kind).assertEqual(ArkDbErrorKind.Protocol);
+      expect(connection.state).assertEqual(ConnectionState.Closed);
     });
 
     it('preparedPublicImportsCompile', 0, () => {

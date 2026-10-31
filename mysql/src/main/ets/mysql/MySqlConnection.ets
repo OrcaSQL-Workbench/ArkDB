@@ -42,6 +42,7 @@ import {
   MySqlNamedExecutor, MySqlNamedExecutorHost, MySqlPreparedNamedExecutor
 } from './execution/MySqlNamedExecutor';
 import { MySqlConnectionDeadlineExecutor } from './execution/MySqlDeadlineExecutor';
+import { MySqlConnectionSessionController } from './execution/MySqlSessionController';
 import {
   MYSQL_COMMIT_NO_CHAIN_NO_RELEASE, MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE,
   MySqlConnectionTransactionRunner, MySqlTransactionRunnerHost
@@ -50,7 +51,8 @@ import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from './execution/MySqlCommandGate';
 import {
-  MySqlSessionFingerprint, MySqlSessionFingerprintRowDecoder, mysqlSessionFingerprint, mysqlSessionInitializationSql
+  MYSQL_SESSION_CHARACTER_SET_SQL, MYSQL_SESSION_FINGERPRINT_SQL, MySqlSessionFingerprint,
+  MySqlSessionFingerprintRowDecoder, mysqlSessionFingerprint, mysqlSessionInitializationSql
 } from './execution/MySqlSessionInitialization';
 import {
   MySqlExecutionOutcome, MySqlOperationError, isMySqlServerRejection
@@ -86,6 +88,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private transport: TcpTransport;
   private timers: ConnectionTimerPort;
   private opening: ConnectionDeadline | null = null;
+  private resetting: ConnectionDeadline | null = null;
   private closing: Promise<void> | null = null;
   private channel: PacketChannel | null = null;
   private clientCaps: number = 0;
@@ -142,6 +145,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       (): MySqlNamedExecutor => this.namedExecutor());
     this.mysqlFeatures.prepared = new MySqlConnectionPreparedExecutor(
       (): MySqlPreparedExecutor => this.preparedExecutor());
+    this.mysqlFeatures.session = new MySqlConnectionSessionController(
+      (): Promise<void> => this.resetSession());
     this.mysqlFeatures.transactions = new MySqlConnectionTransactionRunner(this.transactionHost());
   }
 
@@ -174,8 +179,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.commandGate.assertOwner(scope);
     this.requireReady();
     let fingerprint: MySqlSessionFingerprint | null = null;
-    const command = buildComQuery('SELECT DATABASE(), @@SESSION.sql_mode, ' +
-      '@@SESSION.character_set_client, @@SESSION.time_zone');
+    const command = buildComQuery(MYSQL_SESSION_FINGERPRINT_SQL);
     await this.bufferedCommandOwned(scope, command, async (channel: PacketChannel): Promise<QueryResult> => {
       const result = await parseBufferedResultStream(channel, this.clientCaps,
         new MySqlSessionFingerprintRowDecoder());
@@ -194,15 +198,16 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   private internalPreparedExecutor(): InternalPreparedExecutor {
     this.requireReady();
-    if (this.prepared === null) {
-      this.prepared = new InternalPreparedExecutor(this.preparedHost());
-    }
+    if (this.prepared !== null) return this.prepared;
+    this.requireExecutorCreationAllowed();
+    this.prepared = new InternalPreparedExecutor(this.preparedHost());
     return this.prepared;
   }
 
   protected batchExecutor(): MySqlBatchExecutor {
     if (this.batch !== null) return this.batch;
     this.requireReady();
+    this.requireExecutorCreationAllowed();
     this.batch = new MySqlPreparedBatchExecutor(this.preparedHost(),
       (): DatabaseSessionStatus => this.status.clone());
     return this.batch;
@@ -210,10 +215,16 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   protected namedExecutor(): MySqlNamedExecutor {
     this.requireReady();
-    if (this.named === null) {
-      this.named = new MySqlPreparedNamedExecutor(this.preparedHost());
-    }
+    if (this.named !== null) return this.named;
+    this.requireExecutorCreationAllowed();
+    this.named = new MySqlPreparedNamedExecutor(this.preparedHost());
     return this.named;
+  }
+
+  private requireExecutorCreationAllowed(): void {
+    if (this.commandGate.current !== null) {
+      throw ArkDbError.protocol('Another command already owns this connection.');
+    }
   }
 
   private transactionHost(): MySqlTransactionRunnerHost {
@@ -281,7 +292,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       throw ArkDbError.protocol('connect() called in state ' + this.connState);
     }
     this.commandGate.advanceGeneration();
-    this.invalidatePreparedCache();
+    this.invalidatePreparedState();
     this.prepared = null;
     const scope = this.commandGate.reserve(MySqlCommandKind.Connect);
     try {
@@ -388,7 +399,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       Logger.e(LogTag.Conn, 'connect failed host=' + Logger.mask(this.config.host) +
         ' kind=' + String(oe.kind) + ' error=' + Logger.errorToken(oe));
       this.channel = null;
-      this.invalidatePreparedCache();
+      this.invalidatePreparedState();
       try {
         await this.transport.abort(oe);
       } catch (cleanup) {
@@ -600,6 +611,133 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     }
   }
 
+  private async resetSession(): Promise<void> {
+    this.requireReady();
+    const deadline = new ConnectionDeadline(this.config.connectTimeoutMs, this.timers);
+    let scope: MySqlCommandScope;
+    try {
+      scope = this.commandGate.reserve(MySqlCommandKind.Reset);
+    } catch (error) {
+      deadline.dispose();
+      throw error as Error;
+    }
+    this.resetting = deadline;
+    let accepted = false;
+    let primary: Object | null = null;
+    let reusableRejection = false;
+    const cleanup: ArkDbError[] = [];
+    try {
+      await this.executeResetOkOwned(scope,
+        new PacketWriter().writeUInt8(Command.RESET_CONNECTION).toUint8Array(), true, deadline);
+      accepted = true;
+      this.invalidatePreparedState();
+      this.commandGate.advanceGenerationOnRelease(scope);
+      await this.reinitializeSessionOwned(scope, deadline);
+    } catch (error) {
+      const caught = error as Object;
+      primary = caught instanceof ArkDbError && caught.kind === ArkDbErrorKind.Timeout ?
+        ArkDbError.timeout('MySQL session reset timed out.') : caught;
+      const failure = toArkDbError(primary);
+      reusableRejection = !accepted &&
+        (failure.kind === ArkDbErrorKind.Unsupported || isMySqlServerRejection(failure));
+      if (!reusableRejection) {
+        this.commandGate.advanceGenerationOnRelease(scope);
+        const retirement = await this.retireResetScope(scope);
+        for (const cleanupFailure of retirement) cleanup.push(cleanupFailure);
+      }
+    }
+    try {
+      deadline.dispose();
+    } catch (error) {
+      cleanup.push(toCleanupError(error as Object));
+    }
+    if (this.resetting === deadline) this.resetting = null;
+    try {
+      this.finishCommand(scope);
+    } catch (error) {
+      cleanup.push(toCleanupError(error as Object));
+    }
+    if (primary !== null) {
+      const failure = toArkDbError(primary);
+      if (reusableRejection && cleanup.length === 0 &&
+        failure.kind === ArkDbErrorKind.Unsupported) throw primary as Error;
+      throw operationFailure(primary, cleanup,
+        reusableRejection ? MySqlExecutionOutcome.ServerRejected : MySqlExecutionOutcome.Unknown);
+    }
+    if (cleanup.length > 0) {
+      throw operationFailure(cleanup[0], cleanup.slice(1), MySqlExecutionOutcome.Completed);
+    }
+  }
+
+  private async reinitializeSessionOwned(scope: MySqlCommandScope,
+    deadline: ConnectionDeadline): Promise<void> {
+    await this.executeResetOkOwned(scope,
+      buildComQuery(MYSQL_SESSION_CHARACTER_SET_SQL), false, deadline);
+    const database = this.config.defaultSchema;
+    if (database !== undefined && database.length > 0) {
+      const command = new PacketWriter().writeUInt8(Command.INIT_DB).writeString(database).toUint8Array();
+      await this.executeResetOkOwned(scope, command, false, deadline);
+    }
+    if (!this.skipAutocommitSetup && this.status.autocommit !== this.config.autocommit) {
+      await this.executeResetOkOwned(scope, buildComQuery(
+        this.config.autocommit ? 'SET autocommit = 1' : 'SET autocommit = 0'), false, deadline);
+    }
+    for (const sql of mysqlSessionInitializationSql(this.config.session)) {
+      await this.executeResetOkOwned(scope, buildComQuery(sql), false, deadline);
+    }
+    const fingerprint = await deadline.wait((): Promise<MySqlSessionFingerprint> =>
+      this.readMySqlSessionFingerprint(scope));
+    deadline.remainingMs();
+    this.validateResetFingerprint(fingerprint);
+  }
+
+  private validateResetFingerprint(fingerprint: MySqlSessionFingerprint): void {
+    if (fingerprint.characterSetClient !== 'utf8mb4') {
+      throw ArkDbError.protocol(
+        'MySQL session reset did not restore character_set_client=utf8mb4.');
+    }
+    const database = this.config.defaultSchema;
+    if (database !== undefined && database.length > 0) {
+      if (fingerprint.database !== database) {
+        throw ArkDbError.protocol('MySQL session reset did not restore the configured default database.');
+      }
+      return;
+    }
+    if (fingerprint.database !== null && fingerprint.database.length > 0) {
+      throw ArkDbError.protocol('MySQL session reset retained an unexpected default database.');
+    }
+  }
+
+  private async executeResetOkOwned(scope: MySqlCommandScope, command: Uint8Array,
+    resetCommand: boolean, deadline: ConnectionDeadline): Promise<void> {
+    const channel = this.requireOwnedChannel(scope);
+    this.commandGate.setPhase(scope, MySqlCommandPhase.Resetting);
+    channel.resetSequence();
+    await deadline.wait((): Promise<void> => channel.writePacket(command));
+    deadline.remainingMs();
+    const response = await deadline.wait((): Promise<MysqlPacket> => channel.readPacket());
+    deadline.remainingMs();
+    if (resetCommand) this.expectResetOk(response);
+    else this.expectOk(response);
+  }
+
+  private async retireResetScope(scope: MySqlCommandScope): Promise<ArkDbError[]> {
+    const cleanup: ArkDbError[] = [];
+    this.commandGate.assertOwner(scope);
+    this.commandGate.advanceGenerationOnRelease(scope);
+    if (this.closing === null) {
+      this.closePending = true;
+      this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+      this.closing = this.closeWithScope(scope, false, false);
+    }
+    try {
+      await this.closing;
+    } catch (error) {
+      cleanup.push(toCleanupError(error as Object));
+    }
+    return cleanup;
+  }
+
   private async executeOkOwned(scope: MySqlCommandScope, command: Uint8Array): Promise<void> {
     const channel = this.requireOwnedChannel(scope);
     let reading = false;
@@ -612,6 +750,18 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } catch (error) {
       throw await this.classifyCommandFailure(scope, error as Object, reading);
     }
+  }
+
+  private expectResetOk(packet: MysqlPacket): void {
+    if (firstByte(packet.payload) === PacketType.ERR) {
+      const error = parseErr(packet.payload, this.clientCaps);
+      if (error.code === 1047 || error.code === 1235) {
+        throw new ArkDbError(ArkDbErrorKind.Unsupported,
+          'Server does not support COM_RESET_CONNECTION.', error.code, error.sqlState);
+      }
+      throw ArkDbError.server(error.message, error.code, error.sqlState);
+    }
+    this.expectOk(packet);
   }
 
   async changeContext(context: DatabaseContext): Promise<void> {
@@ -767,7 +917,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       this.connState = ConnectionState.Closed;
       this.status.known = false;
       this.channel = null;
-      this.invalidatePreparedCache();
+      this.invalidatePreparedState();
       const failure = primary !== null ? toArkDbError(primary) :
         ArkDbError.cancelled('Connection retired after an unacknowledged cancellation.');
       if (primary === null) primary = failure;
@@ -847,11 +997,19 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.connState = ConnectionState.Closed;
     this.status.known = false;
     this.channel = null;
-    this.invalidatePreparedCache();
+    this.invalidatePreparedState();
     if (this.opening !== null) {
       try {
         this.opening.cancel(ArkDbError.cancelled('Connection closed while opening.'));
       } catch (error) { primary = error as Object; }
+    }
+    if (this.resetting !== null) {
+      try {
+        this.resetting.cancel(ArkDbError.cancelled('Connection closed while resetting the session.'));
+      } catch (error) {
+        if (primary === null) primary = error as Object;
+        else cleanupErrors.push(toCleanupError(error as Object));
+      }
     }
     if (channel !== null && polite) {
       try {
@@ -1156,7 +1314,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       await this.settleDeadlineCancellationAttempts(settlement);
       const operationSettled = await this.joinDeadlineOperationAfterAbort(observed);
       await this.settleDeadlineCancellationAttempts(settlement);
-      this.invalidatePreparedCache();
+      this.invalidatePreparedState();
       this.appendDeadlineCancellationFailures(cleanup, settlement);
       if (observed.failure !== null) this.appendDeadlineCleanup(cleanup, observed.failure);
       if (!operationSettled) {
@@ -1274,17 +1432,18 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return cleanup;
   }
 
-  private invalidatePreparedCache(): void {
+  private invalidatePreparedState(): void {
     this.batch = null;
     this.named = null;
     if (this.prepared !== null) this.prepared.invalidate();
+    this.prepared = null;
   }
 
   private async retirePreparedSession(error: ArkDbError): Promise<void> {
     this.connState = ConnectionState.Closed;
     this.status.known = false;
     this.channel = null;
-    this.invalidatePreparedCache();
+    this.invalidatePreparedState();
     await this.transport.abort(error);
   }
 
@@ -1471,7 +1630,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     if (this.connState === ConnectionState.Error) {
       this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
       this.channel = null;
-      this.invalidatePreparedCache();
+      this.invalidatePreparedState();
       try {
         await this.transport.close();
       } catch (cleanup) {

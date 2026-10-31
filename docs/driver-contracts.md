@@ -90,6 +90,22 @@ close remains idempotent and does not add a synthetic `Protocol` failure. This
 driver-local feature is the only statement interface that starts cancellation
 timers; core `QueryOptions.statementTimeoutMs` remains validation-only.
 
+The optional root `mysqlFeatures.session` interface exposes
+`MySqlSessionController.reset()`. It uses `COM_RESET_CONNECTION`, shares the
+connection's single command owner, and is unavailable from callback-scoped
+transaction sessions. A successful reset advances the physical-session
+generation, invalidates every explicit and cached prepared statement, restores
+`utf8mb4`/`utf8mb4_general_ci`, the configured default database, autocommit and
+session options, then verifies an owned session fingerprint before returning
+with known status. The fingerprint must report `character_set_client=utf8mb4`
+and either the exact configured database or no database when no default is
+configured; a residual or mismatched database closes the physical connection.
+An unsupported server reports the canonical
+`Unsupported` error without falling back to `CHANGE_USER`, reconnecting or
+replaying SQL. A timeout, malformed response or uncertain transport outcome
+closes the physical connection instead of returning it for reuse. The feature
+is additive: core and old custom MySQL connections acquire no required method.
+
 MySQL also exposes the optional `mysqlFeatures.transactions`
 `MySqlTransactionRunner`. It accepts `MySqlTransactionOptions`, owns one
 connection command scope across setup, callback query/stream/savepoint commands

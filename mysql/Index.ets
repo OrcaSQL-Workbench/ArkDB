@@ -49,6 +49,7 @@ export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
 export type { MySqlBatchExecutor } from './src/main/ets/mysql/execution/MySqlBatchExecutor';
 export type { MySqlDeadlineExecutor } from './src/main/ets/mysql/execution/MySqlDeadlineExecutor';
 export type { MySqlNamedExecutor } from './src/main/ets/mysql/execution/MySqlNamedExecutor';
+export type { MySqlSessionController } from './src/main/ets/mysql/execution/MySqlSessionController';
 export type { MySqlTransactionRunner } from './src/main/ets/mysql/execution/MySqlTransactionRunner';
 export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
   './src/main/ets/mysql/model/MySqlBatch';

@@ -37,6 +37,7 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
   }
 
   invalidate(): void {
+    this.session.invalidate();
     this.cache.invalidate();
   }
 

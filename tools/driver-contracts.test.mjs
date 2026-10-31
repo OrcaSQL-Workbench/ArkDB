@@ -31,6 +31,19 @@ test('shared contracts describe callback-scoped transaction sessions', async () 
   assert.doesNotMatch(contracts, /\bnot an implemented transaction scope\b/i);
 });
 
+test('shared contracts describe additive MySQL session reset', async () => {
+  const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
+  assert.match(contracts, /\bmysqlFeatures\.session\b/);
+  assert.match(contracts, /\bMySqlSessionController\.reset\(\)/);
+  assert.match(contracts, /\bCOM_RESET_CONNECTION\b/);
+  assert.match(contracts, /\binvalidates every explicit and cached prepared statement\b/i);
+  assert.match(contracts, /\butf8mb4_general_ci\b/);
+  assert.match(contracts, /\bcharacter_set_client=utf8mb4\b/);
+  assert.match(contracts, /\bresidual or mismatched database closes the physical connection\b/i);
+  assert.match(contracts, /\bwithout falling back[\s\S]{0,100}`CHANGE_USER`[\s\S]{0,100}replaying SQL\b/i);
+  assert.match(contracts, /\bcore and old custom MySQL connections acquire no required method\b/i);
+});
+
 test('transaction runner observes the same promise returned to detached callers', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'execution', 'MySqlTransactionRunner.ets'), 'utf8');

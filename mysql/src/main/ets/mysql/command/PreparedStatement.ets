@@ -179,6 +179,13 @@ export class MySqlPreparedSession {
       (this.host.state === ConnectionState.Ready || this.host.state === ConnectionState.Querying);
   }
 
+  invalidate(): void {
+    if (this.retired) return;
+    this.retired = true;
+    for (const handle of this.handles) handle.invalidate();
+    this.handles = [];
+  }
+
   rejectExecution(statement: MySqlPreparedStatement): never {
     this.requireExecutable(statement);
     throw ArkDbError.unsupported('Prepared execution is not implemented.');
@@ -227,9 +234,7 @@ export class MySqlPreparedSession {
     const cleanup: ArkDbError[] = [];
     if (!rejected) {
       const currentPhysicalSession = this.samePhysicalSession();
-      this.retired = true;
-      for (const handle of this.handles) handle.invalidate();
-      this.handles = [];
+      this.invalidate();
       try { this.gate.setPhase(scope, MySqlCommandPhase.Cleaning); } catch (failure) {
         cleanup.push(preparedCleanup(failure as Object));
       }

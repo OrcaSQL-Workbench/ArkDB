@@ -228,6 +228,24 @@ text-query and prepared-execute deadlines are available through
 `mysqlFeatures.deadlines`; legacy `QueryOptions.statementTimeoutMs` remains
 validation-only.
 
+Built-in root connections also expose `mysqlFeatures.session`.
+`MySqlSessionController.reset()` sends `COM_RESET_CONNECTION` (`0x1f`) through
+the same single-command gate; it never queues behind an active query, pending
+cancellation or external cursor. Success advances the physical-session
+generation, invalidates every explicit prepared handle and private cached
+statement, first restores `SET NAMES utf8mb4 COLLATE utf8mb4_general_ci`, then
+reapplies `defaultSchema`, `autocommit`, `session.timeZone` and
+`session.sqlMode`. Before success it reads the owned session fingerprint and
+requires `character_set_client=utf8mb4` plus the exact configured database, or
+no selected database when `defaultSchema` is unset/empty. A residual tenant
+database, charset mismatch or failed fingerprint closes the physical
+connection; it is never returned for reuse. `ROLLBACK` does not reset the
+generation. Servers that reject the command as unsupported produce
+`ArkDbErrorKind.Unsupported`; callers or pools may destroy that connection, but
+the driver does not fall back to `CHANGE_USER`, reconnect or replay SQL. A
+timeout, malformed response, network uncertainty or failed post-reset
+initialization closes the physical connection and retains cleanup failures.
+
 `MySqlSession` is a restricted borrowing interface with read-only feature,
 server-info and session-status properties plus native `query`/`queryStream` and
 transaction-scoped savepoint methods. It does not own connection
@@ -338,7 +356,7 @@ Huawei's [Worker guide](https://developer.huawei.com/consumer/cn/doc/harmonyos-g
 | `user` | empty; required | MySQL account name |
 | `defaultSchema` | unset | Default database selected during authentication |
 | `ssl` | `new SslConfig()` | TLS policy and optional certificate paths |
-| `connectTimeoutMs` | `10000` | Positive integer; total connection-opening deadline |
+| `connectTimeoutMs` | `10000` | Positive integer; total connection-opening or session-reset deadline |
 | `autocommit` | `true` | Requested initial autocommit state |
 | `session` | unset | Optional `MySqlSessionOptions`; `timeZone` and `sqlMode` are individually unset by default |
 | `preparedCacheSize` | unset; off | Integer from 0 to 256; 0 disables the private convenience-statement cache |
@@ -668,7 +686,7 @@ MySQL also exposes these through `features.metadata` and `features.metrics`; gen
 - **Typed values.** Rows are arrays aligned with `columns`. SQL NULL is `null`; BIGINT is `bigint`; DECIMAL and temporal values remain strings; binary values are `Uint8Array`. Preserve these types when designing your own Worker DTOs.
 - **Bounded results.** `query()` uses the bounded streaming implementation and exposes `truncated`, `truncationReason`, and `additionalResults`. It is not an unlimited collector.
 - **Streaming.** `queryStream(sql, options, sink)` awaits each `QueryResultSink` callback. Set row/chunk/result/drain budgets in `QueryOptions`, handle truncation and unknown status explicitly, and avoid accumulating every chunk. Awaiting a sink does not pause socket delivery; the separate receive queue remains bounded and fails closed on overflow.
-- **Timeouts.** `connectTimeoutMs` covers connection opening. Only the optional `mysqlFeatures.deadlines` query/execute interface starts a statement-cancellation timer and owns its convergence/grace cleanup. It joins every cancellation attempt registered for the owned scope, including later public calls, and keeps grace active until the operation and all recorded attempts settle. Timeout and grace delays are chunked to at most `2147483647` ms and re-armed from monotonic absolute expiry. Any unknown attempt or retirement has priority over an original OK result and retains its failure; grace starts target abort before control cleanup, then allows one bounded event-loop turn for prompt unwind. The low-level driver still validates `QueryOptions.statementTimeoutMs` without activating it.
+- **Timeouts.** `connectTimeoutMs` covers connection opening and root session reset. Only the optional `mysqlFeatures.deadlines` query/execute interface starts a statement-cancellation timer and owns its convergence/grace cleanup. It joins every cancellation attempt registered for the owned scope, including later public calls, and keeps grace active until the operation and all recorded attempts settle. Timeout and grace delays are chunked to at most `2147483647` ms and re-armed from monotonic absolute expiry. Any unknown attempt or retirement has priority over an original OK result and retains its failure; grace starts target abort before control cleanup, then allows one bounded event-loop turn for prompt unwind. The low-level driver still validates `QueryOptions.statementTimeoutMs` without activating it.
 - **Transactions.** Generic features expose `begin`, `commit`, `rollback` and known session status. MySQL also retains native `setAutocommit` and the optional `mysqlFeatures.transactions` callback runner with typed options and scoped savepoints. The callback facade expires at settlement and does not expose root prepared/batch/nested transaction executors. Failure can invalidate status or leave an unknown execution outcome; never replay writes.
 - **Cancellation.** The generic connection feature owns its MySQL control-session lifetime. The retained handle-based factory helper does not. Ownership is retained until required cancellation/close cleanup settles. Only the wire-query phase can be killed, not an interrupted-result end callback or an internal status-refresh ping. Status refresh waits for any pending control request and its cleanup; an unknown KILL outcome retires the target and keeps final execution outcome `Unknown`, even after an original OK response. Await the original query and request, then inspect reuse/status before another command.
 - **Errors.** `ArkDbError` and `ArkDbErrorKind` expose common categories and server error code/SQLSTATE. No Workbench-name compatibility aliases are exported. Server messages can contain sensitive data; do not copy them into public logs.

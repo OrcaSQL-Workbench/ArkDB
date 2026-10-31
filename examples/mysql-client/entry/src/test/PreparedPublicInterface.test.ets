@@ -4,7 +4,7 @@ import {
   MySqlConnectionFeatures, MySqlDeadlineExecutor, MySqlDeadlineOptions, MySqlDriverFactory,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameter, MySqlParameterType,
   MySqlParameterValue, MySqlPreparedExecutor,
-  MySqlPreparedStatement, MySqlSession, QueryOptions, QueryResult, QueryResultSink,
+  MySqlPreparedStatement, MySqlSession, MySqlSessionController, QueryOptions, QueryResult, QueryResultSink,
   mysqlPlaceholders, quoteMySqlIdentifier, requireMySqlFeatures
 } from '@arkdb/mysql';
 import { LegacyCustomConnection } from './LegacyPublicInterface.test';
@@ -19,9 +19,11 @@ export default function preparedPublicInterfaceTest(): void {
       const executor: MySqlPreparedExecutor | undefined = features.prepared;
       const namedExecutor: MySqlNamedExecutor | undefined = features.named;
       const deadlines: MySqlDeadlineExecutor | undefined = features.deadlines;
+      const sessionController: MySqlSessionController | undefined = features.session;
       expect(executor !== undefined).assertTrue();
       expect(namedExecutor !== undefined).assertTrue();
       expect(deadlines !== undefined).assertTrue();
+      expect(sessionController !== undefined).assertTrue();
       expect(session.mysqlFeatures === features).assertTrue();
       expect(session.serverInfo === connection.serverInfo).assertTrue();
       expect(factory.capabilities.supportsPreparedStatements).assertTrue();
@@ -50,6 +52,12 @@ export default function preparedPublicInterfaceTest(): void {
       expect(deadlineOptions.timeoutMs).assertEqual(25);
       expect(deadlineOptions.queryOptions.maxRows).assertEqual(1);
       await connection.close();
+      if (sessionController === undefined) throw ArkDbError.unsupported('Expected session reset support.');
+      let resetFailure: Object | null = null;
+      try { await sessionController.reset(); } catch (error) { resetFailure = error as Object; }
+      expect(resetFailure instanceof ArkDbError).assertTrue();
+      if (!(resetFailure instanceof ArkDbError)) throw new Error('Expected the HAR-owned reset error.');
+      expect(resetFailure.kind).assertEqual(ArkDbErrorKind.Protocol);
     });
 
     it('keepsDisconnectedPreparedCallsStateCheckedWithOneErrorIdentity', 0, async () => {

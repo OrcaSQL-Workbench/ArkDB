@@ -57,6 +57,22 @@ export default function mySqlCommandGateTest(): void {
       gate.release(next);
     });
 
+    it('blocksResetWhileAnExternalCursorOwnsTheGeneration', 0, () => {
+      const gate = new MySqlCommandGate();
+      gate.advanceGeneration();
+      const cursor = gate.reserve(MySqlCommandKind.QueryStream);
+      gate.setPhase(cursor, MySqlCommandPhase.CursorIdle);
+      expectProtocol((): void => { gate.reserve(MySqlCommandKind.Reset); });
+      gate.advanceGenerationOnRelease(cursor);
+      gate.advanceGenerationOnRelease(cursor);
+      expect(gate.generation).assertEqual(cursor.generation);
+      gate.release(cursor);
+      expect(gate.generation).assertEqual(cursor.generation + 1);
+      const reset = gate.reserve(MySqlCommandKind.Reset);
+      expect(reset.generation).assertEqual(cursor.generation + 1);
+      gate.release(reset);
+    });
+
     it('retainsCanonicalErrorIdentityAndIndependentPrimaryFields', 0, () => {
       const primary = ArkDbError.server('Synthetic server rejection.', 'ER_SYNTHETIC', '45000');
       const cleanup = ArkDbError.network('Synthetic cleanup failure.');

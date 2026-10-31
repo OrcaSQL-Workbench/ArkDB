@@ -3,6 +3,7 @@ import { PacketType, Capabilities, StatusFlags } from '../protocol/Constants';
 import {
   MySqlQueryResult as QueryResult, MySqlColumnDef as ColumnDef, MySqlValue, mysqlValues
 } from '../model/MySqlQueryResult';
+import { MySqlQueryResultSummary, mysqlSessionStatus } from '../model/MySqlQueryStream';
 import {
   SqlValue, DatabaseSessionStatus, estimateSqlRowBytes, MAX_STATEMENT_TIMEOUT_MS, MAX_QUERY_DRAIN_TIME_MS,
   QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
@@ -162,12 +163,13 @@ async function emitOkResult(packet: MysqlPacket, capabilities: number, sink: Que
   meta.resultIndex = resultIndex;
   await sink.onResultStart(meta);
 
-  const summary = new QueryResultSummary();
+  const summary = new MySqlQueryResultSummary();
   summary.resultIndex = resultIndex;
-  summary.affectedRows = Number(ok.affectedRows);
+  summary.affectedRowsExact = ok.affectedRowsExact;
+  summary.affectedRows = Number(ok.affectedRowsExact);
   summary.lastInsertId = ok.lastInsertId;
   summary.warningCount = ok.warnings;
-  summary.status = statusFromFlags(ok.statusFlags);
+  summary.status = mysqlSessionStatus(statusFromFlags(ok.statusFlags));
   summary.statusKnown = true;
   await sink.onResultEnd(summary);
 
@@ -526,6 +528,9 @@ class BufferedResultCollector implements QueryResultSink {
   async onResultEnd(summary: QueryResultSummary): Promise<void> {
     const result = this.results[summary.resultIndex];
     result.affectedRows = summary.affectedRows;
+    if (summary instanceof MySqlQueryResultSummary && summary.affectedRowsExact !== undefined) {
+      result.affectedRowsExact = summary.affectedRowsExact;
+    }
     if (summary.lastInsertId !== undefined) result.lastInsertId = summary.lastInsertId;
     if (summary.warningCount !== undefined) result.warningCount = summary.warningCount;
     result.loadedBytes = summary.loadedBytes;

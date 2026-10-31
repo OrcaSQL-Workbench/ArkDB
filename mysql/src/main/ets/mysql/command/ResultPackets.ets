@@ -3,7 +3,7 @@ import { Capabilities } from '../protocol/Constants';
 
 /** OK packet — successful command with no result set. */
 export class OkPacket {
-  affectedRows: bigint = 0n;
+  affectedRowsExact: bigint = 0n;
   lastInsertId: bigint = 0n;
   statusFlags: number = 0;
   warnings: number = 0;
@@ -27,7 +27,7 @@ export function parseOk(payload: Uint8Array, capabilities: number): OkPacket {
   r.readUInt8(); // header
   const ok = new OkPacket();
   const affected = r.readLenEncInt();
-  ok.affectedRows = affected === null ? 0n : affected;
+  ok.affectedRowsExact = affected === null ? 0n : affected;
   const insertId = r.readLenEncInt();
   ok.lastInsertId = insertId === null ? 0n : insertId;
   if ((capabilities & Capabilities.PROTOCOL_41) !== 0) {

@@ -20,6 +20,10 @@
   and positional placeholder helpers from the single package entry. Resolve the
   connection-owned executor lazily on every call, preserving ready/busy checks,
   physical-session ownership and the shared streaming/cleanup pipeline.
+- Expose positional `mapMySqlRows` projection without changing native value types
+  or coercing exact decimal, temporal, JSON, NULL or byte values.
+- Add optional native `affectedRowsExact` bigint observations while preserving the
+  established numeric `affectedRows` field and unchanged legacy data literals.
 - Enable the built-in factory's prepared capability hint without adding required
   methods to core or old custom connections. Add a restricted `MySqlSession`
   borrowing interface and retain native/portable text-stream defaults.

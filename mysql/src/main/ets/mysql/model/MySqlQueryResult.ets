@@ -26,6 +26,7 @@ export class MySqlQueryResult extends QueryResult {
   columns: MySqlColumnDef[] = [];
   rows: MySqlValue[][] = [];
   additionalResults: MySqlQueryResult[] = [];
+  affectedRowsExact?: bigint;
   lastInsertId: bigint = 0n;
   warningCount: number = 0;
   autocommit: boolean = true;

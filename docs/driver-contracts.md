@@ -106,6 +106,13 @@ greedily groups consecutive rows while both exact UTF-8 PREPARE payload bytes
 and exact binary EXECUTE payload bytes fit that ceiling and the flattened
 parameter count stays at or below 65535. Empty rows validate the request and
 return without connection use.
+Options, item count, table and columns are validated before inner rows are
+touched, preserving request-level error messages and `failedIndex = 0`. Every
+source row width is then validated with the existing column-count error. After
+all widths pass, every inner row array is copied without changing the failure
+index, and typed snapshots read `MySqlParameter.value` only from those captured
+arrays. Mutating getters cannot alter sibling bindings or append parameters
+after width preflight.
 
 Every emitted INSERT is one prepared statement and one native result under the
 same command scope. `MySqlBatchError` reuses the existing partial-outcome

@@ -253,6 +253,13 @@ There is no raw SQL, expression, suffix, `INSERT IGNORE`, `REPLACE` or
 parameter and option, validates equal row/column counts, and greedily emits the
 largest consecutive row prefix whose generated PREPARE and EXECUTE payloads
 both fit `maxPacketBytes` and whose flattened parameter count is at most 65535.
+It validates options, `maxItems`, table and columns before touching inner rows,
+then validates every row width with the established row-count error semantics.
+Only after all widths pass does it copy every caller-owned inner row array, and
+it reads parameter value getters only from those captured arrays. Getter-side
+mutation therefore cannot replace sibling bindings, append hidden parameters or
+turn a later row into a post-PREPARE width failure. Request-level failures keep
+`failedIndex = 0`; row-specific failures report their source row.
 The four-byte packet frame is not counted. A single row that cannot fit fails
 before network use. Empty rows still validate identifiers and options, then
 return an empty `MySqlBatchResult` without requiring a connection.

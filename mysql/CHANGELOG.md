@@ -43,7 +43,11 @@
   groups, retain decoded results on Unknown retirement, and recreate physical
   execution state after reset. Return the exact transaction-tracked promise
   from callback-scoped execution and observe pre-command snapshot rejections
-  without changing their error identity.
+  without changing their error identity. Preserve request-level validation
+  ordering and failure indices, validate all row widths, then copy every inner
+  row before reading hostile parameter getters; cover exact PREPARE UTF-8
+  bytes, EXECUTE-only splits, 65535-parameter partitioning and length-encoded
+  250/251 and 65535/65536 boundaries.
 - Expose positional `mapMySqlRows` projection without changing native value types
   or coercing exact decimal, temporal, JSON, NULL or byte values.
 - Add optional native `affectedRowsExact` bigint observations while preserving the

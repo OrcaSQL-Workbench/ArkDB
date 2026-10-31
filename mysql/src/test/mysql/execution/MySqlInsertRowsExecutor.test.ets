@@ -3,13 +3,13 @@ import {
   ArkDbError, ArkDbErrorKind, ConnectionState
 } from '@arkdb/core';
 import {
-  MySqlInsertRowsExecutor
+  MySqlInsertRowsExecutor, snapshotMySqlInsertRowsInput
 } from '../../../main/ets/mysql/execution/MySqlInsertRowsExecutor';
 import {
   MySqlInsertRowsOptions
 } from '../../../main/ets/mysql/model/MySqlInsertRows';
 import {
-  MySqlParameter, MySqlParameterType
+  MySqlParameter, MySqlParameterType, MySqlParameterValue
 } from '../../../main/ets/mysql/model/MySqlParameter';
 import {
   MySqlBatchError, MySqlBatchResult
@@ -74,6 +74,172 @@ export default function mySqlInsertRowsExecutorTest(): void {
       } finally {
         await fixture.close();
       }
+    });
+
+    it('textAndBinaryValuesForceExecuteOnlySplit', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      fixture.peer.responses.push(
+        prepareResponse(7, 1), [okPayload()],
+        prepareResponse(8, 1), [okPayload()]);
+      const options = new MySqlInsertRowsOptions();
+      options.maxPacketBytes = 50;
+      try {
+        const result = await insertRowsFeature(fixture).execute(
+          ['t'], ['a'], [
+            [new MySqlParameter(MySqlParameterType.Text, 'x'.repeat(20))],
+            [new MySqlParameter(
+              MySqlParameterType.Binary, new Uint8Array(20))]
+          ], options);
+
+        expect(result.results.length).assertEqual(2);
+        expect(fixture.peer.commands().join(','))
+          .assertEqual('22,23,25,22,23,25');
+        expect(fixture.peer.writes[0].length - 4).assertEqual(33);
+        expect(fixture.peer.writes[1].length - 4).assertEqual(35);
+        expect(fixture.peer.writes[3].length - 4).assertEqual(33);
+        expect(fixture.peer.writes[4].length - 4).assertEqual(35);
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it('textAndBinarySingleRowsRejectExecuteOneByteOverBudget', 0, async () => {
+      const values: MySqlParameter[] = [
+        new MySqlParameter(MySqlParameterType.Text, 'x'.repeat(40)),
+        new MySqlParameter(
+          MySqlParameterType.Binary, new Uint8Array(40))
+      ];
+      for (const parameter of values) {
+        const fixture = new PreparedExecutionFixture();
+        const options = new MySqlInsertRowsOptions();
+        options.maxPacketBytes = 54;
+
+        const failure = expectBatchFailure(await batchFailureOf(
+          insertRowsFeature(fixture).execute(
+            ['t'], ['a'], [[parameter]], options)));
+
+        expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(failure.failedOutcome)
+          .assertEqual(MySqlExecutionOutcome.NotDispatched);
+        expect(fixture.connection.state).assertEqual(ConnectionState.Idle);
+        expect(fixture.peer.writes.length).assertEqual(0);
+      }
+    });
+
+    it('multibyteIdentifierPrepareBudgetUsesUtf8ExactFit', 0, async () => {
+      const exact = new PreparedExecutionFixture();
+      await exact.open();
+      const exactOptions = new MySqlInsertRowsOptions();
+      exactOptions.maxPacketBytes = 37;
+      exact.peer.responses.push(prepareResponse(7, 1), [okPayload()]);
+      try {
+        const result = await insertRowsFeature(exact).execute(
+          ['鲸'], ['值'], [[
+            new MySqlParameter(MySqlParameterType.Null, null)
+          ]], exactOptions);
+        expect(result.results.length).assertEqual(1);
+        expect(exact.peer.writes[0].length - 4).assertEqual(37);
+      } finally {
+        await exact.close();
+      }
+
+      const over = new PreparedExecutionFixture();
+      const overOptions = new MySqlInsertRowsOptions();
+      overOptions.maxPacketBytes = 36;
+      const failure = expectBatchFailure(await batchFailureOf(
+        insertRowsFeature(over).execute(
+          ['鲸'], ['值'], [[
+            new MySqlParameter(MySqlParameterType.Null, null)
+          ]], overOptions)));
+      expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+      expect(over.peer.writes.length).assertEqual(0);
+    });
+
+    it('partitionsRowsCrossingThe65535ParameterLimit', 0, () => {
+      const columns: string[] = [];
+      const row: MySqlParameter[] = [];
+      const nullValue =
+        new MySqlParameter(MySqlParameterType.Null, null);
+      for (let index = 0; index < 32768; index += 1) {
+        columns.push('c');
+        row.push(nullValue);
+      }
+
+      const input = snapshotMySqlInsertRowsInput(
+        ['t'], columns, [row, row]);
+
+      expect(input.groups.length).assertEqual(2);
+      expect(input.groups[0].startIndex).assertEqual(0);
+      expect(input.groups[0].rows.length).assertEqual(1);
+      expect(input.groups[1].startIndex).assertEqual(1);
+      expect(input.groups[1].rows.length).assertEqual(1);
+    });
+
+    it('lengthEncoded250And251DriveExactExecuteGrouping', 0, async () => {
+      const exact = new PreparedExecutionFixture();
+      await exact.open();
+      const exactOptions = new MySqlInsertRowsOptions();
+      exactOptions.maxPacketBytes = 518;
+      exact.peer.responses.push(prepareResponse(7, 2), [okPayload()]);
+      try {
+        const result = await insertRowsFeature(exact).execute(
+          ['t'], ['a'], [
+            binaryRow(250), binaryRow(250)
+          ], exactOptions);
+        expect(result.results.length).assertEqual(1);
+        expect(exact.peer.writes[1].length - 4).assertEqual(518);
+      } finally {
+        await exact.close();
+      }
+
+      const over = new PreparedExecutionFixture();
+      await over.open();
+      const overOptions = new MySqlInsertRowsOptions();
+      overOptions.maxPacketBytes = 523;
+      over.peer.responses.push(
+        prepareResponse(8, 1), [okPayload()],
+        prepareResponse(9, 1), [okPayload()]);
+      try {
+        const result = await insertRowsFeature(over).execute(
+          ['t'], ['a'], [
+            binaryRow(251), binaryRow(251)
+          ], overOptions);
+        expect(result.results.length).assertEqual(2);
+        expect(over.peer.commands().join(','))
+          .assertEqual('22,23,25,22,23,25');
+        expect(over.peer.writes[1].length - 4).assertEqual(268);
+        expect(over.peer.writes[4].length - 4).assertEqual(268);
+      } finally {
+        await over.close();
+      }
+    });
+
+    it('lengthEncoded65535FitsAnd65536IsOneByteOverBudget', 0, async () => {
+      const exact = new PreparedExecutionFixture();
+      await exact.open();
+      const exactOptions = new MySqlInsertRowsOptions();
+      exactOptions.maxPacketBytes = 65552;
+      exact.peer.responses.push(prepareResponse(7, 1), [okPayload()]);
+      try {
+        const result = await insertRowsFeature(exact).execute(
+          ['t'], ['a'], [binaryRow(65535)], exactOptions);
+        expect(result.results.length).assertEqual(1);
+        expect(exact.peer.writes[1].length - 4).assertEqual(65552);
+      } finally {
+        await exact.close();
+      }
+
+      const over = new PreparedExecutionFixture();
+      const overOptions = new MySqlInsertRowsOptions();
+      overOptions.maxPacketBytes = 65553;
+      const failure = expectBatchFailure(await batchFailureOf(
+        insertRowsFeature(over).execute(
+          ['t'], ['a'], [binaryRow(65536)], overOptions)));
+      expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+      expect(failure.failedOutcome)
+        .assertEqual(MySqlExecutionOutcome.NotDispatched);
+      expect(over.peer.writes.length).assertEqual(0);
     });
 
     it('rejectsMismatchedRowWidthsBeforePrepareAtSourceIndex', 0, async () => {
@@ -267,6 +433,97 @@ export default function mySqlInsertRowsExecutorTest(): void {
       }
     });
 
+    it('copiesEveryInnerRowBeforeReadingMutatingGetters', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      const rows: MySqlParameter[][] = [];
+      const first: MySqlParameter[] = [];
+      const second: MySqlParameter[] = [
+        new MySqlParameter(MySqlParameterType.Int32, 3),
+        new MySqlParameter(MySqlParameterType.Int32, 4)
+      ];
+      first.push(new MutatingInsertParameter(1, (): void => {
+        first[1] = new MySqlParameter(MySqlParameterType.Int32, 99);
+        second[0] = new MySqlParameter(MySqlParameterType.Int32, 88);
+        second.push(new MySqlParameter(MySqlParameterType.Int32, 77));
+      }));
+      first.push(new MySqlParameter(MySqlParameterType.Int32, 2));
+      rows.push(first, second);
+      fixture.peer.responses.push(prepareResponse(7, 4), [okPayload()]);
+      try {
+        const result = await insertRowsFeature(fixture).execute(
+          ['t'], ['a', 'b'], rows);
+
+        expect(result.results.length).assertEqual(1);
+        expect(first[1].value).assertEqual(99);
+        expect(second.length).assertEqual(3);
+        expect(hex(fixture.peer.writes[1].subarray(4))).assertEqual(
+          '170700000000010000000001030003000300030001000000020000000300000004000000');
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it('validatesEveryRowWidthBeforeReadingParameterGetters', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      let getterReads = 0;
+      const rows: MySqlParameter[][] = [[
+        new MutatingInsertParameter(1, (): void => { getterReads += 1; }),
+        new MySqlParameter(MySqlParameterType.Int32, 2)
+      ], [
+        new MySqlParameter(MySqlParameterType.Int32, 3)
+      ]];
+
+      const failure = expectBatchFailure(await batchFailureOf(
+        insertRowsFeature(fixture).execute(
+          ['t'], ['a', 'b'], rows)));
+
+      expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+      expect(failure.failedIndex).assertEqual(1);
+      expect(getterReads).assertEqual(0);
+      expect(fixture.connection.state).assertEqual(ConnectionState.Idle);
+      expect(fixture.peer.writes.length).assertEqual(0);
+    });
+
+    it('preservesRequestValidationOrderMessagesAndFailureIndices', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      const rows = rowsWithSecondNonArray();
+
+      const invalidPacket = new MySqlInsertRowsOptions();
+      invalidPacket.maxPacketBytes = 0;
+      const packetFailure = expectBatchFailure(await batchFailureOf(
+        insertRowsFeature(fixture).execute(
+          ['t'], ['a'], rows, invalidPacket)));
+      expect(packetFailure.failedIndex).assertEqual(0);
+      expect(packetFailure.message)
+        .assertEqual('maxPacketBytes must be between 1 and 16777216.');
+
+      const tableFailure = expectBatchFailure(await batchFailureOf(
+        insertRowsFeature(fixture).execute(
+          [], ['a'], rows)));
+      expect(tableFailure.failedIndex).assertEqual(0);
+      expect(tableFailure.message).assertEqual(
+        'MySQL INSERT table identifiers require a table or schema and table.');
+
+      const maxItems = new MySqlInsertRowsOptions();
+      maxItems.maxItems = 1;
+      const itemFailure = expectBatchFailure(await batchFailureOf(
+        insertRowsFeature(fixture).execute(
+          ['t'], ['a'], rows, maxItems)));
+      expect(itemFailure.failedIndex).assertEqual(0);
+      expect(itemFailure.message)
+        .assertEqual('Prepared batch item count exceeds maxItems.');
+
+      const rowFailure = expectBatchFailure(await batchFailureOf(
+        insertRowsFeature(fixture).execute(
+          ['t'], ['a'], rows)));
+      expect(rowFailure.failedIndex).assertEqual(1);
+      expect(rowFailure.message).assertEqual(
+        'Each MySQL INSERT row must match the column count.');
+      expect(fixture.connection.state).assertEqual(ConnectionState.Idle);
+      expect(fixture.peer.writes.length).assertEqual(0);
+    });
+
     it('rejectsUpsertAndRawSqlOptionObjectsBeforeConnectionUse', 0, async () => {
       const names = ['rawSql', 'rawSuffix', 'onDuplicateKeyUpdate'];
       for (const name of names) {
@@ -342,6 +599,19 @@ function nullableIntRow(values: (number | null)[]): MySqlParameter[] {
   return row;
 }
 
+function binaryRow(length: number): MySqlParameter[] {
+  return [new MySqlParameter(
+    MySqlParameterType.Binary, new Uint8Array(length))];
+}
+
+function rowsWithSecondNonArray(): MySqlParameter[][] {
+  const rows = JSON.parse('[[],null]') as MySqlParameter[][];
+  rows[0] = [
+    new MySqlParameter(MySqlParameterType.Int32, 1)
+  ];
+  return rows;
+}
+
 function rawInsertOptions(name: string): MySqlInsertRowsOptions {
   const source = '{"' + name +
     '":"ON DUPLICATE KEY UPDATE value=VALUES(value)"}';
@@ -365,4 +635,18 @@ function expectBatchFailure(failure: ArkDbError | null): MySqlBatchError {
     throw new Error('Expected MySqlBatchError.');
   }
   return failure;
+}
+
+class MutatingInsertParameter extends MySqlParameter {
+  private mutate: () => void;
+
+  constructor(value: number, mutate: () => void) {
+    super(MySqlParameterType.Int32, value);
+    this.mutate = mutate;
+  }
+
+  get value(): MySqlParameterValue {
+    this.mutate();
+    return super.value;
+  }
 }

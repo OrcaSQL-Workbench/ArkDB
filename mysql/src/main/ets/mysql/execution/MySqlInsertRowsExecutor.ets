@@ -222,9 +222,9 @@ export function snapshotMySqlInsertRowsInput(tableParts: string[],
     }
     const snapshot = options === undefined ?
       new MySqlInsertRowsOptions() : options.clone();
-    const capturedRows: MySqlParameter[][] = rows.slice();
+    const outerRows: MySqlParameter[][] = rows.slice();
     const optionErrors = validateMySqlInsertRowsOptions(
-      snapshot, capturedRows.length);
+      snapshot, outerRows.length);
     if (optionErrors.length > 0) throw optionErrors[0];
 
     const table = tableParts.slice();
@@ -243,16 +243,26 @@ export function snapshotMySqlInsertRowsInput(tableParts: string[],
     requireIdentifierStrings(capturedColumns);
     for (const column of capturedColumns) quoteMySqlIdentifier([column]);
 
-    const rowSnapshots: MySqlParameter[][] = [];
-    const rowValueBytes: number[] = [];
-    for (let index = 0; index < capturedRows.length; index += 1) {
+    for (let index = 0; index < outerRows.length; index += 1) {
       failedIndex = index;
-      const row = capturedRows[index];
+      const row = outerRows[index];
       if (!Array.isArray(row) ||
         row.length !== capturedColumns.length) {
         throw ArkDbError.validation(
           'Each MySQL INSERT row must match the column count.');
       }
+    }
+    const capturedRows: MySqlParameter[][] = [];
+    for (let index = 0; index < outerRows.length; index += 1) {
+      capturedRows.push(outerRows[index].slice());
+    }
+
+    failedIndex = 0;
+    const rowSnapshots: MySqlParameter[][] = [];
+    const rowValueBytes: number[] = [];
+    for (let index = 0; index < capturedRows.length; index += 1) {
+      failedIndex = index;
+      const row = capturedRows[index];
       const rowSnapshot: MySqlParameter[] = [];
       for (const parameter of row) {
         if (!(parameter instanceof MySqlParameter)) {

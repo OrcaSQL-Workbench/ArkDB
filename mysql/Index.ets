@@ -35,6 +35,7 @@ export { ConnectionConfigField, ConnectionValidationIssue, SslMode, SslConfig, C
 export { MySqlSessionOptions } from './src/main/ets/mysql/model/MySqlSessionOptions';
 export { MySqlTransactionIsolation, MySqlTransactionOptions } from
   './src/main/ets/mysql/model/MySqlTransactionOptions';
+export { MySqlDeadlineOptions } from './src/main/ets/mysql/model/MySqlDeadlineOptions';
 export { ServerFamily, MySqlServerInfo, MySqlServerInfo as ServerInfo } from
   './src/main/ets/mysql/model/MySqlServerInfo';
 export { MySqlColumnDef, MySqlColumnDef as ColumnDef, MySqlQueryResult, MySqlQueryResult as QueryResult } from
@@ -46,6 +47,7 @@ export type { MySqlSession } from './src/main/ets/mysql/driver/MySqlSession';
 export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
   './src/main/ets/mysql/driver/MySqlPreparedContracts';
 export type { MySqlBatchExecutor } from './src/main/ets/mysql/execution/MySqlBatchExecutor';
+export type { MySqlDeadlineExecutor } from './src/main/ets/mysql/execution/MySqlDeadlineExecutor';
 export type { MySqlTransactionRunner } from './src/main/ets/mysql/execution/MySqlTransactionRunner';
 export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
   './src/main/ets/mysql/model/MySqlBatch';

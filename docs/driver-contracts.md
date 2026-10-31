@@ -10,7 +10,7 @@ not changed by this migration. PostgreSQL is not implemented.
 | Module | Owns |
 | --- | --- |
 | `core` / `@arkdb/core` | One runtime error identity, portable results and server information, minimal connections, optional capability interfaces, deadlines and HarmonyOS diagnostics |
-| `mysql` / `@arkdb/mysql` | MySQL options/TLS posture, wire protocol, authentication, native columns/server information, SQL, context aliases, control-session cancellation and vendor metrics |
+| `mysql` / `@arkdb/mysql` | MySQL options/TLS posture, wire protocol, authentication, native columns/server information, SQL, context aliases, control-session cancellation, opt-in statement deadlines and vendor metrics |
 | Driver-local `arkdb-package.json` | Tooling-only shared/driver classification and driver-owned verification declaration; not an OHPM schema extension |
 | `tools` | Dependency discovery, source/import constraints and exact-archive verification/distribution |
 
@@ -72,6 +72,23 @@ are exported by `@arkdb/mysql`, not core. The public facade resolves the existin
 ready-only executor for each call instead of constructing or retaining a
 physical-session executor while disconnected. Native prepared streams retain
 native callback types; portable `features.streaming` remains text streaming.
+
+MySQL also exposes the optional `mysqlFeatures.deadlines` interface for buffered
+text queries and prepared execution. `MySqlDeadlineOptions` defaults to
+`timeoutMs = 0` and `cancellationGraceMs = 2000`, clones its `QueryOptions`, and
+keeps command ownership until execution and cancellation cleanup converge.
+Every cancellation attempt registered for that owned scope is joined, including
+later public cancellation after an earlier Requested attempt clears, and grace
+remains active until the operation plus all recorded attempts settle. Any
+unknown attempt or retirement forces final `Unknown` even after an original OK
+response and retains its failure. Timeout and grace delays above the platform
+timer range are split into chunks of at most `2147483647` ms and re-armed from
+one monotonic absolute expiry. Grace expiry starts target abort before waiting
+for control cleanup; after abort and cancellation, one zero-delay event-loop
+turn boundedly observes prompt unwind without waiting forever. Expired prepared
+close remains idempotent and does not add a synthetic `Protocol` failure. This
+driver-local feature is the only statement interface that starts cancellation
+timers; core `QueryOptions.statementTimeoutMs` remains validation-only.
 
 MySQL also exposes the optional `mysqlFeatures.transactions`
 `MySqlTransactionRunner`. It accepts `MySqlTransactionOptions`, owns one
@@ -136,9 +153,13 @@ The old handle-based helper is lower-level and still leaves lifetime management
 to its caller.
 
 After an uncertain dispatched MySQL cancellation, the target is closed and
-permanently retired, even if its original operation already completed. Closing
-the control socket alone does not acknowledge the server-side `KILL`. A definite
-server rejection is distinguishable and does not require retirement.
+permanently retired, even if its original operation already completed; the
+reported execution outcome remains `Unknown`. Closing the control socket alone
+does not acknowledge the server-side `KILL`. At deadline grace expiry, target
+abort begins before control cleanup. Deadline settlement joins all cancellation
+attempts recorded for the owned scope; any unknown attempt is retained and keeps
+the final result `Unknown`. A definite server rejection is distinguishable and
+does not require retirement.
 
 Portable `ServerInfo` has no engine enum, handshake version, connection number,
 authentication plugin or capability bitmask. Portable `ColumnDef` has no wire

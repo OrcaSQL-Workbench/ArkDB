@@ -59,10 +59,14 @@ Existing provider implementations do not acquire new required methods.
 `SqlValue`, column metadata, buffered results and streaming callbacks retain
 their MySQL types. Native stream summaries keep the established numeric warning
 and bigint insert-id defaults; zero alone is not proof that a server reported an
-identifier. The portable `features.streaming` interface instead preserves
-unreported observations as optional fields. Shared errors keep one constructor:
-`code` remains numeric, while `nativeCode` can retain numeric or textual codes.
-New fields on existing data shapes are optional.
+identifier. Native results and summaries retain the legacy numeric `affectedRows`
+and add optional `affectedRowsExact` when an OK packet reports the exact bigint;
+row results that report no affected count leave it undefined. Core remains
+engine-neutral and does not acquire this MySQL field. The portable
+`features.streaming` interface instead preserves unreported observations as
+optional fields. Shared errors keep one constructor: `code` remains numeric,
+while `nativeCode` can retain numeric or textual codes. New fields on existing
+data shapes are optional.
 
 Use `CoreDbConnection`, `CoreDbDriverFactory`, `CoreQueryResultSink` and the other
 `Core...` exports when writing portable integrations. Core remains engine-neutral.
@@ -324,6 +328,12 @@ Profile IDs, names, grouping, and credential storage belong to the host. Select 
 
 `columns[i]` describes `rows[rowIndex][i]`. SQL NULL is not the string `"NULL"`. BIGINT is `bigint`, DECIMAL and temporal fields remain strings, and binary values are `Uint8Array`; numbers are not a lossless replacement for BIGINT/DECIMAL. JSON cannot directly serialize `bigint`, so convert values deliberately for your own message format.
 
+`mapMySqlRows(result, mapper)` projects a buffered native result without
+coercion. The mapper receives the original positional row, the original columns
+array and the zero-based row index. Duplicate column names remain distinguishable
+by position, JSON text remains text, SQL NULL remains `null`, bytes remain
+`Uint8Array`, and mapper exceptions propagate unchanged.
+
 <!-- arkts-example: rows -->
 ```typescript
 import { ArkDbError, QueryResult, SqlValue } from '@arkdb/mysql';
@@ -345,7 +355,7 @@ export function displayRow(result: QueryResult, rowIndex: number): string[] {
 }
 ```
 
-Check `result.truncated` / `truncationReason` before treating loaded rows as complete. `additionalResults` contains subsequent result sets; `affectedRows`, `lastInsertId` and `warningCount` describe execution. Portable streaming summaries leave `lastInsertId` absent when an EOF row terminator reports no identifier and preserve the value when an OK packet reports one. The native buffered result retains its historical zero default. Use session flags only when `statusKnown` / `sessionStatus.known` is true. Bound presentation separately; converting a whole result to a giant string defeats streaming. Historical MySQL `ColumnDef`/`ServerInfo` imports retain native subclasses; portable versions live in core.
+Check `result.truncated` / `truncationReason` before treating loaded rows as complete. `additionalResults` contains subsequent result sets; `affectedRows`, `lastInsertId` and `warningCount` describe execution. `affectedRows` remains the legacy number and can lose precision above the safe integer range; use optional `affectedRowsExact` when the server reported an OK-packet count and exactness matters. Portable streaming summaries leave `lastInsertId` absent when an EOF row terminator reports no identifier and preserve the value when an OK packet reports one. The native buffered result retains its historical zero defaults. Use session flags only when `statusKnown` / `sessionStatus.known` is true. Bound presentation separately; converting a whole result to a giant string defeats streaming. Historical MySQL `ColumnDef`/`ServerInfo` imports retain native subclasses; portable versions live in core.
 
 ## Errors and diagnostics
 

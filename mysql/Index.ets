@@ -55,6 +55,7 @@ export { MySqlExecutionOutcome, MySqlOperationError } from
   './src/main/ets/mysql/model/MySqlOperationError';
 export { MySqlParameter, MySqlParameterType } from './src/main/ets/mysql/model/MySqlParameter';
 export type { MySqlParameterValue } from './src/main/ets/mysql/model/MySqlParameter';
+export { mapMySqlRows } from './src/main/ets/mysql/value/MySqlRowMapper';
 export { quoteMySqlIdentifier, mysqlPlaceholders } from './src/main/ets/mysql/value/MySqlSqlHelpers';
 export { MySqlConnection, createMySqlConnection } from './src/main/ets/mysql/MySqlConnection';
 export { MySqlDriverFactory } from './src/main/ets/mysql/driver/MySqlDriverFactory';

@@ -4,11 +4,12 @@ import {
   MySqlDriverFactory, ArkDbError, ArkDbErrorKind, QueryOptions, QueryResult, SqlValue, SslMode,
   MySqlConnection, MySqlConnectionOptions, ColumnDef, DbValueKind, DriverCapabilities,
   DatabaseContext, ForeignKeyInfo, DbConnection, DbDriverFactory, MetadataProvider, DbExecutionController,
-  ServerMetricsProvider, CoreDbConnection, ConnectionState, ServerInfo, QueryExecutionSummary,
+  ServerMetricsProvider, CoreDbConnection, ConnectionState, ServerInfo, QueryExecutionSummary, QueryResultSummary,
   QueryResultSink, MySqlConnectionFeatures, requireMySqlFeatures, MySqlParameter,
   MySqlParameterType, MySqlParameterValue, MySqlPreparedExecutor, MySqlPreparedStatement,
   MySqlSession, MySqlBatchOptions, MySqlDeadlineOptions, MySqlDeadlineExecutor,
-  MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier, mysqlPlaceholders, createMySqlConnection,
+  MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
+  mysqlPlaceholders, mapMySqlRows, createMySqlConnection,
   CoreQueryResultSink, CoreQueryResultMeta, CoreQueryRowChunk, CoreQueryResultSummary
 } from '../../../Index';
 import {
@@ -63,6 +64,14 @@ export default function publicInterfaceTest(): void {
       const result = new QueryResult();
       result.rows.push(row);
       expect(result.rows[0][0]).assertEqual(9007199254740993n);
+      const mapped = mapMySqlRows<string>(result,
+        (values: SqlValue[], columns: ColumnDef[], rowIndex: number): string => {
+          expect(values === row).assertTrue();
+          expect(columns === result.columns).assertTrue();
+          expect(rowIndex).assertEqual(0);
+          return values[1] as string;
+        });
+      expect(mapped[0]).assertEqual('12.34');
       expect(estimateSqlRowBytes(row)).assertEqual(45);
       const options = new QueryOptions();
       expect(options.maxResultBytes > 0).assertTrue();
@@ -100,11 +109,18 @@ export default function publicInterfaceTest(): void {
         loadedBytes: 0, executionTimeMs: 0, autocommit: true, inTransaction: false,
         truncated: false, truncationReason: '', additionalResults: []
       };
+      const summary: QueryResultSummary = {
+        resultIndex: 0, rowCount: 0, rowCountKnown: true, loadedRowCount: 0, loadedBytes: 0,
+        affectedRows: 0, lastInsertId: 0n, warningCount: 0, truncated: false, truncationReason: '',
+        statusKnown: true, status: new DatabaseSessionStatus()
+      };
       const foreignKey: ForeignKeyInfo = {
         context: new DatabaseContext(), objectName: '', name: '', referencedSchema: '',
         referencedTable: '', columns: []
       };
       expect(result.columns[0].name).assertEqual('value');
+      expect(result.affectedRowsExact === undefined).assertTrue();
+      expect(summary.affectedRowsExact === undefined).assertTrue();
       expect(capabilities.supportsTransactions).assertTrue();
       expect(foreignKey.columns.length).assertEqual(0);
     });

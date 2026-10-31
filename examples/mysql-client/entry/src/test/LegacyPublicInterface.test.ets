@@ -6,7 +6,7 @@ import {
   DriverCapabilities, ForeignKeyInfo, IndexInfo, CatalogInfo, SchemaInfo, MetadataProvider,
   MySqlDriverFactory, MySqlSessionOptions, QueryExecutionSummary, QueryOptions, QueryResult, QueryResultMeta,
   QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation, ServerFamily, ServerInfo,
-  ServerMetricsProvider, SqlValue
+  ServerMetricsProvider, SqlValue, mapMySqlRows
 } from '@arkdb/mysql';
 
 export default function legacyPublicInterfaceTest(): void {
@@ -78,12 +78,27 @@ export default function legacyPublicInterfaceTest(): void {
         autocommit: true, inTransaction: false,
         clone: (): DatabaseSessionStatus => new DatabaseSessionStatus()
       };
+      const summary: QueryResultSummary = {
+        resultIndex: 0, rowCount: 0, rowCountKnown: true, loadedRowCount: 0, loadedBytes: 0,
+        affectedRows: 0, lastInsertId: 0n, warningCount: 0, truncated: false, truncationReason: '',
+        statusKnown: true, status: status
+      };
       const foreignKey: ForeignKeyInfo = {
         context: new DatabaseContext(), objectName: '', name: '', referencedSchema: '',
         referencedTable: '', columns: []
       };
+      result.rows.push(['12.3400']);
+      const mapped = mapMySqlRows<string>(result,
+        (row: SqlValue[], columns: ColumnDef[], rowIndex: number): string => {
+          expect(columns[0] === column).assertTrue();
+          expect(rowIndex).assertEqual(0);
+          return row[0] as string;
+        });
       expect(capabilities.supportsTransactions).assertTrue();
       expect(result.columns[0].name).assertEqual('value');
+      expect(mapped[0]).assertEqual('12.3400');
+      expect(result.affectedRowsExact === undefined).assertTrue();
+      expect(summary.affectedRowsExact === undefined).assertTrue();
       expect(status.clone().autocommit).assertTrue();
       expect(foreignKey.columns.length).assertEqual(0);
     });

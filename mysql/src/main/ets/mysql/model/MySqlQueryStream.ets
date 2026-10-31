@@ -30,6 +30,7 @@ export class MySqlQueryRowChunk extends QueryRowChunk {
 }
 
 export class MySqlQueryResultSummary extends QueryResultSummary {
+  affectedRowsExact?: bigint;
   lastInsertId: bigint = 0n;
   warningCount: number = 0;
   statusKnown: boolean = true;
@@ -106,6 +107,9 @@ export class MySqlResultSinkAdapter implements QueryResultSink {
     summary.loadedRowCount = value.loadedRowCount;
     summary.loadedBytes = value.loadedBytes;
     summary.affectedRows = value.affectedRows;
+    if (value instanceof MySqlQueryResultSummary && value.affectedRowsExact !== undefined) {
+      summary.affectedRowsExact = value.affectedRowsExact;
+    }
     if (value.lastInsertId !== undefined) summary.lastInsertId = value.lastInsertId;
     if (value.warningCount !== undefined) summary.warningCount = value.warningCount;
     summary.truncated = value.truncated;

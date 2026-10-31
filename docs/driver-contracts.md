@@ -167,9 +167,17 @@ type number, flags or collation. Native details remain typed driver-owned
 subclasses. Native type identifiers and logical value kinds are available to
 generic callers. Scalars include boolean, bigint and lossless text/bytes; no
 automatic conversion of exact decimals or structured values to JSON is required.
+MySQL's public `mapMySqlRows` helper is a native positional projection: it passes
+the original row, columns and row index to the caller without coercion, so
+duplicate names remain distinguishable by position and mapper failures retain
+their original identity.
 Generated insert identifiers and warning counts are optional observations, not
 invented zero values for an engine that did not report them. MySQL's native
-result retains its established numeric warning and bigint insert-id fields.
+result retains its established numeric warning and bigint insert-id fields. It
+also retains the legacy numeric `affectedRows` while optionally exposing
+`affectedRowsExact` directly from an OK packet; row results with no affected-count
+observation leave the exact field undefined. Core result and stream types do not
+acquire this MySQL-specific field.
 
 `ArkDbError` has one owner inside a delivery, so its public entry and driver
 implementation use the same constructor. Separately assembled standalone driver

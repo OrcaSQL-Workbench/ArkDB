@@ -1,7 +1,9 @@
 import { PacketReader } from '../protocol/PacketReader';
-import { MySqlColumnDef as ColumnDef } from '../model/MySqlQueryResult';
+import {
+  MySqlColumnDef as ColumnDef, mysqlColumnDecodesAsBytes
+} from '../model/MySqlQueryResult';
 import { DbValueKind } from '@arkdb/core';
-import { ColumnType, Collation, FieldFlag } from '../protocol/Constants';
+import { ColumnType, FieldFlag } from '../protocol/Constants';
 
 /** Parse a ColumnDefinition41 packet into a ColumnDef. */
 export function parseColumnDef(payload: Uint8Array): ColumnDef {
@@ -68,6 +70,6 @@ function mysqlValueKind(type: number, charset: number): DbValueKind {
   if (type === ColumnType.TIME) return DbValueKind.Time;
   if (type === ColumnType.DATETIME || type === ColumnType.TIMESTAMP) return DbValueKind.DateTime;
   if (type === ColumnType.JSON) return DbValueKind.Json;
-  if (type === ColumnType.BIT || charset === Collation.BINARY) return DbValueKind.Binary;
+  if (mysqlColumnDecodesAsBytes(type, charset)) return DbValueKind.Binary;
   return DbValueKind.Text;
 }

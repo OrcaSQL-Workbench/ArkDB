@@ -73,6 +73,27 @@ ready-only executor for each call instead of constructing or retaining a
 physical-session executor while disconnected. Native prepared streams retain
 native callback types; portable `features.streaming` remains text streaming.
 
+MySQL's optional `mysqlFeatures.procedures` interface performs stored procedure
+calls only through prepared binary execution. `MySqlProcedureArgument` and
+`MySqlParameterDirection` model typed `In`, `Out` and `InOut` arguments using
+the existing `MySqlParameter` value contract. Pure `Out` is normalized to a
+typed NULL placeholder; `In` and `InOut` retain their input values. The driver
+negotiates `CLIENT_PS_MULTI_RESULTS` when offered and identifies the single-row
+OUT/INOUT result through `SERVER_PS_OUT_PARAMS` status on either the classic
+metadata EOF or the deprecated-EOF row terminator. For classic OUT results, the
+metadata EOF's `SERVER_MORE_RESULTS_EXISTS` remains the continuation signal when
+the row EOF omits it. `MySqlProcedureResult.results` preserves ordinary results,
+the marked OUT result and final OK in complete wire order; `outResultIndex`
+identifies the marked entry and `outValues` preserves its declaration-ordered
+values. Output validation is positional with strict count, type-family and
+signedness checks; SQL NULL remains null. Text/byte validation shares the binary
+decoder's classification: charset 63 and intrinsic BIT/GEOMETRY values are
+byte-valued, while `FieldFlag.BINARY` alone does not change a nonbinary-charset
+string into bytes. The marked OUT result must report exactly one known total row
+and a nontruncated payload; row limits, cumulative byte limits or prior ordinary
+truncation cannot be mistaken for successful output cardinality. There are no
+session variables, text `CALL` fallbacks or positional guesses.
+
 MySQL also exposes the optional `mysqlFeatures.deadlines` interface for buffered
 text queries and prepared execution. `MySqlDeadlineOptions` defaults to
 `timeoutMs = 0` and `cancellationGraceMs = 2000`, clones its `QueryOptions`, and

@@ -24,6 +24,9 @@ export function computeClientCapabilities(serverCaps: number, withDb: boolean, w
   if ((serverCaps & Capabilities.DEPRECATE_EOF) !== 0) {
     caps = caps | Capabilities.DEPRECATE_EOF;
   }
+  if ((serverCaps & Capabilities.PS_MULTI_RESULTS) !== 0) {
+    caps = caps | Capabilities.PS_MULTI_RESULTS;
+  }
   if (withDb) {
     caps = caps | Capabilities.CONNECT_WITH_DB;
   }

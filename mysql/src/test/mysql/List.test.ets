@@ -11,6 +11,7 @@ import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
 import mySqlDeadlineExecutorTest from './execution/MySqlDeadlineExecutor.test';
 import mySqlStatementCacheTest from './execution/MySqlStatementCache.test';
 import mySqlNamedExecutorTest from './execution/MySqlNamedExecutor.test';
+import mySqlProcedureCallerTest from './execution/MySqlProcedureCaller.test';
 import mySqlTransactionRunnerTest from './execution/MySqlTransactionRunner.test';
 import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';
 import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
@@ -41,6 +42,7 @@ export default function testsuite(): void {
   mySqlDeadlineExecutorTest();
   mySqlStatementCacheTest();
   mySqlNamedExecutorTest();
+  mySqlProcedureCallerTest();
   mySqlTransactionRunnerTest();
   mySqlServerMetricsProviderTest();
   mySqlMetadataProviderTest();

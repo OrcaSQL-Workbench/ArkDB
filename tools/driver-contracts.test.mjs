@@ -44,6 +44,34 @@ test('shared contracts describe additive MySQL session reset', async () => {
   assert.match(contracts, /\bcore and old custom MySQL connections acquire no required method\b/i);
 });
 
+test('shared contracts describe binary procedure output parameters', async () => {
+  const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
+  const index = await readFile(join(ROOT, 'mysql', 'Index.ets'), 'utf8');
+  assert.match(contracts, /\bmysqlFeatures\.procedures\b/);
+  assert.match(contracts, /\bMySqlProcedureArgument\b/);
+  assert.match(contracts, /\bMySqlParameterDirection\b/);
+  assert.match(contracts, /\bCLIENT_PS_MULTI_RESULTS\b/);
+  assert.match(contracts, /\bSERVER_PS_OUT_PARAMS\b/);
+  assert.match(contracts, /\bSERVER_MORE_RESULTS_EXISTS\b/);
+  assert.match(contracts, /\bclassic\s+metadata EOF\b/i);
+  assert.match(contracts, /\bdeprecated-EOF\s+row terminator\b/i);
+  assert.match(contracts, /\boutResultIndex\b/);
+  assert.match(contracts, /\boutValues\b/);
+  assert.match(contracts, /\btyped NULL placeholder\b/i);
+  assert.match(contracts, /\bFieldFlag\.BINARY\b/);
+  assert.match(contracts, /\bexactly one known total row\b/i);
+  assert.match(contracts, /\bnontruncated payload\b/i);
+  assert.match(contracts, /\bcumulative byte limits\b/i);
+  assert.match(contracts, /\bno\s+session variables\b/i);
+  assert.match(contracts, /\btext\s+`CALL`\s+fallbacks\b/i);
+  assert.match(contracts, /\bSQL NULL remains\s+null\b/i);
+  assert.match(index, /\bMySqlProcedureArgument\b/);
+  assert.match(index, /\bMySqlParameterDirection\b/);
+  assert.doesNotMatch(index, /\bMySqlProcedureParameter\b/);
+  assert.doesNotMatch(index, /\bMySqlProcedureParameterDirection\b/);
+  assert.doesNotMatch(index, /\bMySqlProcedureOutput\b/);
+});
+
 test('transaction runner observes the same promise returned to detached callers', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'execution', 'MySqlTransactionRunner.ets'), 'utf8');

@@ -180,6 +180,45 @@ drain behavior, cancellation settlement and error outcomes as positional
 prepared streaming. Discovering the feature performs no I/O, but execution
 requires the connection to be Ready.
 
+### Binary stored procedure OUT and INOUT parameters
+
+Built-in connections expose the optional
+`requireMySqlFeatures(connection).procedures` caller. `call(procedure,
+arguments, options?)` accepts a quoted identifier path such as
+`['schema', 'routine']` and typed `MySqlProcedureArgument` values with `In`,
+`Out` or `InOut` direction. Every value uses the prepared-statement binary
+protocol. The caller never creates session variables, sends a text `CALL`, or
+falls back when the server does not offer prepared multi-result support.
+
+One call owns PREPARE, EXECUTE, the complete multi-result response and statement
+close. `MySqlProcedureResult.results` preserves every consumed wire result in
+order, including the marked OUT result and final OK. `outResultIndex` identifies
+the OUT entry or is `-1` when the routine has no OUT/INOUT arguments, and
+`outValues` contains that result's ordered values. A pure `Out` argument is
+always encoded as a typed NULL placeholder; `In` and `InOut` retain their input
+values. Returned SQL NULL remains `null`, never numeric zero. Output columns
+must match the declared argument count, protocol type family and signedness.
+Text-versus-bytes validation uses the same rule as binary row decoding: binary
+charset 63 and intrinsic BIT/GEOMETRY values decode as bytes; the column
+`BINARY` flag alone does not turn a nonbinary-charset string into bytes.
+
+The driver negotiates `CLIENT_PS_MULTI_RESULTS` only when the server offers it.
+It recognizes the OUT result by `SERVER_PS_OUT_PARAMS`, not by assuming it is at
+a fixed position. Classic EOF servers carry that marker on the metadata EOF;
+that metadata status also preserves continuation when its row EOF omits
+`SERVER_MORE_RESULTS_EXISTS`. `CLIENT_DEPRECATE_EOF` servers carry the marker and
+continuation on the row-ending OK packet. Missing, duplicate or malformed markers
+fail explicitly only after the response has been fully consumed, so a
+synchronized connection remains reusable. Discovery itself performs no I/O;
+calls still require a Ready, unowned connection.
+
+Query limits still apply across the complete response, but OUT values are exposed
+only when the marked result has a known total row count of exactly one and its
+payload was not truncated. A row limit, cumulative result-byte limit, or earlier
+ordinary-result truncation that prevents loading the complete OUT row therefore
+fails after the wire drain with a synchronized connection; loaded-row count is
+never used as proof of OUT cardinality.
+
 Prepared batches are available from the optional
 `requireMySqlFeatures(connection).batch` feature. The facade can be discovered
 before connect, but a nonempty `execute(sql, rows, options?)` requires a ready

@@ -1,8 +1,10 @@
 import { ArkDbError } from '@arkdb/core';
 import { MySqlRowDecoder } from '../command/ResultStream';
-import { MySqlColumnDef, MySqlValue } from '../model/MySqlQueryResult';
+import {
+  MySqlColumnDef, MySqlValue, mysqlColumnDecodesAsBytes
+} from '../model/MySqlQueryResult';
 import { utf8Decode } from '../protocol/Charsets';
-import { Collation, ColumnType, FieldFlag } from '../protocol/Constants';
+import { ColumnType, FieldFlag } from '../protocol/Constants';
 import { PacketReader } from '../protocol/PacketReader';
 
 export class BinaryRowDecoder implements MySqlRowDecoder {
@@ -101,9 +103,7 @@ function finiteFloat(value: number): number {
 
 function readLengthEncodedValue(reader: PacketReader, column: MySqlColumnDef): MySqlValue {
   const raw = reader.readBytes(reader.readLenEncUInt());
-  if (column.type === ColumnType.BIT || column.type === ColumnType.GEOMETRY ||
-    (column.charset === Collation.BINARY && column.type !== ColumnType.DECIMAL &&
-      column.type !== ColumnType.NEWDECIMAL && column.type !== ColumnType.JSON)) {
+  if (mysqlColumnDecodesAsBytes(column.type, column.charset)) {
     return raw;
   }
   return utf8Decode(raw);

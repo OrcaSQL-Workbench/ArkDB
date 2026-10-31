@@ -450,11 +450,13 @@ async function finishRowResult(terminator: MysqlPacket, capabilities: number, si
   let statusFlags = 0;
   let warnings = 0;
   let lastInsertId: bigint | undefined = undefined;
+  let affectedRowsExact: bigint | undefined = undefined;
   if ((capabilities & Capabilities.DEPRECATE_EOF) !== 0) {
     const ok = parseOk(terminator.payload, capabilities);
     statusFlags = ok.statusFlags;
     warnings = ok.warnings;
     lastInsertId = ok.lastInsertId;
+    affectedRowsExact = ok.affectedRowsExact;
   } else {
     const finalEofLength = (capabilities & Capabilities.PROTOCOL_41) !== 0 ? 5 : 1;
     if (terminator.payload.length !== finalEofLength) {
@@ -465,7 +467,12 @@ async function finishRowResult(terminator: MysqlPacket, capabilities: number, si
     warnings = eof.warnings;
   }
 
-  const summary = new QueryResultSummary();
+  let summary: QueryResultSummary = new QueryResultSummary();
+  if (affectedRowsExact !== undefined) {
+    const nativeSummary = new MySqlQueryResultSummary();
+    nativeSummary.affectedRowsExact = affectedRowsExact;
+    summary = nativeSummary;
+  }
   summary.resultIndex = resultIndex;
   summary.rowCount = totalRows;
   summary.loadedRowCount = emittedRows;

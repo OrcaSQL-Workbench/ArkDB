@@ -720,7 +720,7 @@ export default function queryStreamTest() {
 
     it('exactAffectedCountSurvivesBufferedResult', 0, async () => {
       const exact = 9007199254740993n;
-      const encoded = exactAffectedRowsOkPacket(exact, StatusFlags.AUTOCOMMIT, 0);
+      const encoded = exactAffectedRowsOkPacket(0x00, exact, StatusFlags.AUTOCOMMIT, 0);
       const reader = new PacketReader(encoded.payload);
       expect(reader.readUInt8()).assertEqual(0x00);
       expect(reader.readLenEncInt() === exact).assertTrue();
@@ -736,7 +736,7 @@ export default function queryStreamTest() {
       const native = new NativeRecordingSink();
 
       await parseQueryStream(new FixtureSource([
-        exactAffectedRowsOkPacket(exact, StatusFlags.AUTOCOMMIT, 0)
+        exactAffectedRowsOkPacket(0x00, exact, StatusFlags.AUTOCOMMIT, 0)
       ]), Capabilities.PROTOCOL_41, new QueryOptions(), new MySqlResultSinkAdapter(native));
 
       expect(native.ends.length).assertEqual(1);
@@ -759,6 +759,29 @@ export default function queryStreamTest() {
       expect(native.ends.length).assertEqual(1);
       expect(native.ends[0].affectedRows).assertEqual(0);
       expect(native.ends[0].affectedRowsExact === undefined).assertTrue();
+    });
+
+    it('rowTerminatorsPreserveExactAffectedCountOnlyWhenReported', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const deprecateEof = mode === 1;
+        const capabilities = Capabilities.PROTOCOL_41 |
+          (deprecateEof ? Capabilities.DEPRECATE_EOF : 0);
+        const packets = deprecateEof ? [
+          packet(bytes(1)), columnPacket('value'), textRow('one'),
+          okPacket(0xfe, StatusFlags.AUTOCOMMIT, 0)
+        ] : [
+          packet(bytes(1)), columnPacket('value'), eofPacket(StatusFlags.AUTOCOMMIT, 0),
+          textRow('one'), eofPacket(StatusFlags.AUTOCOMMIT, 0)
+        ];
+        const buffered = await parseResultSet(new FixtureSource(packets.slice()), capabilities);
+        const native = new NativeRecordingSink();
+        await parseQueryStream(new FixtureSource(packets.slice()), capabilities,
+          new QueryOptions(), new MySqlResultSinkAdapter(native));
+
+        expect(buffered.affectedRowsExact === (deprecateEof ? 0n : undefined)).assertTrue();
+        expect(native.ends.length).assertEqual(1);
+        expect(native.ends[0].affectedRowsExact === (deprecateEof ? 0n : undefined)).assertTrue();
+      }
     });
 
     it('truncatesAtDecodedByteBudget', 0, async () => {
@@ -1328,10 +1351,10 @@ function okPacket(header: number, statusFlags: number, warnings: number): MysqlP
   return packet(writer.toUint8Array());
 }
 
-function exactAffectedRowsOkPacket(affectedRowsExact: bigint,
+function exactAffectedRowsOkPacket(header: number, affectedRowsExact: bigint,
   statusFlags: number, warnings: number): MysqlPacket {
   const writer = new PacketWriter();
-  writer.writeUInt8(0x00);
+  writer.writeUInt8(header);
   writer.writeUInt8(0xfe);
   writer.writeUInt64(affectedRowsExact);
   writer.writeLenEncInt(0);

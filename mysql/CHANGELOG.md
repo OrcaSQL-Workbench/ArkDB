@@ -33,6 +33,33 @@
   `outValues`, share text/byte classification with binary row decoding, reject
   unknown or truncated OUT cardinality after full drain, and avoid session
   variables or a text-protocol fallback.
+- Add optional privacy-safe execution observation through
+  the factory-only `MySqlConnectionOptions(..., extensions)` path. Emit one start and one terminal
+  event per accepted physical-connection command with connection-local serial,
+  session generation, command kind and monotonic timing only. Exclude SQL,
+  parameters, credentials, identity, result and error data; remove a throwing
+  observer before tokenized warning logging without failing or replaying the
+  operation. Keep native creation helpers and internal cancellation control
+  connections observer-free. Preserve factory subclass dispatch by delegating
+  ordinary generic creation to `createConnection` and routing only opt-in
+  observation through the protected `createObservedConnection` hook and a
+  non-entry-exported one-shot capability helper. Reject wrong-capability,
+  repeated and post-reservation initialization without replacing the command
+  gate, serial or generation.
+  Separate ownership reservation from start delivery so connection/prepared
+  settlement and memoized close promises are published before observer reentry.
+  Deliver start once before the operation body, reject duplicate starts, and
+  preserve one terminal after converged release.
+  Preserve exact public prepared-handle close promise/error identity for expired
+  and busy-preflight results while keeping session/owned close retries available.
+  Move close publication into a handle-owned deferred and preserve the legacy
+  three-argument `runPreparedCommand` override signature.
+  Track pending/live/settled-preflight bridge state so session close reentry
+  joins the live handle operation and only a settled pre-start rejection is
+  eligible for explicit session/owned retry.
+  Restore the async boundary of the legacy three-argument
+  `runPreparedCommand` override so busy/not-ready preflight rejects through the
+  returned Promise and preserves subclass catch/finally hooks and error identity.
 - Add optional restricted multi-row INSERT through `mysqlFeatures.insertRows`.
   Quote table and column identifiers, bind only typed prepared parameters,
   snapshot every request before dispatch, and greedily group rows by exact

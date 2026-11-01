@@ -35,6 +35,11 @@ export interface MySqlCommandScope {
   readonly ownerToken: Object;
 }
 
+export interface MySqlCommandLifecycleObserver {
+  onStart(scope: MySqlCommandScope): void;
+  onTerminal(scope: MySqlCommandScope): void;
+}
+
 class CommandOwnerToken {}
 
 class CommandScope implements MySqlCommandScope {
@@ -45,6 +50,7 @@ class CommandScope implements MySqlCommandScope {
   phase: MySqlCommandPhase = MySqlCommandPhase.Reserved;
   deadlineExpired: boolean = false;
   advanceGeneration: boolean = false;
+  started: boolean = false;
 
   constructor(serial: number, generation: number, kind: MySqlCommandKind) {
     this.serial = serial;
@@ -57,6 +63,11 @@ export class MySqlCommandGate {
   private serial: number = 0;
   private sessionGeneration: number = 0;
   private active: CommandScope | null = null;
+  private lifecycleObserver: MySqlCommandLifecycleObserver | null;
+
+  constructor(lifecycleObserver?: MySqlCommandLifecycleObserver) {
+    this.lifecycleObserver = lifecycleObserver === undefined ? null : lifecycleObserver;
+  }
 
   get current(): MySqlCommandScope | null {
     return this.active;
@@ -64,6 +75,10 @@ export class MySqlCommandGate {
 
   get generation(): number {
     return this.sessionGeneration;
+  }
+
+  get hasReserved(): boolean {
+    return this.serial > 0;
   }
 
   advanceGeneration(): void {
@@ -86,6 +101,15 @@ export class MySqlCommandGate {
     const scope = new CommandScope(this.serial, this.sessionGeneration, kind);
     this.active = scope;
     return scope;
+  }
+
+  start(scope: MySqlCommandScope): void {
+    this.assertOwner(scope);
+    if (this.active!.started) {
+      throw ArkDbError.protocol('The command scope start was already delivered.');
+    }
+    this.active!.started = true;
+    if (this.lifecycleObserver !== null) this.lifecycleObserver.onStart(scope);
   }
 
   isOwner(scope: MySqlCommandScope): boolean {
@@ -118,9 +142,13 @@ export class MySqlCommandGate {
 
   release(scope: MySqlCommandScope): void {
     this.assertOwner(scope);
+    if (this.lifecycleObserver !== null && !this.active!.started) {
+      throw ArkDbError.protocol('The command scope must start before it can settle.');
+    }
     const advanceGeneration = this.active!.advanceGeneration;
     this.active!.phase = MySqlCommandPhase.Settled;
     this.active = null;
     if (advanceGeneration) this.sessionGeneration += 1;
+    if (this.lifecycleObserver !== null) this.lifecycleObserver.onTerminal(scope);
   }
 }

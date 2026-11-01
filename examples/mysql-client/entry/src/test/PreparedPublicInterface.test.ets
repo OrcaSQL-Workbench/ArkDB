@@ -1,8 +1,11 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionConfig, ConnectionState, MySqlConnection,
-  MySqlBatchResult, MySqlConnectionFeatures, MySqlDeadlineExecutor, MySqlDeadlineOptions,
-  MySqlDriverFactory, MySqlInsertRowsExecutor, MySqlInsertRowsOptions,
+  MySqlBatchResult,
+  MySqlCommandKind, MySqlConnectionExtensions, MySqlConnectionFeatures,
+  MySqlConnectionOptions, MySqlDeadlineExecutor, MySqlDeadlineOptions, MySqlDriverFactory,
+  MySqlExecutionEvent, MySqlExecutionEventType, MySqlExecutionObserver,
+  MySqlInsertRowsExecutor, MySqlInsertRowsOptions,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameter, MySqlParameterType,
   MySqlParameterValue, MySqlPreparedExecutor,
   MySqlPreparedStatement, MySqlProcedureCaller, MySqlProcedureArgument,
@@ -100,6 +103,49 @@ export default function preparedPublicInterfaceTest(): void {
       await connection.close();
     });
 
+    it('executionObserverShipsInTheSingleHarWithoutChangingNativeCreation', 0, async () => {
+      const factory = new MySqlDriverFactory();
+      const observer = new HarExecutionObserver();
+      const config = new ConnectionConfig();
+      const options = new MySqlConnectionOptions(config, '',
+        new MySqlConnectionExtensions(observer));
+      const observed = factory.create(options);
+      await observed.close();
+      expect(observer.events.length).assertEqual(2);
+      expect(observer.events[0].type).assertEqual(MySqlExecutionEventType.Start);
+      expect(observer.events[0].commandKind).assertEqual(MySqlCommandKind.Close);
+      expect(observer.events[1].type).assertEqual(MySqlExecutionEventType.Terminal);
+
+      const legacyOptions = new MySqlConnectionOptions(config, '');
+      expect(legacyOptions.extensions === undefined).assertTrue();
+      const native = factory.createConnection(config, '');
+      const direct = new MySqlConnection(config, '');
+      await native.close();
+      await direct.close();
+      expect(observer.events.length).assertEqual(2);
+    });
+
+    it('genericFactorySubclassHooksShipInTheSingleHar', 0, async () => {
+      const factory = new HarHookedFactory();
+      const config = new ConnectionConfig();
+      const ordinary = factory.create(new MySqlConnectionOptions(config, ''));
+      expect(ordinary === factory.ordinaryConnection).assertTrue();
+      expect(factory.createConnectionCalls).assertEqual(1);
+      expect(factory.createObservedConnectionCalls).assertEqual(0);
+
+      const observer = new HarExecutionObserver();
+      const observed = factory.create(new MySqlConnectionOptions(config, '',
+        new MySqlConnectionExtensions(observer)));
+      expect(observed === factory.ordinaryConnection).assertFalse();
+      expect(factory.createConnectionCalls).assertEqual(1);
+      expect(factory.createObservedConnectionCalls).assertEqual(1);
+      await observed.close();
+      expect(observer.events[0].monotonicTimeMs).assertEqual(200);
+      expect(observer.events[1].monotonicTimeMs).assertEqual(280);
+      expect(observer.events[1].durationMs).assertEqual(80);
+      await ordinary.close();
+    });
+
     it('absentMysqlFeaturesThrowsUnsupported', 0, () => {
       let failure: Object | null = null;
       try { requireMySqlFeatures(new LegacyCustomConnection()); }
@@ -118,6 +164,42 @@ export default function preparedPublicInterfaceTest(): void {
       expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
     });
   });
+}
+
+class HarExecutionObserver implements MySqlExecutionObserver {
+  readonly events: MySqlExecutionEvent[] = [];
+
+  onEvent(event: MySqlExecutionEvent): void {
+    this.events.push(event);
+  }
+}
+
+class HarHookedFactory extends MySqlDriverFactory {
+  readonly ordinaryConnection: MySqlConnection =
+    new MySqlConnection(new ConnectionConfig(), '');
+  createConnectionCalls: number = 0;
+  createObservedConnectionCalls: number = 0;
+  private clockValues: number[] = [200, 280];
+  private clockIndex: number = 0;
+
+  createConnection(_config: ConnectionConfig, _password: string): MySqlConnection {
+    this.createConnectionCalls += 1;
+    return this.ordinaryConnection;
+  }
+
+  protected createObservedConnection(config: ConnectionConfig, password: string,
+    extensions: MySqlConnectionExtensions,
+    _executionClock?: () => number): MySqlConnection {
+    this.createObservedConnectionCalls += 1;
+    return super.createObservedConnection(config, password, extensions,
+      (): number => this.readClock());
+  }
+
+  private readClock(): number {
+    const value = this.clockValues[this.clockIndex];
+    this.clockIndex += 1;
+    return value;
+  }
 }
 
 async function preparedSignatures(executor: MySqlPreparedExecutor, session: MySqlSession,

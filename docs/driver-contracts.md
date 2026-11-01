@@ -62,6 +62,68 @@ compatible with 1.0.1, not replacements by their minimal/generic core counterpar
 Portable consumers use the distinct `CoreDbConnection`, `CoreDbDriverFactory`,
 `CoreDbExecutionController` and `CoreMetadataProvider` exports from the same HAR.
 
+`MySqlConnectionOptions` has an optional third `MySqlConnectionExtensions`
+argument. Its `executionObserver` is invoked synchronously through
+`MySqlExecutionObserver.onEvent(event)` for connections created by the generic
+`factory.create(options)` path. The native
+`createConnection(config, password)` and `createMySqlConnection(config, password)`
+interfaces remain observer-free. The exported `MySqlConnection` constructor
+retains its established config/password plus internal transport/timer/control
+test seams; it accepts neither extensions nor a custom execution clock.
+When no observer is configured, generic `create(options)` still delegates to
+the factory's overridable `createConnection(config, password)` method exactly as
+before. The opt-in observer path uses the protected overridable
+`createObservedConnection` hook, so factory subclasses can retain specialized
+construction and deterministic test clocks without widening the public
+connection constructor.
+
+Observer activation is a one-shot internal capability operation. The capability
+identity and helper are not exported by `mysql/Index.ets`, and
+`MySqlConnection` exposes no public or protected observer initializer to
+consumer subclasses. A wrong capability, repeated initialization, or
+initialization after the first command reservation is rejected without replacing
+the existing command gate, serial or generation.
+
+Each accepted physical-connection command first installs gate ownership and its
+serial. The driver then publishes any shared opening/reset/settlement/close
+promise state before delivering the one start event and before running the wire
+or operation body. Reentrant close calls therefore join the published operation
+instead of stealing or skipping it. A duplicate start is rejected. One terminal
+event follows ownership release. Cancellation, deadlines, close cleanup, session
+reset and the final awaited stream sink must converge before the terminal event.
+Events contain only the fixed fields
+`type`, connection-local `serial`, `generation`, `commandKind`,
+`monotonicTimeMs` and `durationMs`. They contain no SQL, parameters, credentials,
+connection identity, result data, errors, native codes, SQLSTATE or arbitrary
+metadata. Serial values are local to one physical connection; a pool that needs
+cross-connection correlation owns its own envelope.
+
+`MySqlPreparedStatement.close()` memoizes the exact promise returned for every
+public handle close attempt, including an already-expired handle and a busy
+connection preflight rejection. Repeated handle closes therefore preserve both
+promise and error identity. A caller that intentionally retries after a busy
+preflight uses the session/owned close entry point; those entry points clear only
+the handle-preflight memo and retain their established retry behavior.
+The handle-owned deferred is installed before invoking session or connection
+overrides and bridges the returned owner task. Publication does not add an
+argument to the legacy three-argument `runPreparedCommand` override, so existing
+subclasses cannot silently drop start-reentry protection.
+The bridge distinguishes pending, live and settled-preflight states. Handle and
+session close reentry always join a pending or live bridge. Session/owned retry
+clears the retained handle bridge only after it has settled as a pre-start
+rejection; it never clears a live operation or a successful/failed live result.
+
+The legacy three-argument `runPreparedCommand` override retains its async
+boundary. Busy, not-ready, reservation and start preflight failures return a
+rejected Promise rather than throwing before return. Subclass `.catch()` and
+`.finally()` hooks therefore observe the original `ArkDbError` identity for
+prepared, named and batch command entry.
+
+Observer exceptions never change or replay the database operation. The failing
+observer is removed before the driver emits a tokenized warning, and it receives
+no retry or later event. Internal cancellation control connections do not inherit
+the target connection's observer.
+
 MySQL-specific prepared statements use the separate optional
 `mysqlFeatures.prepared` interface. `requireMySqlFeatures` reports a missing
 container with the canonical `Unsupported` error; callers still check the

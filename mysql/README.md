@@ -73,6 +73,83 @@ Use `CoreDbConnection`, `CoreDbDriverFactory`, `CoreQueryResultSink` and the oth
 The reserved `ServerFamily.PostgreSQL` value is retained only for source
 compatibility; it does not mean a PostgreSQL driver exists.
 
+## Privacy-safe execution observation
+
+The generic `MySqlDriverFactory.create(options)` path accepts an optional
+`MySqlConnectionExtensions` value on `MySqlConnectionOptions`. Its
+`executionObserver` receives synchronous lifecycle events without receiving the
+SQL operation payload.
+
+```typescript
+import {
+  ConnectionConfig, MySqlConnection, MySqlConnectionExtensions,
+  MySqlConnectionOptions, MySqlDriverFactory, MySqlExecutionEvent,
+  MySqlExecutionObserver
+} from '@arkdb/mysql';
+
+class LifecycleObserver implements MySqlExecutionObserver {
+  lastEvent: MySqlExecutionEvent | null = null;
+
+  onEvent(event: MySqlExecutionEvent): void {
+    this.lastEvent = event;
+  }
+}
+
+export function createObservedConnection(config: ConnectionConfig,
+  password: string): MySqlConnection {
+  const extensions = new MySqlConnectionExtensions(new LifecycleObserver());
+  return new MySqlDriverFactory().create(
+    new MySqlConnectionOptions(config, password, extensions));
+}
+```
+
+Each accepted command reserves ownership and a serial, publishes any shared
+opening/reset/settlement/close promise needed by reentrant callers, and then
+delivers one start event before the operation body. A duplicate start is
+rejected. One terminal event occurs only after the final awaited stream sink and
+any cancellation, deadline or close cleanup have converged. Session reset
+reports its original generation; a later command observes the advanced
+generation. Event serials are monotonic only within one physical connection.
+
+`MySqlPreparedStatement.close()` is exactly idempotent even when it resolves
+immediately for an expired handle or rejects during busy-connection preflight:
+repeated handle calls return the same promise and the same rejection object.
+Code that deliberately retries after a busy preflight uses the session/owned
+close entry point rather than the memoized public handle call.
+The handle installs and owns its deferred before calling session/connection
+overrides, then bridges the returned close task. Existing three-argument
+`runPreparedCommand` overrides remain unchanged and cannot bypass publication.
+Pending and live bridges are joined by both handle and session close reentry.
+Only a settled pre-start rejection can be cleared by a deliberate session/owned
+retry; live success or failure remains memoized with the original identity.
+
+The three-argument `runPreparedCommand` override also keeps its async boundary.
+Busy or not-ready preflight returns a rejected Promise, so subclass
+`.catch()`/`.finally()` hooks run and receive the original driver error instead
+of a synchronous throw.
+
+The event contains exactly `type`, `serial`, `generation`, `commandKind`,
+`monotonicTimeMs` and `durationMs`. It never contains SQL, parameter values or
+names, credentials, host/user/schema identity, connection handles, result data,
+errors, messages, native codes, SQLSTATE or arbitrary metadata. A throwing
+observer is removed before a tokenized warning is logged; the operation is not
+failed or replayed, and the observer receives no later events. Driver-created
+cancellation control connections are unobserved. The legacy direct constructor,
+`createConnection(config, password)` and `createMySqlConnection(config, password)`
+remain unchanged and observer-free. The public constructor does not accept
+extensions or a custom execution clock; observation is configured only by
+`MySqlDriverFactory.create(options)`.
+
+Factory subclasses keep their established generic-creation behavior:
+`create(options)` delegates to an overridden `createConnection(config, password)`
+when no observer is present, including an empty extensions container. Observed
+creation uses the protected `createObservedConnection` hook, which subclasses
+can override for specialized connection construction or deterministic tests.
+That hook routes through a one-shot internal capability helper that is not
+exported by the package entry. `MySqlConnection` subclasses have no observer
+initializer. Wrong-capability, repeated, and post-reservation initialization
+attempts reject without replacing the connection's command serial or generation.
+
 ## Optional typed prepared statements
 
 Built-in connections expose `mysqlFeatures.prepared`; the factory's

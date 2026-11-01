@@ -897,6 +897,55 @@ export default function mySqlExecutionObserverTest(): void {
       });
     });
 
+    it('connectStartReentryWaitsForRootCloseCleanup', 0, async () => {
+      const observer = new StartCloseObserver();
+      const transport = new GatedFailingCloseTransport();
+      transport.failure = new Error('Synthetic connect start root close failure.');
+      const fixture = new ObserverFixture(
+        observer, undefined, undefined, transport);
+      observer.target = fixture.connection;
+      observer.kind = MySqlCommandKind.Connect;
+      let settled = false;
+      const opening = executionFailure(fixture.connection.connect())
+        .then((failure: Object | null): Object | null => {
+          settled = true;
+          return failure;
+        });
+      try {
+        await observer.entered.promise;
+        await transport.closeEntered.promise;
+        await flushPrepared();
+        expect(settled).assertFalse();
+        expect(observer.starts).assertEqual(1);
+        expect(observer.terminals).assertEqual(0);
+        expect(transport.closeCalls).assertEqual(1);
+        const closeTask = observer.reenteredClose;
+        if (closeTask === null) throw new Error('Expected root close start reentry.');
+        expect(fixture.connection.close() === closeTask).assertTrue();
+
+        transport.closeAllowed.release();
+        const closeFailure = await executionFailure(closeTask);
+        const failure = await opening;
+        expect(closeFailure instanceof MySqlOperationError).assertTrue();
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError &&
+          closeFailure instanceof MySqlOperationError) {
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+          expect(failure.cleanupErrors.length).assertEqual(1);
+          expect(failure.cleanupErrors[0] === closeFailure).assertTrue();
+        }
+        expect(observer.starts).assertEqual(1);
+        expect(observer.terminals).assertEqual(1);
+        expect(transport.closeCalls).assertEqual(1);
+      } finally {
+        transport.closeAllowed.release();
+        await opening;
+        if (observer.reenteredClose !== null) {
+          await executionFailure(observer.reenteredClose);
+        }
+      }
+    });
+
     it('preparedStartReentryWaitsForRootCloseCleanup', 0, async () => {
       const observer = new StartCloseObserver();
       const transport = new GatedFailingCloseTransport();

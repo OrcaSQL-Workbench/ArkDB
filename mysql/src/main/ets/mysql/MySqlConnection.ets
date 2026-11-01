@@ -143,6 +143,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private named: MySqlPreparedNamedExecutor | null = null;
   private procedures: MySqlPreparedProcedureCaller | null = null;
   private prepared: InternalPreparedExecutor | null = null;
+  private connectOperation: CommandCloseSettlement | null = null;
   private ordinaryOperation: OrdinaryCommandSettlement | null = null;
   private preparedOperation: PreparedCommandSettlement | null = null;
   private transactionOperation: PreparedCommandSettlement | null = null;
@@ -368,11 +369,43 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     const deadline = new ConnectionDeadline(this.config.connectTimeoutMs, this.timers);
     this.opening = deadline;
     const scope = this.commandGate.reserve(MySqlCommandKind.Connect);
-    this.commandGate.start(scope);
+    const settlement = new CommandCloseSettlement(scope);
+    this.connectOperation = settlement;
+    let primary: Object | null = null;
+    const cleanup: ArkDbError[] = [];
     try {
+      this.commandGate.start(scope);
       await this.connectOwned(scope, deadline);
-    } finally {
+    } catch (error) {
+      primary = error as Object;
+    }
+    const executionOutcome = primary instanceof MySqlOperationError ? primary.outcome :
+      (primary === null ? MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.NotDispatched);
+    const closeJoin = this.commandCloseJoin(settlement, scope);
+    if (closeJoin !== null) {
+      const closeFailure = await closeJoin;
+      if (closeFailure !== null) {
+        if (primary === null) primary = closeFailure;
+        else if (!operationContainsFailure(primary, closeFailure)) cleanup.push(closeFailure);
+      }
+    }
+    try {
       this.finishCommand(scope);
+    } catch (error) {
+      cleanup.push(toCleanupError(error as Object));
+    }
+    if (this.connectOperation === settlement) this.connectOperation = null;
+    if (primary !== null) {
+      if (cleanup.length === 0 &&
+        (settlement.closeResult === null ||
+          (primary instanceof MySqlOperationError &&
+            primary.outcome === executionOutcome))) {
+        throw primary as Error;
+      }
+      throw operationFailure(primary, cleanup, executionOutcome);
+    }
+    if (cleanup.length > 0) {
+      throw operationFailure(cleanup[0], cleanup.slice(1), MySqlExecutionOutcome.Completed);
     }
   }
 
@@ -472,11 +505,16 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         ' kind=' + String(oe.kind) + ' error=' + Logger.errorToken(oe));
       this.channel = null;
       this.invalidatePreparedState();
-      try {
-        await this.transport.abort(oe);
-      } catch (cleanup) {
-        Logger.w(LogTag.Conn, 'connect cleanup failed error=' + Logger.errorToken(cleanup));
-        cleanupErrors.push(toCleanupError(cleanup as Object));
+      const settlement = this.connectOperation;
+      const rootCloseOwnsCleanup = settlement !== null &&
+        settlement.scope === scope && settlement.closeResult !== null;
+      if (!rootCloseOwnsCleanup) {
+        try {
+          await this.transport.abort(oe);
+        } catch (cleanup) {
+          Logger.w(LogTag.Conn, 'connect cleanup failed error=' + Logger.errorToken(cleanup));
+          cleanupErrors.push(toCleanupError(cleanup as Object));
+        }
       }
     } finally {
       try { deadline.dispose(); } catch (cleanup) {
@@ -1049,6 +1087,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         };
       });
       this.closing = closing;
+      const connecting = this.connectOperation;
+      if (connecting !== null && connecting.scope === scope) connecting.closeResult = closing;
       const ordinary = this.ordinaryOperation;
       if (ordinary !== null && ordinary.scope === scope) ordinary.closeResult = closing;
       const prepared = this.preparedOperation;
@@ -1566,7 +1606,11 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   private ordinaryCloseJoin(
     scope: MySqlCommandScope): Promise<ArkDbError | null> | null {
-    const settlement = this.ordinaryOperation;
+    return this.commandCloseJoin(this.ordinaryOperation, scope);
+  }
+
+  private commandCloseJoin(settlement: CommandCloseSettlement | null,
+    scope: MySqlCommandScope): Promise<ArkDbError | null> | null {
     if (settlement === null || settlement.scope !== scope ||
       settlement.closeResult === null) return null;
     if (settlement.closeJoin === null) {
@@ -2111,15 +2155,18 @@ class PreparedCommandSettlement {
   }
 }
 
-class OrdinaryCommandSettlement {
+class CommandCloseSettlement {
   readonly scope: MySqlCommandScope;
   closeResult: Promise<void> | null = null;
   closeJoin: Promise<ArkDbError | null> | null = null;
-  dispatched: boolean = false;
 
   constructor(scope: MySqlCommandScope) {
     this.scope = scope;
   }
+}
+
+class OrdinaryCommandSettlement extends CommandCloseSettlement {
+  dispatched: boolean = false;
 }
 
 class DeadlineObservation<T> {

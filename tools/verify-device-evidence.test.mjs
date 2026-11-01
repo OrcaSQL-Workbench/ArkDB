@@ -328,6 +328,71 @@ test('does not recover a journal owned by an active preparation', async (t) => {
   await first;
 });
 
+test('treats a permission-denied liveness probe as an active preparation', async (t) => {
+  const fixture = await releaseFixture(t);
+  const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
+  const keyPair = generateKeyPairSync('ed25519');
+  const base = join(fixture.root, 'build', 'mysql-v1.0.0');
+  const evidenceDirectory = join(base, 'evidence', 'device-acceptance');
+  const workParent = join(base, 'work', 'device-acceptance');
+  const challengeId = '87'.repeat(16);
+  const ownerToken = '88'.repeat(16);
+  const stagingDirectory = join(workParent, `.staging-${challengeId}`);
+  const journalPath = join(evidenceDirectory, `${challengeId}.prepare.json`);
+  const lockPath = join(evidenceDirectory, 'preparation.lock.json');
+  await mkdir(evidenceDirectory, { recursive: true });
+  await mkdir(stagingDirectory, { recursive: true });
+  await writeFile(join(stagingDirectory, 'private-key-source.txt'), 'must remain');
+  await writeFile(journalPath, `${JSON.stringify({
+    schemaVersion: 1,
+    kind: 'arkdb-device-preparation',
+    challengeId,
+    ownerToken
+  }, null, 2)}\n`);
+  await writeFile(lockPath, `${JSON.stringify({
+    schemaVersion: 1,
+    kind: 'arkdb-device-preparation-lock',
+    pid: process.pid,
+    token: ownerToken
+  }, null, 2)}\n`);
+
+  const originalKill = process.kill;
+  t.after(() => { process.kill = originalKill; });
+  process.kill = (pid, signal) => {
+    assert.equal(pid, process.pid);
+    assert.equal(signal, 0);
+    const error = new Error('Synthetic permission-denied liveness probe.');
+    error.code = 'EPERM';
+    throw error;
+  };
+  let failure;
+  try {
+    await prepareDeviceEvidence({
+      root: fixture.root, driver: 'mysql', bundleDirectory: bundle.bundleDirectory
+    }, {
+      git: fixture.git,
+      now: () => new Date('2026-11-01T00:05:00.000Z'),
+      randomBytes: (size) => Buffer.alloc(size, size === 16 ? 0x89 : size === 32 ? 0x8a : 0x8b),
+      generateSigningKeyPair: () => ({
+        publicKeySpki: Buffer.from(keyPair.publicKey.export({ format: 'der', type: 'spki' })),
+        privateKeyPkcs8: Buffer.from(keyPair.privateKey.export({ format: 'der', type: 'pkcs8' }))
+      }),
+      async buildHarness() {
+        assert.fail('A permission-denied liveness probe must not replace the active lock.');
+      }
+    });
+  } catch (error) {
+    failure = error;
+  } finally {
+    process.kill = originalKill;
+  }
+
+  assert.match(failure?.message ?? '', /preparation.*progress|already.*progress/i);
+  assert.equal(existsSync(stagingDirectory), true);
+  assert.equal(existsSync(journalPath), true);
+  assert.equal(JSON.parse(await readFile(lockPath, 'utf8')).token, ownerToken);
+});
+
 test('requires exact clean sealed-release source before building the harness', async (t) => {
   const fixture = await releaseFixture(t);
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);

@@ -2062,6 +2062,44 @@ test('rejects external evidence on another release challenge state path', async 
   assert.equal(existsSync(join(otherStateDirectory, `${otherChallengeId}.accepted.json`)), false);
 });
 
+test('rejects mixed-case Windows paths inside verifier storage', {
+  skip: process.platform !== 'win32'
+}, async (t) => {
+  for (const [index, storageKind] of ['work', 'evidence'].entries()) {
+    const f = await deviceFixture(t, { challengeFill: 0x61 + index });
+    const otherChallengeId = String(index + 1).repeat(32);
+    const actualDirectory = join(f.fixture.root, 'build', 'MYSQL-V1.0.1',
+      storageKind.toUpperCase(), 'DEVICE-ACCEPTANCE',
+      ...(storageKind === 'work' ? [otherChallengeId] : []));
+    await mkdir(actualDirectory, { recursive: true });
+    const hapPath = join(f.fixture.root, `${storageKind}-mixed-case-signed-entry.hap`);
+    await writeFile(hapPath, f.hapBytes);
+    const receiptPath = join(f.fixture.root, `${storageKind}-mixed-case-receipt.json`);
+    await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+      f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+    ))}\n`);
+    const mixedDirectory = join(f.fixture.root, 'BUILD', 'MYSQL-V1.0.1',
+      storageKind.toUpperCase(), 'DEVICE-ACCEPTANCE',
+      ...(storageKind === 'work' ? [otherChallengeId] : []));
+    const outPath = join(mixedDirectory, storageKind === 'work'
+      ? 'device-verified.json' : `${otherChallengeId}.accepted.json`);
+    const stem = 'arkdb-mysql-1.0.0';
+    await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+      root: f.fixture.root,
+      receiptPath,
+      manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+      consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+      hapPath,
+      profile: 'M1',
+      features: [],
+      outPath
+    }, artifactDependencies()), /outside every verifier workspace and state directory/i);
+    assert.equal(existsSync(f.prepared.challengePath), true);
+    assert.equal(existsSync(f.prepared.workDirectory), true);
+    assert.equal(existsSync(join(actualDirectory, basename(outPath))), false);
+  }
+});
+
 test('rejects secret-workspace output reached through an ancestor junction', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x43 });
   const signedHap = Buffer.from(f.hapBytes);

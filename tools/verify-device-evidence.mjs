@@ -502,13 +502,18 @@ function canonicalTime(value) {
     new Date(value).toISOString() === value;
 }
 
+function comparisonPath(value) {
+  const path = resolve(value);
+  return process.platform === 'win32' ? path.toLowerCase() : path;
+}
+
 function pathWithin(parent, candidate) {
-  const path = relative(resolve(parent), resolve(candidate));
+  const path = relative(comparisonPath(parent), comparisonPath(candidate));
   return path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`));
 }
 
 function pathWithinDeviceVerifierStorage(buildRoot, candidate) {
-  const path = relative(resolve(buildRoot), resolve(candidate));
+  const path = relative(comparisonPath(buildRoot), comparisonPath(candidate));
   if (path === '' || isAbsolute(path) || path === '..' || path.startsWith(`..${sep}`)) {
     return false;
   }

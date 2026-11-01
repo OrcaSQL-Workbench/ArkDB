@@ -352,11 +352,18 @@ async function readAtomicJson(path) {
 }
 
 async function readBoundedRegularBytes(path, label) {
-  const info = await lstat(path);
-  if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > 2 * 1024 * 1024) {
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() ||
+    before.size <= 0 || before.size > 2 * 1024 * 1024) {
     throw new Error(`${label} is not a bounded regular file: ${basename(path)}`);
   }
-  return await readFile(path);
+  const bytes = await readFile(path);
+  const after = await lstat(path);
+  if (!after.isFile() || after.isSymbolicLink() || bytes.length !== before.size ||
+    ['dev', 'ino', 'size', 'mtimeMs', 'nlink'].some((field) => before[field] !== after[field])) {
+    throw new Error(`${label} changed while reading: ${basename(path)}`);
+  }
+  return bytes;
 }
 
 async function readLockJson(path) {
@@ -988,14 +995,41 @@ function statePaths(root, paths, challengeId) {
   };
 }
 
-async function recoverableChallenge(root, set, challengeId) {
-  const states = statePaths(root, tagOutputPaths(root, set.driver, set.tag), challengeId);
-  for (const path of [states.pending, states.verifying, states.accepted, states.rejected]) {
-    if (!await atomicStateExists(path)) continue;
-    const value = await readAtomicJson(path);
-    return value.kind === 'arkdb-device-evidence-challenge' ? value : value.challenge;
+async function readChallengeWithoutRecovery(states, challengeId) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let observed = null;
+    for (const path of [
+      states.pending, states.verifying, states.accepted, states.rejected, states.lock
+    ]) {
+      if (!existsSync(path)) continue;
+      let value;
+      try {
+        value = jsonBytes(await readBoundedRegularBytes(path, 'Device challenge state'));
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue;
+        throw error;
+      }
+      const challenge = value.kind === 'arkdb-device-evidence-challenge'
+        ? value
+        : value.kind === 'arkdb-device-claim-lock'
+          ? value.claim?.challenge
+          : value.challenge;
+      if (!challenge || challenge.challengeId !== challengeId) {
+        throw new Error('Device challenge state does not match the requested identity.');
+      }
+      if (observed !== null && JSON.stringify(observed) !== JSON.stringify(challenge)) {
+        throw new Error('Device challenge has conflicting unrecovered states.');
+      }
+      observed = challenge;
+    }
+    if (observed !== null) return observed;
   }
   throw new Error('Device challenge is not pending or recoverable.');
+}
+
+async function recoverableChallenge(root, set, challengeId) {
+  const states = statePaths(root, tagOutputPaths(root, set.driver, set.tag), challengeId);
+  return await readChallengeWithoutRecovery(states, challengeId);
 }
 
 function recordBytes(record) {
@@ -1464,17 +1498,12 @@ async function verifyBoundDeviceEvidence({
     throw new Error('Device receipt has no valid challenge identity.');
   }
   const paths = tagOutputPaths(root, driver, set.tag);
-  const preparationLockPath = plainPath(root,
-    join(paths.evidence, 'device-acceptance', 'preparation.lock.json'),
-    { allowMissing: true });
-  const preparationLock = await acquireProcessLock(
-    preparationLockPath, 'arkdb-device-preparation-lock', dependencies);
-  try {
-    await recoverPreparationJournals(root, paths, dependencies);
-  } finally {
-    await releaseProcessLock(preparationLockPath, preparationLock);
-  }
   const states = statePaths(root, paths, parsed.payload.runId);
+  const caseBytes = await readFile(join(root, CASE_MANIFEST));
+  const cases = readCaseManifest(caseBytes);
+  const observedChallenge = await readChallengeWithoutRecovery(states, parsed.payload.runId);
+  validateChallenge(observedChallenge, set, bundle, cases, caseBytes);
+  verifyEnvelopeSignature(parsed, observedChallenge.publicKeySpkiBase64);
   const buildRoot = join(root, 'build');
   const canonicalBuildRoot = await realpath(buildRoot);
   if (frozenOutputPath !== null &&
@@ -1486,8 +1515,16 @@ async function verifyBoundDeviceEvidence({
       pathWithinDeviceWorkspace(canonicalBuildRoot, canonicalOutputPath))) {
     throw new Error('Device evidence output must be outside every secret challenge workspace.');
   }
-  const caseBytes = await readFile(join(root, CASE_MANIFEST));
-  const cases = readCaseManifest(caseBytes);
+  const preparationLockPath = plainPath(root,
+    join(paths.evidence, 'device-acceptance', 'preparation.lock.json'),
+    { allowMissing: true });
+  const preparationLock = await acquireProcessLock(
+    preparationLockPath, 'arkdb-device-preparation-lock', dependencies);
+  try {
+    await recoverPreparationJournals(root, paths, dependencies);
+  } finally {
+    await releaseProcessLock(preparationLockPath, preparationLock);
+  }
   await recoverWorkTombstones(states.work, dependencies);
   const acceptedExists = await atomicStateExists(states.accepted);
   const rejectedExists = await atomicStateExists(states.rejected);
@@ -1706,6 +1743,7 @@ export async function verifyDeviceEvidenceArtifacts({
   const receiptBytes = releaseFile(dirname(resolve(receiptPath)), basename(receiptPath));
   const parsed = parseReceiptEnvelope(receiptBytes);
   const challenge = await recoverableChallenge(root, set, parsed.payload.runId);
+  verifyEnvelopeSignature(parsed, challenge.publicKeySpkiBase64);
   if (manifest.sourceClean !== true || manifest.sourceCommit !== set.sourceCommit ||
     manifest.sha256 !== parsed.payload.harSha256 ||
     consumer.schemaVersion !== 3 || consumer.consumerProfile !== 'current' ||

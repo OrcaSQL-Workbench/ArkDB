@@ -407,10 +407,57 @@ test('rejects signature tampering, wrong keys, failed cases, and privacy-unsafe 
       receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
     }, { now: () => new Date('2026-11-01T01:00:00.000Z') }),
     /signature|identity|case|property|receipt/i);
-    assert.equal(existsSync(f.prepared.workDirectory), false);
+    const authenticated = index >= 2;
+    assert.equal(existsSync(f.prepared.workDirectory), !authenticated);
+    assert.equal(existsSync(f.prepared.challengePath), !authenticated);
     assert.equal(existsSync(join(dirname(f.prepared.challengePath),
-      `${f.prepared.challenge.challengeId}.rejected.json`)), true);
+      `${f.prepared.challenge.challengeId}.rejected.json`)), authenticated);
   }
+});
+
+test('authenticates the receipt before recovering challenge files', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x5e });
+  const other = generateKeyPairSync('ed25519');
+  const receiptPath = join(f.fixture.root, 'unauthenticated-run-id.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, other.privateKey))}\n`);
+  const tombstone = join(dirname(f.prepared.workDirectory),
+    `.${basename(f.prepared.workDirectory)}.tombstone-999-${'a'.repeat(16)}`);
+  await rename(f.prepared.workDirectory, tombstone);
+
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath,
+    confirmPhysicalDevice: true,
+    confirmAuthorizedSchema: true
+  }), /signature/i);
+  assert.equal(existsSync(tombstone), true);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(join(dirname(f.prepared.challengePath),
+    `${f.prepared.challenge.challengeId}.verifying.json`)), false);
+  assert.equal(existsSync(join(dirname(f.prepared.challengePath),
+    `${f.prepared.challenge.challengeId}.rejected.json`)), false);
+
+  const hapPath = join(f.fixture.root, 'unauthenticated-run-id.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const stem = 'arkdb-mysql-1.0.0';
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(f.fixture.root, 'unauthenticated-evidence.json')
+  }, {
+    async verifyHapSignature() {
+      assert.fail('Invalid receipt must fail before HAP signature verification.');
+    }
+  }), /signature/i);
+  assert.equal(existsSync(tombstone), true);
 });
 
 test('rejects a receipt completed after the verification time', async (t) => {

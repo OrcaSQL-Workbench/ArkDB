@@ -1315,6 +1315,10 @@ export async function verifyDeviceEvidence({
   const states = statePaths(root, paths, parsed.payload.runId);
   const canonicalWorkPath = existsSync(states.work) ? await realpath(states.work) : null;
   if (frozenOutputPath !== null &&
+    pathWithin(states.evidenceDirectory, canonicalOutputPath)) {
+    throw new Error('Device evidence output must be outside the verifier state directory.');
+  }
+  if (frozenOutputPath !== null &&
     (pathWithin(states.work, requestedOutputPath) ||
       (canonicalWorkPath !== null && pathWithin(canonicalWorkPath, canonicalOutputPath)))) {
     throw new Error('Device evidence output must be outside the secret workspace.');
@@ -1346,6 +1350,7 @@ export async function verifyDeviceEvidence({
     throw new Error(`Device challenge was ${claim.decision} and consumed.`);
   }
   const lockExists = await atomicStateExists(states.lock);
+  let lockedClaim = null;
   if (lockExists) {
     const activeLock = await readLockJson(states.lock);
     exactKeys(activeLock, ['schemaVersion', 'kind', 'pid', 'claim'], 'Device claim lock');
@@ -1359,6 +1364,7 @@ export async function verifyDeviceEvidence({
     if (processAlive(activeLock.pid, dependencies)) {
       throw new Error('Device challenge verification is already in progress.');
     }
+    lockedClaim = activeLock.claim;
   }
   const verifyingExists = await atomicStateExists(states.verifying);
   const pendingExists = await atomicStateExists(states.pending);
@@ -1404,6 +1410,17 @@ export async function verifyDeviceEvidence({
       throw new Error('Device challenge verification is already in progress.');
     }
     throw new Error('Device challenge is not pending or recoverable.');
+  }
+  if (frozenOutputPath !== null && existsSync(frozenOutputPath)) {
+    if (initialClaim && claim.decision === 'accepted') {
+      throw new Error('Device evidence output must be unused for a fresh challenge.');
+    }
+    const recoverableClaim = claim ?? lockedClaim;
+    if (recoverableClaim?.decision === 'accepted') {
+      const validatedClaim = validateClaim(recoverableClaim, receiptBytes, parsed, 'accepted',
+        states.acceptedRecord, frozenOutputPath);
+      await validateExistingRecord(frozenOutputPath, validatedClaim.recordSha256);
+    }
   }
   claim = await acquireClaimLock(states.lock, claim, receiptBytes, parsed, frozenOutputPath,
     dependencies);

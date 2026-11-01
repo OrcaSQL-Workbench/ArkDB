@@ -1089,6 +1089,44 @@ test('recovers external evidence publication before terminally consuming the cha
   assert.deepEqual(JSON.parse(await readFile(outPath, 'utf8')), recovered.record);
 });
 
+test('recovers an exact external record written before publication interruption', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x4a });
+  const signedHap = Buffer.from(f.hapBytes);
+  const hapPath = join(f.fixture.root, 'written-recovery-signed-entry.hap');
+  await writeFile(hapPath, signedHap);
+  const receiptPath = join(f.fixture.root, 'written-recovery-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(signedHap)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  const outPath = join(f.fixture.root, 'written-recovery-device-verified.json');
+  const options = {
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath
+  };
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async writeExternalRecord(path, record) {
+      await writeFile(path, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
+      throw new Error('Synthetic interruption after external evidence write.');
+    }
+  }), /interruption after external evidence write/i);
+  assert.equal(existsSync(outPath), true);
+
+  const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts(options, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  });
+  assert.equal(recovered.record.verifiedAt, '2026-11-01T01:00:00.000Z');
+  assert.deepEqual(JSON.parse(await readFile(outPath, 'utf8')), recovered.record);
+});
+
 test('rejects a receipt for a different signed HAP before consuming the challenge', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x7b });
   const claimed = Buffer.from(f.hapBytes);
@@ -1162,6 +1200,59 @@ test('rejects a non-file external evidence destination before consuming the chal
   }), /output|regular file|destination/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
+});
+
+test('rejects external evidence inside the verifier state directory before consuming the challenge',
+  async (t) => {
+    const f = await deviceFixture(t, { challengeFill: 0x48 });
+    const signedHap = Buffer.from(f.hapBytes);
+    const hapPath = join(f.fixture.root, 'state-output-signed-entry.hap');
+    await writeFile(hapPath, signedHap);
+    const receiptPath = join(f.fixture.root, 'state-output-receipt.json');
+    await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+      f.prepared.challenge, f.keyPair.privateKey, sha256(signedHap)
+    ))}\n`);
+    const stem = 'arkdb-mysql-1.0.0';
+    await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+      root: f.fixture.root,
+      receiptPath,
+      manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+      consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+      hapPath,
+      profile: 'M1',
+      features: [],
+      outPath: join(dirname(f.prepared.challengePath),
+        `${f.prepared.challenge.challengeId}.accepted.json`)
+    }), /verifier state directory|output/i);
+    assert.equal(existsSync(f.prepared.challengePath), true);
+    assert.equal(existsSync(f.prepared.workDirectory), true);
+  });
+
+test('rejects an unrelated existing external record before consuming the challenge', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x49 });
+  const signedHap = Buffer.from(f.hapBytes);
+  const hapPath = join(f.fixture.root, 'existing-record-signed-entry.hap');
+  await writeFile(hapPath, signedHap);
+  const receiptPath = join(f.fixture.root, 'existing-record-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(signedHap)
+  ))}\n`);
+  const outPath = join(f.fixture.root, 'existing-device-verified.json');
+  await writeFile(outPath, '{"unrelated":true}\n');
+  const stem = 'arkdb-mysql-1.0.0';
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath
+  }), /fresh challenge|must be unused|already exists/i);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(f.prepared.workDirectory), true);
+  assert.equal(await readFile(outPath, 'utf8'), '{"unrelated":true}\n');
 });
 
 test('rejects external evidence inside the secret workspace before consuming the challenge', async (t) => {

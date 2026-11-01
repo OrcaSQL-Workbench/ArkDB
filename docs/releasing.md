@@ -218,8 +218,10 @@ boundary and keeps hardware attestation, read-only privilege verification and
 production certification false.
 
 `--out` is canonicalized through existing parent directories and must remain
-outside both the secret challenge workspace and the sealed release bundle;
-ancestor junction/symlink aliases cannot bypass those boundaries.
+outside the secret challenge workspace, verifier state directory and sealed
+release bundle; ancestor junction/symlink aliases cannot bypass those
+boundaries. A fresh challenge requires an unused destination. Recovery accepts
+an existing destination only when its exact bytes match the frozen claim.
 
 All challenge, claim, evidence-record and terminal files are published through
 a synced temporary sibling followed by an atomic filesystem operation; the

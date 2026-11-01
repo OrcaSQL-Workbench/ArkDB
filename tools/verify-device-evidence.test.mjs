@@ -1783,6 +1783,33 @@ test('rejects external evidence inside another release challenge workspace', asy
   assert.equal(existsSync(otherWork), true);
 });
 
+test('rejects external evidence on another release challenge state path', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x5f });
+  const otherStateDirectory = join(f.fixture.root, 'build', 'mysql-v1.0.1', 'evidence',
+    'device-acceptance');
+  await mkdir(otherStateDirectory, { recursive: true });
+  const hapPath = join(f.fixture.root, 'other-release-state-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'other-release-state-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+  ))}\n`);
+  const otherChallengeId = 'd'.repeat(32);
+  const stem = 'arkdb-mysql-1.0.0';
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(otherStateDirectory, `${otherChallengeId}.accepted.json`)
+  }, artifactDependencies()), /verifier state|challenge state|output/i);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(join(otherStateDirectory, `${otherChallengeId}.accepted.json`)), false);
+});
+
 test('rejects secret-workspace output reached through an ancestor junction', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x43 });
   const signedHap = Buffer.from(f.hapBytes);

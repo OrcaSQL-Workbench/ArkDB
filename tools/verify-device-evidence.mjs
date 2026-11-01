@@ -507,13 +507,15 @@ function pathWithin(parent, candidate) {
   return path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`));
 }
 
-function pathWithinDeviceWorkspace(buildRoot, candidate) {
+function pathWithinDeviceVerifierStorage(buildRoot, candidate) {
   const path = relative(resolve(buildRoot), resolve(candidate));
   if (path === '' || isAbsolute(path) || path === '..' || path.startsWith(`..${sep}`)) {
     return false;
   }
   const parts = path.split(sep);
-  return parts.length >= 3 && parts[1] === 'work' && parts[2] === 'device-acceptance';
+  return parts.length >= 3 &&
+    (parts[1] === 'work' || parts[1] === 'evidence') &&
+    parts[2] === 'device-acceptance';
 }
 
 function strictBase64(value, label, maximumBytes) {
@@ -1511,9 +1513,9 @@ async function verifyBoundDeviceEvidence({
     throw new Error('Device evidence output must be outside the verifier state directory.');
   }
   if (frozenOutputPath !== null &&
-    (pathWithinDeviceWorkspace(buildRoot, requestedOutputPath) ||
-      pathWithinDeviceWorkspace(canonicalBuildRoot, canonicalOutputPath))) {
-    throw new Error('Device evidence output must be outside every secret challenge workspace.');
+    (pathWithinDeviceVerifierStorage(buildRoot, requestedOutputPath) ||
+      pathWithinDeviceVerifierStorage(canonicalBuildRoot, canonicalOutputPath))) {
+    throw new Error('Device evidence output must be outside every verifier workspace and state directory.');
   }
   const preparationLockPath = plainPath(root,
     join(paths.evidence, 'device-acceptance', 'preparation.lock.json'),

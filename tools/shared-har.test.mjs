@@ -110,6 +110,7 @@ test('mock publication and download preserve all core bytes without rebuilding o
       assert.notEqual(core.artifactPath, f.archives[0].artifactPath);
       assert.deepEqual(await readFile(core.artifactPath), bytes.get('arkdb-core-1.0.0.har'));
       return { ...f.consumer,
+        consumerProfile: 'current',
         dependencyArtifacts: [{ ...f.identity.dependencyArtifacts[0], file: 'arkdb-core-1.0.0.har' }] };
     }
   });
@@ -152,6 +153,7 @@ function fakeCompiler(fixture) {
         writeFileSync(definition, '{"module":{"requestPermissions":[{"name":"ohos.permission.INTERNET"}]}}');
       }
       return { status: 0, output: 'BUILD SUCCESSFUL' };
-    }
+    },
+    hapContentFingerprint() { return 'b'.repeat(64); }
   };
 }

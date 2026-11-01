@@ -19,6 +19,8 @@
     "test:consumer": "node tools/test-consumer.mjs",
     "example:prepare": "node tools/test-consumer.mjs --prepare",
     "example:build": "node tools/test-consumer.mjs --example",
+    "device:prepare": "node tools/verify-device-evidence.mjs prepare",
+    "device:verify": "node tools/verify-device-evidence.mjs",
     "verify:registry": "node tools/test-consumer.mjs --registry",
     "release:check": "node tools/check-release.mjs",
     "release:prepare": "node tools/prepare-har-release.mjs",

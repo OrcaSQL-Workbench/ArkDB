@@ -14,6 +14,12 @@ test('prepares only exact verified assets and binds them to the clean annotated 
   assert.equal(prepared.releaseSet.tagObject, TAG_OBJECT);
   assert.equal(prepared.releaseSet.verification.driverTestsPassed, 183);
   assert.equal(prepared.releaseSet.verification.realDeviceVerified, false);
+  assert.equal(prepared.releaseSet.verification.schemaVersion, 3);
+  assert.equal(prepared.releaseSet.verification.consumerProfile, 'current');
+  assert.equal(prepared.releaseSet.verification.sampleHapSha256, fixture.consumer.sampleHapSha256);
+  assert.equal(prepared.releaseSet.verification.sampleHapByteLength, fixture.consumer.sampleHapByteLength);
+  assert.equal(prepared.releaseSet.verification.sampleHapContentSha256,
+    fixture.consumer.sampleHapContentSha256);
   assert.deepEqual((await readdir(prepared.bundleDirectory)).sort(), [
     `${STEM}.consumer.json`, `${STEM}.har`, `${STEM}.har.sha256`,
     `${STEM}.manifest.json`, `${STEM}.readiness.json`, 'release-set.json'
@@ -61,10 +67,18 @@ test('rejects source or tag changes that happen while verification runs', async 
 test('requires successful current runtime evidence, not compile-only or stale reports', async (t) => {
   for (const [name, overrides] of [
     ['consumer', { artifactSha256: '0'.repeat(64) }],
+    ['consumer', { consumerProfile: 'legacy-schema-1' }],
     ['consumer', { localTestsExecuted: false }],
+    ['consumer', { sampleHapSha256: undefined }],
+    ['consumer', { sampleHapContentSha256: undefined }],
+    ['consumer', { sampleHapByteLength: 0 }],
     ['consumer', { check: 'isolated-release-hap-compilation' }],
     ['consumer', { packageName: '@arkdb/other' }],
     ['readiness', { sourceCommit: 'c'.repeat(40) }],
+    ['readiness', { consumerProfile: 'legacy-schema-1' }],
+    ['readiness', { sampleHapSha256: '0'.repeat(64) }],
+    ['readiness', { sampleHapContentSha256: '0'.repeat(64) }],
+    ['readiness', { sampleHapByteLength: 12346 }],
     ['readiness', { ohpmPrepublishPassed: false }],
     ['manifest', { sourceClean: false, sourceCommit: null }]
   ]) {

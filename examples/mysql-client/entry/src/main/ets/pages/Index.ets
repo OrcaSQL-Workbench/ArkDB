@@ -1,5 +1,9 @@
 import { ErrorEvent, MessageEvents, worker } from '@kit.ArkTS';
-import { SampleRequest, SampleResponse } from '../sample/Messages';
+import {
+  DeviceAcceptanceRequest, DeviceAcceptanceResponse, SampleRequest, SampleResponse
+} from '../sample/Messages';
+import { currentDeviceEvidenceBinding } from '../sample/DeviceEvidenceBinding';
+import { DeviceReceiptExporter } from '../sample/DeviceReceiptClipboard';
 
 @Entry
 @Component
@@ -10,11 +14,19 @@ struct Index {
   @State private password: string = '';
   @State private schema: string = '';
   @State private caCertPath: string = '';
+  @State private mismatchHost: string = '';
+  @State private profile: string = 'M1';
+  @State private features: string = '';
+  @State private signedHapSha256: string = '';
+  @State private operatorEvidenceId: string = '';
+  @State private receiptJson: string = '';
   @State private busy: boolean = false;
   @State private output: string = 'Enter an isolated test-server account, then run the fixed read-only query.';
+  private deviceEvidenceBound: boolean = currentDeviceEvidenceBinding().enabled;
   private instance: worker.ThreadWorker | null = null;
   private stopTimer: number = -1;
   private receivedResponse: boolean = false;
+  private receiptExporter: DeviceReceiptExporter = new DeviceReceiptExporter();
 
   aboutToDisappear(): void {
     this.password = '';
@@ -45,9 +57,41 @@ struct Index {
     request.schema = this.schema;
     request.caCertPath = this.caCertPath.trim();
     this.password = '';
+    this.start(request, 'Connecting in a Worker with TLS hostname verification...');
+  }
+
+  private runAcceptance(): void {
+    if (this.busy || this.instance !== null || !this.deviceEvidenceBound) return;
+    const request = new DeviceAcceptanceRequest();
+    request.host = this.host.trim();
+    request.port = Number(this.port);
+    request.user = this.user;
+    request.password = this.password;
+    request.schema = this.schema.trim();
+    request.caCertPath = this.caCertPath.trim();
+    request.mismatchHost = this.mismatchHost.trim();
+    request.profile = this.profile.trim().toUpperCase();
+    request.features = this.features.trim();
+    request.signedHapSha256 = this.signedHapSha256.trim().toLowerCase();
+    request.operatorEvidenceId = this.operatorEvidenceId.trim();
+    this.password = '';
+    this.receiptJson = '';
+    this.start(request, 'Running the bound fixed-case device suite...');
+  }
+
+  private async copyReceipt(): Promise<void> {
+    try {
+      await this.receiptExporter.copyExact(this.receiptJson);
+      this.output = 'Copied the exact signed receipt JSON. Clear the clipboard after secure transfer.';
+    } catch (error) {
+      this.output = 'The signed receipt could not be copied.';
+    }
+  }
+
+  private start(request: SampleRequest | DeviceAcceptanceRequest, status: string): void {
     this.busy = true;
     this.receivedResponse = false;
-    this.output = 'Connecting in a Worker with TLS hostname verification...';
+    this.output = status;
     try {
       const instance = new worker.ThreadWorker('entry/ets/workers/mysql.worker.ets');
       this.instance = instance;
@@ -55,7 +99,13 @@ struct Index {
         this.receivedResponse = true;
         const response: Object = event.data;
         if (!(response instanceof SampleResponse)) {
-          this.output = 'Invalid Worker response. No SQL was replayed.';
+          if (response instanceof DeviceAcceptanceResponse) {
+            this.receiptJson = response.receiptJson;
+            this.output = (response.ok ? 'Receipt candidate completed\n' : 'Device suite did not pass\n') +
+              response.text;
+          } else {
+            this.output = 'Invalid Worker response. No SQL was replayed.';
+          }
         } else {
           this.output = (response.ok ? 'Completed\n' : 'Failed\n') + response.text;
         }
@@ -119,6 +169,31 @@ struct Index {
         Button(this.busy ? 'Running...' : 'Connect, read, and close')
           .enabled(!this.busy)
           .onClick((): void => { this.run(); })
+        Text(this.deviceEvidenceBound ?
+          'This copied sample is bound to a one-time device challenge.' :
+          'Device acceptance is disabled in source. Prepare a sealed-release challenge and build the generated copy.')
+          .fontSize(13)
+        TextInput({ text: this.mismatchHost, placeholder: 'TLS mismatch hostname from the approved test profile' })
+          .enabled(this.deviceEvidenceBound)
+          .onChange((value: string): void => { this.mismatchHost = value; })
+        TextInput({ text: this.profile, placeholder: 'Release profile: M1, M2, M3, or M4' })
+          .enabled(this.deviceEvidenceBound)
+          .onChange((value: string): void => { this.profile = value; })
+        TextInput({ text: this.features, placeholder: 'M4 product feature keys (comma-separated)' })
+          .enabled(this.deviceEvidenceBound)
+          .onChange((value: string): void => { this.features = value; })
+        TextInput({ text: this.signedHapSha256, placeholder: 'Actual signed/installed HAP SHA-256' })
+          .enabled(this.deviceEvidenceBound)
+          .onChange((value: string): void => { this.signedHapSha256 = value; })
+        TextInput({ text: this.operatorEvidenceId, placeholder: 'Operator build/sign/install evidence ID' })
+          .enabled(this.deviceEvidenceBound)
+          .onChange((value: string): void => { this.operatorEvidenceId = value; })
+        Button(this.busy ? 'Running...' : 'Run bound device acceptance')
+          .enabled(!this.busy && this.deviceEvidenceBound)
+          .onClick((): void => { this.runAcceptance(); })
+        Button('Copy exact signed receipt JSON')
+          .enabled(!this.busy && this.receiptJson.length > 0)
+          .onClick((): void => { void this.copyReceipt(); })
         Text(this.output).width('100%').fontFamily('monospace').fontSize(14)
       }.width('100%').padding(24).alignItems(HorizontalAlign.Start)
     }.width('100%').height('100%')

@@ -80,6 +80,8 @@ npm run verify
 | `npm run test:consumer` | Build the sample HAP/Worker and README examples against the exact HAR, then run offline sample lifecycle tests |
 | `npm run example:prepare` | Install the verified HAR into the runnable Worker sample |
 | `npm run example:build` | Compile its unsigned HAP for opening/running with owner-supplied debug signing |
+| `npm run device:prepare -- --driver mysql --bundle dist\mysql-v1.0.2` | From exact clean sealed source, build one unsigned HAR-bound HAP with an embedded one-time Ed25519 key and publish the pending challenge last |
+| `npm run device:verify -- --receipt <file> --manifest <file> --consumer <file> --hap <signed-hap> --profile M1 --out <file>` | Bind the signed receipt to the sealed HAR/consumer and actual signed HAP, then atomically consume the challenge only when every mandatory case passed |
 | `npm run release:check` | Validate current archive/sample/guide evidence and run nonpublishing OHPM checks |
 | `npm run verify:registry` | After publication, restore an exact registry version into a fresh sample and verify acquisition |
 | `npm run verify -- --driver mysql` | Local tooling + declared source-module tests + single-HAR packaging + own sample/README tests + nonpublishing preflight; never publishes |
@@ -115,6 +117,22 @@ See [release and verification requirements](docs/releasing.md) before publishing
 `dist/`, `.hvigor/`, module `build/` and `.test/` directories, generated `BuildProfile.ets` files, `node_modules/`, and `oh_modules/` are generated and ignored. Root npm dependencies support maintenance. Development source imports core; the emitted MySQL HAR embeds that source and has no external core dependency. Root and module build manifests have different roles: source-workspace orchestration versus delivery compilation.
 
 Local validation includes SDK-free checks and actual ArkTS compilation/native contract suites. The exact-archive consumer gate restores one HAR with a fresh cache and unavailable registry before compiling its packaged examples and sample HAP. Only then does it acquire the test framework and run offline cases, including driver-created error identity. Records bind evidence to candidate bytes; source checks alone are not archive-consumption evidence. Device networking/TLS/cancellation remain unverified. Publication requires the separate authorized clean-source release workflow.
+
+The sample also contains an acceptance-disabled device suite. Preparation
+requires exact clean sealed source, copies the sample and sealed HAR to an
+isolated workspace, embeds one Ed25519 private key, compiles the unsigned HAP,
+records that exact HAP digest/size, removes the private source copy, and commits
+the 24-hour pending challenge last. After owner signing, the operator records
+the actual signed/installed HAP digest and evidence ID in the bound page. The
+signed canonical receipt binds profile/features, run ID, clean source, HAR,
+sample, signed HAP, API/device class, verified TLS mode, auth plugin, run times,
+operator evidence ID and ordered case durations/verdicts. The UI exports its
+exact JSON through an explicit clipboard action. No host, port, account,
+password, schema, CA path or query data is included. The validator separately
+hashes the supplied signed HAP and checks the sealed manifest/consumer before
+publishing external evidence. Preparation and synthetic tests are not device
+evidence; hardware attestation, read-only grants and production certification
+remain explicitly false.
 
 Use the matching source/consumer when verifying an older major release. Historical single-HAR and dependency-set records remain readable without treating them as evidence for the current architecture.
 

@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { extract } from 'tar';
 import { prepareHarRelease } from './prepare-har-release.mjs';
+import { readReleaseBundle } from './prepare-har-release.mjs';
 import { publishHarRelease } from './publish-har.mjs';
+import { releaseMarker } from './publish-har.mjs';
 import { downloadBytes, verifyDownloadedHar } from './verify-download.mjs';
 import { fakeGitHub } from './test-fixtures/github-release.mjs';
 import { REPO, releaseFixture, LOCAL_STEM, STEM, TAG } from './test-fixtures/har-release.mjs';
@@ -33,9 +37,13 @@ async function remoteFixture(t) {
     assert.notEqual(options.artifactPath, join(source.dist, `${LOCAL_STEM}.har`));
     assert.deepEqual(await readFile(options.artifactPath), data.get(`${STEM}.har`));
     return {
-      schemaVersion: 1, packageName: '@arkdb/mysql', version: '1.0.0',
+      schemaVersion: 3, packageName: '@arkdb/mysql', version: '1.0.0',
       artifactSha256: source.identity.sha256, documentedExamples: 8,
       localSampleCases: 6, sampleHapCompiled: true, localTestsExecuted: true,
+      sampleHapSha256: source.consumer.sampleHapSha256,
+      sampleHapByteLength: source.consumer.sampleHapByteLength,
+      sampleHapContentSha256: source.consumer.sampleHapContentSha256,
+      consumerProfile: 'current',
       liveNetworkingVerified: false, check: 'isolated-release-hap-and-local-tests'
     };
   };
@@ -45,6 +53,46 @@ async function remoteFixture(t) {
     dependencies: { github, fetch, consumer: consume },
     get consumerCalls() { return consumerCalls; }
   };
+}
+
+async function legacyRemoteFixture(t) {
+  const directory = await mkdtemp(join(tmpdir(), 'arkdb-legacy-download-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await extract({
+    cwd: directory,
+    file: join(import.meta.dirname, 'test-fixtures', 'mysql-v1.0.1-release.tar.gz'),
+    strict: true
+  });
+  const bundle = await readReleaseBundle(directory);
+  const github = fakeGitHub(bundle);
+  const data = new Map(bundle.assets);
+  data.set('release-set.json', bundle.releaseSetBytes);
+  github.state.release = {
+    id: 17,
+    tag_name: bundle.releaseSet.tag,
+    name: `${bundle.releaseSet.packageName}@${bundle.releaseSet.version} (engineering preview)`,
+    body: releaseMarker(bundle.releaseSet, bundle.releaseSetBytes),
+    draft: false,
+    prerelease: true,
+    html_url: `https://github.com/${REPO}/releases/tag/${bundle.releaseSet.tag}`
+  };
+  github.state.assets = [...data].map(([name, bytes], index) => ({
+    id: 100 + index,
+    name,
+    state: 'uploaded',
+    size: bytes.length,
+    digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    browser_download_url:
+      `https://github.com/${REPO}/releases/download/${bundle.releaseSet.tag}/${name}`
+  }));
+  const fetch = async (url) => {
+    const name = new URL(url).pathname.split('/').at(-1);
+    const bytes = data.get(name);
+    return bytes
+      ? new Response(bytes, { status: 200, headers: { 'Content-Length': String(bytes.length) } })
+      : new Response('missing', { status: 404 });
+  };
+  return { bundle, github, fetch };
 }
 
 test('downloads exact public release assets before invoking the independent consumer', async (t) => {
@@ -162,4 +210,63 @@ test('a compile-only or differently bound consumer record cannot establish downl
       artifactSha256: f.identity.sha256, sampleHapCompiled: true, localTestsExecuted: false, localSampleCases: null
     })
   }), /consumer|verification/i);
+});
+
+test('a rebuilt HAP canonical content identity must match schema-3 sealed evidence', async (t) => {
+  const f = await remoteFixture(t);
+  const rawDifferent = await verifyDownloadedHar(f.options, {
+    ...f.dependencies,
+    consumer: async (options) => ({
+      ...await f.dependencies.consumer(options),
+      sampleHapSha256: 'd'.repeat(64),
+      sampleHapByteLength: f.consumer.sampleHapByteLength + 10
+    })
+  });
+  assert.equal(rawDifferent.consumer.sampleHapContentSha256,
+    f.bundle.releaseSet.verification.sampleHapContentSha256);
+  await assert.rejects(verifyDownloadedHar(f.options, {
+    ...f.dependencies,
+    consumer: async (options) => ({
+      ...await f.dependencies.consumer(options),
+      sampleHapContentSha256: 'c'.repeat(64)
+    })
+  }), /canonical HAP content|sealed release/i);
+});
+
+test('schema-1 download verification uses the legacy consumer profile for the immutable bundle', async (t) => {
+  const fixture = await legacyRemoteFixture(t);
+  let consumerCalls = 0;
+  const result = await verifyDownloadedHar({
+    root: process.cwd(),
+    driver: 'mysql',
+    tag: fixture.bundle.releaseSet.tag
+  }, {
+    github: fixture.github,
+    fetch: fixture.fetch,
+    async consumer(options) {
+      consumerCalls++;
+      assert.equal(options.consumerProfile, 'legacy-schema-1');
+      return {
+        schemaVersion: 3,
+        consumerProfile: 'legacy-schema-1',
+        packageName: '@arkdb/mysql',
+        version: '1.0.1',
+        artifactSha256: fixture.bundle.releaseSet.assets
+          .find((entry) => entry.name === 'arkdb-mysql-1.0.1.har').sha256,
+        documentedExamples: 8,
+        localSampleCases: 1,
+        sampleHapCompiled: true,
+        localTestsExecuted: true,
+        sampleHapSha256: 'a'.repeat(64),
+        sampleHapByteLength: 123,
+        sampleHapContentSha256: 'b'.repeat(64),
+        liveNetworkingVerified: false,
+        check: 'isolated-release-hap-and-local-tests'
+      };
+    }
+  });
+
+  assert.equal(consumerCalls, 1);
+  assert.equal(result.downloadVerified, true);
+  assert.equal(result.consumer.consumerProfile, 'legacy-schema-1');
 });

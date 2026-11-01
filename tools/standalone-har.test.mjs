@@ -120,7 +120,8 @@ test('one-HAR consumption proves runtime isolation before restoring the test fra
         stages.push('tests');
       }
       return { status: 0, output: 'BUILD SUCCESSFUL' };
-    }
+    },
+    hapContentFingerprint() { return 'c'.repeat(64); }
   });
   assert.deepEqual(stages, ['runtime', 'hap', 'framework', 'tests']);
   assert.equal(record.selfContainedRuntimeVerified, true);

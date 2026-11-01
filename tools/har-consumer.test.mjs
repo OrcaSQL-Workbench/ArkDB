@@ -38,7 +38,8 @@ function fakeCompiler() {
           'Tests run: 1, Failure: 0, Error: 0, Pass: 1, Ignore: 0\n');
       } else assert.fail(`Unexpected compiler task: ${args.join(' ')}`);
       return { status: 0, output: 'BUILD SUCCESSFUL' };
-    }
+    },
+    hapContentFingerprint() { return 'a'.repeat(64); }
   };
 }
 
@@ -85,6 +86,9 @@ test('consumer uses only the supplied archive and its packaged README, not curre
   assert.equal(record.documentedExamples, 8);
   assert.equal(record.localSampleCases, 1);
   assert.equal(record.localTestsExecuted, true);
+  assert.equal(record.sampleHapSha256, '1db6978eba3c2118be09fa9ff32f4e14d4956b79b8014a8012b7fd65fc9b463f');
+  assert.equal(record.sampleHapByteLength, 20);
+  assert.equal(record.sampleHapContentSha256, 'a'.repeat(64));
   assert.equal(record.artifactSha256, fixture.identity.sha256);
   assert.equal(record.liveNetworkingVerified, false);
 });

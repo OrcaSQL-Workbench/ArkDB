@@ -171,9 +171,13 @@ export async function prepareHarRelease({ root = ROOT, driver: id = 'mysql', tag
       useNormalizedOHMUrl: true, buildMode: 'release'
     },
     verification: {
+      schemaVersion: 3,
+      consumerProfile: 'current',
       driverTestsPassed: verification.driverTestsPassed,
       documentedExamples: extractExamples(readFileSync(join(source.driver.directory, 'README.md'), 'utf8')).length,
       localSampleCases: consumer.localSampleCases, sampleFingerprint: sample, publicExports: source.exports,
+      sampleHapSha256: consumer.sampleHapSha256, sampleHapByteLength: consumer.sampleHapByteLength,
+      sampleHapContentSha256: consumer.sampleHapContentSha256,
       ohpmPrepublishPassed: true, realDeviceVerified: false,
       ...(selected.identity.delivery === 'self-contained' ? {
         selfContainedRuntimeVerified: consumer.selfContainedRuntimeVerified

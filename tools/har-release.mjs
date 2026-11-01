@@ -244,6 +244,10 @@ export function validateReleaseSet(value) {
     platform.compatibleSdkType !== 'HarmonyOS' || platform.useNormalizedOHMUrl !== true ||
     platform.buildMode !== 'release') throw new Error('Unsupported release platform identity.');
   const verification = value.verification;
+  const verificationSchema = verification?.schemaVersion ?? 1;
+  if (![1, 3].includes(verificationSchema)) {
+    throw new Error('Unsupported release verification evidence schema.');
+  }
   for (const name of ['driverTestsPassed', 'documentedExamples', 'localSampleCases']) {
     if (!Number.isSafeInteger(verification?.[name]) || verification[name] <= 0) {
       throw new Error('Release verification must contain successful local tests/examples.');
@@ -255,6 +259,17 @@ export function validateReleaseSet(value) {
     verification.publicExports.some((name) => typeof name !== 'string' || !/^[A-Za-z_$][\w$]*$/.test(name)) ||
     new Set(verification.publicExports).size !== verification.publicExports.length) {
     throw new Error('Invalid release verification evidence.');
+  }
+  if (verificationSchema === 3 && (!SHA256.test(verification.sampleHapSha256 ?? '') ||
+    !SHA256.test(verification.sampleHapContentSha256 ?? '') ||
+    !Number.isSafeInteger(verification.sampleHapByteLength) || verification.sampleHapByteLength <= 0 ||
+    verification.consumerProfile !== 'current')) {
+    throw new Error('Current release verification requires exact compiled HAP evidence.');
+  }
+  if (verificationSchema === 1 && (verification.sampleHapSha256 !== undefined ||
+    verification.sampleHapByteLength !== undefined || verification.sampleHapContentSha256 !== undefined ||
+    verification.consumerProfile !== undefined)) {
+    throw new Error('Legacy release verification cannot silently acquire current HAP evidence.');
   }
   if (!Array.isArray(value.assets) || value.assets.length !== names.length ||
     new Set(value.assets.map((asset) => asset.name)).size !== names.length ||
@@ -279,6 +294,7 @@ export function validateEvidence(set, assets) {
   const consumer = jsonBytes(assets.get(`${stem}.consumer.json`));
   const readiness = jsonBytes(assets.get(`${stem}.readiness.json`));
   const references = releaseDependencyReferences(set);
+  const verificationSchema = set.verification.schemaVersion ?? 1;
   if (identity.schemaVersion !== 1 || identity.packageName !== set.packageName ||
     identity.version !== set.version || identity.driver !== set.driver || identity.modulePath !== set.modulePath ||
     identity.sourceClean !== true || identity.sourceCommit !== set.sourceCommit ||
@@ -326,13 +342,26 @@ export function validateEvidence(set, assets) {
     throw new Error('Release checksum sidecar differs from the actual HAR.');
   }
   for (const record of [consumer, readiness]) {
-    if (record.schemaVersion !== 1 || record.packageName !== set.packageName || record.version !== set.version ||
+    if (record.schemaVersion !== verificationSchema ||
+      record.packageName !== set.packageName || record.version !== set.version ||
       record.artifactSha256 !== identity.sha256 || record.sourceFingerprint !== set.sourceFingerprint ||
       record.sampleFingerprint !== set.verification.sampleFingerprint ||
       record.sampleHapCompiled !== true || record.documentedExamples !== set.verification.documentedExamples ||
       record.localSampleCases !== set.verification.localSampleCases || record.liveNetworkingVerified !== false ||
       JSON.stringify(record.dependencyArtifacts ?? []) !== JSON.stringify(references)) {
       throw new Error('Release consumer/readiness evidence is stale or inconsistent.');
+    }
+    if (verificationSchema === 3 &&
+      (record.consumerProfile !== 'current' ||
+        record.sampleHapSha256 !== set.verification.sampleHapSha256 ||
+        record.sampleHapByteLength !== set.verification.sampleHapByteLength ||
+        record.sampleHapContentSha256 !== set.verification.sampleHapContentSha256)) {
+      throw new Error('Release compiled HAP evidence is stale or inconsistent.');
+    }
+    if (verificationSchema === 1 && (record.sampleHapSha256 !== undefined ||
+      record.sampleHapByteLength !== undefined || record.sampleHapContentSha256 !== undefined ||
+      record.consumerProfile !== undefined)) {
+      throw new Error('Legacy release evidence cannot silently acquire current HAP fields.');
     }
   }
   if (consumer.check !== 'isolated-release-hap-and-local-tests' || consumer.localTestsExecuted !== true ||

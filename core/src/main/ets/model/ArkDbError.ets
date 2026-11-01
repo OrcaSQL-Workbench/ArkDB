@@ -35,8 +35,8 @@ export class ArkDbError extends Error {
     return new ArkDbError(ArkDbErrorKind.Network, message);
   }
 
-  static tls(message: string): ArkDbError {
-    return new ArkDbError(ArkDbErrorKind.Tls, message);
+  static tls(message: string, code?: number | string): ArkDbError {
+    return new ArkDbError(ArkDbErrorKind.Tls, message, code);
   }
 
   static auth(message: string): ArkDbError {

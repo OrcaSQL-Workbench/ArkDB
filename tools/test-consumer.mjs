@@ -14,14 +14,19 @@ import { runHvigor, runOhpm } from './run-hvigor.mjs';
 import { parseHypiumResults } from './run-ohos-tests.mjs';
 import { driverVerification, localOutputPaths, resolvePackage } from './driver-packages.mjs';
 import { artifactReference, verifiedArtifactSet } from './package-har.mjs';
+import { hapContentFingerprint } from './hap-content.mjs';
 
 export const REGISTRY = 'https://ohpm.openharmony.cn/ohpm/';
 export { verifiedArtifact } from './package-har.mjs';
 
+const CURRENT_CONSUMER_PROFILE = 'current';
+const LEGACY_SCHEMA_1_CONSUMER_PROFILE = 'legacy-schema-1';
+
 export function sampleFingerprint(root = ROOT, driver = 'mysql') {
   const sample = driverVerification(root, driver).consumerDirectory;
   const files = [
-    ...['README.md', 'build-profile.json5', 'hvigorfile.ts', 'oh-package.json5'].map((name) => join(sample, name)),
+    ...['README.md', 'build-profile.json5', 'hvigorfile.ts', 'oh-package.json5',
+      'device-acceptance-cases.json'].map((name) => join(sample, name)),
     ...['build-profile.json5', 'hvigorfile.ts', 'oh-package.json5'].map((name) => join(sample, 'entry', name)),
     ...listFiles(join(sample, 'AppScope')), ...listFiles(join(sample, 'hvigor')),
     ...listFiles(join(sample, 'entry', 'src'))
@@ -113,15 +118,84 @@ async function buildSample(workspace, dependencies = {}, requiresInternet = true
   return hap;
 }
 
+async function prepareConsumerProfile(workspace, profile) {
+  if (profile === CURRENT_CONSUMER_PROFILE) return;
+  if (profile !== LEGACY_SCHEMA_1_CONSUMER_PROFILE) {
+    throw new Error('Unsupported HAR consumer profile.');
+  }
+  await rm(join(workspace, 'device-acceptance-cases.json'), { force: true });
+  await rm(join(workspace, 'entry', 'src', 'main', 'ets', 'sample'),
+    { recursive: true, force: true });
+  await rm(join(workspace, 'entry', 'src', 'main', 'ets', 'workers'),
+    { recursive: true, force: true });
+  await rm(join(workspace, 'entry', 'src', 'main', 'ets', 'pages'),
+    { recursive: true, force: true });
+  await rm(join(workspace, 'entry', 'src', 'test'), { recursive: true, force: true });
+  await mkdir(join(workspace, 'entry', 'src', 'main', 'ets', 'pages'), { recursive: true });
+  await mkdir(join(workspace, 'entry', 'src', 'test'), { recursive: true });
+  await writeFile(join(workspace, 'entry', 'src', 'main', 'ets', 'pages', 'Index.ets'),
+    `import { ConnectionConfig, MySqlDriverFactory } from '@arkdb/mysql';
+
+@Entry
+@Component
+struct Index {
+  @State private status: string = 'Ready to verify the downloaded legacy HAR.';
+
+  private async closeIdleConnection(): Promise<void> {
+    const connection = new MySqlDriverFactory().createConnection(new ConnectionConfig(), '');
+    await connection.close();
+    this.status = 'The downloaded HAR created and closed an idle connection.';
+  }
+
+  build() {
+    Column({ space: 12 }) {
+      Text('ArkDB MySQL legacy release verifier').fontSize(24)
+      Button('Verify downloaded HAR')
+        .onClick((): void => { this.closeIdleConnection(); })
+      Text(this.status)
+    }
+    .width('100%')
+    .height('100%')
+    .padding(24)
+  }
+}
+`);
+  await writeFile(join(workspace, 'entry', 'src', 'test', 'LegacyReleaseConsumer.test.ets'),
+    `import { describe, expect, it } from '@ohos/hypium';
+import { ConnectionConfig, MySqlDriverFactory } from '@arkdb/mysql';
+
+export default function legacyReleaseConsumerTest(): void {
+  describe('Legacy release consumer', () => {
+    it('legacyReleasePublicSurfaceCompiles', 0, async () => {
+      const connection = new MySqlDriverFactory().createConnection(new ConnectionConfig(), '');
+      expect(connection !== undefined).assertTrue();
+      await connection.close();
+    });
+  });
+}
+`);
+  await writeFile(join(workspace, 'entry', 'src', 'test', 'List.test.ets'),
+    `import legacyReleaseConsumerTest from './LegacyReleaseConsumer.test';
+
+export default function tests(): void {
+  legacyReleaseConsumerTest();
+}
+`);
+}
+
 export async function verifyHarConsumer({
   root = ROOT, driver = 'mysql', artifactPath, manifestPath, expectedSha256,
-  dependencyArtifacts = [], workspaceDirectory, compileOnly = false, registry = false
+  dependencyArtifacts = [], workspaceDirectory, compileOnly = false, registry = false,
+  consumerProfile = CURRENT_CONSUMER_PROFILE
 }, dependencies = {}) {
   const verification = driverVerification(root, driver);
   if (!Array.isArray(dependencyArtifacts) || dependencyArtifacts.length > 8) {
     throw new Error('Consumer dependency HAR set exceeds its bounded allowlist.');
   }
   if (registry && compileOnly) throw new Error('Registry and compile-only verification cannot be combined.');
+  if (![CURRENT_CONSUMER_PROFILE, LEGACY_SCHEMA_1_CONSUMER_PROFILE].includes(consumerProfile)) {
+    throw new Error('Unsupported HAR consumer profile.');
+  }
   const archives = [];
   for (const supplied of [...dependencyArtifacts, { artifactPath, manifestPath, expectedSha256 }]) {
     const bytes = releaseFile(dirname(supplied.artifactPath), basename(supplied.artifactPath), MAX_RELEASE_ASSET_BYTES);
@@ -193,6 +267,7 @@ export async function verifyHarConsumer({
       'BuildProfile.ets', 'oh-package-lock.json5', '.ohpmrc', '.npmrc', 'local.properties']);
     await cp(verification.consumerDirectory, workspace,
       { recursive: true, filter: (file) => !generated.has(basename(file)) });
+    await prepareConsumerProfile(workspace, consumerProfile);
     const markdown = new TextDecoder('utf-8', { fatal: true }).decode(inspected.entries.get('package/README.md').bytes);
     const examples = await addDocumentationChecks(workspace, markdown);
     const isolatedRuntime = manifest.delivery === 'self-contained' && !registry;
@@ -232,7 +307,11 @@ export async function verifyHarConsumer({
         else dependencyAcquisition.push({ packageName: requested.packageName, ...identity });
       }
     }
-    await buildSample(workspace, dependencies, verification.requiresInternet);
+    const sampleHap = await buildSample(workspace, dependencies, verification.requiresInternet);
+    const sampleHapBytes = releaseFile(dirname(sampleHap), basename(sampleHap), MAX_RELEASE_ASSET_BYTES);
+    const sampleHapSha256 = sha256(sampleHapBytes);
+    const sampleHapContentSha256 =
+      (dependencies.hapContentFingerprint ?? hapContentFingerprint)(sampleHapBytes);
     let verdict = null;
     if (!compileOnly) {
       if (isolatedRuntime && testDependencies.length > 0) {
@@ -257,11 +336,13 @@ export async function verifyHarConsumer({
     if (sha256(releaseFile(dirname(artifactPath), basename(artifactPath), MAX_RELEASE_ASSET_BYTES)) !== expectedSha256 ||
       sampleFingerprint(root, driver) !== sampleSource ||
       archives.some((archive) => sha256(releaseFile(dirname(archive.artifactPath),
-        basename(archive.artifactPath), MAX_RELEASE_ASSET_BYTES)) !== archive.expectedSha256)) {
+        basename(archive.artifactPath), MAX_RELEASE_ASSET_BYTES)) !== archive.expectedSha256) ||
+      sha256(releaseFile(dirname(sampleHap), basename(sampleHap), MAX_RELEASE_ASSET_BYTES)) !== sampleHapSha256) {
       throw new Error('The supplied archive, dependency set or consumer example changed during verification.');
     }
     return {
-      schemaVersion: 1, packageName: manifest.packageName, version: manifest.version,
+      schemaVersion: 3, packageName: manifest.packageName, version: manifest.version,
+      consumerProfile,
       ...(registry ? { referenceLocalArtifactSha256: expectedSha256 } : { artifactSha256: expectedSha256 }),
       sourceFingerprint: manifest.sourceFingerprint, sampleFingerprint: sampleSource,
       dependencyArtifacts: references,
@@ -270,7 +351,9 @@ export async function verifyHarConsumer({
         : registry ? 'isolated-registry-hap-and-local-tests' : 'isolated-release-hap-and-local-tests',
       verifiedAt: new Date().toISOString(), documentedExamples: examples,
       localSampleCases: verdict?.total ?? null, localTestsExecuted: !compileOnly,
-      sampleHapCompiled: true, registryAcquisitionVerified: registry, liveNetworkingVerified: false,
+      sampleHapCompiled: true, sampleHapSha256, sampleHapByteLength: sampleHapBytes.length,
+      sampleHapContentSha256,
+      registryAcquisitionVerified: registry, liveNetworkingVerified: false,
       ...(acquisition ? { acquisition, dependencyAcquisition } : {})
     };
   } finally {

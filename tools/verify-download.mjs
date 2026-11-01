@@ -199,18 +199,29 @@ export async function verifyDownloadedHar({
       manifestPath: join(bundleDirectory, entry.file.replace(/\.har$/, '.manifest.json')),
       expectedSha256: entry.sha256
     }));
+    const verificationSchema = set.verification.schemaVersion ?? 1;
+    const consumerProfile = verificationSchema === 1 ? 'legacy-schema-1' : 'current';
     const consumer = await (dependencies.consumer ?? verifyHarConsumer)({
       root, driver, artifactPath: join(bundleDirectory, har.name), manifestPath: join(bundleDirectory, manifest.name),
-      expectedSha256: har.sha256, dependencyArtifacts, workspaceDirectory: join(workspace, 'consumer')
+      expectedSha256: har.sha256, dependencyArtifacts, workspaceDirectory: join(workspace, 'consumer'),
+      consumerProfile
     });
-    if (consumer?.schemaVersion !== 1 || consumer.packageName !== set.packageName || consumer.version !== set.version ||
+    if (consumer?.schemaVersion !== 3 || consumer.packageName !== set.packageName || consumer.version !== set.version ||
+      consumer.consumerProfile !== consumerProfile ||
       consumer.artifactSha256 !== har.sha256 || consumer.sampleHapCompiled !== true ||
       consumer.localTestsExecuted !== true || !Number.isSafeInteger(consumer.localSampleCases) ||
-      consumer.localSampleCases <= 0 || consumer.check !== 'isolated-release-hap-and-local-tests' ||
+      consumer.localSampleCases <= 0 || !/^[0-9a-f]{64}$/.test(consumer.sampleHapSha256 ?? '') ||
+      !/^[0-9a-f]{64}$/.test(consumer.sampleHapContentSha256 ?? '') ||
+      !Number.isSafeInteger(consumer.sampleHapByteLength) || consumer.sampleHapByteLength <= 0 ||
+      consumer.check !== 'isolated-release-hap-and-local-tests' ||
       consumer.liveNetworkingVerified !== false ||
       (set.delivery === 'self-contained' && consumer.selfContainedRuntimeVerified !== true) ||
       JSON.stringify(consumer.dependencyArtifacts ?? []) !== JSON.stringify(releaseDependencyReferences(set))) {
       throw new Error('The downloaded-HAR consumer did not produce successful, correctly bound verification.');
+    }
+    if (verificationSchema === 3 &&
+      consumer.sampleHapContentSha256 !== set.verification.sampleHapContentSha256) {
+      throw new Error('The downloaded-HAR canonical HAP content differs from the sealed release verification.');
     }
     const current = (await githubList(github, `${GITHUB_BASE}/releases/${release.id}/assets`))
       .map((asset) => assetIdentity(asset, tag)).sort((a, b) => a.name.localeCompare(b.name));

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "arkdb.mysql.device-acceptance",
+  "caseIds": [
+    "tls_identity",
+    "tls_hostname_mismatch",
+    "server_error",
+    "eof_protocol",
+    "binary_protocol",
+    "authorized_schema",
+    "cancellation",
+    "cleanup"
+  ],
+  "runtime": {
+    "minimumSdkApiVersion": 24,
+    "deviceTypes": ["tablet", "2in1"],
+    "serverFamilies": ["MySQL"]
+  }
+}

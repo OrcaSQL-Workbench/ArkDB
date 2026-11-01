@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign as signPayload } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { link, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
 import { prepareHarRelease, readReleaseBundle } from './prepare-har-release.mjs';
@@ -82,6 +83,20 @@ test('prepares exact isolated HAP outputs before committing the pending challeng
   assert.equal(provisioning.expiresAt, challenge.expiresAt);
   for (const path of [f.prepared.challengePath, f.prepared.contextPath, f.prepared.provisioningPath]) {
     assert.equal((await readFile(path, 'utf8')).includes(f.privateKeyPkcs8.toString('base64')), false);
+  }
+});
+
+test('restricts the one-time signing workspace to the preparing account', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x4b });
+  if (process.platform === 'win32') {
+    const acl = spawnSync('icacls.exe', [f.prepared.workDirectory], {
+      encoding: 'utf8',
+      windowsHide: true
+    });
+    assert.equal(acl.status, 0, acl.stderr);
+    assert.doesNotMatch(acl.stdout, /\(I\)/);
+  } else {
+    assert.equal((await stat(f.prepared.workDirectory)).mode & 0o077, 0);
   }
 });
 

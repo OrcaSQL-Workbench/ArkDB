@@ -172,8 +172,11 @@ embeds the private key, and compiles an unsigned HAP. It records the HAP
 SHA-256/size, removes the generated source/private key, and only then commits
 the pending challenge. The retained work directory contains the HAP,
 `receipt-context.json` and the `arkdb_device_acceptance` provisioning record.
-Those retained files and their staging directory are synced before the work
-directory is atomically published.
+The staging/work directory is restricted to the preparing account (plus
+Windows SYSTEM/Administrators), because the HAP contains the one-time private
+key until verification removes the workspace. Permission hardening is
+fail-closed. Those retained files and their staging directory are synced before
+the work directory is atomically published.
 The canonical UTC issue/expiry timestamps are exactly 24 hours apart. The
 challenge binds source, HAR, sample, release-set, fixed case manifest, platform,
 HAP, nonce and public-key identities. It contains no database credential or

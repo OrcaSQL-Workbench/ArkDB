@@ -1,10 +1,12 @@
+import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import {
   createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes as systemRandomBytes,
   sign as signBytes, verify as verifySignature
 } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
-  copyFile, cp, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile
+  chmod, copyFile, cp, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat,
+  writeFile
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -52,6 +54,35 @@ async function syncPreparedFile(path, dependencies) {
   } finally {
     await handle.close();
   }
+}
+
+function runWindowsAcl(args) {
+  const result = nodeSpawnSync('icacls.exe', args, {
+    encoding: 'utf8',
+    windowsHide: true
+  });
+  if (result.error !== undefined || result.status !== 0) {
+    throw new Error('Could not restrict the device secret workspace permissions.');
+  }
+}
+
+async function secureSecretDirectory(directory) {
+  if (process.platform !== 'win32') {
+    await chmod(directory, 0o700);
+    return;
+  }
+  const user = process.env.USERNAME;
+  const domain = process.env.USERDOMAIN;
+  if (typeof user !== 'string' || user.length === 0 || /[\0\r\n]/.test(user) ||
+    (domain !== undefined && /[\0\r\n]/.test(domain))) {
+    throw new Error('Could not identify the device secret workspace owner.');
+  }
+  const account = domain === undefined || domain.length === 0 ? user : `${domain}\\${user}`;
+  runWindowsAcl([
+    directory, '/grant:r', `${account}:(OI)(CI)(F)`,
+    '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)'
+  ]);
+  runWindowsAcl([directory, '/inheritance:r']);
 }
 
 function atomicTempPath(destination, kind, bytes) {
@@ -559,7 +590,8 @@ export async function prepareDeviceEvidence({
   let committed = false;
   let challengeBytes;
   try {
-    await mkdir(stagingDirectory);
+    await mkdir(stagingDirectory, { mode: 0o700 });
+    await secureSecretDirectory(stagingDirectory);
     const sampleDirectory = join(stagingDirectory, 'sample');
     const hapPath = join(stagingDirectory, 'entry-default-unsigned.hap');
     const buildHarness = dependencies.buildHarness ?? defaultBuildHarness;

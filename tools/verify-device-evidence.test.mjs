@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign as signPayload } from 'node:crypto';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { link, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
@@ -1183,9 +1183,12 @@ test('runs the official HAP signature verifier and binds its certificate evidenc
     hapSignToolPath: signToolPath,
     hapSignatureSpawnSync(command, args) {
       assert.equal(command, javaPath);
-      assert.deepEqual(args.slice(0, 5), [
-        '-jar', signToolPath, 'verify-app', '-inFile', hapPath
+      assert.deepEqual(args.slice(0, 4), [
+        '-jar', signToolPath, 'verify-app', '-inFile'
       ]);
+      const snapshotPath = args[4];
+      assert.notEqual(snapshotPath, hapPath);
+      assert.deepEqual(readFileSync(snapshotPath), f.hapBytes);
       assert.deepEqual(args.slice(-2), ['-inForm', 'zip']);
       writeFileSync(args[args.indexOf('-outCertchain') + 1], certificate);
       writeFileSync(args[args.indexOf('-outProfile') + 1], profile);
@@ -1194,6 +1197,77 @@ test('runs the official HAP signature verifier and binds its certificate evidenc
   });
   assert.equal(verified.record.hapSigningCertificateSha256, sha256(certificate));
   assert.equal(verified.record.hapSigningProfileSha256, sha256(profile));
+});
+
+test('consumes the captured receipt bytes after HAP signature verification', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x57 });
+  const hapPath = join(f.fixture.root, 'receipt-snapshot-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'receipt-snapshot.json');
+  const original = specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes));
+  await writeFile(receiptPath, `${JSON.stringify(original)}\n`);
+  const replacement = specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, 'f'.repeat(64), 'M2');
+  const stem = 'arkdb-mysql-1.0.0';
+  const verified = await deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(f.fixture.root, 'receipt-snapshot-evidence.json')
+  }, artifactDependencies({
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async verifyHapSignature() {
+      await writeFile(receiptPath, `${JSON.stringify(replacement)}\n`);
+      return {
+        certificateSha256: 'a'.repeat(64),
+        profileSha256: 'b'.repeat(64)
+      };
+    }
+  }));
+  assert.equal(verified.record.profile, 'M1');
+  assert.equal(verified.record.hapSha256, sha256(f.hapBytes));
+  assert.equal(verified.record.receiptSha256,
+    sha256(Buffer.from(`${JSON.stringify(original)}\n`)));
+});
+
+test('verifies a protected snapshot of the captured HAP bytes', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x58 });
+  const originalHap = Buffer.from(f.hapBytes);
+  const hapPath = join(f.fixture.root, 'hap-snapshot-signed-entry.hap');
+  await writeFile(hapPath, originalHap);
+  const receiptPath = join(f.fixture.root, 'hap-snapshot-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(originalHap)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  const verified = await deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(f.fixture.root, 'hap-snapshot-evidence.json')
+  }, artifactDependencies({
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async verifyHapSignature(snapshot) {
+      assert.equal(Buffer.isBuffer(snapshot), true);
+      assert.equal(sha256(snapshot), sha256(originalHap));
+      await writeFile(hapPath, 'replacement unsigned HAP');
+      return {
+        certificateSha256: 'a'.repeat(64),
+        profileSha256: 'b'.repeat(64)
+      };
+    }
+  }));
+  assert.equal(verified.record.hapSha256, sha256(originalHap));
+  assert.equal(verified.record.hapByteLength, originalHap.length);
 });
 
 test('recovers external evidence publication before terminally consuming the challenge', async (t) => {

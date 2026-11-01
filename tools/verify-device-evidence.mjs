@@ -127,19 +127,38 @@ function validateHapSignatureEvidence(value) {
   return value;
 }
 
-async function verifyHapPackageSignature(hapPath, dependencies) {
+async function writePrivateSnapshot(path, bytes) {
+  let handle;
+  try {
+    handle = await open(path, 'wx', 0o600);
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function verifyHapPackageSignature(hapBytes, dependencies) {
+  if (!Buffer.isBuffer(hapBytes) || hapBytes.length === 0 ||
+    hapBytes.length > 128 * 1024 * 1024) {
+    throw new Error('HAP signature verification requires bounded captured bytes.');
+  }
+  const snapshot = Buffer.from(hapBytes);
   if (dependencies.verifyHapSignature) {
-    return validateHapSignatureEvidence(await dependencies.verifyHapSignature(hapPath));
+    return validateHapSignatureEvidence(
+      await dependencies.verifyHapSignature(Buffer.from(snapshot)));
   }
   const { javaPath, signToolPath } = hapSignatureTools(dependencies);
   const temporaryDirectory = await mkdtemp(join(tmpdir(), 'arkdb-hap-signature-'));
   try {
     await secureSecretDirectory(temporaryDirectory);
+    const snapshotPath = join(temporaryDirectory, 'signed.hap');
+    await writePrivateSnapshot(snapshotPath, snapshot);
     const certificatePath = join(temporaryDirectory, 'certificate-chain.pem');
     const profilePath = join(temporaryDirectory, 'provisioning-profile.p7b');
     const result = (dependencies.hapSignatureSpawnSync ?? nodeSpawnSync)(javaPath, [
       '-jar', signToolPath, 'verify-app',
-      '-inFile', hapPath,
+      '-inFile', snapshotPath,
       '-outCertchain', certificatePath,
       '-outProfile', profilePath,
       '-inForm', 'zip'
@@ -1363,6 +1382,7 @@ async function verifyBoundDeviceEvidence({
   driver = 'mysql',
   bundleDirectory,
   receiptPath,
+  receiptSnapshot = null,
   confirmPhysicalDevice = false,
   confirmAuthorizedSchema = false,
   acceptanceContext = null,
@@ -1412,7 +1432,14 @@ async function verifyBoundDeviceEvidence({
   const bundle = await readReleaseBundle(resolvedBundleDirectory);
   const set = bundle.releaseSet;
   if (set.driver !== driver) throw new Error('The sealed release is not for the selected driver.');
-  const receiptBytes = releaseFile(dirname(receiptPath), basename(receiptPath));
+  if (receiptSnapshot !== null &&
+    (!Buffer.isBuffer(receiptSnapshot) || receiptSnapshot.length === 0 ||
+      receiptSnapshot.length > 2 * 1024 * 1024)) {
+    throw new Error('Device receipt snapshot is invalid.');
+  }
+  const receiptBytes = receiptSnapshot === null
+    ? releaseFile(dirname(receiptPath), basename(receiptPath))
+    : Buffer.from(receiptSnapshot);
   const parsed = parseReceiptEnvelope(receiptBytes);
   if (!/^[0-9a-f]{32}$/.test(parsed.payload?.runId ?? '')) {
     throw new Error('Device receipt has no valid challenge identity.');
@@ -1571,11 +1598,13 @@ async function verifyBoundDeviceEvidence({
 }
 
 export async function verifyDeviceEvidence(options, dependencies = {}) {
-  if (options?.acceptanceContext != null || options?.outputPath != null) {
+  if (options?.acceptanceContext != null || options?.outputPath != null ||
+    options?.receiptSnapshot != null) {
     throw new Error('Signed-HAP acceptance requires the artifact verification entry point.');
   }
   return await verifyBoundDeviceEvidence({
     ...options,
+    receiptSnapshot: null,
     acceptanceContext: null,
     outputPath: null
   }, dependencies);
@@ -1643,12 +1672,13 @@ export async function verifyDeviceEvidenceArtifacts({
     challenge.preparedUnsignedHapContentSha256 !== actualHapContentSha256) {
     throw new Error('Receipt, sealed release, consumer evidence, or actual signed HAP identity differs.');
   }
-  const hapSignature = await verifyHapPackageSignature(resolve(hapPath), dependencies);
+  const hapSignature = await verifyHapPackageSignature(hapBytes, dependencies);
   const preliminary = await verifyBoundDeviceEvidence({
     root,
     driver: set.driver,
     bundleDirectory: manifestDirectory,
     receiptPath: resolve(receiptPath),
+    receiptSnapshot: receiptBytes,
     confirmPhysicalDevice: true,
     confirmAuthorizedSchema: true,
     acceptanceContext: {

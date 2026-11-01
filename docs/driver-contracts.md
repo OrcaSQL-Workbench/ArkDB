@@ -135,6 +135,16 @@ ready-only executor for each call instead of constructing or retaining a
 physical-session executor while disconnected. Native prepared streams retain
 native callback types; portable `features.streaming` remains text streaming.
 
+MySQL-specific read-only server cursors use the separate optional
+`mysqlFeatures.cursors` interface. `open` returns a cursor with execution-time
+columns, `fetch`, `close` and `done`; it does not add methods or capability
+fields to core. One cursor retains one physical command owner until final fetch
+or close, so callers cannot interleave another command or return the connection
+to a pool. `MySqlCursorOptions` extends `QueryOptions` and enforces inherited
+`maxRows`/`maxResultBytes` cumulatively across FETCH calls; `fetchRows` accepts
+1..10000. A future pool adapter must close the cursor before resetting or
+releasing its physical connection.
+
 MySQL's optional `mysqlFeatures.procedures` interface performs stored procedure
 calls only through prepared binary execution. `MySqlProcedureArgument` and
 `MySqlParameterDirection` model typed `In`, `Out` and `InOut` arguments using

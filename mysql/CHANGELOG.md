@@ -60,6 +60,15 @@
   Restore the async boundary of the legacy three-argument
   `runPreparedCommand` override so busy/not-ready preflight rejects through the
   returned Promise and preserves subclass catch/finally hooks and error identity.
+- Add optional read-only prepared server cursors through
+  `mysqlFeatures.cursors`. Retain one command owner from PREPARE/EXECUTE through
+  caller-driven `COM_STMT_FETCH`, use execution-time columns and
+  `SERVER_STATUS_CURSOR_EXISTS`/`SERVER_STATUS_LAST_ROW_SENT`, default
+  `fetchRows` to 200 with a 1..10000 range, bound each decoded batch, extend
+  `QueryOptions`, enforce cumulative `maxRows`/`maxResultBytes`, RESET
+  before early CLOSE, never read a CLOSE acknowledgement, and retire instead
+  of buffering a server fallback. Keep the feature independent of pooling; a
+  future pool lease must close the cursor before session reset or release.
 - Add optional restricted multi-row INSERT through `mysqlFeatures.insertRows`.
   Quote table and column identifiers, bind only typed prepared parameters,
   snapshot every request before dispatch, and greedily group rows by exact

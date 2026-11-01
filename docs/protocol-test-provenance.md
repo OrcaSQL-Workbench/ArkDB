@@ -215,6 +215,40 @@ expired prepared close and joined close cleanup. They do not establish
 live-server or device timing interoperability, prepared CALL/OUT support,
 cursor, long-data, pooling or automatic retries.
 
+## Read-only prepared server cursors
+
+`command/MySqlCursor.ets` owns the cursor lifetime behind the public
+`mysqlFeatures.cursors.open(...)` interface. One command scope covers PREPARE,
+read-only COM_STMT_EXECUTE, every caller-requested COM_STMT_FETCH, RESET when
+closed early, response-free CLOSE and final owner release. The cursor does not
+borrow the convenience statement cache and introduces no pool dependency.
+
+The opaque prepared response builds cursor EXECUTE, FETCH, RESET and CLOSE
+payloads without exposing statement identifiers. Open consumes execution-time
+column metadata and requires `SERVER_STATUS_CURSOR_EXISTS`. FETCH decodes binary
+rows against that metadata and treats only `SERVER_STATUS_LAST_ROW_SENT` as
+completion; a short batch alone is not final. Both classic EOF and
+deprecated-EOF OK terminators share the result-stream terminator parser.
+`fetchRows` accepts exactly 1..10000. Cursor options extend and clone the shared
+`QueryOptions`; inherited `maxRows` and `maxResultBytes` are tracked across all
+FETCH responses rather than restarting at each batch.
+
+If a server ignores the cursor request and begins a normal buffered result, the
+driver does not buffer it as a fallback. Unread/malformed responses retire the
+physical path. Per-fetch decoded-byte overflow drains the current FETCH response
+to its terminator, then RESETs and CLOSEs without returning partial rows.
+Cumulative row/decoded-byte overflow follows the same cleanup path, while exact
+limit exhaustion returns the final allowed batch and closes before resolving.
+Early close reads RESET OK and never invents a CLOSE acknowledgement.
+
+The deterministic cursor fixtures use the real connection, command gate,
+prepared lifecycle, packet channel and binary decoder. They cover fetch-only-on-
+request, final-owner release, early close, strict fallback rejection, empty and
+partial final batches, exact fetch-count boundaries, per-fetch and cumulative
+budgets, disconnect, reentry and both EOF modes. These checks do not establish
+live-server/device interoperability, pool-release integration,
+scrollable/update cursors or long-data support.
+
 ## Optional public prepared capability
 
 The package entry exports `MySqlConnectionFeatures`, `requireMySqlFeatures`,

@@ -55,17 +55,33 @@ export class PrepareResponse {
       .writeUInt32(this.statementId).toUint8Array();
   }
 
-  executePayload(encoded: EncodedBinaryParameters): Uint8Array {
+  executePayload(encoded: EncodedBinaryParameters, cursorFlags: number = 0): Uint8Array {
     if (encoded.types.length !== this.parameterCount * 2 ||
       encoded.nullBitmap.length !== Math.ceil(this.parameterCount / 8)) {
       throw ArkDbError.validation('Parameter count must match the prepared statement');
     }
-    const writer = new PacketWriter().writeUInt8(0x17).writeUInt32(this.statementId)
-      .writeUInt8(0).writeUInt32(1);
+    if (cursorFlags !== 0 && cursorFlags !== 1) {
+      throw ArkDbError.validation('Unsupported prepared statement cursor flags.');
+    }
+    const writer = new PacketWriter().writeUInt8(Command.STMT_EXECUTE)
+      .writeUInt32(this.statementId).writeUInt8(cursorFlags).writeUInt32(1);
     if (this.parameterCount > 0) {
       writer.writeBytes(encoded.nullBitmap).writeUInt8(1).writeBytes(encoded.types).writeBytes(encoded.values);
     }
     return writer.toUint8Array();
+  }
+
+  fetchPayload(fetchRows: number): Uint8Array {
+    if (!Number.isSafeInteger(fetchRows) || fetchRows < 1 || fetchRows > 10000) {
+      throw ArkDbError.validation('fetchRows must be between 1 and 10000.');
+    }
+    return new PacketWriter().writeUInt8(Command.STMT_FETCH)
+      .writeUInt32(this.statementId).writeUInt32(fetchRows).toUint8Array();
+  }
+
+  resetPayload(): Uint8Array {
+    return new PacketWriter().writeUInt8(Command.STMT_RESET)
+      .writeUInt32(this.statementId).toUint8Array();
   }
 
   sameStatementAs(other: PrepareResponse): boolean {

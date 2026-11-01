@@ -51,6 +51,9 @@ import {
 import {
   MySqlPreparedProcedureCaller, MySqlProcedureCaller
 } from './execution/MySqlProcedureCaller';
+import {
+  MySqlCursor, MySqlCursorExecutor
+} from './driver/MySqlCursorContracts';
 import { MySqlConnectionDeadlineExecutor } from './execution/MySqlDeadlineExecutor';
 import { MySqlConnectionSessionController } from './execution/MySqlSessionController';
 import {
@@ -71,6 +74,7 @@ import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
 } from './model/MySqlBatch';
 import { MySqlDeadlineOptions } from './model/MySqlDeadlineOptions';
+import { MySqlCursorOptions } from './model/MySqlCursorOptions';
 import { MySqlInsertRowsOptions } from './model/MySqlInsertRows';
 import { MySqlPreparedExecutor, MySqlPreparedStatement } from './driver/MySqlPreparedContracts';
 import { MySqlConnectionFeatures } from './driver/MySqlConnectionFeatures';
@@ -81,6 +85,9 @@ import {
   MySqlProcedureArgument, MySqlProcedureResult
 } from './model/MySqlProcedure';
 import { MySqlPreparedExecutor as InternalPreparedExecutor } from './command/PreparedExecutor';
+import {
+  MySqlCursorExecutorHost, MySqlReadOnlyCursorExecutor
+} from './command/MySqlCursor';
 import {
   MySqlResultTerminatorObservation, parseBufferedResultStream, parseResultStream
 } from './command/ResultStream';
@@ -143,9 +150,11 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private named: MySqlPreparedNamedExecutor | null = null;
   private procedures: MySqlPreparedProcedureCaller | null = null;
   private prepared: InternalPreparedExecutor | null = null;
+  private cursors: MySqlReadOnlyCursorExecutor | null = null;
   private connectOperation: CommandCloseSettlement | null = null;
   private ordinaryOperation: OrdinaryCommandSettlement | null = null;
   private preparedOperation: PreparedCommandSettlement | null = null;
+  private cursorOperation: PreparedCommandSettlement | null = null;
   private transactionOperation: PreparedCommandSettlement | null = null;
 
   constructor(config: ConnectionConfig, password: string, transport: TcpTransport = new TcpTransport(),
@@ -183,6 +192,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.features.metrics = new MySqlServerMetricsProvider(this.features.streaming);
     this.mysqlFeatures.batch = new MySqlConnectionBatchExecutor(
       (): MySqlBatchExecutor => this.batchExecutor());
+    this.mysqlFeatures.cursors = new MySqlConnectionCursorExecutor(
+      (): MySqlCursorExecutor => this.cursorExecutor());
     this.mysqlFeatures.deadlines = new MySqlConnectionDeadlineExecutor(
       (sql: string, options: MySqlDeadlineOptions): Promise<QueryResult> =>
         this.queryWithDeadline(sql, options),
@@ -265,6 +276,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.batch;
   }
 
+  protected cursorExecutor(): MySqlCursorExecutor {
+    if (this.cursors !== null) return this.cursors;
+    this.requireReady();
+    this.requireExecutorCreationAllowed();
+    this.cursors = new MySqlReadOnlyCursorExecutor(this.preparedHost());
+    return this.cursors;
+  }
+
   protected insertRowsExecutor(): MySqlPreparedInsertRowsExecutor {
     if (this.insertRows !== null) return this.insertRows;
     this.requireReady();
@@ -320,7 +339,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         this.transactionInsertRowsOwned(scope, input));
   }
 
-  private preparedHost(): MySqlNamedExecutorHost {
+  private preparedHost(): PreparedConnectionHost {
     return new PreparedConnectionHost(this.commandGate,
       (): PacketChannel | null => this.channel, (): number => this.clientCaps,
       (): ConnectionState => this.connState,
@@ -352,6 +371,17 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
           this.readMySqlSessionFingerprint(scope),
           MySqlExecutionOutcome.NotDispatched,
           MySqlExecutionOutcome.NotDispatched)).sqlMode,
+      <T>(operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> =>
+        this.startCursorCommand<T>(operation),
+      <T>(scope: MySqlCommandScope, phase: MySqlCommandPhase,
+        command: Uint8Array,
+        parse: (source: MysqlPacketSource) => Promise<T>): Promise<T> =>
+        this.runCursorCommandOwned<T>(scope, phase, command, parse),
+      (scope: MySqlCommandScope, statusFlags: number): void =>
+        this.applyCursorStatus(scope, statusFlags),
+      (scope: MySqlCommandScope, primary?: Object,
+        outcome?: MySqlExecutionOutcome): Promise<void> =>
+        this.finishCursorCommand(scope, primary, outcome),
       this.config.preparedCacheSize === undefined ? 0 : this.config.preparedCacheSize);
   }
 
@@ -1107,7 +1137,18 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } finally {
       this.closePending = false;
       if (ownsScope) this.finishCommand(scope);
-      else this.releaseCompletedCommand();
+      else {
+        const cursor = this.cursorOperation;
+        if (cursor !== null && cursor.scope === scope &&
+          this.commandGate.isOwner(scope)) {
+          this.completedScope = scope;
+          if (this.preparedOperation === cursor) {
+            this.preparedOperation = null;
+          }
+          this.cursorOperation = null;
+        }
+        this.releaseCompletedCommand();
+      }
     }
   }
 
@@ -1662,6 +1703,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.insertRows = null;
     this.named = null;
     this.procedures = null;
+    if (this.cursors !== null) this.cursors.invalidate();
+    this.cursors = null;
     if (this.prepared !== null) this.prepared.invalidate();
     this.prepared = null;
   }
@@ -1691,6 +1734,115 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.commandGate.start(scope);
     begin();
     return task;
+  }
+
+  private startCursorCommand<T>(
+    operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
+    const scope = this.reserveCommandOwnership(MySqlCommandKind.Cursor);
+    const settlement = new PreparedCommandSettlement(scope);
+    this.cursorOperation = settlement;
+    this.preparedOperation = settlement;
+    let begin: () => void = (): void => {};
+    const task = new Promise<T>((resolve: (value: T) => void,
+      reject: (reason?: Object) => void): void => {
+      begin = (): void => {
+        this.startCursorCommandOwned(scope, operation).then(resolve, reject);
+      };
+    });
+    this.commandGate.start(scope);
+    begin();
+    return task;
+  }
+
+  private async startCursorCommandOwned<T>(scope: MySqlCommandScope,
+    operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
+    try {
+      if (this.prepared !== null) this.prepared.retireCacheContext(scope);
+      return await operation(scope);
+    } catch (error) {
+      const primary = error as Object;
+      await this.finishCursorCommand(scope, primary,
+        primary instanceof MySqlOperationError ?
+          primary.outcome : MySqlExecutionOutcome.Unknown);
+      throw primary as Error;
+    }
+  }
+
+  private async runCursorCommandOwned<T>(scope: MySqlCommandScope,
+    phase: MySqlCommandPhase, command: Uint8Array,
+    parse: (source: MysqlPacketSource) => Promise<T>): Promise<T> {
+    const channel = this.requireOwnedChannel(scope);
+    let reading = false;
+    this.connState = ConnectionState.Querying;
+    this.executingScope = scope;
+    this.commandGate.setPhase(scope, phase);
+    try {
+      channel.resetSequence();
+      this.queryWrite = channel.writePacket(command);
+      await this.queryWrite;
+      reading = true;
+      const value = await parse(
+        new PreparedPacketSource(channel, this.clientCaps));
+      if (this.state !== ConnectionState.Closed) {
+        this.connState = ConnectionState.Ready;
+      }
+      return value;
+    } catch (error) {
+      throw await this.classifyCommandFailure(
+        scope, error as Object, reading);
+    } finally {
+      this.queryWrite = null;
+      this.executingScope = null;
+    }
+  }
+
+  private applyCursorStatus(scope: MySqlCommandScope,
+    statusFlags: number): void {
+    this.commandGate.assertOwner(scope);
+    if (this.connState !== ConnectionState.Closed) {
+      this.applyStatusFlags(statusFlags);
+      this.connState = ConnectionState.Ready;
+    }
+  }
+
+  private async finishCursorCommand(scope: MySqlCommandScope,
+    primary?: Object,
+    outcome: MySqlExecutionOutcome = MySqlExecutionOutcome.Completed): Promise<void> {
+    const settlement = this.cursorOperation;
+    const cleanup: ArkDbError[] = [];
+    if (settlement !== null && settlement.scope === scope) {
+      if (this.commandGate.isOwner(scope)) {
+        this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
+      }
+      const cancellationCleanup = await this.settlePreparedCancellation(scope);
+      for (const failure of cancellationCleanup) cleanup.push(failure);
+      const closeResult = settlement.closeResult;
+      if (closeResult !== null && !settlement.closeJoined) {
+        settlement.closeJoined = true;
+        try {
+          await closeResult;
+        } catch (error) {
+          cleanup.push(toCleanupError(error as Object));
+        }
+      }
+    }
+    if (this.commandGate.isOwner(scope)) {
+      try {
+        this.finishCommand(scope);
+      } catch (error) {
+        cleanup.push(toCleanupError(error as Object));
+      }
+    }
+    if (this.cursorOperation === settlement) this.cursorOperation = null;
+    if (this.preparedOperation === settlement) this.preparedOperation = null;
+    if (primary !== undefined) {
+      throw operationFailure(primary, cleanup,
+        cleanup.length > 0 ? MySqlExecutionOutcome.Unknown : outcome);
+    }
+    if (cleanup.length > 0) {
+      throw operationFailure(cleanup[0], cleanup.slice(1),
+        MySqlExecutionOutcome.Completed);
+    }
   }
 
   private async runPreparedCommandOwned<T>(scope: MySqlCommandScope,
@@ -1912,6 +2064,21 @@ class MySqlConnectionPreparedExecutor implements MySqlPreparedExecutor {
   }
 }
 
+class MySqlConnectionCursorExecutor implements MySqlCursorExecutor {
+  private getExecutor: () => MySqlCursorExecutor;
+
+  constructor(getExecutor: () => MySqlCursorExecutor) {
+    this.getExecutor = getExecutor;
+  }
+
+  async open(sql: string, parameters: MySqlParameter[],
+    options?: MySqlCursorOptions): Promise<MySqlCursor> {
+    return this.getExecutor().open(
+      sql, parameters.slice(),
+      options === undefined ? undefined : options.clone());
+  }
+}
+
 class MySqlConnectionNamedExecutor implements MySqlNamedExecutor {
   private getExecutor: () => MySqlNamedExecutor;
 
@@ -2080,7 +2247,18 @@ type PreparedCommandRunner = <T>(kind: MySqlCommandKind,
   operation: (scope: MySqlCommandScope) => Promise<T>,
   cachedConvenience?: boolean) => Promise<T>;
 
-class PreparedConnectionHost implements MySqlNamedExecutorHost {
+type CursorCommandStarter = <T>(
+  operation: (scope: MySqlCommandScope) => Promise<T>) => Promise<T>;
+type CursorWireRunner = <T>(scope: MySqlCommandScope,
+  phase: MySqlCommandPhase, command: Uint8Array,
+  parse: (source: MysqlPacketSource) => Promise<T>) => Promise<T>;
+type CursorStatusApplier =
+  (scope: MySqlCommandScope, statusFlags: number) => void;
+type CursorCommandFinisher = (scope: MySqlCommandScope,
+  primary?: Object, outcome?: MySqlExecutionOutcome) => Promise<void>;
+
+class PreparedConnectionHost implements MySqlNamedExecutorHost,
+  MySqlCursorExecutorHost {
   readonly commandGate: MySqlCommandGate;
   readonly preparedCacheSize: number;
   private readChannel: () => PacketChannel | null;
@@ -2094,6 +2272,10 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost {
   private stream: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
   private readSqlMode: (scope: MySqlCommandScope) => Promise<string>;
+  private startOwnedCursor: CursorCommandStarter;
+  private runCursorWire: CursorWireRunner;
+  private applyOwnedCursorStatus: CursorStatusApplier;
+  private finishOwnedCursor: CursorCommandFinisher;
 
   constructor(gate: MySqlCommandGate, readChannel: () => PacketChannel | null,
     readCapabilities: () => number, readState: () => ConnectionState,
@@ -2104,6 +2286,10 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost {
     stream: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
       sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>,
     readSqlMode: (scope: MySqlCommandScope) => Promise<string>,
+    startCursor: CursorCommandStarter,
+    runCursor: CursorWireRunner,
+    applyCursorStatus: CursorStatusApplier,
+    finishCursor: CursorCommandFinisher,
     preparedCacheSize: number) {
     this.commandGate = gate;
     this.preparedCacheSize = preparedCacheSize;
@@ -2115,6 +2301,10 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost {
     this.buffered = buffered;
     this.stream = stream;
     this.readSqlMode = readSqlMode;
+    this.startOwnedCursor = startCursor;
+    this.runCursorWire = runCursor;
+    this.applyOwnedCursorStatus = applyCursorStatus;
+    this.finishOwnedCursor = finishCursor;
   }
 
   get channel(): PacketChannel | null { return this.readChannel(); }
@@ -2141,6 +2331,26 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost {
 
   readSessionSqlMode(scope: MySqlCommandScope): Promise<string> {
     return this.readSqlMode(scope);
+  }
+
+  startCursor<T>(
+    operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
+    return this.startOwnedCursor<T>(operation);
+  }
+
+  runCursorCommand<T>(scope: MySqlCommandScope,
+    phase: MySqlCommandPhase, command: Uint8Array,
+    parse: (source: MysqlPacketSource) => Promise<T>): Promise<T> {
+    return this.runCursorWire<T>(scope, phase, command, parse);
+  }
+
+  applyCursorStatus(scope: MySqlCommandScope, statusFlags: number): void {
+    this.applyOwnedCursorStatus(scope, statusFlags);
+  }
+
+  finishCursor(scope: MySqlCommandScope, primary?: Object,
+    outcome?: MySqlExecutionOutcome): Promise<void> {
+    return this.finishOwnedCursor(scope, primary, outcome);
   }
 }
 

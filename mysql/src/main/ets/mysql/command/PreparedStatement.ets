@@ -117,6 +117,48 @@ export class MySqlPreparedSession {
     }
   }
 
+  async executeCursorOwned<T>(scope: MySqlCommandScope,
+    statement: MySqlPreparedStatement, encoded: EncodedBinaryParameters,
+    operation: (command: Uint8Array) => Promise<T>): Promise<T> {
+    const channel = this.requireOwnedSession(scope);
+    this.assertUsable(scope, statement);
+    const command = this.ownedHandle(statement).executePayload(encoded, 1);
+    beginPreparedCommand(channel);
+    try {
+      return await operation(command);
+    } finally {
+      pendingPreparedChannels.delete(channel);
+    }
+  }
+
+  async fetchCursorOwned<T>(scope: MySqlCommandScope,
+    statement: MySqlPreparedStatement, fetchRows: number,
+    operation: (command: Uint8Array) => Promise<T>): Promise<T> {
+    const channel = this.requireOwnedSession(scope);
+    this.assertUsable(scope, statement);
+    const command = this.ownedHandle(statement).fetchPayload(fetchRows);
+    beginPreparedCommand(channel);
+    try {
+      return await operation(command);
+    } finally {
+      pendingPreparedChannels.delete(channel);
+    }
+  }
+
+  async resetCursorOwned<T>(scope: MySqlCommandScope,
+    statement: MySqlPreparedStatement,
+    operation: (command: Uint8Array) => Promise<T>): Promise<T> {
+    const channel = this.requireOwnedSession(scope);
+    this.assertUsable(scope, statement);
+    const command = this.ownedHandle(statement).resetPayload();
+    beginPreparedCommand(channel);
+    try {
+      return await operation(command);
+    } finally {
+      pendingPreparedChannels.delete(channel);
+    }
+  }
+
   async execute(statement: MySqlPreparedStatement, parameters: MySqlParameter[],
     options?: QueryOptions): Promise<MySqlQueryResult> {
     this.requireExecutable(statement);
@@ -402,7 +444,7 @@ class PreparedHandle implements MySqlPreparedStatement {
 
   get columns(): MySqlColumnDef[] {
     const columns: MySqlColumnDef[] = [];
-    for (const column of this.response.columns) columns.push(copyColumn(column));
+    for (const column of this.response.columns) columns.push(copyMySqlColumnDef(column));
     return columns;
   }
 
@@ -422,8 +464,17 @@ class PreparedHandle implements MySqlPreparedStatement {
     return this.response.closePayload();
   }
 
-  executePayload(encoded: EncodedBinaryParameters): Uint8Array {
-    return this.response.executePayload(encoded);
+  executePayload(encoded: EncodedBinaryParameters,
+    cursorFlags: number = 0): Uint8Array {
+    return this.response.executePayload(encoded, cursorFlags);
+  }
+
+  fetchPayload(fetchRows: number): Uint8Array {
+    return this.response.fetchPayload(fetchRows);
+  }
+
+  resetPayload(): Uint8Array {
+    return this.response.resetPayload();
   }
 
   async execute(parameters: MySqlParameter[], options?: QueryOptions): Promise<MySqlQueryResult> {
@@ -540,7 +591,7 @@ export function preparedCleanup(error: Object): ArkDbError {
     preparedFailure(error, [], MySqlExecutionOutcome.Unknown);
 }
 
-function copyColumn(column: MySqlColumnDef): MySqlColumnDef {
+export function copyMySqlColumnDef(column: MySqlColumnDef): MySqlColumnDef {
   const copy = new MySqlColumnDef();
   copy.name = column.name;
   copy.sourceCatalog = column.sourceCatalog;

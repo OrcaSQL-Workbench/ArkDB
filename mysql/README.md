@@ -222,6 +222,36 @@ metadata can differ from prepare-time metadata, and handles remain bound to thei
 original physical session. Explicit handles never enter or borrow from the
 convenience cache. Close does not invent a server acknowledgement.
 
+### Read-only server cursors
+
+Built-in connections expose `requireMySqlFeatures(connection).cursors`.
+`open(sql, parameters, options?)` uses a dedicated prepared statement and asks
+the server for a read-only cursor. `MySqlCursorOptions.fetchRows` defaults to
+200 and accepts 1..10000, while `maxBufferedBytes` defaults to 33554432 for
+each fetched batch. The options class extends `QueryOptions`; inherited
+`maxRows` and `maxResultBytes` are enforced cumulatively across every FETCH.
+The returned cursor exposes defensive execution-time `columns`, `done`,
+`fetch()` and idempotent `close()`.
+
+The cursor retains the connection's single command owner while idle. No query,
+prepare, ping, session reset or other command can interleave until a final
+`SERVER_STATUS_LAST_ROW_SENT` batch or explicit close releases it. `fetch()`
+sends one `COM_STMT_FETCH` and never infers completion from a short batch.
+Natural completion sends response-free `COM_STMT_CLOSE`; early close first
+waits for `COM_STMT_RESET` OK and then sends CLOSE without reading a phantom
+acknowledgement.
+
+If the server does not establish `SERVER_STATUS_CURSOR_EXISTS` and begins a
+normal buffered result, the driver does not silently consume that fallback as
+a cursor. An unread or malformed response retires the physical connection.
+A fetched batch that exceeds `maxBufferedBytes` is drained to its terminator,
+then reset and closed without returning partial rows. The same drain/reset/close
+rule applies if a batch would exceed the remaining cumulative
+inherited `maxRows` or `maxResultBytes` budget. Reaching either cumulative limit
+exactly returns the allowed rows and closes the cursor before `fetch()` resolves.
+This feature has no pool dependency; a future pool lease must await cursor close
+before resetting or returning the physical connection.
+
 ### SQL-mode-aware named parameters
 
 Built-in connections expose `requireMySqlFeatures(connection).named` as an
@@ -397,10 +427,9 @@ rather than pretending rollback occurred. Unknown command, commit or
 cancellation outcomes remain `Unknown`. Rollback and control-cleanup failures
 are retained without replacing the original primary failure.
 
-No pool, server cursor or long-data upload is exposed. Opt-in buffered
-text-query and prepared-execute deadlines are available through
-`mysqlFeatures.deadlines`; legacy `QueryOptions.statementTimeoutMs` remains
-validation-only.
+No pool or long-data upload is exposed. Read-only server cursors and opt-in
+buffered text-query/prepared-execute deadlines are available through separate
+MySQL features; legacy `QueryOptions.statementTimeoutMs` remains validation-only.
 
 Built-in root connections also expose `mysqlFeatures.session`.
 `MySqlSessionController.reset()` sends `COM_RESET_CONNECTION` (`0x1f`) through

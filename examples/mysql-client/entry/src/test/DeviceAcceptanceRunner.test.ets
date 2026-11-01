@@ -58,6 +58,7 @@ export default function deviceAcceptanceRunnerTest(): void {
       expect(response.failures).assertEqual(0);
       expect(response.errors).assertEqual(0);
       expect(response.ignored).assertEqual(0);
+      expect(factory.positive.queries.indexOf('SELECT SLEEP(10), 1') >= 0).assertTrue();
       expect(signer.payload.indexOf(binding.sourceCommit) >= 0).assertTrue();
       expect(signer.payload.indexOf(binding.artifactSha256) >= 0).assertTrue();
       expect(signer.payload.indexOf(request.signedHapSha256) >= 0).assertTrue();
@@ -267,6 +268,7 @@ class FakeDeviceConnection implements DeviceAcceptanceConnection {
   challengeId: string = '';
   schemaChallenge: string = '';
   mismatchCode: string = 'TLS_HOSTNAME_MISMATCH';
+  queries: string[] = [];
   private mismatch: boolean;
   private sleepReject: ((error: Error) => void) | null = null;
 
@@ -291,7 +293,8 @@ class FakeDeviceConnection implements DeviceAcceptanceConnection {
   }
 
   async query(sql: string): Promise<QueryResult> {
-    if (sql === 'SELECT SLEEP(10)') {
+    this.queries.push(sql);
+    if (sql === 'SELECT SLEEP(10), 1') {
       this.state = ConnectionState.Querying;
       return new Promise<QueryResult>((_resolve, reject): void => { this.sleepReject = reject; });
     }

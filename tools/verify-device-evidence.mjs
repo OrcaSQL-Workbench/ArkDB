@@ -500,6 +500,15 @@ function pathWithin(parent, candidate) {
   return path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`));
 }
 
+function pathWithinDeviceWorkspace(buildRoot, candidate) {
+  const path = relative(resolve(buildRoot), resolve(candidate));
+  if (path === '' || isAbsolute(path) || path === '..' || path.startsWith(`..${sep}`)) {
+    return false;
+  }
+  const parts = path.split(sep);
+  return parts.length >= 3 && parts[1] === 'work' && parts[2] === 'device-acceptance';
+}
+
 function strictBase64(value, label, maximumBytes) {
   if (typeof value !== 'string' || value.length === 0 || value.length > maximumBytes * 2 ||
     !BASE64.test(value)) throw new Error(`${label} is not bounded canonical base64.`);
@@ -1456,15 +1465,15 @@ async function verifyBoundDeviceEvidence({
     await releaseProcessLock(preparationLockPath, preparationLock);
   }
   const states = statePaths(root, paths, parsed.payload.runId);
-  const workParent = dirname(states.work);
-  const canonicalWorkParent = await realpath(workParent);
+  const buildRoot = join(root, 'build');
+  const canonicalBuildRoot = await realpath(buildRoot);
   if (frozenOutputPath !== null &&
     pathWithin(states.evidenceDirectory, canonicalOutputPath)) {
     throw new Error('Device evidence output must be outside the verifier state directory.');
   }
   if (frozenOutputPath !== null &&
-    (pathWithin(workParent, requestedOutputPath) ||
-      pathWithin(canonicalWorkParent, canonicalOutputPath))) {
+    (pathWithinDeviceWorkspace(buildRoot, requestedOutputPath) ||
+      pathWithinDeviceWorkspace(canonicalBuildRoot, canonicalOutputPath))) {
     throw new Error('Device evidence output must be outside every secret challenge workspace.');
   }
   const caseBytes = await readFile(join(root, CASE_MANIFEST));

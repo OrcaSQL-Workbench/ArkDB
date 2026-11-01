@@ -68,7 +68,7 @@ The fixed suite requires all of these cases:
 | `eof_protocol` | A fixed text query succeeds through the server-negotiated legacy/deprecated EOF path |
 | `binary_protocol` | A fixed prepared query preserves UInt64, DECIMAL and binary bytes |
 | `authorized_schema` | A typed prepared read returns the one-time value from `arkdb_device_acceptance` |
-| `cancellation` | `SELECT SLEEP(10)` is requested, interrupted, awaited and followed by a successful ping |
+| `cancellation` | `SELECT SLEEP(10), 1` is requested, interrupted with a server error, awaited and followed by a successful ping |
 | `cleanup` | Both positive and TLS-negative connections close without cleanup failure |
 
 All four release profiles require the current transport/auth/protocol base

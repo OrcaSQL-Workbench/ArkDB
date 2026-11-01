@@ -1,6 +1,15 @@
 import { ArkDbError, ConnectionState, QueryOptions } from '@arkdb/core';
 import { MySqlConnectionFeatures } from '../driver/MySqlConnectionFeatures';
 import { MySqlSession } from '../driver/MySqlSession';
+import {
+  MySqlInsertRowsExecutor, MySqlInsertRowsInput,
+  snapshotMySqlInsertRowsInput
+} from './MySqlInsertRowsExecutor';
+import {
+  MySqlBatchResult
+} from '../model/MySqlBatch';
+import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
+import { MySqlParameter } from '../model/MySqlParameter';
 import { MySqlServerInfo } from '../model/MySqlServerInfo';
 import {
   MySqlExecutionOutcome, MySqlOperationError
@@ -36,6 +45,8 @@ export interface MySqlTransactionRunnerHost {
   query(scope: MySqlCommandScope, sql: string): Promise<MySqlQueryResult>;
   queryStream(scope: MySqlCommandScope, sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
+  insertRows(scope: MySqlCommandScope,
+    input: MySqlInsertRowsInput): Promise<MySqlBatchResult>;
 }
 
 export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner {
@@ -231,6 +242,12 @@ class ScopedMySqlTransactionSession implements MySqlSession {
   constructor(host: MySqlTransactionRunnerHost, scope: MySqlCommandScope) {
     this.host = host;
     this.scope = scope;
+    this.scopedFeatures.insertRows =
+      new ScopedMySqlInsertRowsExecutor(
+        (input: MySqlInsertRowsInput): Promise<MySqlBatchResult> =>
+          this.runCommand<MySqlBatchResult>(
+            (): Promise<MySqlBatchResult> =>
+              this.host.insertRows(this.scope, input)));
   }
 
   get mysqlFeatures(): MySqlConnectionFeatures {
@@ -354,6 +371,31 @@ class ScopedMySqlTransactionSession implements MySqlSession {
     } finally {
       this.activeCommand = null;
     }
+  }
+}
+
+class ScopedMySqlInsertRowsExecutor implements MySqlInsertRowsExecutor {
+  private executeInput: (
+    input: MySqlInsertRowsInput) => Promise<MySqlBatchResult>;
+
+  constructor(executeInput: (
+    input: MySqlInsertRowsInput) => Promise<MySqlBatchResult>) {
+    this.executeInput = executeInput;
+  }
+
+  execute(tableParts: string[], columns: string[],
+    rows: MySqlParameter[][],
+    options?: MySqlInsertRowsOptions): Promise<MySqlBatchResult> {
+    let input: MySqlInsertRowsInput;
+    try {
+      input = snapshotMySqlInsertRowsInput(
+        tableParts, columns, rows, options);
+    } catch (error) {
+      const task = Promise.reject<MySqlBatchResult>(error as Object);
+      task.catch((_error: Object): void => {});
+      return task;
+    }
+    return this.executeInput(input);
   }
 }
 

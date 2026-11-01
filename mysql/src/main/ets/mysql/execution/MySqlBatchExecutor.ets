@@ -13,6 +13,9 @@ import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
 } from '../value/BinaryParameterEncoder';
+import {
+  mySqlBatchItemOptions, mySqlBatchResultBytes
+} from './MySqlBatchSupport';
 import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
 
 export interface MySqlBatchExecutor {
@@ -77,7 +80,7 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
               let result: MySqlQueryResult;
               try {
                 result = await this.executeItem(scope, statement, encodedRows[index],
-                  batchItemOptions(snapshot.queryOptions, remainingBytes),
+                  mySqlBatchItemOptions(snapshot.queryOptions, remainingBytes),
                   (decoded: MySqlQueryResult): void => { capturedResult = decoded; });
               } catch (error) {
                 if (error instanceof MySqlOperationError &&
@@ -87,7 +90,7 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
                 throw error as Error;
               }
               completed.push(result);
-              const loadedBytes = batchResultBytes(result);
+              const loadedBytes = mySqlBatchResultBytes(result);
               remainingBytes = loadedBytes >= remainingBytes ? 0 : remainingBytes - loadedBytes;
             }
           } catch (error) {
@@ -131,16 +134,4 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
 function validateBatchOptions(options: MySqlBatchOptions, itemCount: number): void {
   const errors = validateMySqlBatchOptions(options, itemCount);
   if (errors.length > 0) throw errors[0];
-}
-
-function batchItemOptions(options: QueryOptions, remainingBytes: number): QueryOptions {
-  const item = options.clone();
-  if (item.maxResultBytes > remainingBytes) item.maxResultBytes = remainingBytes;
-  return item;
-}
-
-function batchResultBytes(result: MySqlQueryResult): number {
-  let bytes = result.loadedBytes;
-  for (const additional of result.additionalResults) bytes += batchResultBytes(additional);
-  return bytes;
 }

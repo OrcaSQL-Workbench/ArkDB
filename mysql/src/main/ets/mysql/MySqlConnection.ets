@@ -42,6 +42,10 @@ import {
   MySqlNamedExecutor, MySqlNamedExecutorHost, MySqlPreparedNamedExecutor
 } from './execution/MySqlNamedExecutor';
 import {
+  MySqlInsertRowsExecutor, MySqlInsertRowsInput,
+  MySqlPreparedInsertRowsExecutor, snapshotMySqlInsertRowsInput
+} from './execution/MySqlInsertRowsExecutor';
+import {
   MySqlPreparedProcedureCaller, MySqlProcedureCaller
 } from './execution/MySqlProcedureCaller';
 import { MySqlConnectionDeadlineExecutor } from './execution/MySqlDeadlineExecutor';
@@ -64,6 +68,7 @@ import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
 } from './model/MySqlBatch';
 import { MySqlDeadlineOptions } from './model/MySqlDeadlineOptions';
+import { MySqlInsertRowsOptions } from './model/MySqlInsertRows';
 import { MySqlPreparedExecutor, MySqlPreparedStatement } from './driver/MySqlPreparedContracts';
 import { MySqlConnectionFeatures } from './driver/MySqlConnectionFeatures';
 import { MySqlSession } from './driver/MySqlSession';
@@ -118,6 +123,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private createControlConnection: () => DbConnection;
   private skipAutocommitSetup: boolean = false;
   private batch: MySqlPreparedBatchExecutor | null = null;
+  private insertRows: MySqlPreparedInsertRowsExecutor | null = null;
   private named: MySqlPreparedNamedExecutor | null = null;
   private procedures: MySqlPreparedProcedureCaller | null = null;
   private prepared: InternalPreparedExecutor | null = null;
@@ -150,6 +156,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       (sql: string, parameters: MySqlParameter[],
         options: MySqlDeadlineOptions): Promise<QueryResult> =>
         this.executeWithDeadline(sql, parameters, options));
+    this.mysqlFeatures.insertRows = new MySqlConnectionInsertRowsExecutor(
+      (): MySqlPreparedInsertRowsExecutor => this.insertRowsExecutor());
     this.mysqlFeatures.named = new MySqlConnectionNamedExecutor(
       (): MySqlNamedExecutor => this.namedExecutor());
     this.mysqlFeatures.prepared = new MySqlConnectionPreparedExecutor(
@@ -224,6 +232,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.batch;
   }
 
+  protected insertRowsExecutor(): MySqlPreparedInsertRowsExecutor {
+    if (this.insertRows !== null) return this.insertRows;
+    this.requireReady();
+    this.requireExecutorCreationAllowed();
+    this.insertRows = new MySqlPreparedInsertRowsExecutor(this.preparedHost());
+    return this.insertRows;
+  }
+
   protected namedExecutor(): MySqlNamedExecutor {
     this.requireReady();
     if (this.named !== null) return this.named;
@@ -265,7 +281,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         this.queryOwned(scope, sql),
       (scope: MySqlCommandScope, sql: string, options: QueryOptions,
         sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> =>
-        this.transactionQueryStreamOwned(scope, sql, options, sink));
+        this.transactionQueryStreamOwned(scope, sql, options, sink),
+      (scope: MySqlCommandScope,
+        input: MySqlInsertRowsInput): Promise<MySqlBatchResult> =>
+        this.transactionInsertRowsOwned(scope, input));
   }
 
   private preparedHost(): MySqlNamedExecutorHost {
@@ -833,6 +852,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       new MySqlResultSinkAdapter(sink)));
   }
 
+  private transactionInsertRowsOwned(scope: MySqlCommandScope,
+    input: MySqlInsertRowsInput): Promise<MySqlBatchResult> {
+    return new MySqlPreparedInsertRowsExecutor(
+      this.preparedHost(),
+      (owned: MySqlCommandScope): Promise<void> =>
+        this.settleTransactionPreparedExecution(owned))
+      .executeInputOwned(scope, input);
+  }
+
   cancel(): Promise<QueryCancellationResult> {
     const scope = this.commandGate.current;
     if (scope === null) {
@@ -1210,6 +1238,21 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return failures;
   }
 
+  private async settleTransactionPreparedExecution(
+    scope: MySqlCommandScope): Promise<void> {
+    const cleanup = await this.settleTransactionOperation(scope);
+    if (cleanup.length === 0) return;
+    let outcome = this.retiredByCancellation ?
+      MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.Completed;
+    for (const failure of cleanup) {
+      if (failure instanceof MySqlOperationError &&
+        failure.outcome === MySqlExecutionOutcome.Unknown) {
+        outcome = MySqlExecutionOutcome.Unknown;
+      }
+    }
+    throw operationFailure(cleanup[0], cleanup.slice(1), outcome);
+  }
+
   private async finishTransactionRunnerScope(scope: MySqlCommandScope): Promise<ArkDbError[]> {
     const failures = await this.settleTransactionOperation(scope);
     try {
@@ -1453,6 +1496,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   private invalidatePreparedState(): void {
     this.batch = null;
+    this.insertRows = null;
     this.named = null;
     this.procedures = null;
     if (this.prepared !== null) this.prepared.invalidate();
@@ -1702,6 +1746,32 @@ class MySqlConnectionNamedExecutor implements MySqlNamedExecutor {
   }
 }
 
+class MySqlConnectionInsertRowsExecutor implements MySqlInsertRowsExecutor {
+  private getExecutor: () => MySqlPreparedInsertRowsExecutor;
+
+  constructor(getExecutor: () => MySqlPreparedInsertRowsExecutor) {
+    this.getExecutor = getExecutor;
+  }
+
+  async execute(tableParts: string[], columns: string[],
+    rows: MySqlParameter[][],
+    options?: MySqlInsertRowsOptions): Promise<MySqlBatchResult> {
+    const input: MySqlInsertRowsInput = snapshotMySqlInsertRowsInput(
+      tableParts, columns, rows, options);
+    if (input.groups.length === 0) return new MySqlBatchResult();
+    let executor: MySqlPreparedInsertRowsExecutor;
+    try {
+      executor = this.getExecutor();
+    } catch (error) {
+      throw new MySqlBatchError(
+        operationFailure(error as Object, [],
+          MySqlExecutionOutcome.NotDispatched),
+        [], 0);
+    }
+    return executor.executeInput(input);
+  }
+}
+
 class MySqlConnectionProcedureCaller implements MySqlProcedureCaller {
   private getCaller: () => MySqlProcedureCaller;
 
@@ -1757,6 +1827,8 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
   private executeQuery: (scope: MySqlCommandScope, sql: string) => Promise<QueryResult>;
   private executeStream: (scope: MySqlCommandScope, sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
+  private executeInsertRows: (scope: MySqlCommandScope,
+    input: MySqlInsertRowsInput) => Promise<MySqlBatchResult>;
 
   constructor(readState: () => ConnectionState,
     readFeatures: () => MySqlConnectionFeatures,
@@ -1769,7 +1841,9 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
     retire: (scope: MySqlCommandScope, error: ArkDbError) => Promise<void>,
     executeQuery: (scope: MySqlCommandScope, sql: string) => Promise<QueryResult>,
     executeStream: (scope: MySqlCommandScope, sql: string, options: QueryOptions,
-      sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>) {
+      sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>,
+    executeInsertRows: (scope: MySqlCommandScope,
+      input: MySqlInsertRowsInput) => Promise<MySqlBatchResult>) {
     this.readState = readState;
     this.readFeatures = readFeatures;
     this.readServerInfo = readServerInfo;
@@ -1781,6 +1855,7 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
     this.retire = retire;
     this.executeQuery = executeQuery;
     this.executeStream = executeStream;
+    this.executeInsertRows = executeInsertRows;
   }
 
   get state(): ConnectionState { return this.readState(); }
@@ -1809,6 +1884,11 @@ class TransactionConnectionHost implements MySqlTransactionRunnerHost {
   queryStream(scope: MySqlCommandScope, sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> {
     return this.executeStream(scope, sql, options, sink);
+  }
+
+  insertRows(scope: MySqlCommandScope,
+    input: MySqlInsertRowsInput): Promise<MySqlBatchResult> {
+    return this.executeInsertRows(scope, input);
   }
 }
 

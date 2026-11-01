@@ -72,6 +72,35 @@ test('shared contracts describe binary procedure output parameters', async () =>
   assert.doesNotMatch(index, /\bMySqlProcedureOutput\b/);
 });
 
+test('shared contracts describe restricted prepared insert rows', async () => {
+  const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
+  const index = await readFile(join(ROOT, 'mysql', 'Index.ets'), 'utf8');
+  const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'execution', 'MySqlInsertRowsExecutor.ets'), 'utf8');
+  assert.match(contracts, /\bmysqlFeatures\.insertRows\b/);
+  assert.match(contracts, /\bMySqlInsertRowsOptions\b/);
+  assert.match(contracts, /\bINSERT INTO \.\.\. VALUES\b/);
+  assert.match(contracts, /\b16777216-byte\b/);
+  assert.match(contracts, /\b65535\b/);
+  assert.match(contracts, /\bMySqlBatchError\b/);
+  assert.match(contracts, /\bmanual transaction\b/i);
+  assert.match(contracts, /\bcallback-scoped adapter\b/i);
+  assert.match(contracts, /\bafter each emitted statement\b/i);
+  assert.match(contracts, /\bjoin counter\b/i);
+  assert.match(contracts, /\bpartial\s+`MySqlBatchError`/i);
+  assert.match(contracts, /\buncertain retirement retains\b/i);
+  assert.match(contracts, /\bvalidated before inner rows are[\s\S]{0,20}touched\b/i);
+  assert.match(contracts,
+    /\bAfter[\s\S]{0,20}all widths pass[\s\S]{0,100}(?:every )?inner row array is copied\b/i);
+  assert.match(contracts, /\bCOM_RESET_CONNECTION\b/);
+  assert.match(index, /\bMySqlInsertRowsExecutor\b/);
+  assert.match(index, /\bMySqlInsertRowsOptions\b/);
+  assert.match(source, /'INSERT INTO '/);
+  assert.doesNotMatch(source, /\bON DUPLICATE KEY UPDATE\b/);
+  assert.doesNotMatch(source, /\bINSERT IGNORE\b/);
+  assert.doesNotMatch(source, /\bREPLACE INTO\b/);
+});
+
 test('transaction runner observes the same promise returned to detached callers', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'execution', 'MySqlTransactionRunner.ets'), 'utf8');
@@ -101,6 +130,42 @@ test('transaction runner observes the same promise returned to detached callers'
   const waitForActiveCommand = source.slice(waitStart, waitEnd);
   assert.match(waitForActiveCommand, /const command = this\.activeCommand;/);
   assert.match(waitForActiveCommand, /await command/);
+});
+
+test('transaction-scoped insert rows returns the exact observed promise', async () => {
+  const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'execution', 'MySqlTransactionRunner.ets'), 'utf8');
+  const scopedStart = source.indexOf('class ScopedMySqlInsertRowsExecutor');
+  const scopedEnd = source.indexOf('function snapshotTransactionOptions', scopedStart);
+  assert.notEqual(scopedStart, -1);
+  assert.notEqual(scopedEnd, -1);
+  const scoped = source.slice(scopedStart, scopedEnd);
+  assert.match(scoped, /\n  execute\(tableParts:/);
+  assert.doesNotMatch(scoped, /\n  async execute\(tableParts:/);
+  assert.match(scoped, /const task = Promise\.reject<MySqlBatchResult>\(error as Object\);/);
+  assert.match(scoped, /task\.catch\(\(_error: Object\): void => \{\}\);/);
+  assert.match(scoped, /return task;/);
+  assert.match(scoped, /return this\.executeInput\(input\);/);
+  assert.doesNotMatch(scoped, /return this\.executeInput\(input\)\.then/);
+});
+
+test('restricted insert preserves request validation before row snapshots', async () => {
+  const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'execution', 'MySqlInsertRowsExecutor.ets'), 'utf8');
+  const start = source.indexOf('export function snapshotMySqlInsertRowsInput');
+  const end = source.indexOf('function requireIdentifierStrings', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const snapshot = source.slice(start, end);
+  const options = snapshot.indexOf('const optionErrors = validateMySqlInsertRowsOptions');
+  const table = snapshot.indexOf('const table = tableParts.slice();');
+  const columns = snapshot.indexOf('const capturedColumns = columns.slice();');
+  const widths = snapshot.indexOf('Each MySQL INSERT row must match the column count.');
+  const copies = snapshot.indexOf('capturedRows.push(outerRows[index].slice());');
+  const values = snapshot.indexOf('new MySqlParameter(parameter.type, parameter.value)');
+  assert.ok(options >= 0 && table > options && columns > table);
+  assert.ok(widths > columns && copies > widths && values > copies);
+  assert.match(snapshot, /failedIndex = 0;\r?\n    const rowSnapshots:/);
 });
 
 test('adding an independently typed adapter changes registration only, not MySQL implementation', async (t) => {

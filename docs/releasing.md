@@ -172,6 +172,8 @@ embeds the private key, and compiles an unsigned HAP. It records the HAP
 SHA-256/size, removes the generated source/private key, and only then commits
 the pending challenge. The retained work directory contains the HAP,
 `receipt-context.json` and the `arkdb_device_acceptance` provisioning record.
+Those retained files and their staging directory are synced before the work
+directory is atomically published.
 The canonical UTC issue/expiry timestamps are exactly 24 hours apart. The
 challenge binds source, HAR, sample, release-set, fixed case manifest, platform,
 HAP, nonce and public-key identities. It contains no database credential or
@@ -214,6 +216,10 @@ record-write interruption can resume without creating conflicting terminal
 states. The external result states that operator attestation is the trust
 boundary and keeps hardware attestation, read-only privilege verification and
 production certification false.
+
+`--out` is canonicalized through existing parent directories and must remain
+outside both the secret challenge workspace and the sealed release bundle;
+ancestor junction/symlink aliases cannot bypass those boundaries.
 
 All challenge, claim, evidence-record and terminal files are published through
 a synced temporary sibling followed by an atomic filesystem operation; the

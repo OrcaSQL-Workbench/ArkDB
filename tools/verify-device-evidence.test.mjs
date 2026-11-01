@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { link, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
-import { prepareHarRelease } from './prepare-har-release.mjs';
+import { prepareHarRelease, readReleaseBundle } from './prepare-har-release.mjs';
 import { releaseFixture } from './test-fixtures/har-release.mjs';
 import { sha256 } from './package-har.mjs';
 import { sampleFingerprint } from './test-consumer.mjs';
@@ -113,6 +113,32 @@ test('removes staged outputs when pending challenge publication fails', async (t
   }), /publication failure/);
   assert.equal(existsSync(join(paths, 'work', 'device-acceptance', challengeId)), false);
   assert.equal(existsSync(join(paths, 'evidence', 'device-acceptance',
+    `${challengeId}.pending.json`)), false);
+});
+
+test('does not publish a challenge when retained preparation file sync fails', async (t) => {
+  const fixture = await releaseFixture(t);
+  const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
+  const keyPair = generateKeyPairSync('ed25519');
+  const hapBytes = await readFile(join(import.meta.dirname,
+    'test-fixtures', 'mysql-client-real.hap'));
+  const challengeId = '42'.repeat(16);
+  const base = join(fixture.root, 'build', 'mysql-v1.0.0');
+  await assert.rejects(prepareDeviceEvidence({
+    root: fixture.root, driver: 'mysql', bundleDirectory: bundle.bundleDirectory
+  }, {
+    git: fixture.git,
+    now: () => new Date('2026-11-01T00:00:00.000Z'),
+    randomBytes: (size) => Buffer.alloc(size, size === 16 ? 0x42 : size === 32 ? 0x43 : 0x44),
+    generateSigningKeyPair: () => ({
+      publicKeySpki: Buffer.from(keyPair.publicKey.export({ format: 'der', type: 'spki' })),
+      privateKeyPkcs8: Buffer.from(keyPair.privateKey.export({ format: 'der', type: 'pkcs8' }))
+    }),
+    async buildHarness({ hapPath }) { await writeFile(hapPath, hapBytes); },
+    async syncPreparedFile() { throw new Error('Synthetic retained-file sync failure.'); }
+  }), /retained-file sync failure/i);
+  assert.equal(existsSync(join(base, 'work', 'device-acceptance', challengeId)), false);
+  assert.equal(existsSync(join(base, 'evidence', 'device-acceptance',
     `${challengeId}.pending.json`)), false);
 });
 
@@ -1187,6 +1213,86 @@ test('rejects secret-workspace output reached through an ancestor junction', asy
   }), /secret workspace|output/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
+});
+
+test('canonicalizes an external evidence path reached through an ancestor junction', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x45 });
+  const signedHap = Buffer.from(f.hapBytes);
+  const hapPath = join(f.fixture.root, 'external-junction-signed-entry.hap');
+  await writeFile(hapPath, signedHap);
+  const receiptPath = join(f.fixture.root, 'external-junction-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(signedHap)
+  ))}\n`);
+  const evidenceDirectory = join(f.fixture.root, 'external-evidence');
+  const alias = join(f.fixture.root, 'external-evidence-alias');
+  await mkdir(evidenceDirectory);
+  await mkdir(join(evidenceDirectory, 'nested'));
+  await symlink(evidenceDirectory, alias,
+    process.platform === 'win32' ? 'junction' : 'dir');
+  const stem = 'arkdb-mysql-1.0.0';
+  const verified = await deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(alias, 'nested', 'device-verified.json')
+  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  assert.equal(verified.recordPath, join(evidenceDirectory, 'nested', 'device-verified.json'));
+  assert.equal(existsSync(join(alias, 'nested', 'device-verified.json')), true);
+});
+
+test('rejects external evidence inside the sealed bundle before consuming the challenge', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x46 });
+  const signedHap = Buffer.from(f.hapBytes);
+  const hapPath = join(f.fixture.root, 'sealed-bundle-output-signed-entry.hap');
+  await writeFile(hapPath, signedHap);
+  const receiptPath = join(f.fixture.root, 'sealed-bundle-output-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(signedHap)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(f.bundle.bundleDirectory, 'device-verified.json')
+  }), /sealed release bundle|output/i);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(f.prepared.workDirectory), true);
+  await readReleaseBundle(f.bundle.bundleDirectory);
+});
+
+test('direct verification rejects sealed-bundle output before consuming the challenge', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x47 });
+  const receiptPath = join(f.fixture.root, 'direct-sealed-bundle-output.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath,
+    confirmPhysicalDevice: true,
+    confirmAuthorizedSchema: true,
+    acceptanceContext: {
+      hapSha256: sha256(f.hapBytes),
+      hapByteLength: f.hapBytes.length,
+      hapContentSha256: hapSigningContentFingerprint(f.hapBytes)
+    },
+    outputPath: join(f.bundle.bundleDirectory, 'direct-device-verified.json')
+  }, { now: () => new Date('2026-11-01T01:00:00.000Z') }),
+  /sealed release bundle|output/i);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(f.prepared.workDirectory), true);
+  await readReleaseBundle(f.bundle.bundleDirectory);
 });
 
 test('binds the implemented M4 sha256 selection to caching SHA-2 evidence', async (t) => {

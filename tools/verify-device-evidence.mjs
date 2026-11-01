@@ -41,6 +41,19 @@ async function syncDirectory(directory) {
   }
 }
 
+async function syncPreparedFile(path, dependencies) {
+  if (dependencies.syncPreparedFile) {
+    await dependencies.syncPreparedFile(path);
+    return;
+  }
+  const handle = await open(path, 'r+');
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 function atomicTempPath(destination, kind, bytes) {
   return join(dirname(destination), `.${basename(destination)}.tmp-${kind}-${sha256(bytes)}-` +
     `${process.pid}-${systemRandomBytes(8).toString('hex')}`);
@@ -618,6 +631,10 @@ export async function prepareDeviceEvidence({
     if (sha256(currentBundle.releaseSetBytes) !== challenge.releaseSetSha256) {
       throw new Error('The sealed release changed while the device harness was built.');
     }
+    for (const file of [hapPath, provisioningPath, contextPath]) {
+      await syncPreparedFile(file, dependencies);
+    }
+    await syncDirectory(stagingDirectory);
     await atomicRename(stagingDirectory, workDirectory);
     if (dependencies.beforePending) await dependencies.beforePending({ challenge, workDirectory });
     await atomicWriteNew(pendingPath, challengeBytes, {
@@ -1240,7 +1257,8 @@ export async function verifyDeviceEvidence({
   if (confirmPhysicalDevice !== true || confirmAuthorizedSchema !== true) {
     throw new Error('Device evidence requires explicit physical-device and authorized-schema operator attestations.');
   }
-  const frozenOutputPath = outputPath === null ? null : resolve(outputPath);
+  const requestedOutputPath = outputPath === null ? null : resolve(outputPath);
+  let frozenOutputPath = requestedOutputPath;
   let canonicalOutputPath = null;
   if ((acceptanceContext === null) !== (frozenOutputPath === null) ||
     (acceptanceContext !== null &&
@@ -1266,8 +1284,16 @@ export async function verifyDeviceEvidence({
         throw new Error('Device evidence output destination must be a regular file.');
       }
     }
+    frozenOutputPath = canonicalOutputPath;
   }
-  const bundle = await readReleaseBundle(bundleDirectory);
+  const resolvedBundleDirectory = resolve(bundleDirectory);
+  const canonicalBundleDirectory = await realpath(resolvedBundleDirectory);
+  if (frozenOutputPath !== null &&
+    (pathWithin(resolvedBundleDirectory, requestedOutputPath) ||
+      pathWithin(canonicalBundleDirectory, canonicalOutputPath))) {
+    throw new Error('Device evidence output must be outside the sealed release bundle.');
+  }
+  const bundle = await readReleaseBundle(resolvedBundleDirectory);
   const set = bundle.releaseSet;
   if (set.driver !== driver) throw new Error('The sealed release is not for the selected driver.');
   const receiptBytes = releaseFile(dirname(receiptPath), basename(receiptPath));
@@ -1289,7 +1315,7 @@ export async function verifyDeviceEvidence({
   const states = statePaths(root, paths, parsed.payload.runId);
   const canonicalWorkPath = existsSync(states.work) ? await realpath(states.work) : null;
   if (frozenOutputPath !== null &&
-    (pathWithin(states.work, frozenOutputPath) ||
+    (pathWithin(states.work, requestedOutputPath) ||
       (canonicalWorkPath !== null && pathWithin(canonicalWorkPath, canonicalOutputPath)))) {
     throw new Error('Device evidence output must be outside the secret workspace.');
   }
@@ -1428,6 +1454,14 @@ export async function verifyDeviceEvidenceArtifacts({
     throw new Error('Device evidence profile or product features are invalid.');
   }
   const manifestDirectory = dirname(resolve(manifestPath));
+  const requestedOutputPath = resolve(outPath);
+  const canonicalOutputPath = join(await realpath(dirname(requestedOutputPath)),
+    basename(requestedOutputPath));
+  const canonicalManifestDirectory = await realpath(manifestDirectory);
+  if (pathWithin(manifestDirectory, requestedOutputPath) ||
+    pathWithin(canonicalManifestDirectory, canonicalOutputPath)) {
+    throw new Error('Device evidence output must be outside the sealed release bundle.');
+  }
   if (dirname(resolve(consumerPath)) !== manifestDirectory) {
     throw new Error('Device manifest and consumer evidence must come from one sealed bundle.');
   }
@@ -1476,9 +1510,9 @@ export async function verifyDeviceEvidenceArtifacts({
       hapByteLength: hapBytes.length,
       hapContentSha256: actualHapContentSha256
     },
-    outputPath: resolve(outPath)
+    outputPath: requestedOutputPath
   }, dependencies);
-  return preliminary;
+  return { ...preliminary, recordPath: canonicalOutputPath };
 }
 
 export function deviceEvidenceCaseManifestPath(root = ROOT) {

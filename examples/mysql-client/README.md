@@ -115,10 +115,13 @@ npm run device:verify -- `
 
 Verification checks the Ed25519 signature over the exact canonical payload
 and rejects a receipt whose HAR/sample/profile or signed-HAP digest differs
-from the separately supplied sealed files. It also compares a
-signing-independent HAP content fingerprint, excluding only `META-INF/`
-signature metadata, so unrelated or rebuilt application content cannot be
-endorsed as the prepared harness. The challenge moves from `pending` to
+from the separately supplied sealed files. It also runs
+`hap-sign-tool.jar verify-app` (configure `DEVECO_HOME`, or
+`HARMONYOS_JAVA` plus `HARMONYOS_HAP_SIGN_TOOL`) and records the verified
+certificate-chain/profile digests. A signing-independent HAP content
+fingerprint excludes only `META-INF/` signature metadata, so unrelated or
+rebuilt application content cannot be endorsed as the prepared harness. The
+challenge moves from `pending` to
 `verifying`; cleanup must remove the one-time HAP workspace before the state is
 atomically renamed `accepted` or `rejected`. A cleanup interruption leaves a
 recoverable `verifying` state, while an accepted-state record-write interruption

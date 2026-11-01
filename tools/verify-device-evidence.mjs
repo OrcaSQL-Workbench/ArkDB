@@ -5,9 +5,10 @@ import {
 } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
-  chmod, copyFile, cp, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat,
-  writeFile
+  chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm,
+  stat, writeFile
 } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ROOT } from './check-package.mjs';
@@ -30,6 +31,7 @@ const DEVICE_FEATURES = [
   'local-infile', 'failover', 'worker', 'session-observations', 'routing'
 ];
 const DEVICE_AUTH_PLUGINS = ['mysql_native_password', 'caching_sha2_password'];
+const DEFAULT_WINDOWS_DEVECO_HOME = 'C:\\Program Files\\Huawei\\DevEco Studio';
 
 async function syncDirectory(directory) {
   let handle;
@@ -83,6 +85,80 @@ async function secureSecretDirectory(directory) {
     '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)'
   ]);
   runWindowsAcl([directory, '/inheritance:r']);
+}
+
+function configuredPath(value) {
+  return typeof value === 'string' && value.trim().length > 0 ? resolve(value.trim()) : null;
+}
+
+function hapSignatureTools(dependencies) {
+  const env = dependencies.env ?? process.env;
+  const devecoHome = configuredPath(dependencies.devecoHome) ??
+    configuredPath(env.DEVECO_HOME) ??
+    (process.platform === 'win32' ? DEFAULT_WINDOWS_DEVECO_HOME : null);
+  const javaHome = configuredPath(env.JAVA_HOME);
+  const bundledJava = devecoHome === null ? null : [
+    join(devecoHome, 'jbr', 'bin', process.platform === 'win32' ? 'java.exe' : 'java'),
+    join(devecoHome, 'jbr', 'Contents', 'Home', 'bin', 'java')
+  ].find((candidate) => existsSync(candidate)) ?? null;
+  const javaPath = configuredPath(dependencies.javaPath) ??
+    configuredPath(env.HARMONYOS_JAVA) ??
+    (javaHome === null ? null :
+      join(javaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java')) ??
+    bundledJava;
+  const signToolPath = configuredPath(dependencies.hapSignToolPath) ??
+    configuredPath(env.HARMONYOS_HAP_SIGN_TOOL) ??
+    (devecoHome === null ? null :
+      join(devecoHome, 'sdk', 'default', 'openharmony', 'toolchains', 'lib',
+        'hap-sign-tool.jar'));
+  if (javaPath === null || signToolPath === null ||
+    !existsSync(javaPath) || !existsSync(signToolPath)) {
+    throw new Error('HAP signature verification tools are unavailable.');
+  }
+  return { javaPath, signToolPath };
+}
+
+function validateHapSignatureEvidence(value) {
+  exactKeys(value, ['certificateSha256', 'profileSha256'], 'HAP signature evidence');
+  if (!/^[0-9a-f]{64}$/.test(value.certificateSha256 ?? '') ||
+    !/^[0-9a-f]{64}$/.test(value.profileSha256 ?? '')) {
+    throw new Error('HAP package signature verification returned invalid evidence.');
+  }
+  return value;
+}
+
+async function verifyHapPackageSignature(hapPath, dependencies) {
+  if (dependencies.verifyHapSignature) {
+    return validateHapSignatureEvidence(await dependencies.verifyHapSignature(hapPath));
+  }
+  const { javaPath, signToolPath } = hapSignatureTools(dependencies);
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'arkdb-hap-signature-'));
+  try {
+    await secureSecretDirectory(temporaryDirectory);
+    const certificatePath = join(temporaryDirectory, 'certificate-chain.pem');
+    const profilePath = join(temporaryDirectory, 'provisioning-profile.p7b');
+    const result = (dependencies.hapSignatureSpawnSync ?? nodeSpawnSync)(javaPath, [
+      '-jar', signToolPath, 'verify-app',
+      '-inFile', hapPath,
+      '-outCertchain', certificatePath,
+      '-outProfile', profilePath,
+      '-inForm', 'zip'
+    ], {
+      encoding: 'utf8',
+      windowsHide: true
+    });
+    if (result.error !== undefined || result.status !== 0) {
+      throw new Error('HAP package signature verification failed.');
+    }
+    const certificate = releaseFile(temporaryDirectory, basename(certificatePath), 2 * 1024 * 1024);
+    const profile = releaseFile(temporaryDirectory, basename(profilePath), 2 * 1024 * 1024);
+    return {
+      certificateSha256: sha256(certificate),
+      profileSha256: sha256(profile)
+    };
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
 }
 
 function atomicTempPath(destination, kind, bytes) {
@@ -801,7 +877,7 @@ export function verifyDeviceReceiptEnvelope(bytes, expectedPublicKeySpkiBase64) 
   return verifyEnvelopeSignature(parseReceiptEnvelope(bytes), expectedPublicKeySpkiBase64);
 }
 
-function validateReceipt(envelope, receipt, challenge, cases) {
+function validateReceipt(envelope, receipt, challenge, cases, now) {
   const parsed = verifyEnvelopeSignature({ envelope, payload: receipt }, challenge.publicKeySpkiBase64);
   const publicKeyBytes = Buffer.from(parsed.envelope.signature.publicKeySpkiBase64, 'base64');
   if (sha256(publicKeyBytes) !== challenge.publicKeySpkiSha256) {
@@ -838,6 +914,9 @@ function validateReceipt(envelope, receipt, challenge, cases) {
     typeof receipt.operatorEvidenceId !== 'string' ||
     !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(receipt.operatorEvidenceId)) {
     throw new Error('Device receipt release/harness binding does not match the pending challenge.');
+  }
+  if (Date.parse(receipt.completedAt) > now.getTime()) {
+    throw new Error('Device receipt completion time is in the future.');
   }
   if (!Array.isArray(receipt.cases) || receipt.cases.length !== challenge.caseIds.length) {
     throw new Error('Device receipt case manifest is incomplete or differently bound.');
@@ -947,13 +1026,16 @@ function acceptedRecord(parsed, challenge, receiptBytes, now, acceptanceContext 
     hapSha256: acceptanceContext.hapSha256,
     hapByteLength: acceptanceContext.hapByteLength,
     hapContentSha256: acceptanceContext.hapContentSha256,
+    hapSigningCertificateSha256: acceptanceContext.hapSigningCertificateSha256,
+    hapSigningProfileSha256: acceptanceContext.hapSigningProfileSha256,
     signedHapVerified: true,
     liveNetworkingVerified: true,
     operatorEvidenceBound: true,
     physicalDeviceAttestedByOperator: true,
     authorizedSchemaAttestedByOperator: true,
     operatorAttestationTrustBoundary:
-      'Receipt, signed-HAP bytes, and operator evidence ID are bound; no hardware remote attestation is claimed.'
+      'Receipt, verified signed-HAP bytes, signing certificate/profile digests, and operator ' +
+      'evidence ID are bound; no hardware remote attestation is claimed.'
   };
 }
 
@@ -1276,7 +1358,7 @@ async function publishExternalRecord(path, record, expectedSha256, dependencies)
   await validateExistingRecord(path, expectedSha256);
 }
 
-export async function verifyDeviceEvidence({
+async function verifyBoundDeviceEvidence({
   root = ROOT,
   driver = 'mysql',
   bundleDirectory,
@@ -1296,6 +1378,8 @@ export async function verifyDeviceEvidence({
     (acceptanceContext !== null &&
       (!/^[0-9a-f]{64}$/.test(acceptanceContext.hapSha256 ?? '') ||
         !/^[0-9a-f]{64}$/.test(acceptanceContext.hapContentSha256 ?? '') ||
+        !/^[0-9a-f]{64}$/.test(acceptanceContext.hapSigningCertificateSha256 ?? '') ||
+        !/^[0-9a-f]{64}$/.test(acceptanceContext.hapSigningProfileSha256 ?? '') ||
         !Number.isSafeInteger(acceptanceContext.hapByteLength) ||
         acceptanceContext.hapByteLength <= 0))) {
     throw new Error('Final device evidence requires one exact signed-HAP/output context.');
@@ -1345,15 +1429,16 @@ export async function verifyDeviceEvidence({
     await releaseProcessLock(preparationLockPath, preparationLock);
   }
   const states = statePaths(root, paths, parsed.payload.runId);
-  const canonicalWorkPath = existsSync(states.work) ? await realpath(states.work) : null;
+  const workParent = dirname(states.work);
+  const canonicalWorkParent = await realpath(workParent);
   if (frozenOutputPath !== null &&
     pathWithin(states.evidenceDirectory, canonicalOutputPath)) {
     throw new Error('Device evidence output must be outside the verifier state directory.');
   }
   if (frozenOutputPath !== null &&
-    (pathWithin(states.work, requestedOutputPath) ||
-      (canonicalWorkPath !== null && pathWithin(canonicalWorkPath, canonicalOutputPath)))) {
-    throw new Error('Device evidence output must be outside the secret workspace.');
+    (pathWithin(workParent, requestedOutputPath) ||
+      pathWithin(canonicalWorkParent, canonicalOutputPath))) {
+    throw new Error('Device evidence output must be outside every secret challenge workspace.');
   }
   const caseBytes = await readFile(join(root, CASE_MANIFEST));
   const cases = readCaseManifest(caseBytes);
@@ -1424,7 +1509,7 @@ export async function verifyDeviceEvidence({
       }
       try {
         if (now.getTime() > Date.parse(pending.expiresAt)) throw new Error('Device challenge has expired.');
-        validateReceipt(parsed.envelope, parsed.payload, pending, cases);
+        validateReceipt(parsed.envelope, parsed.payload, pending, cases, now);
       } catch (error) {
         validationFailure = error;
       }
@@ -1483,6 +1568,17 @@ export async function verifyDeviceEvidence({
     throw new Error(`Device receipt was rejected: ${claim.record.reason}.`);
   }
   return { record: claim.record, recordPath, statePath: terminalPath };
+}
+
+export async function verifyDeviceEvidence(options, dependencies = {}) {
+  if (options?.acceptanceContext != null || options?.outputPath != null) {
+    throw new Error('Signed-HAP acceptance requires the artifact verification entry point.');
+  }
+  return await verifyBoundDeviceEvidence({
+    ...options,
+    acceptanceContext: null,
+    outputPath: null
+  }, dependencies);
 }
 
 export async function verifyDeviceEvidenceArtifacts({
@@ -1547,7 +1643,8 @@ export async function verifyDeviceEvidenceArtifacts({
     challenge.preparedUnsignedHapContentSha256 !== actualHapContentSha256) {
     throw new Error('Receipt, sealed release, consumer evidence, or actual signed HAP identity differs.');
   }
-  const preliminary = await verifyDeviceEvidence({
+  const hapSignature = await verifyHapPackageSignature(resolve(hapPath), dependencies);
+  const preliminary = await verifyBoundDeviceEvidence({
     root,
     driver: set.driver,
     bundleDirectory: manifestDirectory,
@@ -1557,7 +1654,9 @@ export async function verifyDeviceEvidenceArtifacts({
     acceptanceContext: {
       hapSha256: actualHapSha256,
       hapByteLength: hapBytes.length,
-      hapContentSha256: actualHapContentSha256
+      hapContentSha256: actualHapContentSha256,
+      hapSigningCertificateSha256: hapSignature.certificateSha256,
+      hapSigningProfileSha256: hapSignature.profileSha256
     },
     outputPath: requestedOutputPath
   }, dependencies);

@@ -130,10 +130,12 @@ immutable challenge window, operator evidence ID and ordered case durations/verd
 exact JSON through an explicit clipboard action. No host, port, account,
 password, schema, CA path or query data is included. The validator separately
 hashes the supplied signed HAP, compares its signing-independent application
-content with the prepared harness, and checks the sealed manifest/consumer
-before publishing external evidence. Preparation and synthetic tests are not device
-evidence; hardware attestation, read-only grants and production certification
-remain explicitly false.
+content with the prepared harness, verifies the package signature with
+`hap-sign-tool.jar verify-app`, and checks the sealed manifest/consumer before
+publishing external evidence. The verified certificate-chain and provisioning
+profile digests are retained in that evidence. Preparation and synthetic tests
+are not device evidence; hardware attestation, read-only grants and production
+certification remain explicitly false.
 
 Use the matching source/consumer when verifying an older major release. Historical single-HAR and dependency-set records remain readable without treating them as evidence for the current architecture.
 

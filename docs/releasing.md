@@ -206,25 +206,30 @@ npm run device:verify -- `
   --out C:\Evidence\device-verified.json
 ```
 
-The verifier requires the exact Ed25519 signature and
+The verifier requires the exact Ed25519 receipt signature and
 release/source/HAR/sample/profile identities, recomputes the actual signed HAP
-digest, and requires API/device class, verified TLS mode, negotiated auth
-plugin, run timestamps, operator evidence ID, every ordered case ID/duration
-and zero failed or ignored cases. It rejects extra receipt fields, so endpoint,
-account, password, schema, CA path, result rows and raw errors cannot be
-persisted. It atomically renames `pending` to `verifying`; the generated HAP
-workspace must be removed before the state can be atomically renamed
-`accepted` or `rejected`. Cleanup failure remains recoverable and a
-record-write interruption can resume without creating conflicting terminal
-states. The external result states that operator attestation is the trust
-boundary and keeps hardware attestation, read-only privilege verification and
-production certification false.
+digest, and runs `hap-sign-tool.jar verify-app` before acceptance. Configure
+`DEVECO_HOME`, or set `HARMONYOS_JAVA` and `HARMONYOS_HAP_SIGN_TOOL`
+explicitly. The evidence records the verified signing certificate-chain and
+provisioning-profile digests. It also requires API/device class, verified TLS
+mode, negotiated auth plugin, run timestamps no later than verification time,
+operator evidence ID, every ordered case ID/duration and zero failed or ignored
+cases. It rejects extra receipt fields, so endpoint, account, password, schema,
+CA path, result rows and raw errors cannot be persisted. It atomically renames
+`pending` to `verifying`; the generated HAP workspace must be removed before
+the state can be atomically renamed `accepted` or `rejected`. Cleanup failure
+remains recoverable and a record-write interruption can resume without creating
+conflicting terminal states. The external result states that operator
+attestation is the trust boundary and keeps hardware attestation, read-only
+privilege verification and production certification false.
 
 `--out` is canonicalized through existing parent directories and must remain
-outside the secret challenge workspace, verifier state directory and sealed
-release bundle; ancestor junction/symlink aliases cannot bypass those
+outside every device challenge workspace, the verifier state directory and the
+sealed release bundle; ancestor junction/symlink aliases cannot bypass those
 boundaries. A fresh challenge requires an unused destination. Recovery accepts
 an existing destination only when its exact bytes match the frozen claim.
+Receipt-only verification cannot claim signed-HAP acceptance; that state is
+available only through the artifact validator above.
 
 All challenge, claim, evidence-record and terminal files are published through
 a synced temporary sibling followed by an atomic filesystem operation; the

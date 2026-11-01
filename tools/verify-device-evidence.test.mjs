@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign as signPayload } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { link, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
@@ -50,6 +50,47 @@ async function deviceFixture(t, overrides = {}) {
     root: fixture.root, driver: 'mysql', bundleDirectory: bundle.bundleDirectory
   }, dependencies);
   return { fixture, bundle, keyPair, publicKeySpki, privateKeyPkcs8, hapBytes, prepared };
+}
+
+async function prepareAdditionalDeviceChallenge(f, challengeFill) {
+  const keyPair = generateKeyPairSync('ed25519');
+  const values = [
+    Buffer.alloc(16, challengeFill),
+    Buffer.alloc(32, challengeFill + 1),
+    Buffer.alloc(32, challengeFill + 2)
+  ];
+  return await prepareDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory
+  }, {
+    git: f.fixture.git,
+    now: () => new Date('2026-11-01T00:00:00.000Z'),
+    randomBytes(size) {
+      const value = values.shift();
+      assert.equal(value.length, size);
+      return value;
+    },
+    generateSigningKeyPair: () => ({
+      publicKeySpki: Buffer.from(keyPair.publicKey.export({ format: 'der', type: 'spki' })),
+      privateKeyPkcs8: Buffer.from(keyPair.privateKey.export({ format: 'der', type: 'pkcs8' }))
+    }),
+    async buildHarness({ hapPath }) {
+      await writeFile(hapPath, f.hapBytes, { flag: 'wx' });
+    }
+  });
+}
+
+function artifactDependencies(overrides = {}) {
+  return {
+    async verifyHapSignature() {
+      return {
+        certificateSha256: 'a'.repeat(64),
+        profileSha256: 'b'.repeat(64)
+      };
+    },
+    ...overrides
+  };
 }
 
 test('prepares exact isolated HAP outputs before committing the pending challenge', async (t) => {
@@ -370,6 +411,26 @@ test('rejects signature tampering, wrong keys, failed cases, and privacy-unsafe 
     assert.equal(existsSync(join(dirname(f.prepared.challengePath),
       `${f.prepared.challenge.challengeId}.rejected.json`)), true);
   }
+});
+
+test('rejects a receipt completed after the verification time', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x4c });
+  const envelope = passingEnvelope(f.prepared.challenge, f.keyPair.privateKey);
+  const payload = JSON.parse(envelope.payload);
+  payload.startedAt = '2026-11-01T12:00:00.000Z';
+  payload.completedAt = '2026-11-01T12:01:00.000Z';
+  resign(envelope, payload, f.keyPair.privateKey);
+  const receiptPath = join(f.fixture.root, 'future-device-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(envelope)}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath,
+    confirmPhysicalDevice: true,
+    confirmAuthorizedSchema: true
+  }, { now: () => new Date('2026-11-01T01:00:00.000Z') }),
+  /future|verification time|receipt time/i);
 });
 
 test('rejects edited or noncanonical 24-hour challenge timestamps', async (t) => {
@@ -1054,12 +1115,85 @@ test('validates the actual signed HAP and complete receipt provenance before ext
     profile: 'M1',
     features: [],
     outPath
-  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  }, artifactDependencies({ now: () => new Date('2026-11-01T01:00:00.000Z') }));
   assert.equal(verified.record.hapSha256, sha256(signedHap));
+  assert.equal(verified.record.hapSigningCertificateSha256, 'a'.repeat(64));
+  assert.equal(verified.record.hapSigningProfileSha256, 'b'.repeat(64));
   assert.equal(verified.record.operatorEvidenceId, 'operator-evidence-001');
   assert.equal(verified.record.liveNetworkingVerified, true);
   assert.equal(verified.record.hardwareAttested, false);
   assert.deepEqual(JSON.parse(await readFile(outPath, 'utf8')), verified.record);
+});
+
+test('requires cryptographic HAP signature verification before consuming the challenge', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x4f });
+  const hapPath = join(f.fixture.root, 'unverified-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'unverified-signature-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(f.fixture.root, 'unverified-device-evidence.json')
+  }, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async verifyHapSignature() {
+      throw new Error('HAP package signature verification failed.');
+    }
+  }), /HAP package signature verification failed/i);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(f.prepared.workDirectory), true);
+});
+
+test('runs the official HAP signature verifier and binds its certificate evidence', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x55 });
+  const hapPath = join(f.fixture.root, 'tool-verified-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'tool-verified-signature-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+  ))}\n`);
+  const javaPath = join(f.fixture.root, 'java');
+  const signToolPath = join(f.fixture.root, 'hap-sign-tool.jar');
+  await writeFile(javaPath, 'synthetic java');
+  await writeFile(signToolPath, 'synthetic sign tool');
+  const certificate = Buffer.from('synthetic certificate chain');
+  const profile = Buffer.from('synthetic provisioning profile');
+  const stem = 'arkdb-mysql-1.0.0';
+  const verified = await deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(f.fixture.root, 'tool-verified-device-evidence.json')
+  }, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    javaPath,
+    hapSignToolPath: signToolPath,
+    hapSignatureSpawnSync(command, args) {
+      assert.equal(command, javaPath);
+      assert.deepEqual(args.slice(0, 5), [
+        '-jar', signToolPath, 'verify-app', '-inFile', hapPath
+      ]);
+      assert.deepEqual(args.slice(-2), ['-inForm', 'zip']);
+      writeFileSync(args[args.indexOf('-outCertchain') + 1], certificate);
+      writeFileSync(args[args.indexOf('-outProfile') + 1], profile);
+      return { status: 0, stdout: '', stderr: '' };
+    }
+  });
+  assert.equal(verified.record.hapSigningCertificateSha256, sha256(certificate));
+  assert.equal(verified.record.hapSigningProfileSha256, sha256(profile));
 });
 
 test('recovers external evidence publication before terminally consuming the challenge', async (t) => {
@@ -1083,12 +1217,12 @@ test('recovers external evidence publication before terminally consuming the cha
     features: [],
     outPath
   };
-  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, {
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
     now: () => new Date('2026-11-01T01:00:00.000Z'),
     async writeExternalRecord() {
       throw new Error('Synthetic external evidence write interruption.');
     }
-  }), /external evidence write interruption/i);
+  })), /external evidence write interruption/i);
   const stateDirectory = dirname(f.prepared.challengePath);
   assert.equal(existsSync(join(stateDirectory,
     `${f.prepared.challenge.challengeId}.verifying.json`)), true);
@@ -1096,10 +1230,10 @@ test('recovers external evidence publication before terminally consuming the cha
     `${f.prepared.challenge.challengeId}.accepted.json`)), false);
   assert.equal(existsSync(outPath), false);
 
-  const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts(options, {
+  const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
     now: () => new Date('2026-11-03T00:00:00.000Z'),
     isProcessAlive: () => false
-  });
+  }));
   assert.equal(recovered.record.verifiedAt, '2026-11-01T01:00:00.000Z');
   assert.deepEqual(JSON.parse(await readFile(outPath, 'utf8')), recovered.record);
 });
@@ -1125,19 +1259,19 @@ test('recovers an exact external record written before publication interruption'
     features: [],
     outPath
   };
-  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, {
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
     now: () => new Date('2026-11-01T01:00:00.000Z'),
     async writeExternalRecord(path, record) {
       await writeFile(path, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
       throw new Error('Synthetic interruption after external evidence write.');
     }
-  }), /interruption after external evidence write/i);
+  })), /interruption after external evidence write/i);
   assert.equal(existsSync(outPath), true);
 
-  const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts(options, {
+  const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
     now: () => new Date('2026-11-03T00:00:00.000Z'),
     isProcessAlive: () => false
-  });
+  }));
   assert.equal(recovered.record.verifiedAt, '2026-11-01T01:00:00.000Z');
   assert.deepEqual(JSON.parse(await readFile(outPath, 'utf8')), recovered.record);
 });
@@ -1186,7 +1320,7 @@ test('rejects an unsupported external evidence filename before consuming the cha
     profile: 'M1',
     features: [],
     outPath: join(f.fixture.root, 'device evidence.json')
-  }), /output|filename|file name/i);
+  }, artifactDependencies()), /output|filename|file name/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
 });
@@ -1212,7 +1346,7 @@ test('rejects a non-file external evidence destination before consuming the chal
     profile: 'M1',
     features: [],
     outPath: outputDirectory
-  }), /output|regular file|destination/i);
+  }, artifactDependencies()), /output|regular file|destination/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
 });
@@ -1238,7 +1372,7 @@ test('rejects external evidence inside the verifier state directory before consu
       features: [],
       outPath: join(dirname(f.prepared.challengePath),
         `${f.prepared.challenge.challengeId}.accepted.json`)
-    }), /verifier state directory|output/i);
+    }, artifactDependencies()), /verifier state directory|output/i);
     assert.equal(existsSync(f.prepared.challengePath), true);
     assert.equal(existsSync(f.prepared.workDirectory), true);
   });
@@ -1264,7 +1398,7 @@ test('rejects an unrelated existing external record before consuming the challen
     profile: 'M1',
     features: [],
     outPath
-  }), /fresh challenge|must be unused|already exists/i);
+  }, artifactDependencies()), /fresh challenge|must be unused|already exists/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
   assert.equal(await readFile(outPath, 'utf8'), '{"unrelated":true}\n');
@@ -1289,10 +1423,37 @@ test('rejects external evidence inside the secret workspace before consuming the
     profile: 'M1',
     features: [],
     outPath: join(f.prepared.workDirectory, 'device-verified.json')
-  }), /secret workspace|output/i);
+  }, artifactDependencies()), /secret workspace|output/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
 });
+
+test('rejects external evidence inside a sibling challenge workspace before consuming the challenge',
+  async (t) => {
+    const f = await deviceFixture(t, { challengeFill: 0x4d });
+    const sibling = await prepareAdditionalDeviceChallenge(f, 0x4e);
+    const signedHap = Buffer.from(f.hapBytes);
+    const hapPath = join(f.fixture.root, 'sibling-work-output-signed-entry.hap');
+    await writeFile(hapPath, signedHap);
+    const receiptPath = join(f.fixture.root, 'sibling-work-output-receipt.json');
+    await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+      f.prepared.challenge, f.keyPair.privateKey, sha256(signedHap)
+    ))}\n`);
+    const stem = 'arkdb-mysql-1.0.0';
+    await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+      root: f.fixture.root,
+      receiptPath,
+      manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+      consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+      hapPath,
+      profile: 'M1',
+      features: [],
+      outPath: join(sibling.workDirectory, 'device-verified.json')
+    }, artifactDependencies()), /challenge workspace|secret workspace|output/i);
+    assert.equal(existsSync(f.prepared.challengePath), true);
+    assert.equal(existsSync(f.prepared.workDirectory), true);
+    assert.equal(existsSync(sibling.workDirectory), true);
+  });
 
 test('rejects secret-workspace output reached through an ancestor junction', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x43 });
@@ -1316,7 +1477,7 @@ test('rejects secret-workspace output reached through an ancestor junction', asy
     profile: 'M1',
     features: [],
     outPath: join(alias, f.prepared.challenge.challengeId, 'device-verified.json')
-  }), /secret workspace|output/i);
+  }, artifactDependencies()), /secret workspace|output/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
 });
@@ -1346,7 +1507,7 @@ test('canonicalizes an external evidence path reached through an ancestor juncti
     profile: 'M1',
     features: [],
     outPath: join(alias, 'nested', 'device-verified.json')
-  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  }, artifactDependencies({ now: () => new Date('2026-11-01T01:00:00.000Z') }));
   assert.equal(verified.recordPath, join(evidenceDirectory, 'nested', 'device-verified.json'));
   assert.equal(existsSync(join(alias, 'nested', 'device-verified.json')), true);
 });
@@ -1376,9 +1537,9 @@ test('rejects external evidence inside the sealed bundle before consuming the ch
   await readReleaseBundle(f.bundle.bundleDirectory);
 });
 
-test('direct verification rejects sealed-bundle output before consuming the challenge', async (t) => {
-  const f = await deviceFixture(t, { challengeFill: 0x47 });
-  const receiptPath = join(f.fixture.root, 'direct-sealed-bundle-output.json');
+test('direct verification cannot claim signed-HAP acceptance without artifact verification', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x56 });
+  const receiptPath = join(f.fixture.root, 'direct-artifact-bypass-receipt.json');
   await writeFile(receiptPath,
     `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
   await assert.rejects(verifyDeviceEvidence({
@@ -1391,14 +1552,15 @@ test('direct verification rejects sealed-bundle output before consuming the chal
     acceptanceContext: {
       hapSha256: sha256(f.hapBytes),
       hapByteLength: f.hapBytes.length,
-      hapContentSha256: hapSigningContentFingerprint(f.hapBytes)
+      hapContentSha256: hapSigningContentFingerprint(f.hapBytes),
+      hapSigningCertificateSha256: 'a'.repeat(64),
+      hapSigningProfileSha256: 'b'.repeat(64)
     },
-    outputPath: join(f.bundle.bundleDirectory, 'direct-device-verified.json')
+    outputPath: join(f.fixture.root, 'direct-artifact-bypass.json')
   }, { now: () => new Date('2026-11-01T01:00:00.000Z') }),
-  /sealed release bundle|output/i);
+  /artifact verification|artifact verifier|direct.*acceptance/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
-  await readReleaseBundle(f.bundle.bundleDirectory);
 });
 
 test('binds the implemented M4 sha256 selection to caching SHA-2 evidence', async (t) => {
@@ -1420,7 +1582,7 @@ test('binds the implemented M4 sha256 selection to caching SHA-2 evidence', asyn
     profile: 'M4',
     features: ['sha256'],
     outPath: join(f.fixture.root, 'm4-sha256-verified.json')
-  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  }, artifactDependencies({ now: () => new Date('2026-11-01T01:00:00.000Z') }));
   assert.deepEqual(verified.record.features, ['sha256']);
   assert.equal(verified.record.authPlugin, 'caching_sha2_password');
 });

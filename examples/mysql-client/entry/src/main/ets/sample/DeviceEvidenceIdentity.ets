@@ -1,0 +1,27 @@
+export class DeviceEvidenceIdentity {
+  enabled: boolean = false;
+  challengeId: string = '';
+  receiptNonce: string = '';
+  schemaChallenge: string = '';
+  createdAt: string = '';
+  expiresAt: string = '';
+  suiteId: string = '';
+  caseManifestSha256: string = '';
+  releaseSetSha256: string = '';
+  repository: string = '';
+  driver: string = '';
+  packageName: string = '';
+  version: string = '';
+  sourceCommit: string = '';
+  artifactSha256: string = '';
+  artifactByteLength: number = 0;
+  sampleFingerprint: string = '';
+  publicKeySpkiBase64: string = '';
+  publicKeySpkiSha256: string = '';
+  privateKeyPkcs8Base64: string = '';
+  format: string = '';
+  compatibleSdkVersion: number = 0;
+  compatibleSdkType: string = '';
+  useNormalizedOHMUrl: boolean = false;
+  buildMode: string = '';
+}

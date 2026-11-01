@@ -1,19 +1,22 @@
 import { MessageEvents, ThreadWorkerGlobalScope, worker } from '@kit.ArkTS';
-import { SampleRequest } from '../sample/Messages';
+import { DeviceAcceptanceRequest, SampleRequest } from '../sample/Messages';
+import { DeviceAcceptanceRunner } from '../sample/DeviceAcceptanceRunner';
 import { SampleRunner } from '../sample/SampleRunner';
 
 const port: ThreadWorkerGlobalScope = worker.workerPort;
 const runner = new SampleRunner();
+const deviceRunner = new DeviceAcceptanceRunner();
 
 port.onmessage = (event: MessageEvents): void => {
   const request: Object = event.data;
-  if (!(request instanceof SampleRequest)) throw new Error('Invalid sample request.');
-  if (request.operation === 'stop') {
+  if (request instanceof SampleRequest && request.operation === 'stop') {
     void stop();
-  } else if (request.operation === 'read') {
+  } else if (request instanceof SampleRequest && request.operation === 'read') {
     void read(request);
+  } else if (request instanceof DeviceAcceptanceRequest && request.operation === 'acceptance') {
+    void accept(request);
   } else {
-    throw new Error('Unknown sample operation.');
+    throw new Error('Invalid or unknown sample operation.');
   }
 };
 
@@ -25,6 +28,15 @@ async function read(request: SampleRequest): Promise<void> {
   }
 }
 
+async function accept(request: DeviceAcceptanceRequest): Promise<void> {
+  try {
+    port.postMessage(await deviceRunner.run(request));
+  } finally {
+    port.close();
+  }
+}
+
 async function stop(): Promise<void> {
   await runner.stop();
+  await deviceRunner.stop();
 }

@@ -154,6 +154,128 @@ Before a public version exists this command must fail. A download/consumer pass 
 
 For end users, the [build/download guide](building-drivers.md) explains ordinary checksum verification and `ohpm install <local.har>`. They do not run the maintainer scripts or need a publisher account.
 
+## Capture post-seal device evidence
+
+Device evidence is separate from the immutable release set. Do not rewrite
+`release-set.json`, its `realDeviceVerified:false` preparation fact or any
+published asset after a device run.
+
+With the exact sealed bundle and matching source checkout:
+
+```powershell
+npm run device:prepare -- --driver mysql --bundle dist\mysql-v1.0.2
+```
+
+This requires clean `HEAD` at the sealed source commit, copies the sample and
+exact sealed HAR into an isolated workspace, generates one Ed25519 key pair,
+embeds the private key, and compiles an unsigned HAP. It records the HAP
+SHA-256/size, removes the generated source/private key, and only then commits
+the pending challenge. The retained work directory contains the HAP,
+`receipt-context.json` and the `arkdb_device_acceptance` provisioning record.
+The staging/work directory is restricted to the preparing account (plus
+Windows SYSTEM/Administrators), because the HAP contains the one-time private
+key until verification removes the workspace. Permission hardening is
+fail-closed. Those retained files and their staging directory are synced before
+the work directory is atomically published.
+The canonical UTC issue/expiry timestamps are exactly 24 hours apart. The
+challenge binds source, HAR, sample, release-set, fixed case manifest, platform,
+HAP, nonce and public-key identities. It contains no database credential or
+endpoint.
+
+The external operator must then:
+
+1. Use G02/G03-approved infrastructure to create the isolated challenge row and
+   read-only account; administrator credentials never enter the sample.
+2. Configure owner distribution/debug signing for the exact generated unsigned
+   HAP without rebuilding it, then install it on a supported physical tablet or
+   2in1.
+3. Record an operator evidence ID for the build/sign/install record, hash the
+   actual signed HAP, and enter that digest, the approved release profile,
+   optional M4 feature keys and TLS-mismatch hostname; then run all fixed cases.
+4. Use **Copy exact signed receipt JSON**, save that exact clipboard text as the
+   receipt file, and clear the clipboard and transient credential material.
+5. Verify it once:
+
+```powershell
+npm run device:verify -- `
+  --receipt C:\Evidence\device-receipt.json `
+  --manifest dist\mysql-v1.0.2\arkdb-mysql-1.0.2.manifest.json `
+  --consumer dist\mysql-v1.0.2\arkdb-mysql-1.0.2.consumer.json `
+  --hap C:\Evidence\entry-default-signed.hap `
+  --profile M1 `
+  --out C:\Evidence\device-verified.json
+```
+
+The verifier requires the exact Ed25519 receipt signature and
+release/source/HAR/sample/profile identities, recomputes the actual signed HAP
+digest, and runs `hap-sign-tool.jar verify-app` before acceptance. Configure
+`DEVECO_HOME`, or set `HARMONYOS_JAVA` and `HARMONYOS_HAP_SIGN_TOOL`
+explicitly. The evidence records the verified signing certificate-chain and
+provisioning-profile digests. It also requires API/device class, verified TLS
+mode, negotiated auth plugin, run timestamps no later than verification time,
+operator evidence ID, every ordered case ID/duration and zero failed or ignored
+cases. It rejects extra receipt fields, so endpoint, account, password, schema,
+CA path, result rows and raw errors cannot be persisted. It atomically renames
+`pending` to `verifying`; the generated HAP workspace must be removed before
+the state can be atomically renamed `accepted` or `rejected`. Cleanup failure
+remains recoverable and a record-write interruption can resume without creating
+conflicting terminal states. The external result states that operator
+evidence is the trust boundary, but does not infer direct physical-device or
+authorized-schema attestation; hardware attestation, read-only privilege
+verification and production certification remain false.
+
+`--out` is canonicalized through existing parent directories and must remain
+outside every device challenge workspace, the verifier state directory and the
+sealed release bundle; ancestor junction/symlink aliases cannot bypass those
+boundaries. A fresh challenge requires an unused destination. Recovery accepts
+an existing destination only when its exact bytes match the frozen claim. If
+publication never created the original output, recovery may atomically retarget
+one other unused, boundary-safe destination; a published output cannot be
+retargeted or duplicated.
+Receipt-only verification cannot claim signed-HAP acceptance; that state is
+available only through the artifact validator above.
+
+All challenge, claim, evidence-record and terminal files are published through
+a synced temporary sibling followed by an atomic filesystem operation; the
+owning directory is synced where the platform supports it. The hard-link
+publication path unlinks its temporary sibling and syncs the directory again.
+On restart, linked siblings are removed only when inode and content match the
+destination; typed replacement siblings complete the frozen replacement when
+their content digest agrees, while conflicting siblings are rejected.
+Preparation journals remove secret-bearing orphan workspaces left before
+pending publication and preserve the matching workspace once pending has been
+linked. A per-release process lock prevents an active preparation from being
+mistaken for an orphan. Stale claim-lock recovery uses an exclusive recovery
+owner/snapshot guard so only one process can replace a dead owner. A
+receipt-bound exclusive
+claim records the chosen verification/rejection timestamp, full canonical
+record, receipt/payload/decision/record digests before cleanup. Concurrent
+verification is rejected, a restart may continue only with that same receipt
+and reuses the stored decision/time/record even after expiry, partial temporary
+records are removed, and terminal state is trusted only after its exact
+referenced record digest validates.
+
+The generated HAP workspace is secret-bearing because it embeds the one-time
+private key. Before evidence or terminal publication it is atomically renamed
+to a tombstone, the parent directory is synced, the tombstone is recursively
+removed, and the parent is synced again. Recovery completes known tombstones
+before proceeding and never publishes accepted evidence while either the
+workspace or a tombstone remains.
+
+An accepted receipt's signature proves possession of the one-time key embedded
+in the exact prepared harness; it is not hardware attestation. Operator
+confirmations remain responsible for physical-device and schema authorization.
+The evidence does not prove the account lacks write permissions, certify every
+server patch or convert the engineering preview into production certification.
+This source tree contains no captured device receipt and makes no live MySQL or
+MariaDB acceptance claim.
+
+The local Harmony unit runtime compiles the Ed25519 API but returns no signature
+bytes. The signer treats that as unavailable and emits no receipt. G03 therefore
+includes a physical-device Ed25519 proof for the exact generated HAP; this is a
+runtime evidence gate, not permission to substitute a fake signature or weaken
+the Node verifier.
+
 ## Optional later OHPM publication
 
 OHPM is a separate distribution route, not a blocker for GitHub HAR downloads. Only after the owner elects to publish there:

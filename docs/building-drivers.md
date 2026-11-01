@@ -46,6 +46,60 @@ Interface compatibility determines release versioning, not the number of generat
 
 `npm run verify -- --driver mysql` is the local gate: SDK-free checks, declared core/MySQL source suites, single-HAR packaging, exact-archive sample/README compilation, local sample tests and nonpublishing OHPM checks. Runtime restoration is first proved with an unavailable registry and no test-only dependency; the public test framework is acquired separately afterward. Native suite launching generates current HAR BuildProfiles and uses registered source paths. Nothing is published.
 
+Current consumer/readiness evidence uses schema 3 and retains the compiled
+unsigned HAP raw SHA-256/byte length plus a canonical content SHA-256 before the
+temporary workspace is removed. The canonical fingerprint hashes sorted ZIP
+entry names, stable file/directory metadata and uncompressed bytes while
+excluding ZIP timestamps, compression/order effects and other container noise.
+Release preparation marks `verification.schemaVersion:3` and copies all three
+fields into `release-set.json`. Local sealing requires raw and canonical
+identities to match; a later public-download rebuild may have a different raw
+ZIP digest but must have the same canonical content fingerprint. Synthetic
+timestamp/order regressions prove container normalization, while a real Hvigor
+HAP fixture exercises CRC and parser validation; content tampering changes the
+canonical hash. Immutable 1.0.1 records remain schema 1 and intentionally have
+no HAP fields; the real historical bundle is retained as a compatibility
+regression and is not retroactively rewritten.
+This is local compilation evidence, not a signed/deployed application identity
+or device result.
+
+The device suite is another separate layer. Its committed sample is disabled.
+After `release:prepare` has produced an immutable bundle, `npm run
+device:prepare -- --driver mysql --bundle dist\mysql-v<version>` requires
+clean `HEAD == sourceCommit`, rechecks source/sample/bundle identity, copies the
+sample and exact sealed HAR into an isolated workspace, generates one Ed25519
+key pair, embeds the private key, and builds the unsigned HAP. The challenge
+binds its exact digest/size plus the release-set digest, source commit, HAR
+digest/size, sample fingerprint, case-manifest digest, API-24 platform, nonce
+and canonical 24-hour timestamps. Generated source and private key are removed;
+the pending challenge is committed last. Preparation does not sign for
+distribution, install or run the HAP and cannot establish device acceptance.
+
+A later captured receipt is copied exactly from the app and checked with `npm
+run device:verify -- --receipt ... --manifest ... --consumer ... --hap ...
+--profile ... --out ...`. The verifier requires the prepared Ed25519 public key,
+verifies the signature over the exact canonical payload, hashes the actual
+signed HAP, and checks the sealed manifest/current consumer profile. It accepts
+only the fixed ordered TLS-positive, TLS-hostname-negative, server-error, EOF,
+binary-protocol, schema, cancellation and cleanup cases with zero failures or
+ignored cases. Cleanup precedes an atomic terminal state; interrupted cleanup
+remains recoverable. The external record omits credentials, endpoint/schema
+identities, CA paths, result data and raw server messages. It retains the
+profile/features, signed-HAP identity, server/auth/TLS identity, case durations
+challenge window, and operator evidence ID while explicitly disclaiming hardware attestation,
+read-only privilege verification and production certification. No receipt is
+bundled into `dist`. The signed HAP must retain the prepared harness's
+signing-independent content fingerprint; only `META-INF/` signing metadata may
+differ.
+
+The local API-24 HAP compiles the real CryptoArchitectureKit Ed25519 interface
+and signs only the exact UTF-8 view (`buffer`, `byteOffset`, `length`). The local
+unit runtime currently returns no Ed25519 signature bytes, so the production
+signer fails closed and no receipt is emitted there. G03 must prove real
+Ed25519 output on the signed physical-device HAP; Node verification already
+rejects an empty, altered or wrong-key signature and can never set
+`liveNetworkingVerified:true` without a valid signature.
+
 The API24 pipeline deliberately uses standard compilation of one generated SDK module. Huawei's legacy `bundledDependencies` flag includes dependency code but leaves this graph's core dependency/public type imports; two isolated legacy variants still attempted to fetch core. The newer full declaration/dependency bundling documented for 26.0.0+ is not assumed available on the installed toolchain. Source assembly keeps the existing public package/import name without editing compiled archives or requiring a toolchain upgrade. See [Huawei's HAR build guide](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/ide-hvigor-build-har).
 
 ## Local module and directory selection

@@ -135,6 +135,7 @@ export default function tcpTransportTest() {
           if (mode === 1 || mode === 4) {
             expect(error !== null).assertTrue();
             expect(error!.kind).assertEqual(ArkDbErrorKind.Tls);
+            expect(error!.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
             expect(error!.message).assertEqual('TLS certificate does not match host ' + host);
             expect(peer.closeCalls).assertEqual(1);
             expect(await rejection(transport.read(1))).assertEqual(error);

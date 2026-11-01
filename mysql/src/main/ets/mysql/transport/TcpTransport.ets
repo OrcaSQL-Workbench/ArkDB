@@ -518,7 +518,7 @@ async function verifyTlsIdentity(tls: socket.TLSSocket, host: string): Promise<v
   try {
     const certificate = await cert.createX509Cert(await tls.getRemoteCertificate());
     if (!certificateMatchesHost(certificate, host)) {
-      throw ArkDbError.tls('TLS certificate does not match host ' + host);
+      throw ArkDbError.tls('TLS certificate does not match host ' + host, 'TLS_HOSTNAME_MISMATCH');
     }
   } catch (e) {
     if (e instanceof ArkDbError) throw e;

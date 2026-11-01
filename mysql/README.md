@@ -639,6 +639,12 @@ export function configureVerifiedTls(config: ConnectionConfig, caPemPath: string
 
 For server-only TLS, leave both client fields unset. A successful local compile or mock-certificate test does not certify a real platform trust chain, hostname rejection, or mutual TLS.
 
+A `VERIFY_IDENTITY` hostname mismatch is reported as `ArkDbErrorKind.Tls` with
+the stable textual `nativeCode` `TLS_HOSTNAME_MISMATCH`. Other TLS failures
+(socket upgrade, certificate retrieval/decoding, trust-chain or file-access
+errors) do not use that identifier. Evidence tooling must require the identifier
+rather than treating every TLS-category failure as hostname-mismatch proof.
+
 ## Bounded streaming
 
 Use an awaited sink to process each chunk without retaining every row. Omitting `onTruncation` selects bounded synchronization draining rather than pretending cancellation occurred. Sink callbacks must settle; awaiting a sink does not pause incoming socket delivery.

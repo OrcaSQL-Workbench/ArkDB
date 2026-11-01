@@ -178,7 +178,7 @@ export default function connectionOpeningTest(): void {
       for (let stage = 0; stage < 4; stage++) {
         const fixture = new OpeningFixture();
         fixture.start();
-        fixture.peer.emitMessage(handshake(stage >= 2 ? 'caching_sha2_password' : 'mysql_native_password'));
+        fixture.peer.emitMessage(handshake(stage >= 1 ? 'caching_sha2_password' : 'mysql_native_password'));
         await flush();
         expect(fixture.peer.sends).assertEqual(1);
         fixture.timers.advance(15);
@@ -190,6 +190,9 @@ export default function connectionOpeningTest(): void {
           fixture.peer.emitMessage(frame(2, new Uint8Array([1, stage === 2 ? 3 : 4])));
         }
         await flush();
+        if (stage === 1) {
+          expect(fixture.connection!.serverInfo.authPlugin).assertEqual('mysql_native_password');
+        }
         expect(fixture.peer.sends).assertEqual(stage === 1 || stage === 3 ? 2 : 1);
         fixture.timers.advance(10);
         await flush();

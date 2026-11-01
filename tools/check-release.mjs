@@ -13,10 +13,13 @@ export function requireConsumerEvidence(identity, consumer, currentSample, examp
   if (identity.delivery === 'self-contained' && consumer.selfContainedRuntimeVerified !== true) {
     throw new Error('Self-contained HAR readiness requires registry-independent runtime verification.');
   }
-  if (consumer.schemaVersion !== 1 || consumer.artifactSha256 !== identity.sha256 ||
+  if (consumer.schemaVersion !== 3 || consumer.consumerProfile !== 'current' ||
+    consumer.artifactSha256 !== identity.sha256 ||
     consumer.sourceFingerprint !== identity.sourceFingerprint || consumer.sampleFingerprint !== currentSample ||
     consumer.check !== 'isolated-release-hap-and-local-tests' || consumer.sampleHapCompiled !== true ||
-    consumer.localTestsExecuted !== true ||
+    consumer.localTestsExecuted !== true || !/^[0-9a-f]{64}$/.test(consumer.sampleHapSha256 ?? '') ||
+    !/^[0-9a-f]{64}$/.test(consumer.sampleHapContentSha256 ?? '') ||
+    !Number.isSafeInteger(consumer.sampleHapByteLength) || consumer.sampleHapByteLength <= 0 ||
     consumer.documentedExamples !== examples || !Number.isSafeInteger(consumer.localSampleCases) ||
     consumer.localSampleCases <= 0 ||
     JSON.stringify(consumer.dependencyArtifacts ?? []) !== JSON.stringify(identity.dependencyArtifacts ?? [])) {
@@ -59,7 +62,8 @@ async function main() {
   if (requireClean) requireCleanSource(source.identity, sourceClean, sourceCommit);
   await mkdir(source.evidenceDirectory, { recursive: true });
   await writeFile(join(source.evidenceDirectory, `${source.stem}.readiness.json`), `${JSON.stringify({
-    schemaVersion: 1, packageName: source.manifest.name, version: source.manifest.version,
+    schemaVersion: 3, packageName: source.manifest.name, version: source.manifest.version,
+    consumerProfile: 'current',
     artifactSha256: source.identity.sha256, sourceFingerprint: source.identity.sourceFingerprint,
     sampleFingerprint: consumer.sampleFingerprint, checkedAt: new Date().toISOString(),
     dependencyArtifacts: source.identity.dependencyArtifacts ?? [],
@@ -67,6 +71,8 @@ async function main() {
       selfContainedRuntimeVerified: consumer.selfContainedRuntimeVerified
     } : {}),
     ohpmPrepublishPassed: true, documentedExamples: examples, sampleHapCompiled: true,
+    sampleHapSha256: consumer.sampleHapSha256, sampleHapByteLength: consumer.sampleHapByteLength,
+    sampleHapContentSha256: consumer.sampleHapContentSha256,
     localSampleCases: consumer.localSampleCases, sourceClean, sourceCommit,
     publisherScopeOwnershipVerified: false, registryAcquisitionVerified: false,
     liveNetworkingVerified: false, published: false

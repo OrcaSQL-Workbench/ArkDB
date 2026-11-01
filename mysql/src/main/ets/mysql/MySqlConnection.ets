@@ -1197,6 +1197,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         newSalt = newSalt.subarray(0, newSalt.length - 1);
       }
       this.authNonce = newSalt;
+      this.info.authPlugin = newPlugin;
       Logger.d(LogTag.Auth, 'auth-switch -> ' + authPluginLogValue(newPlugin));
       const response = await deadline.wait((): Promise<Uint8Array> => this.computeAuth(newPlugin, newSalt));
       await deadline.wait((): Promise<void> => channel.writePacket(response));

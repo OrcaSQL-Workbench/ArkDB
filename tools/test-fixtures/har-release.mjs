@@ -92,9 +92,12 @@ export async function releaseFixture(t) {
     useNormalizedOHMUrl: true, buildMode: 'release', published: false
   };
   const consumer = {
-    schemaVersion: 1, packageName: '@arkdb/mysql', version: '1.0.0', artifactSha256: identity.sha256,
+    schemaVersion: 3, packageName: '@arkdb/mysql', version: '1.0.0', artifactSha256: identity.sha256,
+    consumerProfile: 'current',
     sourceFingerprint: fingerprint, sampleFingerprint: sample, check: 'isolated-release-hap-and-local-tests',
     documentedExamples: 8, sampleHapCompiled: true, localTestsExecuted: true, localSampleCases: 6,
+    sampleHapSha256: 'f'.repeat(64), sampleHapByteLength: 12345,
+    sampleHapContentSha256: 'e'.repeat(64),
     verifiedAt: '2026-10-22T00:00:00.000Z', registryAcquisitionVerified: false, liveNetworkingVerified: false
   };
   const readiness = {

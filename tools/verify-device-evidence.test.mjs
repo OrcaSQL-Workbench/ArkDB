@@ -1600,6 +1600,60 @@ test('preserves the latest recovery destination across a stale retarget interlea
   assert.deepEqual(JSON.parse(await readFile(publishedOutPath, 'utf8')), recovered.record);
 });
 
+test('persists the acquired claim before pending and verifying recovery publication', async (t) => {
+  for (const [index, sourceState] of ['verifying', 'pending'].entries()) {
+    const f = await deviceFixture(t, { challengeFill: 0x5f + index });
+    const hapPath = join(f.fixture.root, `${sourceState}-claim-signed-entry.hap`);
+    await writeFile(hapPath, f.hapBytes);
+    const receiptPath = join(f.fixture.root, `${sourceState}-claim-receipt.json`);
+    await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+      f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+    ))}\n`);
+    const stem = 'arkdb-mysql-1.0.0';
+    const originalOutPath = join(f.fixture.root, `${sourceState}-claim-evidence.json`);
+    const staleOutPath = join(f.fixture.root, `${sourceState}-stale-evidence.json`);
+    const options = {
+      root: f.fixture.root,
+      receiptPath,
+      manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+      consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+      hapPath,
+      profile: 'M1',
+      features: [],
+      outPath: originalOutPath
+    };
+    await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
+      now: () => new Date('2026-11-01T01:00:00.000Z'),
+      async writeExternalRecord() {
+        throw new Error('Synthetic recovery publication interruption.');
+      }
+    })), /recovery publication interruption/i);
+
+    const stateDirectory = dirname(f.prepared.challengePath);
+    const verifyingPath = join(stateDirectory,
+      `${f.prepared.challenge.challengeId}.verifying.json`);
+    const pendingPath = join(stateDirectory,
+      `${f.prepared.challenge.challengeId}.pending.json`);
+    if (sourceState === 'pending') await rename(verifyingPath, pendingPath);
+    const sourcePath = sourceState === 'verifying' ? verifyingPath : pendingPath;
+    const sourceClaim = JSON.parse(await readFile(sourcePath, 'utf8'));
+    sourceClaim.outputPath = staleOutPath;
+    await writeFile(sourcePath, `${JSON.stringify(sourceClaim, null, 2)}\n`);
+
+    const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts(options,
+      artifactDependencies({
+        now: () => new Date('2026-11-03T00:00:00.000Z'),
+        isProcessAlive: () => false
+      }));
+    assert.equal(recovered.recordPath, originalOutPath);
+    assert.equal(existsSync(originalOutPath), true);
+    assert.equal(existsSync(staleOutPath), false);
+    const terminalClaim = JSON.parse(await readFile(join(stateDirectory,
+      `${f.prepared.challenge.challengeId}.accepted.json`), 'utf8'));
+    assert.equal(terminalClaim.outputPath, originalOutPath);
+  }
+});
+
 test('rejects receipt-only recovery of an artifact-bound verification claim', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x5c });
   const hapPath = join(f.fixture.root, 'mode-bound-signed-entry.hap');

@@ -122,6 +122,23 @@ export default function deviceAcceptanceRunnerTest(): void {
       expect(response.failures).assertEqual(1);
     });
 
+    it('reportsConnectionFailureWithoutClaimingMariaDb', 0, async () => {
+      const factory = new FakeDeviceFactory();
+      const binding = validBinding();
+      factory.positive.connectError = ArkDbError.network('Synthetic connection failure.');
+      const response = await new DeviceAcceptanceRunner(
+        factory, binding, new FakePlatformReader(), new ImmediateDelay(),
+        new FakeSigner(binding.publicKeySpkiBase64)
+      ).run(validRequest());
+
+      expect(response.ok).assertFalse();
+      expect(response.receiptJson).assertEqual('');
+      expect(response.errorKind).assertEqual(ArkDbErrorKind.Network);
+      expect(response.text).assertEqual(
+        'The primary connection did not reach a verified MySQL server. ' +
+        'Check network access, TLS identity, and authentication settings.');
+    });
+
     it('rejectsCompletedQueryAsCancellationEvidence', 0, async () => {
       const response = await runWithCancellationMode(CANCELLATION_QUERY_COMPLETED);
 
@@ -313,6 +330,7 @@ class FakeDeviceConnection implements DeviceAcceptanceConnection {
   challengeId: string = '';
   schemaChallenge: string = '';
   mismatchCode: string = 'TLS_HOSTNAME_MISMATCH';
+  connectError: ArkDbError | null = null;
   cancellationMode: string = '';
   queries: string[] = [];
   preparedQueries: string[] = [];
@@ -332,6 +350,7 @@ class FakeDeviceConnection implements DeviceAcceptanceConnection {
 
   async connect(): Promise<void> {
     if (this.mismatch) throw ArkDbError.tls('Synthetic hostname mismatch.', this.mismatchCode);
+    if (this.connectError !== null) throw this.connectError;
     this.state = ConnectionState.Ready;
   }
 

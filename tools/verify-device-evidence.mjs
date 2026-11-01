@@ -1674,8 +1674,6 @@ async function verifyBoundDeviceEvidence({
       throw new Error('Published device evidence cannot be retargeted.');
     }
     claim = { ...claim, outputPath: frozenOutputPath };
-    if (verifyingExists) await atomicReplace(states.verifying, recordBytes(claim));
-    else if (pendingHasClaim) await atomicReplace(states.pending, recordBytes(claim));
     await atomicReplace(states.lock, recordBytes({
       schemaVersion: 1,
       kind: 'arkdb-device-claim-lock',
@@ -1685,9 +1683,13 @@ async function verifyBoundDeviceEvidence({
   }
   claim = validateClaim(claim, receiptBytes, parsed, decision, recordPath,
     decision === 'accepted' ? frozenOutputPath : null);
-  if (!verifyingExists) {
-    if (initialClaim || pendingRawWithLock) await atomicReplace(states.pending, recordBytes(claim));
-    else if (!pendingHasClaim) throw new Error('Device pending recovery state is invalid.');
+  if (verifyingExists) {
+    await atomicReplace(states.verifying, recordBytes(claim));
+  } else {
+    if (!initialClaim && !pendingRawWithLock && !pendingHasClaim) {
+      throw new Error('Device pending recovery state is invalid.');
+    }
+    await atomicReplace(states.pending, recordBytes(claim));
     await atomicRename(states.pending, states.verifying);
   }
   try {

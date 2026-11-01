@@ -240,6 +240,15 @@ export class DeviceAcceptanceRunner {
       this.busy = false;
     }
     const completedAt = new Date().toISOString();
+    if (serverFamily.length === 0) {
+      const connectionCase = cases.find((entry: DeviceCaseResult): boolean =>
+        entry.id === 'tls_identity');
+      response.serverVersion = serverVersion;
+      response.errorKind = connectionCase?.errorKind ?? ArkDbErrorKind.Validation;
+      response.text = 'The primary connection did not reach a verified MySQL server. ' +
+        'Check network access, TLS identity, and authentication settings.';
+      return response;
+    }
     if (serverFamily !== ServerFamily.MySQL) {
       response.serverVersion = serverVersion;
       response.errorKind = ArkDbErrorKind.Validation;

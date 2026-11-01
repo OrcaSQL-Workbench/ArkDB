@@ -7,7 +7,7 @@ import {
   QueryExecutionSummary, ServerFamily, MySqlServerInfo, SslMode
 } from '@arkdb/mysql';
 import {
-  DeviceAcceptanceRequest
+  DeviceAcceptanceRequest, DeviceAcceptanceResponse
 } from '../main/ets/sample/Messages';
 import {
   DeviceEvidenceIdentity
@@ -21,6 +21,9 @@ import {
 } from '../main/ets/sample/DeviceReceiptSigner';
 
 const SCHEMA_CHALLENGE: string = '33'.repeat(32);
+const CANCELLATION_QUERY_COMPLETED: string = 'query-completed';
+const CANCELLATION_NOT_RUNNING: string = 'not-running';
+const CANCELLATION_UNRELATED_ERROR: string = 'unrelated-error';
 const EXPECTED_CASES: string[] = [
   'tls_identity',
   'tls_hostname_mismatch',
@@ -119,6 +122,33 @@ export default function deviceAcceptanceRunnerTest(): void {
       expect(response.failures).assertEqual(1);
     });
 
+    it('rejectsCompletedQueryAsCancellationEvidence', 0, async () => {
+      const response = await runWithCancellationMode(CANCELLATION_QUERY_COMPLETED);
+
+      expect(response.ok).assertFalse();
+      expect(response.passed).assertEqual(7);
+      expect(response.failures).assertEqual(1);
+      expect(response.errors).assertEqual(0);
+    });
+
+    it('rejectsNotRunningCancellationAsEvidence', 0, async () => {
+      const response = await runWithCancellationMode(CANCELLATION_NOT_RUNNING);
+
+      expect(response.ok).assertFalse();
+      expect(response.passed).assertEqual(7);
+      expect(response.failures).assertEqual(1);
+      expect(response.errors).assertEqual(0);
+    });
+
+    it('rejectsUnrelatedErrorAsCancellationEvidence', 0, async () => {
+      const response = await runWithCancellationMode(CANCELLATION_UNRELATED_ERROR);
+
+      expect(response.ok).assertFalse();
+      expect(response.passed).assertEqual(7);
+      expect(response.failures).assertEqual(1);
+      expect(response.errors).assertEqual(0);
+    });
+
     it('doesNotSignMariaDbAsMysqlProfileEvidence', 0, async () => {
       const factory = new FakeDeviceFactory();
       const binding = validBinding();
@@ -163,6 +193,18 @@ export default function deviceAcceptanceRunnerTest(): void {
       expect(request.password).assertEqual('');
     });
   });
+}
+
+async function runWithCancellationMode(mode: string): Promise<DeviceAcceptanceResponse> {
+  const factory = new FakeDeviceFactory();
+  const binding = validBinding();
+  factory.positive.challengeId = binding.challengeId;
+  factory.positive.schemaChallenge = binding.schemaChallenge;
+  factory.positive.cancellationMode = mode;
+  return new DeviceAcceptanceRunner(
+    factory, binding, new FakePlatformReader(), new ImmediateDelay(),
+    new FakeSigner(binding.publicKeySpkiBase64)
+  ).run(validRequest());
 }
 
 function validRequest(): DeviceAcceptanceRequest {
@@ -271,6 +313,7 @@ class FakeDeviceConnection implements DeviceAcceptanceConnection {
   challengeId: string = '';
   schemaChallenge: string = '';
   mismatchCode: string = 'TLS_HOSTNAME_MISMATCH';
+  cancellationMode: string = '';
   queries: string[] = [];
   preparedQueries: string[] = [];
   private mismatch: boolean;
@@ -299,6 +342,7 @@ class FakeDeviceConnection implements DeviceAcceptanceConnection {
   async query(sql: string): Promise<QueryResult> {
     this.queries.push(sql);
     if (sql === 'SELECT SLEEP(10), 1') {
+      if (this.cancellationMode === CANCELLATION_QUERY_COMPLETED) return new QueryResult();
       this.state = ConnectionState.Querying;
       return new Promise<QueryResult>((_resolve, reject): void => { this.sleepReject = reject; });
     }
@@ -314,7 +358,12 @@ class FakeDeviceConnection implements DeviceAcceptanceConnection {
     const reject = this.sleepReject;
     this.sleepReject = null;
     this.state = ConnectionState.Ready;
-    if (reject !== null) reject(ArkDbError.cancelled('Synthetic interruption.'));
+    if (reject === null) return;
+    if (this.cancellationMode === CANCELLATION_UNRELATED_ERROR) {
+      reject(ArkDbError.server('Synthetic unrelated server error.', 1105, 'HY000'));
+      return;
+    }
+    reject(ArkDbError.cancelled('Synthetic interruption.'));
   }
 
   async queryStream(_sql: string, _options: QueryOptions,
@@ -342,6 +391,9 @@ class FakeCancellation implements CoreDbExecutionController {
 
   async cancel(): Promise<QueryCancellationResult> {
     this.connection.interrupt();
+    if (this.connection.cancellationMode === CANCELLATION_NOT_RUNNING) {
+      return new QueryCancellationResult(CancellationOutcome.NotRunning, ConnectionReuse.Ready);
+    }
     return new QueryCancellationResult(CancellationOutcome.Requested, ConnectionReuse.AwaitingCompletion);
   }
 

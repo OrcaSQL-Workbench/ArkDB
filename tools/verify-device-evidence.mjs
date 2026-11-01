@@ -1397,6 +1397,14 @@ async function acquireClaimLock(path, candidateClaim, receiptBytes, parsed, depe
   throw new Error('Device challenge claim lock changed during recovery.');
 }
 
+async function releaseClaimLock(path, claim) {
+  if (!existsSync(path)) return;
+  const lock = await readLockJson(path);
+  if (lock.pid !== process.pid || JSON.stringify(lock.claim) !== JSON.stringify(claim)) return;
+  await rm(path);
+  await syncDirectory(dirname(path));
+}
+
 async function validateExistingRecord(path, expectedSha256) {
   await recoverAtomicState(path);
   if (!existsSync(path)) return false;
@@ -1633,7 +1641,24 @@ async function verifyBoundDeviceEvidence({
       await validateExistingRecord(frozenOutputPath, validatedClaim.recordSha256);
     }
   }
+  if (dependencies.beforeClaimLock) {
+    await dependencies.beforeClaimLock({ path: states.lock, claim });
+  }
   claim = await acquireClaimLock(states.lock, claim, receiptBytes, parsed, dependencies);
+  const acceptedAfterLock = await atomicStateExists(states.accepted);
+  const rejectedAfterLock = await atomicStateExists(states.rejected);
+  if (acceptedAfterLock || rejectedAfterLock) {
+    await releaseClaimLock(states.lock, claim);
+    if (acceptedAfterLock && rejectedAfterLock) {
+      throw new Error('Device challenge has conflicting terminal states.');
+    }
+    throw new Error(`Device challenge was ${acceptedAfterLock ? 'accepted' : 'rejected'} and consumed.`);
+  }
+  const sourceState = verifyingExists ? states.verifying : states.pending;
+  if (!await atomicStateExists(sourceState)) {
+    await releaseClaimLock(states.lock, claim);
+    throw new Error('Device challenge state changed before claim-lock acquisition.');
+  }
   validateChallenge(claim.challenge, set, bundle, cases, caseBytes);
   const decision = claim.decision;
   const recordPath = decision === 'accepted' ? states.acceptedRecord : states.rejectedRecord;

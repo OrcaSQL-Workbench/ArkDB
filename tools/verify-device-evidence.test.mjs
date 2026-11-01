@@ -850,6 +850,64 @@ test('rejects concurrent verification while the receipt-bound claim is live', as
   assert.equal((await first).record.receiptAccepted, true);
 });
 
+test('does not recreate a challenge consumed before claim-lock acquisition', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x60 });
+  const acceptedReceiptPath = join(f.fixture.root, 'accepted-race.json');
+  await writeFile(acceptedReceiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  const rejectedEnvelope = passingEnvelope(f.prepared.challenge, f.keyPair.privateKey);
+  const rejectedPayload = JSON.parse(rejectedEnvelope.payload);
+  rejectedPayload.cases[0].status = 'fail';
+  rejectedPayload.cases[0].errorKind = 'synthetic-failure';
+  resign(rejectedEnvelope, rejectedPayload, f.keyPair.privateKey);
+  const rejectedReceiptPath = join(f.fixture.root, 'rejected-race.json');
+  await writeFile(rejectedReceiptPath, `${JSON.stringify(rejectedEnvelope)}\n`);
+
+  let releaseRejected;
+  const holdRejected = new Promise((resolve) => { releaseRejected = resolve; });
+  let markRejected;
+  const rejectedPaused = new Promise((resolve) => { markRejected = resolve; });
+  const rejected = verifyDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath: rejectedReceiptPath,
+    confirmPhysicalDevice: true,
+    confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async beforeClaimLock() {
+      markRejected();
+      await holdRejected;
+    }
+  }).then(
+    () => ({ state: 'resolved' }),
+    (error) => ({ state: 'rejected', error })
+  );
+  const phase = await Promise.race([
+    rejectedPaused.then(() => 'paused'),
+    rejected.then(() => 'completed')
+  ]);
+  assert.equal(phase, 'paused');
+
+  const accepted = await verifyDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath: acceptedReceiptPath,
+    confirmPhysicalDevice: true,
+    confirmAuthorizedSchema: true
+  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  releaseRejected();
+  const rejectedResult = await rejected;
+  assert.equal(rejectedResult.state, 'rejected');
+  assert.equal(accepted.record.receiptAccepted, true);
+  assert.equal(existsSync(join(dirname(f.prepared.challengePath),
+    `${f.prepared.challenge.challengeId}.accepted.json`)), true);
+  assert.equal(existsSync(join(dirname(f.prepared.challengePath),
+    `${f.prepared.challenge.challengeId}.rejected.json`)), false);
+});
+
 test('rejects a different receipt during receipt-bound recovery', async (t) => {
   const f = await deviceFixture(t);
   const firstPath = join(f.fixture.root, 'first-recovery.json');

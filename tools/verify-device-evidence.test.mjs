@@ -81,7 +81,7 @@ test('prepares exact isolated HAP outputs before committing the pending challeng
   assert.equal(provisioning.createdAt, challenge.createdAt);
   assert.equal(provisioning.expiresAt, challenge.expiresAt);
   for (const path of [f.prepared.challengePath, f.prepared.contextPath, f.prepared.provisioningPath]) {
-    assert.doesNotMatch(await readFile(path, 'utf8'), new RegExp(f.privateKeyPkcs8.toString('base64')));
+    assert.equal((await readFile(path, 'utf8')).includes(f.privateKeyPkcs8.toString('base64')), false);
   }
 });
 

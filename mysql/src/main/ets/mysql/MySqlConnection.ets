@@ -377,11 +377,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         command: Uint8Array,
         parse: (source: MysqlPacketSource) => Promise<T>): Promise<T> =>
         this.runCursorCommandOwned<T>(scope, phase, command, parse),
+      (scope: MySqlCommandScope): void => {
+        this.requireOwnedChannel(scope);
+      },
       (scope: MySqlCommandScope, statusFlags: number): void =>
         this.applyCursorStatus(scope, statusFlags),
       (scope: MySqlCommandScope, primary?: Object,
-        outcome?: MySqlExecutionOutcome): Promise<void> =>
-        this.finishCursorCommand(scope, primary, outcome),
+        outcome?: MySqlExecutionOutcome, validate?: () => void,
+        complete?: () => void): Promise<void> =>
+        this.finishCursorCommand(scope, primary, outcome, validate, complete),
       this.config.preparedCacheSize === undefined ? 0 : this.config.preparedCacheSize);
   }
 
@@ -1107,13 +1111,18 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       const ownsScope = current === null;
       const scope = current !== null ? current : this.commandGate.reserve(MySqlCommandKind.Close);
       const polite = ownsScope && this.opening === null && this.connState === ConnectionState.Ready;
+      const cursor = this.cursorOperation;
+      const releaseIdleCursor = current !== null &&
+        current.phase === MySqlCommandPhase.CursorIdle &&
+        cursor !== null && cursor.scope === scope;
       this.closePending = true;
       this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
       let begin: () => void = (): void => {};
       const closing = new Promise<void>((resolve: () => void,
         reject: (reason?: Object) => void): void => {
         begin = (): void => {
-          this.closeWithScope(scope, ownsScope, polite).then(resolve, reject);
+          this.closeWithScope(
+            scope, ownsScope, polite, releaseIdleCursor).then(resolve, reject);
         };
       });
       this.closing = closing;
@@ -1123,6 +1132,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       if (ordinary !== null && ordinary.scope === scope) ordinary.closeResult = closing;
       const prepared = this.preparedOperation;
       if (prepared !== null && prepared.scope === scope) prepared.closeResult = closing;
+      if (cursor !== null && (cursor.scope === scope || ownsScope)) {
+        cursor.closeResult = closing;
+      }
       const transaction = this.transactionOperation;
       if (transaction !== null && transaction.scope === scope) transaction.closeResult = closing;
       if (ownsScope) this.commandGate.start(scope);
@@ -1131,7 +1143,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.closing;
   }
 
-  private async closeWithScope(scope: MySqlCommandScope, ownsScope: boolean, polite: boolean): Promise<void> {
+  private async closeWithScope(scope: MySqlCommandScope,
+    ownsScope: boolean, polite: boolean,
+    releaseIdleCursor: boolean = false): Promise<void> {
     try {
       await this.closeInternal(polite);
     } finally {
@@ -1139,7 +1153,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       if (ownsScope) this.finishCommand(scope);
       else {
         const cursor = this.cursorOperation;
-        if (cursor !== null && cursor.scope === scope &&
+        if (releaseIdleCursor &&
+          cursor !== null && cursor.scope === scope &&
           this.commandGate.isOwner(scope)) {
           this.completedScope = scope;
           if (this.preparedOperation === cursor) {
@@ -1746,7 +1761,20 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     const task = new Promise<T>((resolve: (value: T) => void,
       reject: (reason?: Object) => void): void => {
       begin = (): void => {
-        this.startCursorCommandOwned(scope, operation).then(resolve, reject);
+        this.startCursorCommandOwned(scope, operation).then(
+          (value: T): void => {
+            try {
+              this.requireOwnedChannel(scope);
+              this.commandGate.setPhase(
+                scope, MySqlCommandPhase.CursorIdle);
+              resolve(value);
+            } catch (error) {
+              const primary = error as Object;
+              this.finishCursorCommand(
+                scope, primary, MySqlExecutionOutcome.Completed)
+                .then((): void => reject(primary), reject);
+            }
+          }, reject);
       };
     });
     this.commandGate.start(scope);
@@ -1783,6 +1811,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       reading = true;
       const value = await parse(
         new PreparedPacketSource(channel, this.clientCaps));
+      this.requireOwnedChannel(scope);
       if (this.state !== ConnectionState.Closed) {
         this.connState = ConnectionState.Ready;
       }
@@ -1807,9 +1836,12 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   private async finishCursorCommand(scope: MySqlCommandScope,
     primary?: Object,
-    outcome: MySqlExecutionOutcome = MySqlExecutionOutcome.Completed): Promise<void> {
+    outcome: MySqlExecutionOutcome = MySqlExecutionOutcome.Completed,
+    validate?: () => void, complete?: () => void): Promise<void> {
     const settlement = this.cursorOperation;
     const cleanup: ArkDbError[] = [];
+    let rootCloseFailure: ArkDbError | null = null;
+    let failure = primary;
     if (settlement !== null && settlement.scope === scope) {
       if (this.commandGate.isOwner(scope)) {
         this.commandGate.setPhase(scope, MySqlCommandPhase.Cleaning);
@@ -1822,8 +1854,17 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         try {
           await closeResult;
         } catch (error) {
-          cleanup.push(toCleanupError(error as Object));
+          rootCloseFailure = toCleanupError(error as Object);
+          cleanup.push(rootCloseFailure);
         }
+      }
+    }
+    if (failure === undefined && cleanup.length === 0 &&
+      validate !== undefined) {
+      try {
+        validate();
+      } catch (error) {
+        failure = error as Object;
       }
     }
     if (this.commandGate.isOwner(scope)) {
@@ -1833,15 +1874,39 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         cleanup.push(toCleanupError(error as Object));
       }
     }
+    if (settlement !== null && settlement.scope === scope) {
+      const closeResult = settlement.closeResult;
+      if (closeResult !== null && !settlement.closeJoined) {
+        settlement.closeJoined = true;
+        try {
+          await closeResult;
+        } catch (error) {
+          rootCloseFailure = toCleanupError(error as Object);
+          cleanup.push(rootCloseFailure);
+        }
+      }
+    }
     if (this.cursorOperation === settlement) this.cursorOperation = null;
     if (this.preparedOperation === settlement) this.preparedOperation = null;
-    if (primary !== undefined) {
-      throw operationFailure(primary, cleanup,
+    if (failure !== undefined) {
+      throw operationFailure(failure, cleanup,
         cleanup.length > 0 ? MySqlExecutionOutcome.Unknown : outcome);
     }
     if (cleanup.length > 0) {
+      if (rootCloseFailure !== null &&
+        cleanup.length === 1 && cleanup[0] === rootCloseFailure) {
+        throw rootCloseFailure;
+      }
       throw operationFailure(cleanup[0], cleanup.slice(1),
         MySqlExecutionOutcome.Completed);
+    }
+    if (complete !== undefined) {
+      try {
+        complete();
+      } catch (error) {
+        throw operationFailure(
+          error as Object, [], MySqlExecutionOutcome.Completed);
+      }
     }
   }
 
@@ -2252,10 +2317,12 @@ type CursorCommandStarter = <T>(
 type CursorWireRunner = <T>(scope: MySqlCommandScope,
   phase: MySqlCommandPhase, command: Uint8Array,
   parse: (source: MysqlPacketSource) => Promise<T>) => Promise<T>;
+type CursorContinuationValidator = (scope: MySqlCommandScope) => void;
 type CursorStatusApplier =
   (scope: MySqlCommandScope, statusFlags: number) => void;
 type CursorCommandFinisher = (scope: MySqlCommandScope,
-  primary?: Object, outcome?: MySqlExecutionOutcome) => Promise<void>;
+  primary?: Object, outcome?: MySqlExecutionOutcome,
+  validate?: () => void, complete?: () => void) => Promise<void>;
 
 class PreparedConnectionHost implements MySqlNamedExecutorHost,
   MySqlCursorExecutorHost {
@@ -2274,6 +2341,7 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost,
   private readSqlMode: (scope: MySqlCommandScope) => Promise<string>;
   private startOwnedCursor: CursorCommandStarter;
   private runCursorWire: CursorWireRunner;
+  private validateCursorContinuation: CursorContinuationValidator;
   private applyOwnedCursorStatus: CursorStatusApplier;
   private finishOwnedCursor: CursorCommandFinisher;
 
@@ -2288,6 +2356,7 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost,
     readSqlMode: (scope: MySqlCommandScope) => Promise<string>,
     startCursor: CursorCommandStarter,
     runCursor: CursorWireRunner,
+    assertCursorActive: CursorContinuationValidator,
     applyCursorStatus: CursorStatusApplier,
     finishCursor: CursorCommandFinisher,
     preparedCacheSize: number) {
@@ -2303,6 +2372,7 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost,
     this.readSqlMode = readSqlMode;
     this.startOwnedCursor = startCursor;
     this.runCursorWire = runCursor;
+    this.validateCursorContinuation = assertCursorActive;
     this.applyOwnedCursorStatus = applyCursorStatus;
     this.finishOwnedCursor = finishCursor;
   }
@@ -2344,13 +2414,19 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost,
     return this.runCursorWire<T>(scope, phase, command, parse);
   }
 
+  assertCursorActive(scope: MySqlCommandScope): void {
+    this.validateCursorContinuation(scope);
+  }
+
   applyCursorStatus(scope: MySqlCommandScope, statusFlags: number): void {
     this.applyOwnedCursorStatus(scope, statusFlags);
   }
 
   finishCursor(scope: MySqlCommandScope, primary?: Object,
-    outcome?: MySqlExecutionOutcome): Promise<void> {
-    return this.finishOwnedCursor(scope, primary, outcome);
+    outcome?: MySqlExecutionOutcome, validate?: () => void,
+    complete?: () => void): Promise<void> {
+    return this.finishOwnedCursor(
+      scope, primary, outcome, validate, complete);
   }
 }
 

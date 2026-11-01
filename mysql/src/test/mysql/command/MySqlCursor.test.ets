@@ -9,18 +9,44 @@ import {
   initializeMySqlExecutionObserverInternal
 } from '../../../main/ets/mysql/MySqlConnection';
 import {
-  Capabilities, StatusFlags
+  Capabilities, ColumnType, StatusFlags
 } from '../../../main/ets/mysql/protocol/Constants';
 import {
-  PreparedExecutionFixture, cursorFetchResult, cursorOpenResult, prepareResponse,
+  PreparedExecutionFixture, columnPayload, cursorFetchEmptyStrings, cursorFetchResult,
+  cursorOpenResult, prepareResponse,
   cursorBufferedFallback, errorPayload, flushPrepared, hex, okPayload, preparedFailureOf
 } from './PreparedExecutionFixture';
 
 class CursorExecutionObserver implements MySqlExecutionObserver {
   readonly events: MySqlExecutionEvent[] = [];
+  cursorTerminal: (() => void) | null = null;
 
   onEvent(event: MySqlExecutionEvent): void {
     this.events.push(event);
+    const cursorTerminal = this.cursorTerminal;
+    if (cursorTerminal !== null &&
+      event.type === MySqlExecutionEventType.Terminal &&
+      event.commandKind === MySqlCommandKind.Cursor) {
+      cursorTerminal();
+    }
+  }
+}
+
+class FinalFetchTerminalTrace {
+  readonly closeStarted: boolean;
+  readonly cursorDoneAtClose: boolean;
+  readonly fetchSucceeded: boolean;
+  readonly exactIdentity: boolean;
+  readonly closeSettledBeforeFetch: boolean;
+
+  constructor(closeStarted: boolean, cursorDoneAtClose: boolean,
+    fetchSucceeded: boolean, exactIdentity: boolean,
+    closeSettledBeforeFetch: boolean) {
+    this.closeStarted = closeStarted;
+    this.cursorDoneAtClose = cursorDoneAtClose;
+    this.fetchSucceeded = fetchSucceeded;
+    this.exactIdentity = exactIdentity;
+    this.closeSettledBeforeFetch = closeSettledBeforeFetch;
   }
 }
 
@@ -117,6 +143,40 @@ export default function mySqlCursorTest(): void {
         } finally {
           await fixture.close();
         }
+      }
+    });
+
+    it('rejectsRowsBeyondTheRequestedFetchCountWhenRowsUseZeroBytes', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      const cursors = requireMySqlFeatures(fixture.connection).cursors;
+      if (cursors === undefined) throw new Error('Expected cursor support.');
+      const options = new MySqlCursorOptions();
+      options.fetchRows = 1;
+      fixture.peer.responses.push(
+        prepareResponse(7),
+        cursorOpenResult('value', 2 | StatusFlags.CURSOR_EXISTS,
+          false, ColumnType.VAR_STRING),
+        cursorFetchEmptyStrings(2, 2 | StatusFlags.CURSOR_EXISTS),
+        [okPayload()],
+        [okPayload()]);
+      try {
+        const cursor = await cursors.open('SELECT value FROM values', [], options);
+        const failure = await preparedFailureOf(cursor.fetch());
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+          expect(failure.message).assertEqual('Cursor result exceeded maxRows.');
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+        }
+        expect(cursor.done).assertTrue();
+        expect(fixture.peer.commands().join(','))
+          .assertEqual('22,23,28,26,25');
+        await fixture.connection.ping();
+        expect(fixture.peer.commands().join(','))
+          .assertEqual('22,23,28,26,25,14');
+      } finally {
+        await fixture.close();
       }
     });
 
@@ -539,6 +599,222 @@ export default function mySqlCursorTest(): void {
       }
     });
 
+    it('inFlightPrepareRetainsPhysicalCloseFailure', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      const cursors = requireMySqlFeatures(fixture.connection).cursors;
+      if (cursors === undefined) throw new Error('Expected cursor support.');
+      const partialPrepare = prepareResponse(
+        7, 0, [columnPayload('value')]);
+      fixture.peer.responses.push([partialPrepare[0]]);
+      const opening = preparedFailureOf(cursors.open('SELECT value', []));
+      try {
+        await flushPrepared();
+        const closeCause = new Error('Synthetic close failure during cursor PREPARE.');
+        fixture.peer.closeFailure = closeCause;
+        const closing = await preparedFailureOf(fixture.connection.close());
+        const failure = await opening;
+        expectInFlightCloseFailure(failure, closing);
+      } finally {
+        await preparedFailureOf(fixture.close());
+        await opening;
+      }
+    });
+
+    it('inFlightExecuteRetainsPhysicalCloseFailure', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      const cursors = requireMySqlFeatures(fixture.connection).cursors;
+      if (cursors === undefined) throw new Error('Expected cursor support.');
+      fixture.peer.responses.push(prepareResponse(7));
+      fixture.peer.holdCommand = 0x17;
+      const opening = preparedFailureOf(cursors.open('SELECT value', []));
+      try {
+        await flushPrepared();
+        const closeCause = new Error('Synthetic close failure during cursor EXECUTE.');
+        fixture.peer.closeFailure = closeCause;
+        const closing = await preparedFailureOf(fixture.connection.close());
+        const failure = await opening;
+        expectInFlightCloseFailure(failure, closing);
+      } finally {
+        fixture.peer.holdCommand = -1;
+        await preparedFailureOf(fixture.close());
+        await opening;
+      }
+    });
+
+    it('inFlightFetchRetainsPhysicalCloseFailure', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      const cursors = requireMySqlFeatures(fixture.connection).cursors;
+      if (cursors === undefined) throw new Error('Expected cursor support.');
+      fixture.peer.responses.push(
+        prepareResponse(7),
+        cursorOpenResult('value'));
+      const cursor = await cursors.open('SELECT value', []);
+      fixture.peer.holdCommand = 0x1c;
+      const fetching = preparedFailureOf(cursor.fetch());
+      try {
+        await flushPrepared();
+        const closeCause = new Error('Synthetic close failure during cursor FETCH.');
+        fixture.peer.closeFailure = closeCause;
+        const closing = await preparedFailureOf(fixture.connection.close());
+        const failure = await fetching;
+        expectInFlightCloseFailure(failure, closing);
+      } finally {
+        fixture.peer.holdCommand = -1;
+        await preparedFailureOf(fixture.close());
+        await fetching;
+      }
+    });
+
+    it('inFlightResetRetainsPhysicalCloseFailure', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      const cursors = requireMySqlFeatures(fixture.connection).cursors;
+      if (cursors === undefined) throw new Error('Expected cursor support.');
+      fixture.peer.responses.push(
+        prepareResponse(7),
+        cursorOpenResult('value'));
+      const cursor = await cursors.open('SELECT value', []);
+      fixture.peer.holdCommand = 0x1a;
+      const resetting = preparedFailureOf(cursor.close());
+      try {
+        await flushPrepared();
+        const closeCause = new Error('Synthetic close failure during cursor RESET.');
+        fixture.peer.closeFailure = closeCause;
+        const closing = await preparedFailureOf(fixture.connection.close());
+        const failure = await resetting;
+        expectInFlightCloseFailure(failure, closing);
+      } finally {
+        fixture.peer.holdCommand = -1;
+        await preparedFailureOf(fixture.close());
+        await resetting;
+      }
+    });
+
+    it('finalFetchPreservesSoleRootCloseFailureIdentity', 0, async () => {
+      let earlyObserved = false;
+      let targetObserved = false;
+      let lateObserved = false;
+      let delayedObserverObserved = false;
+      for (let turns = 0; turns < 64; turns += 1) {
+        const fixture = new PreparedExecutionFixture();
+        await fixture.open();
+        const cursors = requireMySqlFeatures(fixture.connection).cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        fixture.peer.responses.push(
+          prepareResponse(7),
+          cursorOpenResult('value'),
+          cursorFetchResult([7], 2 | StatusFlags.LAST_ROW_SENT));
+        fixture.peer.closeFailure =
+          new Error('Synthetic sole root close failure after final FETCH.');
+        fixture.peer.afterSendTurns = turns;
+        let active = true;
+        let closing: Promise<ArkDbError | null> | null = null;
+        let sequence = 0;
+        let closeSequence = 0;
+        let fetchSequence = 0;
+        fixture.peer.afterSendSettled = (command: number): void => {
+          if (!active || command !== 0x19 || closing !== null) return;
+          closeSequence = ++sequence;
+          closing = preparedFailureOf(fixture.connection.close());
+        };
+        const cursor = await cursors.open('SELECT value', []);
+        const fetching = preparedFailureOf(cursor.fetch())
+          .then((failure: ArkDbError | null): ArkDbError | null => {
+            fetchSequence = ++sequence;
+            return failure;
+          });
+        try {
+          const failure = await fetching;
+          active = false;
+          if (closing === null || fetchSequence < closeSequence) {
+            lateObserved = true;
+            break;
+          }
+          if (failure === null) {
+            delayedObserverObserved = closeSequence < fetchSequence;
+            lateObserved = true;
+            break;
+          }
+          const closeFailure = await requireFailureTask(closing,
+            'Expected root close during response-free statement close.');
+          expect(failure instanceof MySqlOperationError).assertTrue();
+          expect(closeFailure instanceof MySqlOperationError).assertTrue();
+          if (failure === closeFailure) {
+            targetObserved = true;
+          } else {
+            earlyObserved = true;
+          }
+          if (failure instanceof MySqlOperationError) {
+            expect(failure.outcome === MySqlExecutionOutcome.NotDispatched)
+              .assertFalse();
+          }
+        } finally {
+          active = false;
+          fixture.peer.afterSendSettled = null;
+          await preparedFailureOf(fixture.close());
+          await fetching;
+          if (closing !== null) await closing;
+        }
+      }
+      if (!lateObserved) {
+        lateObserved = await finalFetchSettlesBeforeRootClose();
+      }
+      const terminalTrace = await finalFetchClosesAtCursorTerminal();
+      expect(earlyObserved).assertTrue();
+      expect(targetObserved).assertTrue();
+      expect(lateObserved).assertTrue();
+      expect(delayedObserverObserved).assertTrue();
+      expect(terminalTrace.closeStarted).assertTrue();
+      expect(terminalTrace.cursorDoneAtClose).assertFalse();
+      expect(terminalTrace.fetchSucceeded).assertFalse();
+      expect(terminalTrace.closeSettledBeforeFetch).assertTrue();
+      expect(terminalTrace.exactIdentity).assertTrue();
+    });
+
+    it('completedExecuteContinuationIsNeverNotDispatched', 0, async () => {
+      let exercised = false;
+      let notDispatched = false;
+      for (let turns = 0; turns < 32; turns += 1) {
+        const fixture = new PreparedExecutionFixture();
+        await fixture.open();
+        const cursors = requireMySqlFeatures(fixture.connection).cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        fixture.peer.responses.push(prepareResponse(7));
+        fixture.peer.holdCommand = 0x17;
+        let operationSettled = false;
+        const opening = preparedFailureOf(cursors.open('SELECT value', []))
+          .then((failure: ArkDbError | null): ArkDbError | null => {
+            operationSettled = true;
+            return failure;
+          });
+        try {
+          await flushPrepared();
+          fixture.peer.emitResponse(cursorOpenResult('value'));
+          await flushCursorTurns(turns);
+          if (operationSettled) break;
+          const closing = preparedFailureOf(fixture.connection.close());
+          const failure = await opening;
+          await closing;
+          if (failure instanceof MySqlOperationError) {
+            exercised = true;
+            if (failure.outcome === MySqlExecutionOutcome.NotDispatched) {
+              notDispatched = true;
+              break;
+            }
+          }
+        } finally {
+          fixture.peer.holdCommand = -1;
+          await preparedFailureOf(fixture.close());
+          await opening;
+        }
+      }
+      expect(exercised).assertTrue();
+      expect(notDispatched).assertFalse();
+    });
+
     it('disconnectInvalidatesCursorWithoutLeakingOwner', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();
@@ -620,5 +896,121 @@ function expectCursorServerFailure(failure: ArkDbError | null,
     expect(failure.sqlState).assertEqual(sqlState);
     expect(failure.outcome).assertEqual(MySqlExecutionOutcome.ServerRejected);
     expect(failure.cleanupErrors.length).assertEqual(0);
+  }
+}
+
+function expectInFlightCloseFailure(failure: ArkDbError | null,
+  closing: ArkDbError | null): void {
+  expect(retainsInFlightCloseFailure(failure, closing)).assertTrue();
+}
+
+function retainsInFlightCloseFailure(failure: ArkDbError | null,
+  closing: ArkDbError | null): boolean {
+  if (!(closing instanceof MySqlOperationError) ||
+    !(failure instanceof MySqlOperationError) ||
+    failure.outcome !== MySqlExecutionOutcome.Unknown) return false;
+  for (const cleanup of failure.cleanupErrors) {
+    if (cleanup === closing) return true;
+  }
+  return false;
+}
+
+function requireFailureTask(task: Promise<ArkDbError | null> | null,
+  message: string): Promise<ArkDbError | null> {
+  if (task === null) throw new Error(message);
+  return task;
+}
+
+async function finalFetchSettlesBeforeRootClose(): Promise<boolean> {
+  const fixture = new PreparedExecutionFixture();
+  await fixture.open();
+  const cursors = requireMySqlFeatures(fixture.connection).cursors;
+  if (cursors === undefined) throw new Error('Expected cursor support.');
+  fixture.peer.responses.push(
+    prepareResponse(7),
+    cursorOpenResult('value'),
+    cursorFetchResult([7], 2 | StatusFlags.LAST_ROW_SENT));
+  let sequence = 0;
+  let closeSequence = 0;
+  let fetchSequence = 0;
+  const cursor = await cursors.open('SELECT value', []);
+  const fetching = preparedFailureOf(cursor.fetch())
+    .then((failure: ArkDbError | null): ArkDbError | null => {
+      fetchSequence = ++sequence;
+      return failure;
+    });
+  try {
+    const failure = await fetching;
+    fixture.peer.closeFailure =
+      new Error('Synthetic root close after final FETCH settlement.');
+    closeSequence = ++sequence;
+    await preparedFailureOf(fixture.connection.close());
+    return failure === null && fetchSequence < closeSequence;
+  } finally {
+    await preparedFailureOf(fixture.close());
+    await fetching;
+  }
+}
+
+async function finalFetchClosesAtCursorTerminal(): Promise<FinalFetchTerminalTrace> {
+  const fixture = new PreparedExecutionFixture();
+  const observer = new CursorExecutionObserver();
+  initializeMySqlExecutionObserverInternal(
+    fixture.connection, observer, (): number => 100);
+  await fixture.open();
+  observer.events.length = 0;
+  const cursors = requireMySqlFeatures(fixture.connection).cursors;
+  if (cursors === undefined) throw new Error('Expected cursor support.');
+  fixture.peer.responses.push(
+    prepareResponse(7),
+    cursorOpenResult('value'),
+    cursorFetchResult([7], 2 | StatusFlags.LAST_ROW_SENT));
+  fixture.peer.closeFailure =
+    new Error('Synthetic sole root close failure at cursor terminal.');
+  const cursor = await cursors.open('SELECT value', []);
+  let sequence = 0;
+  let closeSequence = 0;
+  let closeSettledSequence = 0;
+  let fetchSequence = 0;
+  let closeStarted = false;
+  let cursorDoneAtClose = false;
+  let closing: Promise<ArkDbError | null> | null = null;
+  observer.cursorTerminal = (): void => {
+    if (closing !== null) return;
+    closeStarted = true;
+    cursorDoneAtClose = cursor.done;
+    closeSequence = ++sequence;
+    closing = preparedFailureOf(fixture.connection.close())
+      .then((failure: ArkDbError | null): ArkDbError | null => {
+        closeSettledSequence = ++sequence;
+        return failure;
+      });
+  };
+  const fetching = preparedFailureOf(cursor.fetch())
+    .then((failure: ArkDbError | null): ArkDbError | null => {
+      fetchSequence = ++sequence;
+      return failure;
+    });
+  try {
+    const failure = await fetching;
+    const closeFailure = await requireFailureTask(closing,
+      'Expected root close from cursor terminal observation.');
+    return new FinalFetchTerminalTrace(
+      closeStarted && closeSequence > 0,
+      cursorDoneAtClose,
+      failure === null,
+      failure === closeFailure,
+      closeSettledSequence > 0 && closeSettledSequence < fetchSequence);
+  } finally {
+    observer.cursorTerminal = null;
+    await preparedFailureOf(fixture.close());
+    await fetching;
+    if (closing !== null) await closing;
+  }
+}
+
+async function flushCursorTurns(turns: number): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await Promise.resolve();
   }
 }

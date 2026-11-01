@@ -44,9 +44,11 @@ export interface MySqlCursorExecutorHost extends MySqlPreparedSessionHost {
   runCursorCommand<T>(scope: MySqlCommandScope, phase: MySqlCommandPhase,
     command: Uint8Array,
     parse: (source: MysqlPacketSource) => Promise<T>): Promise<T>;
+  assertCursorActive(scope: MySqlCommandScope): void;
   applyCursorStatus(scope: MySqlCommandScope, statusFlags: number): void;
   finishCursor(scope: MySqlCommandScope, primary?: Object,
-    outcome?: MySqlExecutionOutcome): Promise<void>;
+    outcome?: MySqlExecutionOutcome, validate?: () => void,
+    complete?: () => void): Promise<void>;
 }
 
 export class MySqlReadOnlyCursorExecutor implements MySqlCursorExecutor {
@@ -86,6 +88,7 @@ export class MySqlReadOnlyCursorExecutor implements MySqlCursorExecutor {
     input: CursorInput): Promise<MySqlCursor> {
     let statement: MySqlPreparedStatement | null = null;
     let primary: Object | null = null;
+    let executeCompleted = false;
     const cleanup: ArkDbError[] = [];
     try {
       statement = await this.session.prepareOwned(scope, sql);
@@ -97,6 +100,8 @@ export class MySqlReadOnlyCursorExecutor implements MySqlCursorExecutor {
             scope, MySqlCommandPhase.Executing, command,
             (source: MysqlPacketSource): Promise<CursorOpenResponse> =>
               readCursorOpen(source, this.host.capabilities)));
+      executeCompleted = true;
+      this.host.assertCursorActive(scope);
       this.host.applyCursorStatus(scope, response.statusFlags);
       if (!response.cursorExists) {
         throw preparedFailure(
@@ -104,7 +109,6 @@ export class MySqlReadOnlyCursorExecutor implements MySqlCursorExecutor {
             'The server did not open a read-only prepared statement cursor.'),
           [], MySqlExecutionOutcome.Completed);
       }
-      this.host.commandGate.setPhase(scope, MySqlCommandPhase.CursorIdle);
       let cursor: MySqlServerCursor | null = null;
       cursor = new MySqlServerCursor(
         this.host, this.session, scope, statement, response.columns,
@@ -124,7 +128,9 @@ export class MySqlReadOnlyCursorExecutor implements MySqlCursorExecutor {
       }
     }
     const outcome = primary instanceof MySqlOperationError ?
-      primary.outcome : MySqlExecutionOutcome.NotDispatched;
+      primary.outcome : (executeCompleted ?
+        MySqlExecutionOutcome.Completed :
+        MySqlExecutionOutcome.NotDispatched);
     throw preparedFailure(primary!, cleanup, outcome);
   }
 }
@@ -164,6 +170,16 @@ class CursorFetchResponse {
     this.statusFlags = statusFlags;
     this.loadedBytes = loadedBytes;
     this.limitReason = limitReason;
+  }
+}
+
+class CursorFetchBatch {
+  readonly rows: MySqlValue[][];
+  readonly terminal: boolean;
+
+  constructor(rows: MySqlValue[][], terminal: boolean) {
+    this.rows = rows;
+    this.terminal = terminal;
   }
 }
 
@@ -223,7 +239,34 @@ class MySqlServerCursor implements MySqlCursor {
       (resolve: (value: MySqlValue[][]) => void,
         reject: (reason?: Object) => void): void => {
         begin = (): void => {
-          this.fetchOwned().then(resolve, reject);
+          this.fetchOwned(resolve).then(
+            (batch: CursorFetchBatch): void => {
+              if (batch.terminal) return;
+              const rows = batch.rows;
+              if (this.invalid) {
+                const primary = ArkDbError.network(
+                  'Connection closed while cursor fetch was completing.');
+                this.resetAndFinish(
+                  primary, MySqlExecutionOutcome.Completed)
+                  .then((): void => reject(primary), reject);
+                return;
+              }
+              if (this.ended) {
+                resolve(rows);
+                return;
+              }
+              try {
+                this.host.assertCursorActive(this.scope);
+                this.host.commandGate.setPhase(
+                  this.scope, MySqlCommandPhase.CursorIdle);
+                resolve(rows);
+              } catch (error) {
+                const primary = error as Object;
+                this.resetAndFinish(
+                  primary, MySqlExecutionOutcome.Completed)
+                  .then((): void => reject(primary), reject);
+              }
+            }, reject);
         };
       });
     this.fetchTask = task;
@@ -258,17 +301,21 @@ class MySqlServerCursor implements MySqlCursor {
   invalidate(): void {
     if (this.ended) return;
     this.invalid = true;
-    this.ended = true;
-    this.settled();
+    this.settleEnded();
   }
 
-  private async fetchOwned(): Promise<MySqlValue[][]> {
+  private async fetchOwned(
+    completeTerminal: (rows: MySqlValue[][]) => void): Promise<CursorFetchBatch> {
     const remainingRows = this.remainingRows();
     const remainingBytes =
       this.options.maxResultBytes - this.loadedBytes;
     if (remainingRows === 0 || remainingBytes === 0) {
-      await this.resetAndFinish(null, MySqlExecutionOutcome.Completed);
-      return [];
+      const rows: MySqlValue[][] = [];
+      await this.resetAndFinish(
+        null, MySqlExecutionOutcome.Completed,
+        (): void => this.assertTerminalFetchActive(),
+        (): void => this.completeTerminalFetch(rows, completeTerminal));
+      return new CursorFetchBatch(rows, true);
     }
     const fetchRows = remainingRows < 0 ?
       this.options.fetchRows :
@@ -283,21 +330,22 @@ class MySqlServerCursor implements MySqlCursor {
             (source: MysqlPacketSource): Promise<CursorFetchResponse> =>
               readCursorFetch(source, this.host.capabilities,
                 this.metadata, this.options.maxBufferedBytes,
-                remainingRows, remainingBytes,
+                fetchRows, remainingBytes,
                 this.options.maxDrainBytes, this.options.maxDrainTimeMs)));
+      this.host.assertCursorActive(this.scope);
     } catch (error) {
       const failure = error as Object;
       const outcome = failure instanceof MySqlOperationError ?
         failure.outcome : MySqlExecutionOutcome.Unknown;
       await this.resetAndFinish(failure, outcome);
-      return [];
+      return new CursorFetchBatch([], false);
     }
     this.host.applyCursorStatus(this.scope, response.statusFlags);
     if (response.limitReason.length > 0) {
       await this.resetAndFinish(
         ArkDbError.protocol(cursorLimitMessage(response.limitReason)),
         MySqlExecutionOutcome.Completed);
-      return [];
+      return new CursorFetchBatch([], false);
     }
     this.loadedRows += response.rows.length;
     this.loadedBytes += response.loadedBytes;
@@ -308,14 +356,23 @@ class MySqlServerCursor implements MySqlCursor {
       this.loadedRows >= this.options.maxRows;
     const byteLimitReached =
       this.loadedBytes >= this.options.maxResultBytes;
+    let terminal = false;
     if (serverDone) {
-      await this.closeStatementAndFinish(null, MySqlExecutionOutcome.Completed);
+      terminal = true;
+      await this.closeStatementAndFinish(
+        null, MySqlExecutionOutcome.Completed,
+        (): void => this.assertTerminalFetchActive(),
+        (): void =>
+          this.completeTerminalFetch(response.rows, completeTerminal));
     } else if (rowLimitReached || byteLimitReached) {
-      await this.resetAndFinish(null, MySqlExecutionOutcome.Completed);
-    } else {
-      this.host.commandGate.setPhase(this.scope, MySqlCommandPhase.CursorIdle);
+      terminal = true;
+      await this.resetAndFinish(
+        null, MySqlExecutionOutcome.Completed,
+        (): void => this.assertTerminalFetchActive(),
+        (): void =>
+          this.completeTerminalFetch(response.rows, completeTerminal));
     }
-    return response.rows;
+    return new CursorFetchBatch(response.rows, terminal);
   }
 
   private remainingRows(): number {
@@ -325,7 +382,8 @@ class MySqlServerCursor implements MySqlCursor {
   }
 
   private async resetAndFinish(primary: Object | null,
-    outcome: MySqlExecutionOutcome): Promise<void> {
+    outcome: MySqlExecutionOutcome, validate?: () => void,
+    complete?: () => void): Promise<void> {
     let failure = primary;
     const cleanup: ArkDbError[] = [];
     let finalOutcome = outcome;
@@ -355,11 +413,12 @@ class MySqlServerCursor implements MySqlCursor {
     await this.closeStatementAndFinish(
       failure === null ? null :
         preparedFailure(failure, cleanup, finalOutcome),
-      finalOutcome);
+      finalOutcome, validate, complete);
   }
 
   private async closeStatementAndFinish(primary: Object | null,
-    outcome: MySqlExecutionOutcome): Promise<void> {
+    outcome: MySqlExecutionOutcome, validate?: () => void,
+    complete?: () => void): Promise<void> {
     let failure = primary;
     const cleanup: ArkDbError[] = [];
     if (!this.statement.closed &&
@@ -375,8 +434,8 @@ class MySqlServerCursor implements MySqlCursor {
         }
       }
     }
-    this.ended = true;
-    this.settled();
+    const deferredSettlement = complete !== undefined;
+    if (!deferredSettlement) this.settleEnded();
     if (failure !== null && cleanup.length > 0) {
       let cleanupUnknown = false;
       for (const entry of cleanup) {
@@ -388,8 +447,38 @@ class MySqlServerCursor implements MySqlCursor {
       failure = preparedFailure(failure, cleanup,
         cleanupUnknown ? MySqlExecutionOutcome.Unknown : outcome);
     }
-    await this.host.finishCursor(this.scope,
-      failure === null ? undefined : failure, outcome);
+    try {
+      await this.host.finishCursor(this.scope,
+        failure === null ? undefined : failure, outcome, validate, complete);
+    } catch (error) {
+      if (deferredSettlement) this.settleEnded();
+      throw error as Error;
+    }
+  }
+
+  private assertTerminalFetchActive(): void {
+    this.assertTerminalFetchOpen();
+    this.host.assertCursorActive(this.scope);
+  }
+
+  private assertTerminalFetchOpen(): void {
+    if (this.invalid || this.host.state === ConnectionState.Closed) {
+      throw ArkDbError.network(
+        'Connection closed while cursor fetch was completing.');
+    }
+  }
+
+  private completeTerminalFetch(rows: MySqlValue[][],
+    complete: (rows: MySqlValue[][]) => void): void {
+    this.assertTerminalFetchOpen();
+    this.settleEnded();
+    complete(rows);
+  }
+
+  private settleEnded(): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.settled();
   }
 }
 
@@ -459,7 +548,7 @@ async function readCursorOpen(source: MysqlPacketSource,
 
 async function readCursorFetch(source: MysqlPacketSource,
   capabilities: number, columns: MySqlColumnDef[],
-  maxBufferedBytes: number, maxRows: number,
+  maxBufferedBytes: number, maxFetchRows: number,
   maxResultBytes: number, maxDrainBytes: number,
   maxDrainTimeMs: number): Promise<CursorFetchResponse> {
   const decoder = new BinaryRowDecoder();
@@ -490,7 +579,7 @@ async function readCursorFetch(source: MysqlPacketSource,
     if (limitReason.length > 0) continue;
     const row = decoder.decode(packet.payload, columns);
     const rowBytes = estimateSqlRowBytes(row);
-    if (maxRows >= 0 && rows.length >= maxRows) {
+    if (rows.length >= maxFetchRows) {
       rows = [];
       loadedBytes = 0;
       limitReason = 'maxRows';

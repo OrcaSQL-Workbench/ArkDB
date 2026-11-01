@@ -156,6 +156,48 @@ and a nontruncated payload; row limits, cumulative byte limits or prior ordinary
 truncation cannot be mistaken for successful output cardinality. There are no
 session variables, text `CALL` fallbacks or positional guesses.
 
+MySQL's optional `mysqlFeatures.insertRows` interface is a restricted prepared
+multi-row INSERT builder, not a general SQL rewrite interface. It accepts a
+one- or two-segment table identifier, individual column identifier segments and
+typed `MySqlParameter` rows, then generates only quoted
+`INSERT INTO ... VALUES` syntax with positional placeholders. It exposes no raw
+SQL, expressions, suffixes, `INSERT IGNORE`, `REPLACE` or server-upsert clause.
+`MySqlInsertRowsOptions` retains the batch item/result budgets and adds a
+16777216-byte prepared-packet ceiling. Planning happens before dispatch and
+greedily groups consecutive rows while both exact UTF-8 PREPARE payload bytes
+and exact binary EXECUTE payload bytes fit that ceiling and the flattened
+parameter count stays at or below 65535. Empty rows validate the request and
+return without connection use.
+Options, item count, table and columns are validated before inner rows are
+touched, preserving request-level error messages and `failedIndex = 0`. Every
+source row width is then validated with the existing column-count error. After
+all widths pass, every inner row array is copied without changing the failure
+index, and typed snapshots read `MySqlParameter.value` only from those captured
+arrays. Mutating getters cannot alter sibling bindings or append parameters
+after width preflight.
+
+Every emitted INSERT is one prepared statement and one native result under the
+same command scope. `MySqlBatchError` reuses the existing partial-outcome
+contract: completed statement results are retained, `failedIndex` points to the
+first source row in the failed statement, and Unknown writes are not retried.
+The interface can execute inside a caller-owned manual transaction and has an
+explicit callback-scoped adapter that reuses the transaction runner's owner
+without exposing root prepared, generic batch, named, procedure or nested
+transaction executors. It never begins, commits or rolls back itself. Accepted
+`COM_RESET_CONNECTION` invalidates its physical executor together with the
+other prepared-generation state while preserving the stable optional feature
+facade. Callback-scoped execution joins every transaction-owned cancellation
+attempt after each emitted statement and before statement close or later group
+dispatch. The transaction join counter makes final settlement idempotent.
+Known cleanup failure is returned at the `insertRows` interface as a partial
+`MySqlBatchError`; uncertain retirement retains any already decoded statement
+result while preserving final `Unknown` and prohibiting replay.
+The callback-scoped method returns the exact promise registered with the
+transaction session. Pre-command snapshot failures are converted to one
+observed rejected promise and returned unchanged, preserving exact error
+identity for awaiting callers without leaking an unhandled rejection when a
+caller ignores it.
+
 MySQL also exposes the optional `mysqlFeatures.deadlines` interface for buffered
 text queries and prepared execution. `MySqlDeadlineOptions` defaults to
 `timeoutMs = 0` and `cancellationGraceMs = 2000`, clones its `QueryOptions`, and

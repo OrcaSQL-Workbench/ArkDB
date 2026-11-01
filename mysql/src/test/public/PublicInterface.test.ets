@@ -12,7 +12,9 @@ import {
   MySqlPreparedExecutor, MySqlPreparedStatement,
   MySqlProcedureCaller, MySqlProcedureArgument, MySqlParameterDirection,
   MySqlProcedureResult,
-  MySqlSession, MySqlBatchOptions, MySqlDeadlineOptions, MySqlDeadlineExecutor, MySqlSessionController,
+  MySqlSession, MySqlBatchError, MySqlBatchOptions, MySqlBatchResult,
+  MySqlInsertRowsExecutor, MySqlInsertRowsOptions,
+  MySqlDeadlineOptions, MySqlDeadlineExecutor, MySqlSessionController,
   MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
   mysqlPlaceholders, mapMySqlRows, createMySqlConnection,
   CoreQueryResultSink, CoreQueryResultMeta, CoreQueryRowChunk, CoreQueryResultSummary
@@ -224,6 +226,40 @@ export default function publicInterfaceTest(): void {
       expect(errors.length).assertEqual(0);
     });
 
+    it('insertRowsPublicImportsCompile', 0, () => {
+      const features: MySqlConnectionFeatures = new MySqlConnectionFeatures();
+      const omitted: MySqlInsertRowsExecutor | undefined = features.insertRows;
+      const options: MySqlInsertRowsOptions = new MySqlInsertRowsOptions();
+      const copy: MySqlInsertRowsOptions = options.clone();
+
+      expect(omitted === undefined).assertTrue();
+      expect(options.maxItems).assertEqual(1000);
+      expect(options.maxBufferedBytes).assertEqual(33554432);
+      expect(options.maxPacketBytes).assertEqual(16777216);
+      expect(options.validate().length).assertEqual(0);
+      copy.maxPacketBytes = 1024;
+      expect(options.maxPacketBytes).assertEqual(16777216);
+    });
+
+    it('emptyInsertRowsValidateAndDoNotConnect', 0, async () => {
+      const connection = createMySqlConnection(publicConfig(), '');
+      const insertRows = publicInsertRows(connection);
+
+      const result: MySqlBatchResult =
+        await insertRows.execute(['schema', 'table'], ['value'], []);
+      expect(result.results.length).assertEqual(0);
+      expect(connection.state).assertEqual(ConnectionState.Idle);
+
+      const invalid = new MySqlInsertRowsOptions();
+      invalid.maxPacketBytes = 0;
+      const failure = await publicFailure((): Promise<MySqlBatchResult> =>
+        insertRows.execute(['schema', 'table'], ['value'], [], invalid));
+      expect(failure instanceof MySqlBatchError).assertTrue();
+      expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+      expect(connection.state).assertEqual(ConnectionState.Idle);
+      await connection.close();
+    });
+
     it('deadlinePublicImportsCloneAndRemainOptional', 0, async () => {
       const options: MySqlDeadlineOptions = new MySqlDeadlineOptions();
       expect(options.timeoutMs).assertEqual(0);
@@ -315,6 +351,7 @@ export default function publicInterfaceTest(): void {
       expect(connection.mysqlFeatures !== undefined).assertTrue();
       const features: MySqlConnectionFeatures = requireMySqlFeatures(connection);
       expect(features.prepared !== undefined).assertTrue();
+      expect(features.insertRows !== undefined).assertTrue();
       expect(features.named !== undefined).assertTrue();
       expect(features.procedures !== undefined).assertTrue();
       await connection.close();
@@ -339,6 +376,30 @@ export default function publicInterfaceTest(): void {
             phase === 0 ? ConnectionState.Idle : ConnectionState.Closed);
           const failure = await publicFailure((): Promise<MySqlProcedureResult> =>
             procedures.call(['public_procedure'], parameters));
+          expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+          await connection.close();
+        }
+      }
+    });
+
+    it('checksEveryPublicInsertRowsCallForAllCreationPathsBeforeConnectAndAfterClose', 0, async () => {
+      const factory = new MySqlDriverFactory();
+      const nativeFactory: DbDriverFactory = factory;
+      const config = publicConfig();
+      const connections: DbConnection[] = [
+        new MySqlConnection(config, ''), createMySqlConnection(config, ''),
+        factory.create(new MySqlConnectionOptions(config, '')),
+        nativeFactory.createConnection(config, '')
+      ];
+      const rows = [[new MySqlParameter(MySqlParameterType.Int32, 7)]];
+      for (const connection of connections) {
+        const insertRows = publicInsertRows(connection);
+        for (let phase = 0; phase < 2; phase += 1) {
+          expect(connection.state).assertEqual(
+            phase === 0 ? ConnectionState.Idle : ConnectionState.Closed);
+          const failure = await publicFailure((): Promise<MySqlBatchResult> =>
+            insertRows.execute(['public_table'], ['value'], rows));
+          expect(failure instanceof MySqlBatchError).assertTrue();
           expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
           await connection.close();
         }
@@ -642,6 +703,14 @@ function publicPrepared(connection: DbConnection): MySqlPreparedExecutor {
   const prepared = requireMySqlFeatures(connection).prepared;
   if (prepared === undefined) throw ArkDbError.unsupported('Expected public prepared support.');
   return prepared;
+}
+
+function publicInsertRows(connection: DbConnection): MySqlInsertRowsExecutor {
+  const insertRows = requireMySqlFeatures(connection).insertRows;
+  if (insertRows === undefined) {
+    throw ArkDbError.unsupported('Expected public insert rows support.');
+  }
+  return insertRows;
 }
 
 function publicNamed(connection: DbConnection): MySqlNamedExecutor {

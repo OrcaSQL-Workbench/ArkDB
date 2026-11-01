@@ -5,8 +5,19 @@ import {
 } from '@arkdb/core';
 import { MySqlSession } from '../../../main/ets/mysql/driver/MySqlSession';
 import {
+  MySqlInsertRowsExecutor
+} from '../../../main/ets/mysql/execution/MySqlInsertRowsExecutor';
+import {
+  MySqlInsertRowsOptions
+} from '../../../main/ets/mysql/model/MySqlInsertRows';
+import { MySqlParameter, MySqlParameterType } from
+  '../../../main/ets/mysql/model/MySqlParameter';
+import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../../../main/ets/mysql/model/MySqlOperationError';
+import {
+  MySqlBatchError, MySqlBatchResult
+} from '../../../main/ets/mysql/model/MySqlBatch';
 import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
 import {
   MySqlTransactionIsolation, MySqlTransactionOptions
@@ -14,7 +25,8 @@ import {
 import { Capabilities, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
 import { utf8Decode } from '../../../main/ets/mysql/protocol/Charsets';
 import {
-  PreparedExecutionFixture, PreparedGate, errorPayload, flushPrepared, okPayload
+  PreparedExecutionFixture, PreparedGate, errorPayload, flushPrepared, okPayload,
+  prepareResponse
 } from '../command/PreparedExecutionFixture';
 
 class TransactionOptionsFixture extends MySqlTransactionOptions {}
@@ -435,6 +447,154 @@ export default function mySqlTransactionRunnerTest(): void {
       }
     });
 
+    it('detachedInsertRowsFailureUsesTrackedPromiseWithoutUnhandledRejection', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      let detachedPromise: Promise<MySqlBatchResult> | null = null;
+      const unhandledReasons: Object[] = [];
+      const observer: errorManager.UnhandledRejectionObserver =
+        (reason: ESObject, promise: Promise<ESObject>): void => {
+          if (detachedPromise !== null &&
+            (promise as Object) === (detachedPromise as Object)) {
+            unhandledReasons.push(reason as Object);
+          }
+        };
+      errorManager.on('unhandledRejection', observer);
+      try {
+        wire = new TransactionWirePlan(fixture);
+        const running = captureFailure(transactionFeature(fixture).run(
+          new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            fixture.peer.responses.push(
+              prepareResponse(7, 1),
+              [errorPayload(1213, '40001')]);
+            const insertRows = session.mysqlFeatures.insertRows;
+            if (insertRows === undefined) {
+              throw new Error('Expected transaction-scoped insertRows.');
+            }
+            detachedPromise = insertRows.execute(
+              ['t'], ['a'],
+              [[new MySqlParameter(MySqlParameterType.Int32, 1)]]);
+          }));
+
+        const failure = operationFailure(await running);
+        expect(operationContainsNativeCode(failure, 1213)).assertTrue();
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|ROLLBACK AND NO CHAIN NO RELEASE');
+        await flushPrepared();
+        await flushPrepared();
+        expect(unhandledReasons.length).assertEqual(0);
+      } finally {
+        errorManager.off('unhandledRejection', observer);
+        if (detachedPromise !== null) {
+          await captureFailure<MySqlBatchResult>(detachedPromise);
+        }
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
+    it('detachedInsertRowsSuccessKeepsTransactionWaitingForReturnedPromise', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      let detachedPromise: Promise<MySqlBatchResult> | null = null;
+      let transactionSettled = false;
+      try {
+        wire = new TransactionWirePlan(fixture);
+        wire.holdPreparedCommand = 0x17;
+        fixture.peer.holdCommand = 0x17;
+        const running = captureFailure(transactionFeature(fixture).run(
+          new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            fixture.peer.responses.push(prepareResponse(7, 1));
+            const insertRows = session.mysqlFeatures.insertRows;
+            if (insertRows === undefined) {
+              throw new Error('Expected transaction-scoped insertRows.');
+            }
+            detachedPromise = insertRows.execute(
+              ['t'], ['a'],
+              [[new MySqlParameter(MySqlParameterType.Int32, 1)]]);
+          })).then((failure: Object | null): Object | null => {
+            transactionSettled = true;
+            return failure;
+          });
+
+        await wire.preparedEntered.promise;
+        await flushPrepared();
+        expect(transactionSettled).assertFalse();
+        expect(commandSql(fixture).join('|')).assertEqual('START TRANSACTION');
+
+        fixture.peer.holdCommand = -1;
+        fixture.peer.emitResponse([
+          okPayload(StatusFlags.AUTOCOMMIT | StatusFlags.IN_TRANS)
+        ]);
+        const transactionFailure = arkFailure(await running);
+        const result = await requiredBatchPromise(detachedPromise);
+
+        expect(result.results.length).assertEqual(1);
+        expect(transactionFailure.kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|ROLLBACK AND NO CHAIN NO RELEASE');
+      } finally {
+        fixture.peer.holdCommand = -1;
+        if (detachedPromise !== null) {
+          await captureFailure<MySqlBatchResult>(detachedPromise);
+        }
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
+    it('ignoredInsertRowsSnapshotRejectionIsObservedAndKeepsExactError', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      let rejectedPromise: Promise<MySqlBatchResult> | null = null;
+      const unhandledReasons: Object[] = [];
+      const observer: errorManager.UnhandledRejectionObserver =
+        (reason: ESObject, promise: Promise<ESObject>): void => {
+          if (rejectedPromise !== null &&
+            (promise as Object) === (rejectedPromise as Object)) {
+            unhandledReasons.push(reason as Object);
+          }
+        };
+      errorManager.on('unhandledRejection', observer);
+      try {
+        wire = new TransactionWirePlan(fixture);
+        await transactionFeature(fixture).run(
+          new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            const insertRows = session.mysqlFeatures.insertRows;
+            if (insertRows === undefined) {
+              throw new Error('Expected transaction-scoped insertRows.');
+            }
+            rejectedPromise = insertRows.execute(['t'], [], []);
+          });
+
+        await flushPrepared();
+        await flushPrepared();
+        expect(unhandledReasons.length).assertEqual(0);
+        const rejected = requiredBatchPromise(rejectedPromise);
+        const first = requiredBatchFailure(await captureFailure(rejected));
+        const second = requiredBatchFailure(await captureFailure(rejected));
+        expect(first === second).assertTrue();
+        expect(first.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(first.failedOutcome)
+          .assertEqual(MySqlExecutionOutcome.NotDispatched);
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE');
+      } finally {
+        errorManager.off('unhandledRejection', observer);
+        if (rejectedPromise !== null) {
+          await captureFailure<MySqlBatchResult>(rejectedPromise);
+        }
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
     it('serverErrorInsideCallbackStillRollsBack', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();
@@ -725,7 +885,7 @@ export default function mySqlTransactionRunnerTest(): void {
       }
     });
 
-    it('callbackSessionDoesNotExposeRootScopedExecutors', 0, async () => {
+    it('callbackSessionExposesOnlyOwnedInsertRowsFeature', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();
       let wire: TransactionWirePlan | null = null;
@@ -735,6 +895,7 @@ export default function mySqlTransactionRunnerTest(): void {
         expect(rootFeatures.prepared !== undefined).assertTrue();
         expect(rootFeatures.batch !== undefined).assertTrue();
         expect(rootFeatures.named !== undefined).assertTrue();
+        expect(rootFeatures.procedures !== undefined).assertTrue();
         expect(rootFeatures.transactions !== undefined).assertTrue();
         wire = new TransactionWirePlan(fixture);
 
@@ -742,9 +903,11 @@ export default function mySqlTransactionRunnerTest(): void {
           async (session: TransactionSessionView): Promise<void> => {
             const scopedFeatures = session.mysqlFeatures;
             expect(scopedFeatures === rootFeatures).assertFalse();
+            expect(scopedFeatures.insertRows !== undefined).assertTrue();
             expect(scopedFeatures.prepared === undefined).assertTrue();
             expect(scopedFeatures.batch === undefined).assertTrue();
             expect(scopedFeatures.named === undefined).assertTrue();
+            expect(scopedFeatures.procedures === undefined).assertTrue();
             expect(scopedFeatures.transactions === undefined).assertTrue();
           });
 
@@ -753,6 +916,269 @@ export default function mySqlTransactionRunnerTest(): void {
       } finally {
         if (wire !== null) wire.dispose();
         await fixture.close();
+      }
+    });
+
+    it('runsInsideTransactionCallbackOwnerWithoutNestedTransactionSql', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      try {
+        const transactions = transactionFeature(fixture);
+        wire = new TransactionWirePlan(fixture);
+
+        const affected = await transactions.run(
+          new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<number> => {
+            fixture.peer.responses.push(
+              prepareResponse(7, 1),
+              [okPayload(StatusFlags.AUTOCOMMIT | StatusFlags.IN_TRANS)]);
+            const insertRows = session.mysqlFeatures.insertRows;
+            if (insertRows === undefined) {
+              throw new Error('Expected transaction-scoped insertRows.');
+            }
+            const result = await insertRows.execute(
+              ['t'], ['a'],
+              [[new MySqlParameter(MySqlParameterType.Int32, 1)]]);
+            return result.results.length;
+          });
+
+        expect(affected).assertEqual(1);
+        expect(fixture.peer.commands().join(','))
+          .assertEqual('3,22,23,25,3');
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE');
+      } finally {
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
+    it('failedScopedInsertRowsRollsBackAndKeepsBatchErrorIdentity', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      try {
+        const transactions = transactionFeature(fixture);
+        wire = new TransactionWirePlan(fixture);
+        const failure = await captureFailure(transactions.run(
+          new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            fixture.peer.responses.push(
+              prepareResponse(7, 1),
+              [errorPayload(1064, '42000')]);
+            const insertRows = session.mysqlFeatures.insertRows;
+            if (insertRows === undefined) {
+              throw new Error('Expected transaction-scoped insertRows.');
+            }
+            await insertRows.execute(
+              ['t'], ['a'],
+              [[new MySqlParameter(MySqlParameterType.Int32, 1)]]);
+          }));
+
+        expect(failure instanceof MySqlBatchError).assertTrue();
+        if (!(failure instanceof MySqlBatchError)) {
+          throw new Error('Expected exact MySqlBatchError identity.');
+        }
+        expect(failure.failedOutcome)
+          .assertEqual(MySqlExecutionOutcome.ServerRejected);
+        expect(failure.failedIndex).assertEqual(0);
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|ROLLBACK AND NO CHAIN NO RELEASE');
+      } finally {
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
+    it('expiredTransactionInsertRowsRejectsEvenEmptyRows', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      let captured: MySqlInsertRowsExecutor | null = null;
+      try {
+        wire = new TransactionWirePlan(fixture);
+        await transactionFeature(fixture).run(
+          new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            const insertRows = session.mysqlFeatures.insertRows;
+            if (insertRows === undefined) {
+              throw new Error('Expected transaction-scoped insertRows.');
+            }
+            captured = insertRows;
+          });
+        const retained = requiredInsertRows(captured);
+
+        const failure = arkFailure(await captureFailure(
+          retained.execute(['t'], ['a'], []) as Promise<MySqlBatchResult>));
+        expect(failure.kind).assertEqual(ArkDbErrorKind.Validation);
+        expect(commandSql(fixture).join('|')).assertEqual(
+          'START TRANSACTION|COMMIT AND NO CHAIN NO RELEASE');
+      } finally {
+        if (wire !== null) wire.dispose();
+        await fixture.close();
+      }
+    });
+
+    it('insertRowsWaitsForKnownCancellationCleanupBeforeSecondGroup', 0, async () => {
+      const cleanup = new ArkDbError(ArkDbErrorKind.Network,
+        'Synthetic insertRows control cleanup failure.',
+        'INSERT_ROWS_CONTROL_CLEANUP', '08S01');
+      const control = new TransactionControlConnection();
+      const closing = new PreparedGate();
+      control.closing = closing;
+      control.cleanupFailure = cleanup;
+      const fixture = new PreparedExecutionFixture(
+        Capabilities.PROTOCOL_41, (): DbConnection => control);
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      let cancelling: Promise<Object | null> | null = null;
+      let running: Promise<Object | null> | null = null;
+      const insertFailure = new TransactionFailureCapture();
+      let insertSettled = false;
+      try {
+        wire = new TransactionWirePlan(fixture);
+        wire.holdPreparedCommand = 0x17;
+        fixture.peer.holdCommand = 0x17;
+        running = captureFailure(transactionFeature(fixture).run(
+          new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            fixture.peer.responses.push(prepareResponse(7, 4));
+            const insertRows = session.mysqlFeatures.insertRows;
+            if (insertRows === undefined) {
+              throw new Error('Expected transaction-scoped insertRows.');
+            }
+            try {
+              await insertRows.execute(
+                ['t'], ['a', 'b'], threeInsertPairs(),
+                twoRowInsertOptions());
+            } catch (error) {
+              insertFailure.value = error as Object;
+              throw error as Error;
+            } finally {
+              insertSettled = true;
+            }
+          }));
+
+        await wire.preparedEntered.promise;
+        cancelling = captureFailure(fixture.connection.cancel());
+        await control.cleaning.promise;
+        fixture.peer.holdCommand = -1;
+        fixture.peer.emitResponse([
+          okPayload(StatusFlags.AUTOCOMMIT | StatusFlags.IN_TRANS)
+        ]);
+        await flushPrepared();
+
+        expect(insertSettled).assertFalse();
+        expect(preparedCommandCount(fixture, 0x16)).assertEqual(1);
+        expect(preparedCommandCount(fixture, 0x17)).assertEqual(1);
+
+        closing.release();
+        const cancellationFailure = operationFailure(await cancelling);
+        const failure = await running;
+
+        expect(cancellationFailure.primary === cleanup).assertTrue();
+        const partial = requiredBatchFailure(insertFailure.value);
+        expect(failure === partial).assertTrue();
+        expect(partial.primary === cleanup).assertTrue();
+        expect(partial.failedOutcome)
+          .assertEqual(MySqlExecutionOutcome.Completed);
+        expect(partial.failedIndex).assertEqual(0);
+        expect(partial.completedResults.length).assertEqual(1);
+        expect(preparedCommandCount(fixture, 0x16)).assertEqual(1);
+        expect(preparedCommandCount(fixture, 0x17)).assertEqual(1);
+        expect(control.commands.join(',')).assertEqual('KILL QUERY 42');
+      } finally {
+        closing.release();
+        fixture.peer.holdCommand = -1;
+        if (preparedCommandCount(fixture, 0x16) > 1) {
+          fixture.peer.responses.push([
+            okPayload(StatusFlags.AUTOCOMMIT | StatusFlags.IN_TRANS)
+          ]);
+          fixture.peer.emitResponse(prepareResponse(8, 2));
+        }
+        if (cancelling !== null) await cancelling;
+        if (running !== null) await running;
+        if (wire !== null) wire.dispose();
+        await captureFailure<void>(fixture.close());
+      }
+    });
+
+    it('insertRowsRetainsDecodedGroupOnUnknownCancellationRetirement', 0, async () => {
+      const control = new TransactionControlConnection();
+      const queryAllowed = new PreparedGate();
+      control.querying = queryAllowed;
+      control.failure = new ArkDbError(ArkDbErrorKind.Network,
+        'Synthetic uncertain insertRows KILL dispatch.',
+        'INSERT_ROWS_KILL_UNKNOWN', '08S01');
+      const fixture = new PreparedExecutionFixture(
+        Capabilities.PROTOCOL_41, (): DbConnection => control);
+      await fixture.open();
+      let wire: TransactionWirePlan | null = null;
+      let cancelling: Promise<Object | null> | null = null;
+      let running: Promise<Object | null> | null = null;
+      const insertFailure = new TransactionFailureCapture();
+      let insertSettled = false;
+      try {
+        wire = new TransactionWirePlan(fixture);
+        wire.holdPreparedCommand = 0x17;
+        fixture.peer.holdCommand = 0x17;
+        running = captureFailure(transactionFeature(fixture).run(
+          new TransactionOptionsFixture(),
+          async (session: TransactionSessionView): Promise<void> => {
+            fixture.peer.responses.push(prepareResponse(7, 4));
+            const insertRows = session.mysqlFeatures.insertRows;
+            if (insertRows === undefined) {
+              throw new Error('Expected transaction-scoped insertRows.');
+            }
+            try {
+              await insertRows.execute(
+                ['t'], ['a', 'b'], threeInsertPairs(),
+                twoRowInsertOptions());
+            } catch (error) {
+              insertFailure.value = error as Object;
+              throw error as Error;
+            } finally {
+              insertSettled = true;
+            }
+          }));
+
+        await wire.preparedEntered.promise;
+        cancelling = captureFailure(fixture.connection.cancel());
+        await control.queryEntered.promise;
+        fixture.peer.holdCommand = -1;
+        fixture.peer.emitResponse([
+          okPayload(StatusFlags.AUTOCOMMIT | StatusFlags.IN_TRANS)
+        ]);
+        await flushPrepared();
+
+        expect(insertSettled).assertFalse();
+        expect(preparedCommandCount(fixture, 0x16)).assertEqual(1);
+        expect(preparedCommandCount(fixture, 0x17)).assertEqual(1);
+
+        queryAllowed.release();
+        const cancellationFailure = operationFailure(await cancelling);
+        const failure = await running;
+
+        expect(cancellationFailure.outcome)
+          .assertEqual(MySqlExecutionOutcome.Unknown);
+        const partial = requiredBatchFailure(insertFailure.value);
+        expect(partial.failedOutcome)
+          .assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(partial.failedIndex).assertEqual(0);
+        expect(partial.completedResults.length).assertEqual(1);
+        const outer = operationFailure(failure);
+        expect(outer.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(preparedCommandCount(fixture, 0x16)).assertEqual(1);
+        expect(preparedCommandCount(fixture, 0x17)).assertEqual(1);
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+      } finally {
+        queryAllowed.release();
+        fixture.peer.holdCommand = -1;
+        if (cancelling !== null) await cancelling;
+        if (running !== null) await running;
+        if (wire !== null) wire.dispose();
+        await captureFailure<void>(fixture.close());
       }
     });
 
@@ -1250,7 +1676,9 @@ class TransactionControlConnection implements DbConnection {
   readonly serverInfo: ServerInfo = new ServerInfo();
   readonly commands: string[] = [];
   readonly cleaning: PreparedGate = new PreparedGate();
+  readonly queryEntered: PreparedGate = new PreparedGate();
   opening: PreparedGate | null = null;
+  querying: PreparedGate | null = null;
   closing: PreparedGate | null = null;
   failure: ArkDbError | null = null;
   cleanupFailure: ArkDbError | null = null;
@@ -1262,6 +1690,8 @@ class TransactionControlConnection implements DbConnection {
 
   async query(sql: string): Promise<QueryResult> {
     this.commands.push(sql);
+    this.queryEntered.release();
+    if (this.querying !== null) await this.querying.promise;
     if (this.failure !== null) throw this.failure;
     return new QueryResult();
   }
@@ -1274,9 +1704,15 @@ class TransactionControlConnection implements DbConnection {
   }
 }
 
+class TransactionFailureCapture {
+  value: Object | null = null;
+}
+
 class TransactionWirePlan {
   readonly entered: PreparedGate = new PreparedGate();
+  readonly preparedEntered: PreparedGate = new PreparedGate();
   holdSql: string | null = null;
+  holdPreparedCommand: number = -1;
   failSql: string | null = null;
   failure: ArkDbError | null = null;
   commitServerError: boolean = false;
@@ -1287,6 +1723,9 @@ class TransactionWirePlan {
   constructor(fixture: PreparedExecutionFixture) {
     this.fixture = fixture;
     this.fixture.peer.onCommand = (command: number): void => {
+      if (command === this.holdPreparedCommand) {
+        this.preparedEntered.release();
+      }
       if (command !== 0x03) return;
       const sql = currentCommandSql(this.fixture);
       if (this.failSql === sql && this.failure !== null) {
@@ -1341,6 +1780,55 @@ function transactionFeature(fixture: PreparedExecutionFixture): TransactionRunne
 function requiredTransactionSession(value: TransactionSessionView | null): TransactionSessionView {
   if (value === null) throw new Error('Expected the callback transaction session.');
   return value;
+}
+
+function requiredInsertRows(
+  value: MySqlInsertRowsExecutor | null): MySqlInsertRowsExecutor {
+  if (value === null) {
+    throw new Error('Expected captured transaction-scoped insertRows.');
+  }
+  return value;
+}
+
+function requiredBatchFailure(value: Object | null): MySqlBatchError {
+  expect(value instanceof MySqlBatchError).assertTrue();
+  if (!(value instanceof MySqlBatchError)) {
+    throw new Error('Expected partial MySqlBatchError.');
+  }
+  return value;
+}
+
+function requiredBatchPromise(
+  value: Promise<MySqlBatchResult> | null): Promise<MySqlBatchResult> {
+  if (value === null) {
+    throw new Error('Expected captured insertRows promise.');
+  }
+  return value;
+}
+
+function twoRowInsertOptions(): MySqlInsertRowsOptions {
+  const options = new MySqlInsertRowsOptions();
+  options.maxPacketBytes = 45;
+  return options;
+}
+
+function threeInsertPairs(): MySqlParameter[][] {
+  return [
+    insertPair(1, 2), insertPair(3, 4), insertPair(5, 6)
+  ];
+}
+
+function insertPair(first: number, second: number): MySqlParameter[] {
+  return [
+    new MySqlParameter(MySqlParameterType.Int32, first),
+    new MySqlParameter(MySqlParameterType.Int32, second)
+  ];
+}
+
+function preparedCommandCount(
+  fixture: PreparedExecutionFixture, command: number): number {
+  return fixture.peer.commands()
+    .filter((value: number): boolean => value === command).length;
 }
 
 async function captureFailure<T>(task: Promise<T>): Promise<Object | null> {

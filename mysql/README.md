@@ -312,6 +312,62 @@ Successful items retain their native `MySqlQueryResult` values. A failure throws
 start, commit or roll back a transaction, and invocation inside an active
 transaction is rejected.
 
+### Restricted multi-row INSERT
+
+Built-in connections expose the optional
+`requireMySqlFeatures(connection).insertRows` executor. Its single
+`execute(tableParts, columns, rows, options?)` interface accepts only a table
+identifier path, column identifier segments and rows of typed
+`MySqlParameter` values. It generates exactly
+`INSERT INTO <quoted table> (<quoted columns>) VALUES (...)` with positional
+placeholders. SQL-looking identifier text remains quoted identifier content.
+There is no raw SQL, expression, suffix, `INSERT IGNORE`, `REPLACE` or
+`ON DUPLICATE KEY UPDATE` interface.
+
+`MySqlInsertRowsOptions` retains the batch `maxItems`, `maxBufferedBytes` and
+`queryOptions` limits and adds `maxPacketBytes`, defaulting to and capped at
+16777216. Before dispatch, the executor snapshots every identifier, row,
+parameter and option, validates equal row/column counts, and greedily emits the
+largest consecutive row prefix whose generated PREPARE and EXECUTE payloads
+both fit `maxPacketBytes` and whose flattened parameter count is at most 65535.
+It validates options, `maxItems`, table and columns before touching inner rows,
+then validates every row width with the established row-count error semantics.
+Only after all widths pass does it copy every caller-owned inner row array, and
+it reads parameter value getters only from those captured arrays. Getter-side
+mutation therefore cannot replace sibling bindings, append hidden parameters or
+turn a later row into a post-PREPARE width failure. Request-level failures keep
+`failedIndex = 0`; row-specific failures report their source row.
+The four-byte packet frame is not counted. A single row that cannot fit fails
+before network use. Empty rows still validate identifiers and options, then
+return an empty `MySqlBatchResult` without requiring a connection.
+
+Each emitted statement is prepared, executed once through the binary protocol,
+and closed under one command scope. `MySqlBatchResult.results` contains one
+native result per emitted statement. On failure, `MySqlBatchError` preserves
+completed statement results and reports the first source-row index in the
+failed statement. Unknown writes are never retried or repartitioned. The
+cumulative buffered-result budget spans all emitted statements.
+
+Unlike the generic prepared batch executor, restricted INSERT can run inside a
+caller-owned manual transaction. Transaction callback sessions expose an owned
+`session.mysqlFeatures.insertRows` adapter that reuses the callback's reserved
+scope; the helper itself never starts, commits or rolls back. Completed results
+inside that callback report server completion, not durability. Session reset
+invalidates the physical insert executor and the stable feature facade resolves
+a new generation on its next nonempty call. After every callback-scoped emitted
+statement, the executor joins cancellation/control cleanup before closing that
+statement or preparing the next group. A cleanup failure therefore returns from
+the `insertRows` call as a partial `MySqlBatchError`; a decoded completed group
+is retained even when uncertain cancellation retires the connection and forces
+an `Unknown` outcome.
+
+The callback-scoped `execute` method returns the exact promise tracked by the
+transaction session rather than an async wrapper. If snapshot validation fails
+before command tracking begins, it returns the same rejected
+`MySqlBatchError` promise with an internal nontransforming rejection observer.
+Awaiting callers receive the original error identity and outcome, while ignored
+calls do not leak an unhandled rejection.
+
 Built-in connections also expose the optional
 `requireMySqlFeatures(connection).transactions` runner. Check that member
 separately. `MySqlTransactionOptions` defaults to
@@ -327,7 +383,9 @@ The callback receives a scoped `MySqlSession`. Its query/stream and
 savepoint/rollback-to/release operations share one physical command owner. The
 facade expires as soon as the callback settles, waits for owned
 cancellation/control cleanup before later child commands or final settlement,
-and omits root prepared, batch and nested-transaction executors. The root
+and omits root prepared, batch, named, procedure and nested-transaction
+executors. It exposes only the owned restricted INSERT adapter in addition to
+query/stream/savepoint operations. The root
 connection's savepoint methods reject because only the callback facade may use
 that scope.
 

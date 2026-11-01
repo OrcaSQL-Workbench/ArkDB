@@ -1,9 +1,11 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionConfig, ConnectionState, MySqlConnection,
+  MySqlBatchResult,
   MySqlCommandKind, MySqlConnectionExtensions, MySqlConnectionFeatures,
   MySqlConnectionOptions, MySqlDeadlineExecutor, MySqlDeadlineOptions, MySqlDriverFactory,
   MySqlExecutionEvent, MySqlExecutionEventType, MySqlExecutionObserver,
+  MySqlInsertRowsExecutor, MySqlInsertRowsOptions,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameter, MySqlParameterType,
   MySqlParameterValue, MySqlPreparedExecutor,
   MySqlPreparedStatement, MySqlProcedureCaller, MySqlProcedureArgument,
@@ -24,11 +26,13 @@ export default function preparedPublicInterfaceTest(): void {
       const namedExecutor: MySqlNamedExecutor | undefined = features.named;
       const procedures: MySqlProcedureCaller | undefined = features.procedures;
       const deadlines: MySqlDeadlineExecutor | undefined = features.deadlines;
+      const insertRows: MySqlInsertRowsExecutor | undefined = features.insertRows;
       const sessionController: MySqlSessionController | undefined = features.session;
       expect(executor !== undefined).assertTrue();
       expect(namedExecutor !== undefined).assertTrue();
       expect(procedures !== undefined).assertTrue();
       expect(deadlines !== undefined).assertTrue();
+      expect(insertRows !== undefined).assertTrue();
       expect(sessionController !== undefined).assertTrue();
       expect(session.mysqlFeatures === features).assertTrue();
       expect(session.serverInfo === connection.serverInfo).assertTrue();
@@ -72,6 +76,9 @@ export default function preparedPublicInterfaceTest(): void {
       deadlineCopy.queryOptions.maxRows = 2;
       expect(deadlineOptions.timeoutMs).assertEqual(25);
       expect(deadlineOptions.queryOptions.maxRows).assertEqual(1);
+      const insertOptions: MySqlInsertRowsOptions = new MySqlInsertRowsOptions();
+      expect(insertOptions.maxPacketBytes).assertEqual(16777216);
+      expect(insertOptions.validate().length).assertEqual(0);
       await connection.close();
       if (sessionController === undefined) throw ArkDbError.unsupported('Expected session reset support.');
       let resetFailure: Object | null = null;
@@ -235,4 +242,12 @@ async function procedureSignatures(caller: MySqlProcedureCaller,
       new MySqlParameter(MySqlParameterType.UInt64, 9n))
   ];
   return caller.call(['app', 'read_values'], parameters, options);
+}
+
+async function insertRowsSignatures(executor: MySqlInsertRowsExecutor,
+  options: MySqlInsertRowsOptions): Promise<MySqlBatchResult> {
+  return executor.execute(['app', 'values'], ['id', 'value'], [[
+    new MySqlParameter(MySqlParameterType.Int32, 1),
+    new MySqlParameter(MySqlParameterType.Text, 'one')
+  ]], options);
 }

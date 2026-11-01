@@ -855,6 +855,7 @@ export default function mySqlExecutionObserverTest(): void {
         await transport.closeEntered.promise;
         await flushPrepared();
         expect(settled).assertFalse();
+        expect(observer.terminals).assertEqual(0);
         const closeTask = observer.reenteredClose;
         if (closeTask === null) throw new Error('Expected root close start reentry.');
 
@@ -874,6 +875,144 @@ export default function mySqlExecutionObserverTest(): void {
       } finally {
         transport.closeAllowed.release();
         await executing;
+        if (observer.reenteredClose !== null) {
+          await executionFailure(observer.reenteredClose);
+        }
+      }
+    });
+
+    it('bufferedStartReentryWaitsForRootCloseCleanup', 0, async () => {
+      const observer = new StartCloseObserver();
+      const transport = new GatedFailingCloseTransport();
+      transport.failure = new Error('Synthetic buffered start root close failure.');
+      const fixture = new ObserverFixture(
+        observer, undefined, undefined, transport);
+      observer.target = fixture.connection;
+      await fixture.open();
+      observer.kind = MySqlCommandKind.Query;
+      let settled = false;
+      const querying = executionFailure(fixture.connection.query('SELECT start_reentry'))
+        .then((failure: Object | null): Object | null => {
+          settled = true;
+          return failure;
+        });
+      try {
+        await observer.entered.promise;
+        await transport.closeEntered.promise;
+        await flushPrepared();
+        expect(settled).assertFalse();
+        expect(observer.terminals).assertEqual(0);
+        const closeTask = observer.reenteredClose;
+        if (closeTask === null) throw new Error('Expected root close start reentry.');
+
+        transport.closeAllowed.release();
+        const closeFailure = await executionFailure(closeTask);
+        const failure = await querying;
+        expect(closeFailure instanceof MySqlOperationError).assertTrue();
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError &&
+          closeFailure instanceof MySqlOperationError) {
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+          expect(failure.cleanupErrors.length).assertEqual(1);
+          expect(failure.cleanupErrors[0] === closeFailure).assertTrue();
+        }
+        expect(observer.starts).assertEqual(1);
+        expect(observer.terminals).assertEqual(1);
+      } finally {
+        transport.closeAllowed.release();
+        await querying;
+        if (observer.reenteredClose !== null) {
+          await executionFailure(observer.reenteredClose);
+        }
+      }
+    });
+
+    it('streamStartReentryWaitsForRootCloseCleanup', 0, async () => {
+      const observer = new StartCloseObserver();
+      const transport = new GatedFailingCloseTransport();
+      transport.failure = new Error('Synthetic stream start root close failure.');
+      const fixture = new ObserverFixture(
+        observer, undefined, undefined, transport);
+      observer.target = fixture.connection;
+      await fixture.open();
+      observer.kind = MySqlCommandKind.QueryStream;
+      let settled = false;
+      const querying = executionFailure(fixture.connection.queryStream(
+        'SELECT start_reentry', new QueryOptions(), new HeldRowsSink()))
+        .then((failure: Object | null): Object | null => {
+          settled = true;
+          return failure;
+        });
+      try {
+        await observer.entered.promise;
+        await transport.closeEntered.promise;
+        await flushPrepared();
+        expect(settled).assertFalse();
+        expect(observer.terminals).assertEqual(0);
+        const closeTask = observer.reenteredClose;
+        if (closeTask === null) throw new Error('Expected root close start reentry.');
+
+        transport.closeAllowed.release();
+        const closeFailure = await executionFailure(closeTask);
+        const failure = await querying;
+        expect(closeFailure instanceof MySqlOperationError).assertTrue();
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError &&
+          closeFailure instanceof MySqlOperationError) {
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+          expect(failure.cleanupErrors.length).assertEqual(1);
+          expect(failure.cleanupErrors[0] === closeFailure).assertTrue();
+        }
+        expect(observer.starts).assertEqual(1);
+        expect(observer.terminals).assertEqual(1);
+      } finally {
+        transport.closeAllowed.release();
+        await querying;
+        if (observer.reenteredClose !== null) {
+          await executionFailure(observer.reenteredClose);
+        }
+      }
+    });
+
+    it('executeOkStartReentryWaitsForRootCloseCleanup', 0, async () => {
+      const observer = new StartCloseObserver();
+      const transport = new GatedFailingCloseTransport();
+      transport.failure = new Error('Synthetic execute OK start root close failure.');
+      const fixture = new ObserverFixture(
+        observer, undefined, undefined, transport);
+      observer.target = fixture.connection;
+      await fixture.open();
+      observer.kind = MySqlCommandKind.Ping;
+      let settled = false;
+      const pinging = executionFailure(fixture.connection.ping())
+        .then((failure: Object | null): Object | null => {
+          settled = true;
+          return failure;
+        });
+      try {
+        await observer.entered.promise;
+        await transport.closeEntered.promise;
+        await flushPrepared();
+        expect(settled).assertFalse();
+        const closeTask = observer.reenteredClose;
+        if (closeTask === null) throw new Error('Expected root close start reentry.');
+
+        transport.closeAllowed.release();
+        const closeFailure = await executionFailure(closeTask);
+        const failure = await pinging;
+        expect(closeFailure instanceof MySqlOperationError).assertTrue();
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError &&
+          closeFailure instanceof MySqlOperationError) {
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+          expect(failure.cleanupErrors.length).assertEqual(1);
+          expect(failure.cleanupErrors[0] === closeFailure).assertTrue();
+        }
+        expect(observer.starts).assertEqual(1);
+        expect(observer.terminals).assertEqual(1);
+      } finally {
+        transport.closeAllowed.release();
+        await pinging;
         if (observer.reenteredClose !== null) {
           await executionFailure(observer.reenteredClose);
         }

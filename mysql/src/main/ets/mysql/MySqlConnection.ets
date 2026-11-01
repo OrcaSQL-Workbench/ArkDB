@@ -143,6 +143,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   private named: MySqlPreparedNamedExecutor | null = null;
   private procedures: MySqlPreparedProcedureCaller | null = null;
   private prepared: InternalPreparedExecutor | null = null;
+  private ordinaryOperation: OrdinaryCommandSettlement | null = null;
   private preparedOperation: PreparedCommandSettlement | null = null;
   private transactionOperation: PreparedCommandSettlement | null = null;
 
@@ -495,22 +496,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   /** Run a text SQL statement and return the (fully buffered) result. */
   async query(sql: string): Promise<QueryResult> {
-    const scope = this.reserveCommand(MySqlCommandKind.Query);
-    try {
-      return await this.queryOwned(scope, sql);
-    } finally {
-      this.finishCommand(scope);
-    }
+    return this.runOrdinaryCommand<QueryResult>(MySqlCommandKind.Query,
+      (scope: MySqlCommandScope): Promise<QueryResult> => this.queryOwned(scope, sql));
   }
 
   private async queryWithDeadline(sql: string, options: MySqlDeadlineOptions): Promise<QueryResult> {
-    const scope = this.reserveCommand(MySqlCommandKind.Query);
-    try {
-      return await this.runMySqlDeadline<QueryResult>(scope, options,
-        (): Promise<QueryResult> => this.queryOwnedWithOptions(scope, sql, options.queryOptions));
-    } finally {
-      this.finishCommand(scope);
-    }
+    return this.runOrdinaryCommand<QueryResult>(MySqlCommandKind.Query,
+      (scope: MySqlCommandScope): Promise<QueryResult> =>
+        this.runMySqlDeadline<QueryResult>(scope, options,
+          (): Promise<QueryResult> => this.queryOwnedWithOptions(scope, sql, options.queryOptions)));
   }
 
   private executeWithDeadline(sql: string, parameters: MySqlParameter[],
@@ -582,14 +576,12 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   private async queryStreamInternal(sql: string, options: QueryOptions,
     sink: QueryResultSink): Promise<QueryExecutionSummary> {
-    const scope = this.reserveCommand(MySqlCommandKind.QueryStream);
-    try {
+    return this.runOrdinaryCommand<QueryExecutionSummary>(MySqlCommandKind.QueryStream,
+      (scope: MySqlCommandScope): Promise<QueryExecutionSummary> => {
       const executionOptions = options.clone();
       validateQueryOptions(executionOptions);
-      return await this.queryStreamOwned(scope, sql, executionOptions, sink);
-    } finally {
-      this.finishCommand(scope);
-    }
+      return this.queryStreamOwned(scope, sql, executionOptions, sink);
+    });
   }
 
   private async queryStreamOwned(scope: MySqlCommandScope, sql: string, executionOptions: QueryOptions,
@@ -661,25 +653,21 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   /** Round-trip COM_PING. */
   async ping(): Promise<void> {
-    const scope = this.reserveCommand(MySqlCommandKind.Ping);
-    try {
+    return this.runOrdinaryCommand<void>(MySqlCommandKind.Ping,
+      (scope: MySqlCommandScope): Promise<void> => {
       const command = new PacketWriter().writeUInt8(Command.PING).toUint8Array();
-      await this.executeOkOwned(scope, command);
-    } finally {
-      this.finishCommand(scope);
-    }
+      return this.executeOkOwned(scope, command);
+    });
   }
 
   /** Switch the default database (COM_INIT_DB / USE). */
   async useDatabase(name: string): Promise<void> {
-    const scope = this.reserveCommand(MySqlCommandKind.Context);
-    try {
+    return this.runOrdinaryCommand<void>(MySqlCommandKind.Context,
+      (scope: MySqlCommandScope): Promise<void> => {
       Logger.d(LogTag.Conn, 'useDatabase ' + Logger.mask(name));
       const command = new PacketWriter().writeUInt8(Command.INIT_DB).writeString(name).toUint8Array();
-      await this.executeOkOwned(scope, command);
-    } finally {
-      this.finishCommand(scope);
-    }
+      return this.executeOkOwned(scope, command);
+    });
   }
 
   private async resetSession(): Promise<void> {
@@ -869,13 +857,11 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   private async transactionCommand(sql: string): Promise<MySqlDatabaseSessionStatus> {
-    const scope = this.reserveCommand(MySqlCommandKind.Transaction);
-    try {
-      await this.queryOwned(scope, sql);
-      return this.sessionStatus;
-    } finally {
-      this.finishCommand(scope);
-    }
+    return this.runOrdinaryCommand<MySqlDatabaseSessionStatus>(MySqlCommandKind.Transaction,
+      async (scope: MySqlCommandScope): Promise<MySqlDatabaseSessionStatus> => {
+        await this.queryOwned(scope, sql);
+        return this.sessionStatus;
+      });
   }
 
   private async transactionQueryStreamOwned(scope: MySqlCommandScope, sql: string,
@@ -1060,6 +1046,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         };
       });
       this.closing = closing;
+      const ordinary = this.ordinaryOperation;
+      if (ordinary !== null && ordinary.scope === scope) ordinary.closeResult = closing;
       const prepared = this.preparedOperation;
       if (prepared !== null && prepared.scope === scope) prepared.closeResult = closing;
       const transaction = this.transactionOperation;
@@ -1234,19 +1222,52 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     return this.commandGate.reserve(kind);
   }
 
-  private reserveCommand(kind: MySqlCommandKind,
-    cachedConvenience: boolean = false): MySqlCommandScope {
+  private async runOrdinaryCommand<T>(kind: MySqlCommandKind,
+    operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
     const scope = this.reserveCommandOwnership(kind);
-    this.commandGate.start(scope);
+    const settlement = new OrdinaryCommandSettlement(scope);
+    this.ordinaryOperation = settlement;
+    let value: T | undefined;
+    let primary: Object | null = null;
+    const cleanup: ArkDbError[] = [];
     try {
-      if (!cachedConvenience && this.prepared !== null) {
+      this.commandGate.start(scope);
+      if (this.prepared !== null) {
         this.prepared.retireCacheContext(scope);
       }
-      return scope;
+      value = await operation(scope);
     } catch (error) {
-      this.finishCommand(scope);
-      throw error as Error;
+      primary = error as Object;
     }
+    const executionOutcome = primary instanceof MySqlOperationError ? primary.outcome :
+      (primary === null ? MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.NotDispatched);
+    const closeJoin = this.ordinaryCloseJoin(scope);
+    if (closeJoin !== null) {
+      const closeFailure = await closeJoin;
+      if (closeFailure !== null) {
+        if (primary === null) primary = closeFailure;
+        else if (!operationContainsFailure(primary, closeFailure)) cleanup.push(closeFailure);
+      }
+    }
+    try {
+      this.finishCommand(scope);
+    } catch (error) {
+      cleanup.push(toCleanupError(error as Object));
+    }
+    if (this.ordinaryOperation === settlement) this.ordinaryOperation = null;
+    if (primary !== null) {
+      if (cleanup.length === 0 &&
+        (settlement.closeResult === null ||
+          (primary instanceof MySqlOperationError &&
+            primary.outcome === executionOutcome))) {
+        throw primary as Error;
+      }
+      throw operationFailure(primary, cleanup, executionOutcome);
+    }
+    if (cleanup.length > 0) {
+      throw operationFailure(cleanup[0], cleanup.slice(1), MySqlExecutionOutcome.Completed);
+    }
+    return value!;
   }
 
   private reserveTransactionRunnerScope(): MySqlCommandScope {
@@ -1448,7 +1469,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         this.appendDeadlineCleanup(cleanup,
           ArkDbError.timeout('MySQL operation did not settle during bounded post-abort cleanup.'));
       }
-      await this.joinDeadlineClose(cleanup);
+      await this.joinDeadlineClose(scope, cleanup);
       return Promise.reject<T>(
         new MySqlOperationError(timeout, cleanup, MySqlExecutionOutcome.Unknown));
     } finally {
@@ -1462,7 +1483,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     closeCleanup: ArkDbError[]): Promise<void> {
     await observation.settled;
     await this.settleDeadlineCancellationAttempts(settlement);
-    await this.joinDeadlineClose(closeCleanup);
+    await this.joinDeadlineClose(settlement.scope, closeCleanup);
     await this.settleDeadlineCancellationAttempts(settlement);
   }
 
@@ -1521,7 +1542,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     });
   }
 
-  private async joinDeadlineClose(cleanup: ArkDbError[]): Promise<void> {
+  private async joinDeadlineClose(scope: MySqlCommandScope,
+    cleanup: ArkDbError[]): Promise<void> {
+    const ordinaryClose = this.ordinaryCloseJoin(scope);
+    if (ordinaryClose !== null) {
+      const failure = await ordinaryClose;
+      if (failure !== null) this.appendDeadlineCleanup(cleanup, failure);
+      return;
+    }
     const closing = this.closing;
     if (closing === null) return;
     try {
@@ -1529,6 +1557,19 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } catch (failure) {
       this.appendDeadlineCleanup(cleanup, failure as Object);
     }
+  }
+
+  private ordinaryCloseJoin(
+    scope: MySqlCommandScope): Promise<ArkDbError | null> | null {
+    const settlement = this.ordinaryOperation;
+    if (settlement === null || settlement.scope !== scope ||
+      settlement.closeResult === null) return null;
+    if (settlement.closeJoin === null) {
+      settlement.closeJoin = settlement.closeResult.then(
+        (): ArkDbError | null => null,
+        (error: Object): ArkDbError | null => toCleanupError(error));
+    }
+    return settlement.closeJoin;
   }
 
   private async retireDeadlineScope(scope: MySqlCommandScope,
@@ -2058,6 +2099,16 @@ class PreparedCommandSettlement {
   }
 }
 
+class OrdinaryCommandSettlement {
+  readonly scope: MySqlCommandScope;
+  closeResult: Promise<void> | null = null;
+  closeJoin: Promise<ArkDbError | null> | null = null;
+
+  constructor(scope: MySqlCommandScope) {
+    this.scope = scope;
+  }
+}
+
 class DeadlineObservation<T> {
   readonly settled: Promise<void>;
   value: T | undefined = undefined;
@@ -2374,6 +2425,16 @@ function operationFailure(error: Object, cleanupErrors: ArkDbError[],
   }
   return new MySqlOperationError(toArkDbError(error), cleanupErrors, outcome,
     error instanceof ArkDbError ? undefined : error);
+}
+
+function operationContainsFailure(error: Object, expected: ArkDbError): boolean {
+  if (error === expected) return true;
+  if (!(error instanceof MySqlOperationError)) return false;
+  if (operationContainsFailure(error.primary, expected)) return true;
+  for (const cleanup of error.cleanupErrors) {
+    if (operationContainsFailure(cleanup, expected)) return true;
+  }
+  return false;
 }
 
 function callbackFailure(error: Object): MySqlOperationError {

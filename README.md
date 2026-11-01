@@ -133,9 +133,10 @@ hashes the supplied signed HAP, compares its signing-independent application
 content with the prepared harness, verifies the package signature with
 `hap-sign-tool.jar verify-app`, and checks the sealed manifest/consumer before
 publishing external evidence. The verified certificate-chain and provisioning
-profile digests are retained in that evidence. Preparation and synthetic tests
-are not device evidence; hardware attestation, read-only grants and production
-certification remain explicitly false.
+profile digests are retained in that evidence. Operator evidence is bound, but
+direct physical-device and authorized-schema attestations are not inferred.
+Preparation and synthetic tests are not device evidence; hardware attestation,
+read-only grants and production certification remain explicitly false.
 
 Use the matching source/consumer when verifying an older major release. Historical single-HAR and dependency-set records remain readable without treating them as evidence for the current architecture.
 

@@ -129,8 +129,9 @@ can be resumed without creating an accepted/rejected ambiguity. Every manifest
 case must appear once, in order, with `passed`; the aggregate must contain zero
 failures, errors and ignored cases. Terminal challenges cannot be replayed.
 The output binds `operatorEvidenceId` and records the operator-attestation trust
-boundary explicitly; it does not claim hardware remote attestation, read-only
-privilege verification or production certification.
+boundary explicitly, but does not infer direct physical-device or
+authorized-schema attestation; it does not claim hardware remote attestation,
+read-only privilege verification or production certification.
 
 The local release evidence uses schema 3. It preserves the exact raw unsigned
 HAP digest/size and also records a canonical content fingerprint that ignores

@@ -220,14 +220,18 @@ CA path, result rows and raw errors cannot be persisted. It atomically renames
 the state can be atomically renamed `accepted` or `rejected`. Cleanup failure
 remains recoverable and a record-write interruption can resume without creating
 conflicting terminal states. The external result states that operator
-attestation is the trust boundary and keeps hardware attestation, read-only
-privilege verification and production certification false.
+evidence is the trust boundary, but does not infer direct physical-device or
+authorized-schema attestation; hardware attestation, read-only privilege
+verification and production certification remain false.
 
 `--out` is canonicalized through existing parent directories and must remain
 outside every device challenge workspace, the verifier state directory and the
 sealed release bundle; ancestor junction/symlink aliases cannot bypass those
 boundaries. A fresh challenge requires an unused destination. Recovery accepts
-an existing destination only when its exact bytes match the frozen claim.
+an existing destination only when its exact bytes match the frozen claim. If
+publication never created the original output, recovery may atomically retarget
+one other unused, boundary-safe destination; a published output cannot be
+retargeted or duplicated.
 Receipt-only verification cannot claim signed-HAP acceptance; that state is
 available only through the artifact validator above.
 

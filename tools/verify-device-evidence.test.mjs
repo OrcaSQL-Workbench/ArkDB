@@ -1122,6 +1122,8 @@ test('validates the actual signed HAP and complete receipt provenance before ext
   assert.equal(verified.record.operatorEvidenceId, 'operator-evidence-001');
   assert.equal(verified.record.liveNetworkingVerified, true);
   assert.equal(verified.record.hardwareAttested, false);
+  assert.equal(verified.record.physicalDeviceAttestedByOperator, false);
+  assert.equal(verified.record.authorizedSchemaAttestedByOperator, false);
   assert.deepEqual(JSON.parse(await readFile(outPath, 'utf8')), verified.record);
 });
 
@@ -1310,6 +1312,86 @@ test('recovers external evidence publication before terminally consuming the cha
   }));
   assert.equal(recovered.record.verifiedAt, '2026-11-01T01:00:00.000Z');
   assert.deepEqual(JSON.parse(await readFile(outPath, 'utf8')), recovered.record);
+});
+
+test('retargets recoverable evidence when the original output was never published', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x5a });
+  const hapPath = join(f.fixture.root, 'retarget-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'retarget-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  const originalOutPath = join(f.fixture.root, 'unavailable-device-evidence.json');
+  const recoveredOutPath = join(f.fixture.root, 'recovered-device-evidence.json');
+  const options = {
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: originalOutPath
+  };
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async writeExternalRecord() {
+      throw new Error('Synthetic unavailable output destination.');
+    }
+  })), /unavailable output destination/i);
+  assert.equal(existsSync(originalOutPath), false);
+
+  const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts({
+    ...options,
+    outPath: recoveredOutPath
+  }, artifactDependencies({
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  }));
+  assert.equal(recovered.recordPath, recoveredOutPath);
+  assert.equal(existsSync(originalOutPath), false);
+  assert.deepEqual(JSON.parse(await readFile(recoveredOutPath, 'utf8')), recovered.record);
+});
+
+test('does not retarget evidence after the original output was published', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x5b });
+  const hapPath = join(f.fixture.root, 'published-retarget-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'published-retarget-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  const originalOutPath = join(f.fixture.root, 'published-device-evidence.json');
+  const options = {
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: originalOutPath
+  };
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async writeExternalRecord(path, record) {
+      await writeFile(path, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
+      throw new Error('Synthetic interruption after published output.');
+    }
+  })), /interruption after published output/i);
+  assert.equal(existsSync(originalOutPath), true);
+
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    ...options,
+    outPath: join(f.fixture.root, 'must-not-duplicate-evidence.json')
+  }, artifactDependencies({
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  })), /published device evidence cannot be retargeted/i);
+  assert.equal(existsSync(originalOutPath), true);
 });
 
 test('recovers an exact external record written before publication interruption', async (t) => {

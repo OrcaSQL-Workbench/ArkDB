@@ -1059,11 +1059,11 @@ function acceptedRecord(parsed, challenge, receiptBytes, now, acceptanceContext 
     signedHapVerified: true,
     liveNetworkingVerified: true,
     operatorEvidenceBound: true,
-    physicalDeviceAttestedByOperator: true,
-    authorizedSchemaAttestedByOperator: true,
+    physicalDeviceAttestedByOperator: false,
+    authorizedSchemaAttestedByOperator: false,
     operatorAttestationTrustBoundary:
       'Receipt, verified signed-HAP bytes, signing certificate/profile digests, and operator ' +
-      'evidence ID are bound; no hardware remote attestation is claimed.'
+      'evidence ID are bound; no direct physical-device or schema attestation is inferred.'
   };
 }
 
@@ -1105,6 +1105,9 @@ function validateClaim(claim, receiptBytes, parsed, decision, recordPath, output
     claim.payloadSha256 !== sha256(Buffer.from(parsed.envelope.payload, 'utf8')) ||
     claim.decision !== decision || claim.recordName !== basename(recordPath) ||
     claim.recordSha256 !== sha256(recordBytes(claim.record)) ||
+    (outputPath !== null
+      ? typeof claim.outputPath !== 'string' || !isAbsolute(claim.outputPath)
+      : claim.outputPath !== null) ||
     claim.outputPath !== outputPath) {
     throw new Error('Device verification recovery belongs to a different receipt or decision.');
   }
@@ -1298,7 +1301,7 @@ async function releaseProcessLock(path, identity) {
   await syncDirectory(dirname(path));
 }
 
-async function acquireClaimLock(path, candidateClaim, receiptBytes, parsed, outputPath, dependencies) {
+async function acquireClaimLock(path, candidateClaim, receiptBytes, parsed, dependencies) {
   await recoverAtomicState(path);
   const identity = {
     schemaVersion: 1,
@@ -1328,26 +1331,27 @@ async function acquireClaimLock(path, candidateClaim, receiptBytes, parsed, outp
         ? join(dirname(path), `${existing.claim?.challenge?.challengeId}.rejection.json`) : '';
     if (recordPath.length === 0) throw new Error('Device challenge claim lock has no valid decision.');
     const storedClaim = validateClaim(existing.claim, receiptBytes, parsed, decision, recordPath,
-      decision === 'accepted' ? outputPath : null);
+      decision === 'accepted' ? existing.claim?.outputPath : null);
     if (candidateClaim !== null &&
       (candidateClaim.receiptSha256 !== storedClaim.receiptSha256 ||
         candidateClaim.payloadSha256 !== storedClaim.payloadSha256 ||
         candidateClaim.decision !== storedClaim.decision ||
+        candidateClaim.recordName !== storedClaim.recordName ||
         candidateClaim.recordSha256 !== storedClaim.recordSha256 ||
-        candidateClaim.outputPath !== storedClaim.outputPath ||
         JSON.stringify(candidateClaim.challenge) !== JSON.stringify(storedClaim.challenge))) {
       throw new Error('Device challenge is claimed by a different receipt.');
     }
     if (processAlive(existing.pid, dependencies)) {
       throw new Error('Device challenge verification is already in progress.');
     }
+    const selectedClaim = candidateClaim ?? storedClaim;
     const replacement = recordBytes({
       schemaVersion: 1,
       kind: 'arkdb-device-claim-lock',
       pid: process.pid,
-      claim: storedClaim
+      claim: selectedClaim
     });
-    if (await replaceStaleLock(path, existingBytes, replacement, dependencies)) return storedClaim;
+    if (await replaceStaleLock(path, existingBytes, replacement, dependencies)) return selectedClaim;
   }
   throw new Error('Device challenge claim lock changed during recovery.');
 }
@@ -1397,7 +1401,8 @@ async function verifyBoundDeviceEvidence({
   acceptanceContext = null,
   outputPath = null
 }, dependencies = {}) {
-  if (confirmPhysicalDevice !== true || confirmAuthorizedSchema !== true) {
+  if (acceptanceContext === null &&
+    (confirmPhysicalDevice !== true || confirmAuthorizedSchema !== true)) {
     throw new Error('Device evidence requires explicit physical-device and authorized-schema operator attestations.');
   }
   const requestedOutputPath = outputPath === null ? null : resolve(outputPath);
@@ -1564,22 +1569,37 @@ async function verifyBoundDeviceEvidence({
     }
     throw new Error('Device challenge is not pending or recoverable.');
   }
+  const recoverableClaim = claim ?? lockedClaim;
   if (frozenOutputPath !== null && existsSync(frozenOutputPath)) {
     if (initialClaim && claim.decision === 'accepted') {
       throw new Error('Device evidence output must be unused for a fresh challenge.');
     }
-    const recoverableClaim = claim ?? lockedClaim;
     if (recoverableClaim?.decision === 'accepted') {
       const validatedClaim = validateClaim(recoverableClaim, receiptBytes, parsed, 'accepted',
-        states.acceptedRecord, frozenOutputPath);
+        states.acceptedRecord, recoverableClaim.outputPath);
       await validateExistingRecord(frozenOutputPath, validatedClaim.recordSha256);
     }
   }
-  claim = await acquireClaimLock(states.lock, claim, receiptBytes, parsed, frozenOutputPath,
-    dependencies);
+  claim = await acquireClaimLock(states.lock, claim, receiptBytes, parsed, dependencies);
   validateChallenge(claim.challenge, set, bundle, cases, caseBytes);
   const decision = claim.decision;
   const recordPath = decision === 'accepted' ? states.acceptedRecord : states.rejectedRecord;
+  claim = validateClaim(claim, receiptBytes, parsed, decision, recordPath,
+    decision === 'accepted' ? claim.outputPath : null);
+  if (decision === 'accepted' && claim.outputPath !== frozenOutputPath) {
+    if (await validateExistingRecord(claim.outputPath, claim.recordSha256)) {
+      throw new Error('Published device evidence cannot be retargeted.');
+    }
+    claim = { ...claim, outputPath: frozenOutputPath };
+    if (verifyingExists) await atomicReplace(states.verifying, recordBytes(claim));
+    else if (pendingHasClaim) await atomicReplace(states.pending, recordBytes(claim));
+    await atomicReplace(states.lock, recordBytes({
+      schemaVersion: 1,
+      kind: 'arkdb-device-claim-lock',
+      pid: process.pid,
+      claim
+    }));
+  }
   claim = validateClaim(claim, receiptBytes, parsed, decision, recordPath,
     decision === 'accepted' ? frozenOutputPath : null);
   if (!verifyingExists) {
@@ -1688,8 +1708,6 @@ export async function verifyDeviceEvidenceArtifacts({
     bundleDirectory: manifestDirectory,
     receiptPath: resolve(receiptPath),
     receiptSnapshot: receiptBytes,
-    confirmPhysicalDevice: true,
-    confirmAuthorizedSchema: true,
     acceptanceContext: {
       hapSha256: actualHapSha256,
       hapByteLength: hapBytes.length,

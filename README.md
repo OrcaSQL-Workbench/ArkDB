@@ -126,7 +126,7 @@ the 24-hour pending challenge last. After owner signing, the operator records
 the actual signed/installed HAP digest and evidence ID in the bound page. The
 signed canonical receipt binds profile/features, run ID, clean source, HAR,
 sample, signed HAP, API/device class, verified TLS mode, auth plugin, run times,
-operator evidence ID and ordered case durations/verdicts. The UI exports its
+immutable challenge window, operator evidence ID and ordered case durations/verdicts. The UI exports its
 exact JSON through an explicit clipboard action. No host, port, account,
 password, schema, CA path or query data is included. The validator separately
 hashes the supplied signed HAP, compares its signing-independent application

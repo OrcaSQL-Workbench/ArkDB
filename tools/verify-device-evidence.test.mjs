@@ -334,7 +334,11 @@ test('rejects signature tampering, wrong keys, failed cases, and privacy-unsafe 
 test('rejects edited or noncanonical 24-hour challenge timestamps', async (t) => {
   for (const change of [
     { createdAt: '2026-11-01T00:00:01.000Z' },
-    { expiresAt: '2026-11-02T00:00:00Z' }
+    { expiresAt: '2026-11-02T00:00:00Z' },
+    {
+      createdAt: '2026-11-01T00:15:00.000Z',
+      expiresAt: '2026-11-02T00:15:00.000Z'
+    }
   ]) {
     const f = await deviceFixture(t, {
       challengeFill: change.createdAt ? 0x71 : 0x72,
@@ -516,6 +520,89 @@ test('elects one stale-claim recovery owner before replacing the lock', async (t
   }), /recovery.*progress|already.*progress/i);
   releaseOwner();
   const accepted = await recovery;
+  assert.equal(accepted.record.receiptAccepted, true);
+});
+
+test('does not retire a replacement recovery owner during stale-owner takeover', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x35 });
+  const receiptPath = join(f.fixture.root, 'stale-recovery-owner-race.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async afterClaimLock() { throw new Error('Synthetic stale recovery-owner seed.'); }
+  }), /recovery-owner seed/i);
+  const lockPath = join(dirname(f.prepared.challengePath),
+    `${f.prepared.challenge.challengeId}.claim.json`);
+  const staleLock = JSON.parse(await readFile(lockPath, 'utf8'));
+  staleLock.pid = 999998;
+  await writeFile(lockPath, `${JSON.stringify(staleLock, null, 2)}\n`);
+  const ownerPath = join(dirname(lockPath), `${basename(lockPath)}.recovery-owner.json`);
+  await writeFile(ownerPath, `${JSON.stringify({
+    schemaVersion: 1,
+    kind: 'arkdb-lock-recovery-owner',
+    pid: 999997,
+    token: 'aa'.repeat(16)
+  }, null, 2)}\n`);
+
+  let releaseFirstRetire;
+  const holdFirstRetire = new Promise((resolve) => { releaseFirstRetire = resolve; });
+  let markFirstRetire;
+  const firstRetire = new Promise((resolve) => { markFirstRetire = resolve; });
+  let releaseFirstOwner;
+  const holdFirstOwner = new Promise((resolve) => { releaseFirstOwner = resolve; });
+  let markFirstOwner;
+  const firstOwner = new Promise((resolve) => { markFirstOwner = resolve; });
+  const first = verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: (pid) => pid === process.pid,
+    async afterStaleRecoveryOwnerRecheck() {
+      markFirstRetire();
+      await holdFirstRetire;
+    },
+    async afterRecoveryOwner() {
+      markFirstOwner();
+      await holdFirstOwner;
+    }
+  });
+  const firstState = await Promise.race([
+    firstRetire.then(() => 'retire-paused'),
+    firstOwner.then(() => 'owner-started-without-retire-check')
+  ]);
+  if (firstState !== 'retire-paused') {
+    releaseFirstOwner();
+    await first;
+  }
+  assert.equal(firstState, 'retire-paused');
+
+  let releaseSecondRetire;
+  const holdSecondRetire = new Promise((resolve) => { releaseSecondRetire = resolve; });
+  let markSecondRetire;
+  const secondRetire = new Promise((resolve) => { markSecondRetire = resolve; });
+  const second = verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: (pid) => pid === process.pid,
+    async afterStaleRecoveryOwnerRecheck() {
+      markSecondRetire();
+      await holdSecondRetire;
+    }
+  });
+  await secondRetire;
+  releaseFirstRetire();
+  await firstOwner;
+  releaseSecondRetire();
+  await assert.rejects(second, /recovery.*progress|already.*progress/i);
+  releaseFirstOwner();
+  const accepted = await first;
   assert.equal(accepted.record.receiptAccepted, true);
 });
 
@@ -1051,6 +1138,57 @@ test('rejects a non-file external evidence destination before consuming the chal
   assert.equal(existsSync(f.prepared.workDirectory), true);
 });
 
+test('rejects external evidence inside the secret workspace before consuming the challenge', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x40 });
+  const signedHap = Buffer.from(f.hapBytes);
+  const hapPath = join(f.fixture.root, 'secret-work-output-signed-entry.hap');
+  await writeFile(hapPath, signedHap);
+  const receiptPath = join(f.fixture.root, 'secret-work-output-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(signedHap)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(f.prepared.workDirectory, 'device-verified.json')
+  }), /secret workspace|output/i);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(f.prepared.workDirectory), true);
+});
+
+test('rejects secret-workspace output reached through an ancestor junction', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x43 });
+  const signedHap = Buffer.from(f.hapBytes);
+  const hapPath = join(f.fixture.root, 'junction-output-signed-entry.hap');
+  await writeFile(hapPath, signedHap);
+  const receiptPath = join(f.fixture.root, 'junction-output-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(signedHap)
+  ))}\n`);
+  const alias = join(f.fixture.root, 'device-work-alias');
+  await symlink(dirname(f.prepared.workDirectory), alias,
+    process.platform === 'win32' ? 'junction' : 'dir');
+  const stem = 'arkdb-mysql-1.0.0';
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(alias, f.prepared.challenge.challengeId, 'device-verified.json')
+  }), /secret workspace|output/i);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(f.prepared.workDirectory), true);
+});
+
 test('binds the implemented M4 sha256 selection to caching SHA-2 evidence', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x7c });
   const signedHap = Buffer.from(f.hapBytes);
@@ -1115,6 +1253,8 @@ function passingPayload(challenge, hapSha256 = challenge.preparedUnsignedHapSha2
     serverVersion: '8.0.36',
     tlsMode: 'verify_identity',
     authPlugin: 'caching_sha2_password',
+    challengeIssuedAt: challenge.createdAt,
+    challengeExpiresAt: challenge.expiresAt,
     startedAt: '2026-11-01T00:30:00.000Z',
     completedAt: '2026-11-01T00:31:00.000Z',
     operatorEvidenceId: 'operator-evidence-001',

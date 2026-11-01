@@ -86,7 +86,7 @@ ignored cases. Cleanup precedes an atomic terminal state; interrupted cleanup
 remains recoverable. The external record omits credentials, endpoint/schema
 identities, CA paths, result data and raw server messages. It retains the
 profile/features, signed-HAP identity, server/auth/TLS identity, case durations
-and operator evidence ID while explicitly disclaiming hardware attestation,
+challenge window, and operator evidence ID while explicitly disclaiming hardware attestation,
 read-only privilege verification and production certification. No receipt is
 bundled into `dist`. The signed HAP must retain the prepared harness's
 signing-independent content fingerprint; only `META-INF/` signing metadata may

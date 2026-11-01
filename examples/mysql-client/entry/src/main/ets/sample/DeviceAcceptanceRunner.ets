@@ -97,6 +97,8 @@ class DeviceReceiptPayload {
   serverVersion: string = '';
   tlsMode: string = 'verify_identity';
   authPlugin: string = '';
+  challengeIssuedAt: string = '';
+  challengeExpiresAt: string = '';
   startedAt: string = '';
   completedAt: string = '';
   operatorEvidenceId: string = '';
@@ -388,6 +390,8 @@ export class DeviceAcceptanceRunner {
     receipt.serverVersion = serverVersion;
     receipt.tlsMode = 'verify_identity';
     receipt.authPlugin = authPlugin;
+    receipt.challengeIssuedAt = this.binding.createdAt;
+    receipt.challengeExpiresAt = this.binding.expiresAt;
     receipt.startedAt = startedAt;
     receipt.completedAt = completedAt;
     receipt.operatorEvidenceId = operatorEvidenceId;

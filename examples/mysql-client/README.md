@@ -84,7 +84,8 @@ signature. Its allowlisted payload binds profile/product feature keys, run ID,
 clean source commit, sealed HAR SHA-256, sample fingerprint, actual
 signed/installed HAP SHA-256, API/device class, server version, verified TLS
 mode, negotiated authentication plugin, canonical run times, the operator
-evidence ID and ordered case durations/verdicts. It never contains endpoint,
+evidence ID, the immutable challenge issue/expiry window and ordered case
+durations/verdicts. It never contains endpoint,
 account, password, schema, CA path, challenge value, result rows or raw server
 messages.
 Use **Copy exact signed receipt JSON** to place the exact envelope on the local

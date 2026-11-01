@@ -4,9 +4,9 @@ import {
 } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
-  copyFile, cp, link, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile
+  copyFile, cp, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile
 } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ROOT } from './check-package.mjs';
 import { driverVerification, packageStem, tagOutputPaths } from './driver-packages.mjs';
@@ -354,6 +354,11 @@ function stringLiteral(value) {
 function canonicalTime(value) {
   return typeof value === 'string' && CANONICAL_TIME.test(value) &&
     new Date(value).toISOString() === value;
+}
+
+function pathWithin(parent, candidate) {
+  const path = relative(resolve(parent), resolve(candidate));
+  return path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`));
 }
 
 function strictBase64(value, label, maximumBytes) {
@@ -756,8 +761,8 @@ function validateReceipt(envelope, receipt, challenge, cases) {
   exactKeys(receipt, [
     'schemaVersion', 'profile', 'features', 'runId', 'sourceCommit', 'sourceClean',
     'harSha256', 'sampleFingerprint', 'hapSha256', 'apiVersion', 'deviceClass',
-    'serverVersion', 'tlsMode', 'authPlugin', 'startedAt', 'completedAt',
-    'operatorEvidenceId', 'cases'
+    'serverVersion', 'tlsMode', 'authPlugin', 'challengeIssuedAt', 'challengeExpiresAt',
+    'startedAt', 'completedAt', 'operatorEvidenceId', 'cases'
   ], 'Device acceptance receipt');
   if (receipt.schemaVersion !== 1 || !DEVICE_PROFILES.includes(receipt.profile) ||
     !Array.isArray(receipt.features) ||
@@ -775,6 +780,8 @@ function validateReceipt(envelope, receipt, challenge, cases) {
     !cases.runtime.deviceTypes.includes(receipt.deviceClass) ||
     !safePublicLabel(receipt.serverVersion) || receipt.tlsMode !== 'verify_identity' ||
     !DEVICE_AUTH_PLUGINS.includes(receipt.authPlugin) ||
+    receipt.challengeIssuedAt !== challenge.createdAt ||
+    receipt.challengeExpiresAt !== challenge.expiresAt ||
     !canonicalTime(receipt.startedAt) || !canonicalTime(receipt.completedAt) ||
     Date.parse(receipt.startedAt) < Date.parse(challenge.createdAt) ||
     Date.parse(receipt.completedAt) < Date.parse(receipt.startedAt) ||
@@ -870,6 +877,8 @@ function acceptedRecord(parsed, challenge, receiptBytes, now, acceptanceContext 
     serverVersion: parsed.payload.serverVersion,
     tlsMode: parsed.payload.tlsMode,
     authPlugin: parsed.payload.authPlugin,
+    challengeIssuedAt: parsed.payload.challengeIssuedAt,
+    challengeExpiresAt: parsed.payload.challengeExpiresAt,
     startedAt: parsed.payload.startedAt,
     completedAt: parsed.payload.completedAt,
     operatorEvidenceId: parsed.payload.operatorEvidenceId,
@@ -1021,11 +1030,37 @@ async function acquireRecoveryOwner(path, observedBytes, dependencies) {
       if (processAlive(owner.pid, dependencies)) {
         throw new Error('Lock recovery is already in progress.');
       }
+      if (dependencies.beforeStaleRecoveryOwnerRetire) {
+        await dependencies.beforeStaleRecoveryOwnerRetire({
+          path, ownerPath: paths.owner, observedToken: owner.token
+        });
+      }
+      if (!existsSync(paths.owner)) continue;
+      const currentOwner = await readAtomicJson(paths.owner);
+      if (currentOwner.token !== owner.token || processAlive(currentOwner.pid, dependencies)) {
+        continue;
+      }
+      if (dependencies.afterStaleRecoveryOwnerRecheck) {
+        await dependencies.afterStaleRecoveryOwnerRecheck({
+          path, ownerPath: paths.owner, observedToken: owner.token
+        });
+      }
       const retired = join(dirname(paths.owner), `${basename(paths.owner)}.stale-${process.pid}-` +
         systemRandomBytes(8).toString('hex'));
       try {
         await rename(paths.owner, retired);
         await syncDirectory(dirname(paths.owner));
+        const retiredOwner = await readAtomicJson(retired);
+        if (retiredOwner.token !== owner.token) {
+          try {
+            await link(retired, paths.owner);
+            await syncDirectory(dirname(paths.owner));
+          } catch (restoreError) {
+            if (restoreError?.code !== 'EEXIST') throw restoreError;
+          }
+          await rm(retired, { force: true });
+          continue;
+        }
         await rm(retired, { force: true });
       } catch (retireError) {
         if (retireError?.code !== 'ENOENT') throw retireError;
@@ -1055,6 +1090,8 @@ async function replaceStaleLock(path, observedBytes, replacementBytes, dependenc
   const recovery = await acquireRecoveryOwner(path, observedBytes, dependencies);
   if (recovery === null) return false;
   try {
+    if (!existsSync(recovery.owner) ||
+      (await readAtomicJson(recovery.owner)).token !== recovery.token) return false;
     if (!existsSync(path) || sha256(await readFile(path)) !== sha256(observedBytes)) return false;
     await atomicReplace(path, replacementBytes);
     return true;
@@ -1204,6 +1241,7 @@ export async function verifyDeviceEvidence({
     throw new Error('Device evidence requires explicit physical-device and authorized-schema operator attestations.');
   }
   const frozenOutputPath = outputPath === null ? null : resolve(outputPath);
+  let canonicalOutputPath = null;
   if ((acceptanceContext === null) !== (frozenOutputPath === null) ||
     (acceptanceContext !== null &&
       (!/^[0-9a-f]{64}$/.test(acceptanceContext.hapSha256 ?? '') ||
@@ -1220,6 +1258,8 @@ export async function verifyDeviceEvidence({
     if (!parent.isDirectory() || parent.isSymbolicLink()) {
       throw new Error('Device evidence output must use a real existing directory.');
     }
+    canonicalOutputPath = join(await realpath(dirname(frozenOutputPath)),
+      basename(frozenOutputPath));
     if (existsSync(frozenOutputPath)) {
       const output = await lstat(frozenOutputPath);
       if (!output.isFile() || output.isSymbolicLink()) {
@@ -1247,6 +1287,12 @@ export async function verifyDeviceEvidence({
     await releaseProcessLock(preparationLockPath, preparationLock);
   }
   const states = statePaths(root, paths, parsed.payload.runId);
+  const canonicalWorkPath = existsSync(states.work) ? await realpath(states.work) : null;
+  if (frozenOutputPath !== null &&
+    (pathWithin(states.work, frozenOutputPath) ||
+      (canonicalWorkPath !== null && pathWithin(canonicalWorkPath, canonicalOutputPath)))) {
+    throw new Error('Device evidence output must be outside the secret workspace.');
+  }
   const caseBytes = await readFile(join(root, CASE_MANIFEST));
   const cases = readCaseManifest(caseBytes);
   await recoverWorkTombstones(states.work, dependencies);

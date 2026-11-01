@@ -65,6 +65,8 @@ export default function deviceAcceptanceRunnerTest(): void {
       expect(signer.payload.indexOf('"profile":"M1"') >= 0).assertTrue();
       expect(signer.payload.indexOf('"authPlugin":"caching_sha2_password"') >= 0).assertTrue();
       expect(signer.payload.indexOf('"tlsMode":"verify_identity"') >= 0).assertTrue();
+      expect(signer.payload.indexOf(binding.createdAt) >= 0).assertTrue();
+      expect(signer.payload.indexOf(binding.expiresAt) >= 0).assertTrue();
       expect(signer.payload.indexOf('"startedAt":') >= 0).assertTrue();
       expect(signer.payload.indexOf('"completedAt":') >= 0).assertTrue();
       expect(signer.payload.indexOf('"durationMs":') >= 0).assertTrue();

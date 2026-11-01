@@ -339,6 +339,7 @@ export class MySqlPreparedSession {
 
 class PreparedCloseBridge {
   readonly task: Promise<void>;
+  readonly ownership: number;
   handlePreflight: boolean;
   started: boolean = false;
   settled: boolean = false;
@@ -346,8 +347,9 @@ class PreparedCloseBridge {
   private complete: () => void = (): void => {};
   private fail: (reason?: Object) => void = (_reason?: Object): void => {};
 
-  constructor(handlePreflight: boolean) {
+  constructor(handlePreflight: boolean, ownership: number) {
     this.handlePreflight = handlePreflight;
+    this.ownership = ownership;
     this.task = new Promise<void>((resolve: () => void,
       reject: (reason?: Object) => void): void => {
       this.complete = resolve;
@@ -381,9 +383,9 @@ class PreparedHandle implements MySqlPreparedStatement {
   private response: PrepareResponse;
   private invalid: boolean = false;
   private closeTask: Promise<void> | null = null;
-  private handlePreflightClose: boolean = false;
   private closeBridge: PreparedCloseBridge | null = null;
   private ownerClosePending: boolean = false;
+  private closeOwnership: number = 0;
 
   constructor(owner: MySqlPreparedSession, response: PrepareResponse) {
     this.owner = owner;
@@ -452,25 +454,21 @@ class PreparedHandle implements MySqlPreparedStatement {
     return this.closeTask;
   }
 
-  retainCloseResult(task: Promise<void>,
-    handlePreflightClose: boolean = false): Promise<void> {
+  retainCloseResult(task: Promise<void>): Promise<void> {
+    this.closeOwnership += 1;
     this.closeBridge = null;
     this.closeTask = task;
-    this.handlePreflightClose = handlePreflightClose;
-    task.then((): void => {}, (): void => {
-      if (!this.invalid && !handlePreflightClose && this.closeTask === task) {
-        this.closeTask = null;
-      }
-    });
     return task;
   }
 
   clearSettledPreflightRejection(): boolean {
     const bridge = this.closeBridge;
-    if (bridge === null || !bridge.canRetryPreflightRejection()) return false;
+    if (bridge === null || !bridge.canRetryPreflightRejection() ||
+      this.closeTask !== bridge.task ||
+      this.closeOwnership !== bridge.ownership) return false;
+    this.closeOwnership += 1;
     this.closeBridge = null;
     this.closeTask = null;
-    this.handlePreflightClose = false;
     return true;
   }
 
@@ -481,12 +479,13 @@ class PreparedHandle implements MySqlPreparedStatement {
   }
 
   beginSessionClose(): PreparedCloseBridge {
-    return this.beginCloseResult(false);
+    return this.beginCloseResult(true);
   }
 
   markCloseStarted(): void {
-    this.handlePreflightClose = false;
-    if (this.closeBridge !== null) this.closeBridge.markStarted();
+    const bridge = this.closeBridge;
+    if (bridge !== null && this.closeTask === bridge.task &&
+      this.closeOwnership === bridge.ownership) bridge.markStarted();
   }
 
   bridgeCloseResult(bridge: PreparedCloseBridge, task: Promise<void>): void {
@@ -495,17 +494,10 @@ class PreparedHandle implements MySqlPreparedStatement {
   }
 
   private beginCloseResult(handlePreflight: boolean): PreparedCloseBridge {
-    const bridge = new PreparedCloseBridge(handlePreflight);
+    this.closeOwnership += 1;
+    const bridge = new PreparedCloseBridge(handlePreflight, this.closeOwnership);
     this.closeBridge = bridge;
     this.closeTask = bridge.task;
-    this.handlePreflightClose = handlePreflight;
-    bridge.task.then((): void => {}, (): void => {
-      if (!this.invalid && !bridge.handlePreflight &&
-        this.closeTask === bridge.task) {
-        this.closeBridge = null;
-        this.closeTask = null;
-      }
-    });
     return bridge;
   }
 }

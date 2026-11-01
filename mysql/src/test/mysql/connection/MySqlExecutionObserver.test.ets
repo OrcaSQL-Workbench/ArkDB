@@ -1134,6 +1134,7 @@ export default function mySqlExecutionObserverTest(): void {
     it('connectionCloseStartReentrySharesOnePromiseAndTerminal', 0, async () => {
       const observer = new StartCloseObserver();
       const transport = new GatedFailingCloseTransport();
+      transport.failure = new Error('Synthetic memoized root close failure.');
       const fixture = new ObserverFixture(
         observer, undefined, undefined, transport);
       observer.target = fixture.connection;
@@ -1151,12 +1152,16 @@ export default function mySqlExecutionObserverTest(): void {
         expect(observer.terminals).assertEqual(0);
 
         transport.closeAllowed.release();
-        await first;
-        await repeated;
+        const firstFailure = await executionFailure(first);
+        const repeatedFailure = await executionFailure(repeated);
+        const afterFailure = fixture.connection.close();
+        expect(afterFailure === first).assertTrue();
+        expect((await executionFailure(afterFailure)) === firstFailure).assertTrue();
+        expect(repeatedFailure === firstFailure).assertTrue();
         expect(observer.terminals).assertEqual(1);
       } finally {
         transport.closeAllowed.release();
-        await first;
+        await executionFailure(first);
       }
     });
 

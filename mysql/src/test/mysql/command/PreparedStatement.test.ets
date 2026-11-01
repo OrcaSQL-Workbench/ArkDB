@@ -541,6 +541,33 @@ export default function preparedStatementTest(): void {
       expect(statement.closed).assertTrue();
     });
 
+    it('memoizesExplicitSessionRetryPreflightRejectionExactly', 0, async () => {
+      const host = new PreparedHost([[prepareOk(1, 0, 0)]]);
+      const session = new MySqlPreparedSession(host);
+      const statement = await prepareSuccessfully(session, 'DO 1');
+      const scope = host.commandGate.reserve(MySqlCommandKind.Transaction);
+
+      const original = statement.close();
+      const originalError = await captureCommandFailure(original);
+      const retry = session.close(statement);
+      const retryError = await captureCommandFailure(retry);
+      const repeated = statement.close();
+      const repeatedError = await captureCommandFailure(repeated);
+      const repeatedRetryPromise = repeated === retry;
+      const repeatedRetryError = repeatedError === retryError;
+
+      host.commandGate.release(scope);
+      const completed = await captureCommandFailure(session.close(statement));
+
+      expectProtocolError(originalError);
+      expectProtocolError(retryError);
+      expect(repeatedRetryPromise).assertTrue();
+      expect(repeatedRetryError).assertTrue();
+      expect(completed === null).assertTrue();
+      expect(statement.closed).assertTrue();
+      expect(host.transport.writes.length).assertEqual(2);
+    });
+
     it('publishesStatementCloseBeforeStartObserverReentry', 0, async () => {
       const observer = new StatementCloseStartObserver();
       const gate = new MySqlCommandGate(observer);

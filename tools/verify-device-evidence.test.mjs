@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as signPayload } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
 import { prepareHarRelease } from './prepare-har-release.mjs';
 import { releaseFixture } from './test-fixtures/har-release.mjs';
 import { sha256 } from './package-har.mjs';
 import { sampleFingerprint } from './test-consumer.mjs';
+import { hapSigningContentFingerprint } from './hap-content.mjs';
 import {
   deviceEvidenceArguments, prepareDeviceEvidence, verifyDeviceEvidence, verifyDeviceReceiptEnvelope
 } from './verify-device-evidence.mjs';
@@ -24,7 +25,8 @@ async function deviceFixture(t, overrides = {}) {
     Buffer.alloc(32, overrides.receiptFill ?? 0x22),
     Buffer.alloc(32, overrides.schemaFill ?? 0x33)
   ];
-  const hapBytes = Buffer.from(overrides.hapText ?? 'Synthetic exact bound device HAP.');
+  const hapBytes = overrides.hapBytes ?? await readFile(
+    join(import.meta.dirname, 'test-fixtures', 'mysql-client-real.hap'));
   const dependencies = {
     git: fixture.git,
     now: () => new Date('2026-11-01T00:00:00.000Z'),
@@ -66,6 +68,8 @@ test('prepares exact isolated HAP outputs before committing the pending challeng
   assert.equal(challenge.publicKeySpkiSha256, sha256(f.publicKeySpki));
   assert.equal(challenge.preparedUnsignedHapSha256, sha256(f.hapBytes));
   assert.equal(challenge.preparedUnsignedHapByteLength, f.hapBytes.length);
+  assert.equal(challenge.preparedUnsignedHapContentSha256,
+    hapSigningContentFingerprint(f.hapBytes));
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.deepEqual(await readFile(f.prepared.hapPath), f.hapBytes);
   assert.equal(existsSync(join(f.prepared.workDirectory, 'sample')), false);
@@ -85,6 +89,8 @@ test('removes staged outputs when pending challenge publication fails', async (t
   const fixture = await releaseFixture(t);
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
   const keyPair = generateKeyPairSync('ed25519');
+  const hapBytes = await readFile(join(import.meta.dirname,
+    'test-fixtures', 'mysql-client-real.hap'));
   const challengeId = '41'.repeat(16);
   const paths = join(fixture.root, 'build', 'mysql-v1.0.0');
   await assert.rejects(prepareDeviceEvidence({
@@ -97,7 +103,7 @@ test('removes staged outputs when pending challenge publication fails', async (t
       publicKeySpki: Buffer.from(keyPair.publicKey.export({ format: 'der', type: 'spki' })),
       privateKeyPkcs8: Buffer.from(keyPair.privateKey.export({ format: 'der', type: 'pkcs8' }))
     }),
-    async buildHarness({ hapPath }) { await writeFile(hapPath, 'synthetic hap'); },
+    async buildHarness({ hapPath }) { await writeFile(hapPath, hapBytes); },
     async beforePending({ workDirectory }) {
       assert.equal(existsSync(join(workDirectory, 'entry-default-unsigned.hap')), true);
       assert.equal(existsSync(join(paths, 'evidence', 'device-acceptance',
@@ -114,6 +120,8 @@ test('preserves a linked pending publication when post-link cleanup fails', asyn
   const fixture = await releaseFixture(t);
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
   const keyPair = generateKeyPairSync('ed25519');
+  const hapBytes = await readFile(join(import.meta.dirname,
+    'test-fixtures', 'mysql-client-real.hap'));
   const challengeId = '44'.repeat(16);
   const paths = join(fixture.root, 'build', 'mysql-v1.0.0');
   let challenge;
@@ -127,7 +135,7 @@ test('preserves a linked pending publication when post-link cleanup fails', asyn
       publicKeySpki: Buffer.from(keyPair.publicKey.export({ format: 'der', type: 'spki' })),
       privateKeyPkcs8: Buffer.from(keyPair.privateKey.export({ format: 'der', type: 'pkcs8' }))
     }),
-    async buildHarness({ hapPath }) { await writeFile(hapPath, 'linked pending HAP'); },
+    async buildHarness({ hapPath }) { await writeFile(hapPath, hapBytes); },
     async afterPendingLink(context) {
       challenge = context.challenge;
       throw new Error('Synthetic crash after pending link.');
@@ -162,7 +170,8 @@ test('reconciles a journaled orphan preparation workspace before issuing another
   await writeFile(journal, `${JSON.stringify({
     schemaVersion: 1,
     kind: 'arkdb-device-preparation',
-    challengeId: orphanId
+    challengeId: orphanId,
+    ownerToken: 'aa'.repeat(16)
   }, null, 2)}\n`);
   const nextKeyPair = generateKeyPairSync('ed25519');
   const values = [Buffer.alloc(16, 0x73), Buffer.alloc(32, 0x74), Buffer.alloc(32, 0x75)];
@@ -180,11 +189,61 @@ test('reconciles a journaled orphan preparation workspace before issuing another
       publicKeySpki: Buffer.from(nextKeyPair.publicKey.export({ format: 'der', type: 'spki' })),
       privateKeyPkcs8: Buffer.from(nextKeyPair.privateKey.export({ format: 'der', type: 'pkcs8' }))
     }),
-    async buildHarness({ hapPath }) { await writeFile(hapPath, 'next prepared HAP'); }
+    async buildHarness({ hapPath }) { await writeFile(hapPath, f.hapBytes); }
   });
   assert.equal(existsSync(orphanWork), false);
   assert.equal(existsSync(journal), false);
   assert.equal(existsSync(prepared.challengePath), true);
+});
+
+test('does not recover a journal owned by an active preparation', async (t) => {
+  const fixture = await releaseFixture(t);
+  const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
+  const hapBytes = await readFile(join(import.meta.dirname,
+    'test-fixtures', 'mysql-client-real.hap'));
+  const firstKey = generateKeyPairSync('ed25519');
+  let releaseFirst;
+  const holdFirst = new Promise((resolve) => { releaseFirst = resolve; });
+  let markReady;
+  const ready = new Promise((resolve) => { markReady = resolve; });
+  const firstId = '81'.repeat(16);
+  const first = prepareDeviceEvidence({
+    root: fixture.root, driver: 'mysql', bundleDirectory: bundle.bundleDirectory
+  }, {
+    git: fixture.git,
+    now: () => new Date('2026-11-01T00:00:00.000Z'),
+    randomBytes: (size) => Buffer.alloc(size, size === 16 ? 0x81 : size === 32 ? 0x82 : 0x83),
+    generateSigningKeyPair: () => ({
+      publicKeySpki: Buffer.from(firstKey.publicKey.export({ format: 'der', type: 'spki' })),
+      privateKeyPkcs8: Buffer.from(firstKey.privateKey.export({ format: 'der', type: 'pkcs8' }))
+    }),
+    async buildHarness({ hapPath }) { await writeFile(hapPath, hapBytes); },
+    async beforePending() {
+      markReady();
+      await holdFirst;
+    }
+  });
+  await ready;
+  const firstWork = join(fixture.root, 'build', 'mysql-v1.0.0', 'work',
+    'device-acceptance', firstId);
+  assert.equal(existsSync(firstWork), true);
+
+  const secondKey = generateKeyPairSync('ed25519');
+  await assert.rejects(prepareDeviceEvidence({
+    root: fixture.root, driver: 'mysql', bundleDirectory: bundle.bundleDirectory
+  }, {
+    git: fixture.git,
+    now: () => new Date('2026-11-01T00:05:00.000Z'),
+    randomBytes: (size) => Buffer.alloc(size, size === 16 ? 0x84 : size === 32 ? 0x85 : 0x86),
+    generateSigningKeyPair: () => ({
+      publicKeySpki: Buffer.from(secondKey.publicKey.export({ format: 'der', type: 'spki' })),
+      privateKeyPkcs8: Buffer.from(secondKey.privateKey.export({ format: 'der', type: 'pkcs8' }))
+    }),
+    async buildHarness() { assert.fail('A concurrent preparation must not start a build.'); }
+  }), /preparation.*progress|already.*progress/i);
+  assert.equal(existsSync(firstWork), true);
+  releaseFirst();
+  await first;
 });
 
 test('requires exact clean sealed-release source before building the harness', async (t) => {
@@ -411,6 +470,94 @@ test('recovers the frozen claim after crashing immediately after lock publicatio
   assert.equal(recovered.record.verifiedAt, '2026-11-01T01:00:00.000Z');
 });
 
+test('elects one stale-claim recovery owner before replacing the lock', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x36 });
+  const receiptPath = join(f.fixture.root, 'stale-recovery-owner.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async afterClaimLock() { throw new Error('Synthetic stale owner seed.'); }
+  }), /stale owner seed/i);
+  const lockPath = join(dirname(f.prepared.challengePath),
+    `${f.prepared.challenge.challengeId}.claim.json`);
+  const stale = JSON.parse(await readFile(lockPath, 'utf8'));
+  stale.pid = 999999;
+  await writeFile(lockPath, `${JSON.stringify(stale, null, 2)}\n`);
+  let releaseOwner;
+  const holdOwner = new Promise((resolve) => { releaseOwner = resolve; });
+  let markOwner;
+  const ownerStarted = new Promise((resolve) => { markOwner = resolve; });
+  const recovery = verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: (pid) => pid === process.pid,
+    async afterRecoveryOwner() {
+      markOwner();
+      await holdOwner;
+    }
+  });
+  const firstOutcome = await Promise.race([
+    ownerStarted.then(() => 'owner-started'),
+    recovery.then(() => 'recovery-finished')
+  ]);
+  assert.equal(firstOutcome, 'owner-started');
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: (pid) => pid === process.pid
+  }), /recovery.*progress|already.*progress/i);
+  releaseOwner();
+  const accepted = await recovery;
+  assert.equal(accepted.record.receiptAccepted, true);
+});
+
+test('cleans invalid recovery snapshots before electing a stale-lock owner', async (t) => {
+  for (const kind of ['directory', 'symlink', 'oversized']) {
+    const f = await deviceFixture(t, {
+      challengeFill: kind === 'directory' ? 0x3a : kind === 'symlink' ? 0x3b : 0x3c
+    });
+    const receiptPath = join(f.fixture.root, `invalid-recovery-snapshot-${kind}.json`);
+    await writeFile(receiptPath,
+      `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+    await assert.rejects(verifyDeviceEvidence({
+      root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+      receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+    }, {
+      now: () => new Date('2026-11-01T01:00:00.000Z'),
+      async afterClaimLock() { throw new Error('Synthetic snapshot seed.'); }
+    }), /snapshot seed/i);
+    const lockPath = join(dirname(f.prepared.challengePath),
+      `${f.prepared.challenge.challengeId}.claim.json`);
+    const snapshotPath = join(dirname(lockPath), `${basename(lockPath)}.recovery-snapshot`);
+    if (kind === 'directory') {
+      await mkdir(snapshotPath);
+    } else if (kind === 'symlink') {
+      const target = join(f.fixture.root, 'snapshot-target');
+      await mkdir(target);
+      await symlink(target, snapshotPath, process.platform === 'win32' ? 'junction' : 'dir');
+    } else {
+      await writeFile(snapshotPath, Buffer.alloc(2 * 1024 * 1024 + 1));
+    }
+    const recovered = await verifyDeviceEvidence({
+      root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+      receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+    }, {
+      now: () => new Date('2026-11-03T00:00:00.000Z'),
+      isProcessAlive: () => false
+    });
+    assert.equal(recovered.record.receiptAccepted, true);
+    assert.equal(existsSync(snapshotPath), false);
+  }
+});
+
 test('recovers verifying state when atomic evidence record persistence is interrupted', async (t) => {
   const f = await deviceFixture(t);
   const receiptPath = join(f.fixture.root, 'record-recovery.json');
@@ -504,7 +651,8 @@ test('ignores and removes a partial record temp during restart recovery', async 
   }, {
     now: () => new Date('2026-11-01T01:00:00.000Z'),
     async writeRecord(path) {
-      partialPath = join(dirname(path), `.${basename(path)}.tmp-partial`);
+      partialPath = join(dirname(path),
+        `.${basename(path)}.tmp-new-${'0'.repeat(64)}-2147483646-0000000000000000`);
       await writeFile(partialPath, '{"partial":');
       throw new Error('Synthetic partial record crash.');
     }
@@ -614,6 +762,90 @@ test('completes a frozen pending replacement temp left before rename', async (t)
   assert.equal(existsSync(replacementTemp), false);
 });
 
+test('discards an incomplete replacement temp while preserving the valid destination', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x37 });
+  const replacementTemp = join(dirname(f.prepared.challengePath),
+    `.${basename(f.prepared.challengePath)}.tmp-replace-${'0'.repeat(64)}-` +
+    '2147483646-0000000000000000');
+  await writeFile(replacementTemp, '{"partial":');
+  const receiptPath = join(f.fixture.root, 'partial-replacement-temp.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  const accepted = await verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  assert.equal(accepted.record.receiptAccepted, true);
+  assert.equal(existsSync(replacementTemp), false);
+});
+
+test('discards an incomplete new-file temp while preserving the valid destination', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x3d });
+  const newTemp = join(dirname(f.prepared.challengePath),
+    `.${basename(f.prepared.challengePath)}.tmp-new-${'0'.repeat(64)}-` +
+    '2147483646-0000000000000000');
+  await writeFile(newTemp, '{"partial":');
+  const receiptPath = join(f.fixture.root, 'partial-new-temp.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  const accepted = await verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  assert.equal(accepted.record.receiptAccepted, true);
+  assert.equal(existsSync(newTemp), false);
+});
+
+test('preserves live write staging files and removes stale ones during recovery', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x3e });
+  const directory = dirname(f.prepared.challengePath);
+  const base = basename(f.prepared.challengePath);
+  const liveNew = join(directory, `.${base}.write-new-${process.pid}-0000000000000000`);
+  const liveReplace = join(directory, `.${base}.write-replace-${process.pid}-1111111111111111`);
+  const stale = join(directory, `.${base}.write-new-2147483646-2222222222222222`);
+  for (const path of [liveNew, liveReplace, stale]) await writeFile(path, '{"partial":');
+  const receiptPath = join(f.fixture.root, 'live-write-staging.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  const accepted = await verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  assert.equal(accepted.record.receiptAccepted, true);
+  assert.equal(existsSync(liveNew), true);
+  assert.equal(existsSync(liveReplace), true);
+  assert.equal(existsSync(stale), false);
+});
+
+test('preserves completed temps owned by a live writer until publication', async (t) => {
+  const f = await releaseFixture(t);
+  assert.equal(typeof deviceEvidence.recoverAtomicState, 'function');
+  const newDestination = join(f.root, 'live-new-state.json');
+  const newBytes = Buffer.from('{"state":"new"}\n');
+  const newTemp = join(f.root, `.${basename(newDestination)}.tmp-new-${sha256(newBytes)}-` +
+    `${process.pid}-0000000000000000`);
+  await writeFile(newTemp, newBytes);
+  await deviceEvidence.recoverAtomicState(newDestination);
+  assert.equal(existsSync(newTemp), true);
+  assert.equal(existsSync(newDestination), false);
+  await link(newTemp, newDestination);
+  await rm(newTemp);
+
+  const replaceDestination = join(f.root, 'live-replace-state.json');
+  const oldBytes = Buffer.from('{"state":"old"}\n');
+  const replacementBytes = Buffer.from('{"state":"replacement"}\n');
+  await writeFile(replaceDestination, oldBytes);
+  const replaceTemp = join(f.root,
+    `.${basename(replaceDestination)}.tmp-replace-${sha256(replacementBytes)}-` +
+    `${process.pid}-1111111111111111`);
+  await writeFile(replaceTemp, replacementBytes);
+  await deviceEvidence.recoverAtomicState(replaceDestination);
+  assert.equal(existsSync(replaceTemp), true);
+  assert.deepEqual(await readFile(replaceDestination), oldBytes);
+  await rename(replaceTemp, replaceDestination);
+  assert.deepEqual(await readFile(replaceDestination), replacementBytes);
+});
+
 test('rejects a conflicting atomic state temp instead of trusting file existence', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x39 });
   const conflicting = join(dirname(f.prepared.challengePath),
@@ -675,7 +907,7 @@ test('parses only explicit preparation and artifact-validation commands', () => 
 
 test('validates the actual signed HAP and complete receipt provenance before external evidence', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x7a });
-  const signedHap = Buffer.from('Synthetic signed and installed HAP bytes.');
+  const signedHap = Buffer.from(f.hapBytes);
   const hapPath = join(f.fixture.root, 'signed-entry.hap');
   await writeFile(hapPath, signedHap);
   const receiptPath = join(f.fixture.root, 'spec-receipt.json');
@@ -704,7 +936,7 @@ test('validates the actual signed HAP and complete receipt provenance before ext
 
 test('recovers external evidence publication before terminally consuming the challenge', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x7d });
-  const signedHap = Buffer.from('Recoverable external evidence HAP.');
+  const signedHap = Buffer.from(f.hapBytes);
   const hapPath = join(f.fixture.root, 'recoverable-signed-entry.hap');
   await writeFile(hapPath, signedHap);
   const receiptPath = join(f.fixture.root, 'recoverable-spec-receipt.json');
@@ -746,7 +978,7 @@ test('recovers external evidence publication before terminally consuming the cha
 
 test('rejects a receipt for a different signed HAP before consuming the challenge', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x7b });
-  const claimed = Buffer.from('Claimed signed HAP.');
+  const claimed = Buffer.from(f.hapBytes);
   const actual = Buffer.from('Different signed HAP.');
   const hapPath = join(f.fixture.root, 'different-signed-entry.hap');
   await writeFile(hapPath, actual);
@@ -764,14 +996,14 @@ test('rejects a receipt for a different signed HAP before consuming the challeng
     profile: 'M1',
     features: [],
     outPath: join(f.fixture.root, 'must-not-exist.json')
-  }), /signed HAP|digest|identity/i);
+  }), /signed HAP|digest|identity|malformed|ZIP/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
 });
 
 test('rejects an unsupported external evidence filename before consuming the challenge', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x7e });
-  const signedHap = Buffer.from('Output filename preflight HAP.');
+  const signedHap = Buffer.from(f.hapBytes);
   const hapPath = join(f.fixture.root, 'output-name-signed-entry.hap');
   await writeFile(hapPath, signedHap);
   const receiptPath = join(f.fixture.root, 'output-name-receipt.json');
@@ -795,7 +1027,7 @@ test('rejects an unsupported external evidence filename before consuming the cha
 
 test('rejects a non-file external evidence destination before consuming the challenge', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x7f });
-  const signedHap = Buffer.from('Output destination preflight HAP.');
+  const signedHap = Buffer.from(f.hapBytes);
   const hapPath = join(f.fixture.root, 'output-destination-signed-entry.hap');
   await writeFile(hapPath, signedHap);
   const receiptPath = join(f.fixture.root, 'output-destination-receipt.json');
@@ -821,7 +1053,7 @@ test('rejects a non-file external evidence destination before consuming the chal
 
 test('binds the implemented M4 sha256 selection to caching SHA-2 evidence', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x7c });
-  const signedHap = Buffer.from('M4 SHA-256 signed HAP.');
+  const signedHap = Buffer.from(f.hapBytes);
   const hapPath = join(f.fixture.root, 'm4-sha256.hap');
   await writeFile(hapPath, signedHap);
   const receiptPath = join(f.fixture.root, 'm4-sha256-receipt.json');

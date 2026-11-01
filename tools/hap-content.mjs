@@ -77,7 +77,7 @@ function decodeEntry(archive, entry) {
   return content;
 }
 
-export function hapContentFingerprint(input) {
+function fingerprint(input, prefix, excludeSigningMetadata) {
   const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
   const end = findEnd(bytes);
   if (bytes.readUInt16LE(end + 4) !== 0 || bytes.readUInt16LE(end + 6) !== 0) {
@@ -132,9 +132,15 @@ export function hapContentFingerprint(input) {
     offset = recordEnd;
   }
   if (offset !== end) throw new Error('HAP ZIP central directory has trailing records.');
-  const hash = createHash('sha256').update('arkdb-hap-content-v1\0');
+  const hash = createHash('sha256').update(`${prefix}\0`);
+  let included = 0;
   for (const entry of records.sort((left, right) => Buffer.compare(left.nameBytes, right.nameBytes))) {
     const content = decodeEntry(bytes, entry);
+    if (excludeSigningMetadata &&
+      (entry.name === 'META-INF/' || entry.name.startsWith('META-INF/'))) {
+      continue;
+    }
+    included++;
     const metadata = Buffer.alloc(13);
     metadata.writeUInt32BE(entry.nameBytes.length, 0);
     metadata.writeUInt32BE(content.length, 4);
@@ -142,5 +148,14 @@ export function hapContentFingerprint(input) {
     metadata.writeUInt32BE(content.length, 9);
     hash.update(metadata).update(entry.nameBytes).update(content);
   }
+  if (included === 0) throw new Error('HAP has no application content entries.');
   return hash.digest('hex');
+}
+
+export function hapContentFingerprint(input) {
+  return fingerprint(input, 'arkdb-hap-content-v1', false);
+}
+
+export function hapSigningContentFingerprint(input) {
+  return fingerprint(input, 'arkdb-hap-signing-content-v1', true);
 }

@@ -224,7 +224,10 @@ destination; typed replacement siblings complete the frozen replacement when
 their content digest agrees, while conflicting siblings are rejected.
 Preparation journals remove secret-bearing orphan workspaces left before
 pending publication and preserve the matching workspace once pending has been
-linked. A receipt-bound exclusive
+linked. A per-release process lock prevents an active preparation from being
+mistaken for an orphan. Stale claim-lock recovery uses an exclusive recovery
+owner/snapshot guard so only one process can replace a dead owner. A
+receipt-bound exclusive
 claim records the chosen verification/rejection timestamp, full canonical
 record, receipt/payload/decision/record digests before cleanup. Concurrent
 verification is rejected, a restart may continue only with that same receipt

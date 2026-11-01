@@ -133,6 +133,12 @@ async function prepareConsumerProfile(workspace, profile) {
   await rm(join(workspace, 'entry', 'src', 'test'), { recursive: true, force: true });
   await mkdir(join(workspace, 'entry', 'src', 'main', 'ets', 'pages'), { recursive: true });
   await mkdir(join(workspace, 'entry', 'src', 'test'), { recursive: true });
+  const buildProfilePath = join(workspace, 'entry', 'build-profile.json5');
+  const buildProfile = JSON5.parse(await readFile(buildProfilePath, 'utf8'));
+  buildProfile.buildOption ??= {};
+  buildProfile.buildOption.sourceOption ??= {};
+  buildProfile.buildOption.sourceOption.workers = [];
+  await writeFile(buildProfilePath, `${JSON.stringify(buildProfile, null, 2)}\n`);
   await writeFile(join(workspace, 'entry', 'src', 'main', 'ets', 'pages', 'Index.ets'),
     `import { ConnectionConfig, MySqlDriverFactory } from '@arkdb/mysql';
 

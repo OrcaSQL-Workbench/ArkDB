@@ -129,8 +129,9 @@ sample, signed HAP, API/device class, verified TLS mode, auth plugin, run times,
 operator evidence ID and ordered case durations/verdicts. The UI exports its
 exact JSON through an explicit clipboard action. No host, port, account,
 password, schema, CA path or query data is included. The validator separately
-hashes the supplied signed HAP and checks the sealed manifest/consumer before
-publishing external evidence. Preparation and synthetic tests are not device
+hashes the supplied signed HAP, compares its signing-independent application
+content with the prepared harness, and checks the sealed manifest/consumer
+before publishing external evidence. Preparation and synthetic tests are not device
 evidence; hardware attestation, read-only grants and production certification
 remain explicitly false.
 

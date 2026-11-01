@@ -88,7 +88,9 @@ identities, CA paths, result data and raw server messages. It retains the
 profile/features, signed-HAP identity, server/auth/TLS identity, case durations
 and operator evidence ID while explicitly disclaiming hardware attestation,
 read-only privilege verification and production certification. No receipt is
-bundled into `dist`.
+bundled into `dist`. The signed HAP must retain the prepared harness's
+signing-independent content fingerprint; only `META-INF/` signing metadata may
+differ.
 
 The local API-24 HAP compiles the real CryptoArchitectureKit Ed25519 interface
 and signs only the exact UTF-8 view (`buffer`, `byteOffset`, `length`). The local

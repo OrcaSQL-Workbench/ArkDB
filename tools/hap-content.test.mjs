@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 import test from 'node:test';
-import { hapContentFingerprint } from './hap-content.mjs';
+import * as hapContent from './hap-content.mjs';
+
+const { hapContentFingerprint } = hapContent;
 
 test('two HAP builds with different timestamps and order have one content fingerprint', () => {
   const files = new Map([
@@ -27,6 +29,30 @@ test('HAP content changes alter the canonical fingerprint', () => {
   const tampered = buildHap(new Map([['ets/modules.abc', Buffer.from([1, 2, 4])]]),
     { time: 2, date: 2, reverse: false });
   assert.notEqual(hapContentFingerprint(original), hapContentFingerprint(tampered));
+});
+
+test('signing metadata does not change the signing-independent content fingerprint', () => {
+  const application = new Map([
+    ['module.json', Buffer.from('{"name":"entry"}')],
+    ['ets/modules.abc', Buffer.from([1, 2, 3])]
+  ]);
+  const unsigned = buildHap(application, { time: 1, date: 1, reverse: false });
+  const signed = buildHap(new Map([
+    ...application,
+    ['META-INF/MANIFEST.MF', Buffer.from('manifest')],
+    ['META-INF/CERT.SF', Buffer.from('signature metadata')]
+  ]), { time: 2, date: 2, reverse: true });
+  assert.equal(typeof hapContent.hapSigningContentFingerprint, 'function');
+  assert.notEqual(hapContentFingerprint(unsigned), hapContentFingerprint(signed));
+  assert.equal(hapContent.hapSigningContentFingerprint(unsigned),
+    hapContent.hapSigningContentFingerprint(signed));
+  const changed = buildHap(new Map([
+    ['module.json', Buffer.from('{"name":"other"}')],
+    ['ets/modules.abc', Buffer.from([1, 2, 3])],
+    ['META-INF/MANIFEST.MF', Buffer.from('manifest')]
+  ]), { time: 3, date: 3, reverse: false });
+  assert.notEqual(hapContent.hapSigningContentFingerprint(unsigned),
+    hapContent.hapSigningContentFingerprint(changed));
 });
 
 test('composed and decomposed UTF-8 names sort bytewise independent of archive order', () => {

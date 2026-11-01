@@ -15,6 +15,7 @@ import { sha256, sourceFingerprint } from './package-har.mjs';
 import { readReleaseBundle } from './prepare-har-release.mjs';
 import { runHvigor, runOhpm } from './run-hvigor.mjs';
 import { sampleFingerprint } from './test-consumer.mjs';
+import { hapSigningContentFingerprint } from './hap-content.mjs';
 
 const CASE_MANIFEST = join('examples', 'mysql-client', 'device-acceptance-cases.json');
 const CHALLENGE_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -45,18 +46,27 @@ function atomicTempPath(destination, kind, bytes) {
     `${process.pid}-${systemRandomBytes(8).toString('hex')}`);
 }
 
+function atomicWriteStagingPath(destination, kind) {
+  return join(dirname(destination), `.${basename(destination)}.write-${kind}-${process.pid}-` +
+    systemRandomBytes(8).toString('hex'));
+}
+
 async function writeSyncedTemp(destination, bytes, kind) {
   const temp = atomicTempPath(destination, kind, bytes);
+  const staging = atomicWriteStagingPath(destination, kind);
   let handle;
   try {
-    handle = await open(temp, 'wx');
+    handle = await open(staging, 'wx');
     await handle.writeFile(bytes);
     await handle.sync();
     await handle.close();
     handle = undefined;
+    await rename(staging, temp);
+    await syncDirectory(dirname(destination));
     return temp;
   } catch (error) {
     await handle?.close();
+    await rm(staging, { force: true });
     await rm(temp, { force: true });
     throw error;
   }
@@ -70,7 +80,7 @@ async function atomicWriteNew(destination, bytes, hooks = {}) {
     linked = true;
     if (hooks.afterLink) await hooks.afterLink({ destination, temp });
     await syncDirectory(dirname(destination));
-    await rm(temp);
+    await rm(temp, { force: true });
     await syncDirectory(dirname(destination));
     return;
   } catch (error) {
@@ -97,15 +107,25 @@ async function atomicRename(source, destination) {
   await syncDirectory(dirname(destination));
 }
 
-async function recoverAtomicState(destination) {
+export async function recoverAtomicState(destination) {
   const prefix = `.${basename(destination)}.tmp-`;
-  let names;
+  const writePrefix = `.${basename(destination)}.write-`;
+  let directoryNames;
   try {
-    names = (await readdir(dirname(destination))).filter((name) => name.startsWith(prefix));
+    directoryNames = await readdir(dirname(destination));
   } catch (error) {
     if (error?.code === 'ENOENT') return;
     throw error;
   }
+  let removedStaging = false;
+  for (const name of directoryNames.filter((entry) => entry.startsWith(writePrefix))) {
+    const match = name.slice(writePrefix.length).match(/^(?:new|replace)-(\d+)-[0-9a-f]{16}$/);
+    if (!match || processAlive(Number(match[1]), {})) continue;
+    await rm(join(dirname(destination), name), { force: true });
+    removedStaging = true;
+  }
+  if (removedStaging) await syncDirectory(dirname(destination));
+  const names = directoryNames.filter((name) => name.startsWith(prefix));
   if (names.length === 0) return;
   const entries = [];
   for (const name of names) {
@@ -113,13 +133,22 @@ async function recoverAtomicState(destination) {
     const bytes = await readFile(path);
     const suffix = name.slice(prefix.length);
     const typed = suffix.match(/^(new|replace)-([0-9a-f]{64})-/);
-    if (typed && typed[2] !== sha256(bytes)) {
-      throw new Error(`Atomic state has an ambiguous or conflicting temporary sibling: ${basename(destination)}`);
-    }
-    entries.push({ name, path, bytes, kind: typed?.[1] ?? 'legacy' });
+    const writer = suffix.match(/^(?:new|replace)-[0-9a-f]{64}-(\d+)-[0-9a-f]{16}$/);
+    entries.push({
+      name, path, bytes, kind: typed?.[1] ?? 'legacy',
+      digestMatches: typed === null || typed[2] === sha256(bytes),
+      liveWriter: writer !== null && processAlive(Number(writer[1]), {})
+    });
   }
-  const replacements = entries.filter((entry) => entry.kind === 'replace');
-  const ordinary = entries.filter((entry) => entry.kind !== 'replace');
+  const incompleteTyped = entries.filter((entry) =>
+    entry.kind !== 'legacy' && !entry.digestMatches && !entry.liveWriter);
+  for (const entry of incompleteTyped) await rm(entry.path, { force: true });
+  if (incompleteTyped.length > 0) await syncDirectory(dirname(destination));
+  const replacements = entries.filter((entry) =>
+    entry.kind === 'replace' && entry.digestMatches && !entry.liveWriter);
+  const ordinary = entries.filter((entry) =>
+    entry.kind !== 'replace' && !entry.liveWriter &&
+    (entry.kind === 'legacy' || entry.digestMatches));
   if (!existsSync(destination)) {
     for (const entry of ordinary) await rm(entry.path, { force: true });
     if (replacements.length > 0) {
@@ -136,6 +165,17 @@ async function recoverAtomicState(destination) {
   }
   const destinationInfo = await lstat(destination);
   const destinationBytes = await readFile(destination);
+  for (const entry of entries.filter((candidate) =>
+    candidate.liveWriter && candidate.kind === 'new')) {
+    const tempInfo = await lstat(entry.path);
+    const published = destinationInfo.dev === tempInfo.dev &&
+      destinationInfo.ino === tempInfo.ino &&
+      sha256(destinationBytes) === sha256(entry.bytes);
+    if (published) await rm(entry.path, { force: true });
+  }
+  if (ordinary.some((entry) => !entry.digestMatches)) {
+    throw new Error(`Atomic state has an ambiguous or conflicting temporary sibling: ${basename(destination)}`);
+  }
   for (const entry of ordinary) {
     const tempInfo = await lstat(entry.path);
     const sameInode = destinationInfo.dev === tempInfo.dev && destinationInfo.ino === tempInfo.ino;
@@ -170,6 +210,19 @@ async function atomicStateExists(path) {
 async function readAtomicJson(path) {
   await recoverAtomicState(path);
   return jsonBytes(releaseFile(dirname(path), basename(path)));
+}
+
+async function readBoundedRegularBytes(path, label) {
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > 2 * 1024 * 1024) {
+    throw new Error(`${label} is not a bounded regular file: ${basename(path)}`);
+  }
+  return await readFile(path);
+}
+
+async function readLockJson(path) {
+  await recoverAtomicState(path);
+  return jsonBytes(await readBoundedRegularBytes(path, 'Lock state'));
 }
 
 function tombstonePrefix(work) {
@@ -232,9 +285,11 @@ async function recoverPreparationJournals(root, paths, dependencies) {
     const challengeId = name.match(PREPARATION_JOURNAL)[1];
     const journalPath = join(evidenceDirectory, name);
     const journal = await readAtomicJson(journalPath);
-    exactKeys(journal, ['schemaVersion', 'kind', 'challengeId'], 'Device preparation journal');
+    exactKeys(journal, ['schemaVersion', 'kind', 'challengeId', 'ownerToken'],
+      'Device preparation journal');
     if (journal.schemaVersion !== 1 || journal.kind !== 'arkdb-device-preparation' ||
-      journal.challengeId !== challengeId) {
+      journal.challengeId !== challengeId ||
+      typeof journal.ownerToken !== 'string' || !/^[0-9a-f]{32}$/.test(journal.ownerToken)) {
       throw new Error('Device preparation journal is invalid.');
     }
     const staging = plainPath(root, join(workParent, `.staging-${challengeId}`),
@@ -424,7 +479,6 @@ export async function prepareDeviceEvidence({
   const workParent = plainPath(root, join(paths.workspaces, 'device-acceptance'), { allowMissing: true });
   await mkdir(workParent, { recursive: true });
   plainPath(root, workParent);
-  await recoverPreparationJournals(root, paths, dependencies);
   const caseBytes = await readFile(join(root, CASE_MANIFEST));
   const cases = readCaseManifest(caseBytes);
   const now = dependencies.now ? dependencies.now() : new Date();
@@ -462,6 +516,12 @@ export async function prepareDeviceEvidence({
     privateKeyPkcs8Base64: keys.privateKeyPkcs8.toString('base64'),
     platform: set.platform
   };
+  const preparationLockPath = plainPath(root,
+    join(evidenceDirectory, 'preparation.lock.json'), { allowMissing: true });
+  const preparationLock = await acquireProcessLock(
+    preparationLockPath, 'arkdb-device-preparation-lock', dependencies);
+  try {
+    await recoverPreparationJournals(root, paths, dependencies);
   const stagingDirectory = plainPath(root, join(workParent, `.staging-${challengeId}`), { allowMissing: true });
   const workDirectory = plainPath(root, join(workParent, challengeId), { allowMissing: true });
   const pendingPath = plainPath(root, join(evidenceDirectory, `${challengeId}.pending.json`),
@@ -475,7 +535,8 @@ export async function prepareDeviceEvidence({
   await atomicWriteNew(preparationPath, recordBytes({
     schemaVersion: 1,
     kind: 'arkdb-device-preparation',
-    challengeId
+    challengeId,
+    ownerToken: preparationLock.token
   }));
   let committed = false;
   let challengeBytes;
@@ -494,6 +555,7 @@ export async function prepareDeviceEvidence({
     const hapBytes = releaseFile(stagingDirectory, basename(hapPath), 128 * 1024 * 1024);
     const preparedUnsignedHapSha256 = sha256(hapBytes);
     const preparedUnsignedHapByteLength = hapBytes.length;
+    const preparedUnsignedHapContentSha256 = hapSigningContentFingerprint(hapBytes);
     await rm(sampleDirectory, { recursive: true, force: true });
     const provisioningPath = join(stagingDirectory, 'schema-challenge.json');
     await writeFile(provisioningPath, `${JSON.stringify({
@@ -510,6 +572,7 @@ export async function prepareDeviceEvidence({
       challengeId,
       preparedUnsignedHapSha256,
       preparedUnsignedHapByteLength,
+      preparedUnsignedHapContentSha256,
       publicKeySpkiSha256,
       createdAt,
       expiresAt
@@ -541,7 +604,8 @@ export async function prepareDeviceEvidence({
       publicKeySpkiBase64,
       publicKeySpkiSha256,
       preparedUnsignedHapSha256,
-      preparedUnsignedHapByteLength
+      preparedUnsignedHapByteLength,
+      preparedUnsignedHapContentSha256
     };
     challengeBytes = recordBytes(challenge);
     assertCleanReleaseSource(root, driver, set, git);
@@ -581,6 +645,9 @@ export async function prepareDeviceEvidence({
       }
     }
   }
+  } finally {
+    await releaseProcessLock(preparationLockPath, preparationLock);
+  }
 }
 
 function safePublicLabel(value) {
@@ -602,7 +669,7 @@ function validateChallenge(challenge, set, bundle, cases, caseBytes) {
     'releaseSetSha256', 'suiteId', 'caseManifestSha256', 'caseIds', 'runtime', 'platform',
     'challengeId', 'receiptNonce', 'schemaChallenge', 'createdAt', 'expiresAt',
     'publicKeySpkiBase64', 'publicKeySpkiSha256', 'preparedUnsignedHapSha256',
-    'preparedUnsignedHapByteLength'
+    'preparedUnsignedHapByteLength', 'preparedUnsignedHapContentSha256'
   ], 'Device evidence challenge');
   const publicKey = strictBase64(challenge.publicKeySpkiBase64, 'Device challenge public key', 1024);
   if (challenge.schemaVersion !== 1 || challenge.kind !== 'arkdb-device-evidence-challenge' ||
@@ -626,7 +693,8 @@ function validateChallenge(challenge, set, bundle, cases, caseBytes) {
     challenge.publicKeySpkiSha256 !== sha256(publicKey) ||
     !/^[0-9a-f]{64}$/.test(challenge.preparedUnsignedHapSha256 ?? '') ||
     !Number.isSafeInteger(challenge.preparedUnsignedHapByteLength) ||
-    challenge.preparedUnsignedHapByteLength <= 0) {
+    challenge.preparedUnsignedHapByteLength <= 0 ||
+    !/^[0-9a-f]{64}$/.test(challenge.preparedUnsignedHapContentSha256 ?? '')) {
     throw new Error('Device evidence challenge differs from its sealed release binding.');
   }
 }
@@ -757,6 +825,16 @@ function statePaths(root, paths, challengeId) {
   };
 }
 
+async function recoverableChallenge(root, set, challengeId) {
+  const states = statePaths(root, tagOutputPaths(root, set.driver, set.tag), challengeId);
+  for (const path of [states.pending, states.verifying, states.accepted, states.rejected]) {
+    if (!await atomicStateExists(path)) continue;
+    const value = await readAtomicJson(path);
+    return value.kind === 'arkdb-device-evidence-challenge' ? value : value.challenge;
+  }
+  throw new Error('Device challenge is not pending or recoverable.');
+}
+
 function recordBytes(record) {
   return Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
 }
@@ -785,6 +863,7 @@ function acceptedRecord(parsed, challenge, receiptBytes, now, acceptanceContext 
     sourceClean: parsed.payload.sourceClean,
     harSha256: parsed.payload.harSha256,
     sampleFingerprint: parsed.payload.sampleFingerprint,
+    preparedUnsignedHapContentSha256: challenge.preparedUnsignedHapContentSha256,
     hapSha256: parsed.payload.hapSha256,
     apiVersion: parsed.payload.apiVersion,
     deviceClass: parsed.payload.deviceClass,
@@ -809,6 +888,7 @@ function acceptedRecord(parsed, challenge, receiptBytes, now, acceptanceContext 
     kind: 'arkdb-device-acceptance',
     hapSha256: acceptanceContext.hapSha256,
     hapByteLength: acceptanceContext.hapByteLength,
+    hapContentSha256: acceptanceContext.hapContentSha256,
     signedHapVerified: true,
     liveNetworkingVerified: true,
     operatorEvidenceBound: true,
@@ -874,6 +954,154 @@ function processAlive(pid, dependencies) {
   }
 }
 
+function lockRecoveryPaths(path) {
+  return {
+    snapshot: join(dirname(path), `${basename(path)}.recovery-snapshot`),
+    owner: join(dirname(path), `${basename(path)}.recovery-owner.json`)
+  };
+}
+
+async function releaseRecoveryOwner(paths, token) {
+  let owned = false;
+  if (existsSync(paths.owner)) {
+    const owner = await readAtomicJson(paths.owner);
+    if (owner.token === token) {
+      await rm(paths.owner);
+      owned = true;
+    }
+  }
+  if (owned) {
+    await rm(paths.snapshot, { force: true });
+    await syncDirectory(dirname(paths.owner));
+  }
+}
+
+async function acquireRecoveryOwner(path, observedBytes, dependencies) {
+  const paths = lockRecoveryPaths(path);
+  await recoverAtomicState(paths.owner);
+  let observedSnapshot = null;
+  for (let attempt = 0; attempt < 3 && observedSnapshot === null; attempt++) {
+    if (!existsSync(paths.snapshot)) {
+      try {
+        await link(path, paths.snapshot);
+        await syncDirectory(dirname(path));
+      } catch (error) {
+        if (error?.code === 'ENOENT') return null;
+        if (error?.code !== 'EEXIST') throw error;
+      }
+    }
+    try {
+      observedSnapshot = await readBoundedRegularBytes(paths.snapshot, 'Lock recovery snapshot');
+    } catch (error) {
+      await rm(paths.snapshot, { recursive: true, force: true });
+      await syncDirectory(dirname(paths.snapshot));
+      if (attempt === 2) throw error;
+    }
+  }
+  const token = systemRandomBytes(16).toString('hex');
+  const identity = {
+    schemaVersion: 1,
+    kind: 'arkdb-lock-recovery-owner',
+    pid: process.pid,
+    token
+  };
+  let acquired = false;
+  for (let attempt = 0; attempt < 4 && !acquired; attempt++) {
+    try {
+      await atomicWriteNew(paths.owner, recordBytes(identity));
+      acquired = true;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      const owner = await readAtomicJson(paths.owner);
+      exactKeys(owner, ['schemaVersion', 'kind', 'pid', 'token'], 'Lock recovery owner');
+      if (owner.schemaVersion !== 1 || owner.kind !== 'arkdb-lock-recovery-owner' ||
+        typeof owner.token !== 'string' || !/^[0-9a-f]{32}$/.test(owner.token)) {
+        throw new Error('Lock recovery owner is invalid.');
+      }
+      if (processAlive(owner.pid, dependencies)) {
+        throw new Error('Lock recovery is already in progress.');
+      }
+      const retired = join(dirname(paths.owner), `${basename(paths.owner)}.stale-${process.pid}-` +
+        systemRandomBytes(8).toString('hex'));
+      try {
+        await rename(paths.owner, retired);
+        await syncDirectory(dirname(paths.owner));
+        await rm(retired, { force: true });
+      } catch (retireError) {
+        if (retireError?.code !== 'ENOENT') throw retireError;
+      }
+    }
+  }
+  if (!acquired) throw new Error('Lock recovery owner could not be acquired.');
+  try {
+    const snapshotBytes =
+      await readBoundedRegularBytes(paths.snapshot, 'Lock recovery snapshot');
+    if (sha256(snapshotBytes) !== sha256(observedBytes) ||
+      sha256(observedSnapshot) !== sha256(snapshotBytes)) {
+      await releaseRecoveryOwner(paths, token);
+      return null;
+    }
+    if (dependencies.afterRecoveryOwner) {
+      await dependencies.afterRecoveryOwner({ path, ownerPath: paths.owner, snapshotPath: paths.snapshot });
+    }
+    return { ...paths, token };
+  } catch (error) {
+    await releaseRecoveryOwner(paths, token);
+    throw error;
+  }
+}
+
+async function replaceStaleLock(path, observedBytes, replacementBytes, dependencies) {
+  const recovery = await acquireRecoveryOwner(path, observedBytes, dependencies);
+  if (recovery === null) return false;
+  try {
+    if (!existsSync(path) || sha256(await readFile(path)) !== sha256(observedBytes)) return false;
+    await atomicReplace(path, replacementBytes);
+    return true;
+  } finally {
+    await releaseRecoveryOwner(recovery, recovery.token);
+  }
+}
+
+async function acquireProcessLock(path, kind, dependencies) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await recoverAtomicState(path);
+    const identity = {
+      schemaVersion: 1,
+      kind,
+      pid: process.pid,
+      token: systemRandomBytes(16).toString('hex')
+    };
+    const bytes = recordBytes(identity);
+    try {
+      await atomicWriteNew(path, bytes);
+      return identity;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    const existingBytes = await readFile(path);
+    const existing = jsonBytes(existingBytes);
+    exactKeys(existing, ['schemaVersion', 'kind', 'pid', 'token'], 'Process lock');
+    if (existing.schemaVersion !== 1 || existing.kind !== kind ||
+      typeof existing.token !== 'string' || !/^[0-9a-f]{32}$/.test(existing.token)) {
+      throw new Error('Process lock is invalid.');
+    }
+    if (processAlive(existing.pid, dependencies)) {
+      throw new Error('Device preparation is already in progress.');
+    }
+    if (await replaceStaleLock(path, existingBytes, bytes, dependencies)) return identity;
+  }
+  throw new Error('Device preparation lock changed during recovery.');
+}
+
+async function releaseProcessLock(path, identity) {
+  if (!existsSync(path)) return;
+  const current = await readAtomicJson(path);
+  if (current.token !== identity.token) return;
+  await rm(path);
+  await syncDirectory(dirname(path));
+}
+
 async function acquireClaimLock(path, candidateClaim, receiptBytes, parsed, outputPath, dependencies) {
   await recoverAtomicState(path);
   const identity = {
@@ -890,38 +1118,42 @@ async function acquireClaimLock(path, candidateClaim, receiptBytes, parsed, outp
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error;
   }
-  const existing = await readAtomicJson(path);
-  exactKeys(existing, ['schemaVersion', 'kind', 'pid', 'claim'], 'Device claim lock');
-  if (existing.schemaVersion !== 1 || existing.kind !== 'arkdb-device-claim-lock') {
-    throw new Error('Device challenge claim lock is invalid.');
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existingBytes = await readFile(path);
+    const existing = jsonBytes(existingBytes);
+    exactKeys(existing, ['schemaVersion', 'kind', 'pid', 'claim'], 'Device claim lock');
+    if (existing.schemaVersion !== 1 || existing.kind !== 'arkdb-device-claim-lock') {
+      throw new Error('Device challenge claim lock is invalid.');
+    }
+    const decision = existing.claim?.decision;
+    const recordPath = decision === 'accepted'
+      ? join(dirname(path), `${existing.claim?.challenge?.challengeId}.evidence.json`)
+      : decision === 'rejected'
+        ? join(dirname(path), `${existing.claim?.challenge?.challengeId}.rejection.json`) : '';
+    if (recordPath.length === 0) throw new Error('Device challenge claim lock has no valid decision.');
+    const storedClaim = validateClaim(existing.claim, receiptBytes, parsed, decision, recordPath,
+      decision === 'accepted' ? outputPath : null);
+    if (candidateClaim !== null &&
+      (candidateClaim.receiptSha256 !== storedClaim.receiptSha256 ||
+        candidateClaim.payloadSha256 !== storedClaim.payloadSha256 ||
+        candidateClaim.decision !== storedClaim.decision ||
+        candidateClaim.recordSha256 !== storedClaim.recordSha256 ||
+        candidateClaim.outputPath !== storedClaim.outputPath ||
+        JSON.stringify(candidateClaim.challenge) !== JSON.stringify(storedClaim.challenge))) {
+      throw new Error('Device challenge is claimed by a different receipt.');
+    }
+    if (processAlive(existing.pid, dependencies)) {
+      throw new Error('Device challenge verification is already in progress.');
+    }
+    const replacement = recordBytes({
+      schemaVersion: 1,
+      kind: 'arkdb-device-claim-lock',
+      pid: process.pid,
+      claim: storedClaim
+    });
+    if (await replaceStaleLock(path, existingBytes, replacement, dependencies)) return storedClaim;
   }
-  const decision = existing.claim?.decision;
-  const recordPath = decision === 'accepted'
-    ? join(dirname(path), `${existing.claim?.challenge?.challengeId}.evidence.json`)
-    : decision === 'rejected'
-      ? join(dirname(path), `${existing.claim?.challenge?.challengeId}.rejection.json`) : '';
-  if (recordPath.length === 0) throw new Error('Device challenge claim lock has no valid decision.');
-  const storedClaim = validateClaim(existing.claim, receiptBytes, parsed, decision, recordPath,
-    decision === 'accepted' ? outputPath : null);
-  if (candidateClaim !== null &&
-    (candidateClaim.receiptSha256 !== storedClaim.receiptSha256 ||
-      candidateClaim.payloadSha256 !== storedClaim.payloadSha256 ||
-      candidateClaim.decision !== storedClaim.decision ||
-      candidateClaim.recordSha256 !== storedClaim.recordSha256 ||
-      candidateClaim.outputPath !== storedClaim.outputPath ||
-      JSON.stringify(candidateClaim.challenge) !== JSON.stringify(storedClaim.challenge))) {
-    throw new Error('Device challenge is claimed by a different receipt.');
-  }
-  if (processAlive(existing.pid, dependencies)) {
-    throw new Error('Device challenge verification is already in progress.');
-  }
-  await atomicReplace(path, recordBytes({
-    schemaVersion: 1,
-    kind: 'arkdb-device-claim-lock',
-    pid: process.pid,
-    claim: storedClaim
-  }));
-  return storedClaim;
+  throw new Error('Device challenge claim lock changed during recovery.');
 }
 
 async function validateExistingRecord(path, expectedSha256) {
@@ -975,6 +1207,7 @@ export async function verifyDeviceEvidence({
   if ((acceptanceContext === null) !== (frozenOutputPath === null) ||
     (acceptanceContext !== null &&
       (!/^[0-9a-f]{64}$/.test(acceptanceContext.hapSha256 ?? '') ||
+        !/^[0-9a-f]{64}$/.test(acceptanceContext.hapContentSha256 ?? '') ||
         !Number.isSafeInteger(acceptanceContext.hapByteLength) ||
         acceptanceContext.hapByteLength <= 0))) {
     throw new Error('Final device evidence requires one exact signed-HAP/output context.');
@@ -1003,7 +1236,16 @@ export async function verifyDeviceEvidence({
     throw new Error('Device receipt has no valid challenge identity.');
   }
   const paths = tagOutputPaths(root, driver, set.tag);
-  await recoverPreparationJournals(root, paths, dependencies);
+  const preparationLockPath = plainPath(root,
+    join(paths.evidence, 'device-acceptance', 'preparation.lock.json'),
+    { allowMissing: true });
+  const preparationLock = await acquireProcessLock(
+    preparationLockPath, 'arkdb-device-preparation-lock', dependencies);
+  try {
+    await recoverPreparationJournals(root, paths, dependencies);
+  } finally {
+    await releaseProcessLock(preparationLockPath, preparationLock);
+  }
   const states = statePaths(root, paths, parsed.payload.runId);
   const caseBytes = await readFile(join(root, CASE_MANIFEST));
   const cases = readCaseManifest(caseBytes);
@@ -1033,7 +1275,7 @@ export async function verifyDeviceEvidence({
   }
   const lockExists = await atomicStateExists(states.lock);
   if (lockExists) {
-    const activeLock = await readAtomicJson(states.lock);
+    const activeLock = await readLockJson(states.lock);
     exactKeys(activeLock, ['schemaVersion', 'kind', 'pid', 'claim'], 'Device claim lock');
     if (activeLock.schemaVersion !== 1 || activeLock.kind !== 'arkdb-device-claim-lock') {
       throw new Error('Device challenge claim lock is invalid.');
@@ -1160,8 +1402,10 @@ export async function verifyDeviceEvidenceArtifacts({
   const consumer = jsonBytes(consumerBytes);
   const hapBytes = releaseFile(dirname(resolve(hapPath)), basename(hapPath), 128 * 1024 * 1024);
   const actualHapSha256 = sha256(hapBytes);
+  const actualHapContentSha256 = hapSigningContentFingerprint(hapBytes);
   const receiptBytes = releaseFile(dirname(resolve(receiptPath)), basename(receiptPath));
   const parsed = parseReceiptEnvelope(receiptBytes);
+  const challenge = await recoverableChallenge(root, set, parsed.payload.runId);
   if (manifest.sourceClean !== true || manifest.sourceCommit !== set.sourceCommit ||
     manifest.sha256 !== parsed.payload.harSha256 ||
     consumer.schemaVersion !== 3 || consumer.consumerProfile !== 'current' ||
@@ -1170,7 +1414,8 @@ export async function verifyDeviceEvidenceArtifacts({
     parsed.payload.profile !== profile ||
     JSON.stringify(parsed.payload.features) !== JSON.stringify(features) ||
     !supportedDeviceSelection(profile, features, parsed.payload.authPlugin) ||
-    parsed.payload.hapSha256 !== actualHapSha256) {
+    parsed.payload.hapSha256 !== actualHapSha256 ||
+    challenge.preparedUnsignedHapContentSha256 !== actualHapContentSha256) {
     throw new Error('Receipt, sealed release, consumer evidence, or actual signed HAP identity differs.');
   }
   const preliminary = await verifyDeviceEvidence({
@@ -1182,7 +1427,8 @@ export async function verifyDeviceEvidenceArtifacts({
     confirmAuthorizedSchema: true,
     acceptanceContext: {
       hapSha256: actualHapSha256,
-      hapByteLength: hapBytes.length
+      hapByteLength: hapBytes.length,
+      hapContentSha256: actualHapContentSha256
     },
     outputPath: resolve(outPath)
   }, dependencies);

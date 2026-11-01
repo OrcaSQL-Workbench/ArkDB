@@ -114,7 +114,10 @@ npm run device:verify -- `
 
 Verification checks the Ed25519 signature over the exact canonical payload
 and rejects a receipt whose HAR/sample/profile or signed-HAP digest differs
-from the separately supplied sealed files. The challenge moves from `pending` to
+from the separately supplied sealed files. It also compares a
+signing-independent HAP content fingerprint, excluding only `META-INF/`
+signature metadata, so unrelated or rebuilt application content cannot be
+endorsed as the prepared harness. The challenge moves from `pending` to
 `verifying`; cleanup must remove the one-time HAP workspace before the state is
 atomically renamed `accepted` or `rejected`. A cleanup interruption leaves a
 recoverable `verifying` state, while an accepted-state record-write interruption
@@ -129,7 +132,8 @@ The local release evidence uses schema 3. It preserves the exact raw unsigned
 HAP digest/size and also records a canonical content fingerprint that ignores
 ZIP timestamps and entry order. Download verification compares canonical HAP
 content, while the generated one-time device harness continues to bind its exact
-raw HAP bytes.
+raw HAP bytes and retains a signing-independent content identity for the later
+owner-signed derivative.
 
 ## How it works
 

@@ -53,6 +53,9 @@ test('verifies the immutable schema-1 HAR with only its published API surface', 
     },
     runHvigor(args, { cwd }) {
       if (args.includes('assembleHap')) {
+        const buildProfile = JSON.parse(readFileSync(
+          join(cwd, 'entry', 'build-profile.json5'), 'utf8'));
+        assert.deepEqual(buildProfile.buildOption?.sourceOption?.workers ?? [], []);
         assertOnlyPublishedImports(cwd, available);
         const hap = join(cwd, 'entry', 'build', 'default', 'outputs', 'default',
           'entry-default-unsigned.hap');

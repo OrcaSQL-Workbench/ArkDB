@@ -1387,7 +1387,7 @@ async function acquireClaimLock(path, candidateClaim, receiptBytes, parsed, depe
     if (processAlive(existing.pid, dependencies)) {
       throw new Error('Device challenge verification is already in progress.');
     }
-    const selectedClaim = candidateClaim ?? storedClaim;
+    const selectedClaim = storedClaim;
     const replacement = recordBytes({
       schemaVersion: 1,
       kind: 'arkdb-device-claim-lock',

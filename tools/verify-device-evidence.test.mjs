@@ -1525,6 +1525,81 @@ test('retargets recoverable evidence when the original output was never publishe
   assert.deepEqual(JSON.parse(await readFile(recoveredOutPath, 'utf8')), recovered.record);
 });
 
+test('preserves the latest recovery destination across a stale retarget interleaving', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x5e });
+  const hapPath = join(f.fixture.root, 'interleaved-retarget-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'interleaved-retarget-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  const originalOutPath = join(f.fixture.root, 'interleaved-original-evidence.json');
+  const publishedOutPath = join(f.fixture.root, 'interleaved-published-evidence.json');
+  const staleOutPath = join(f.fixture.root, 'interleaved-stale-evidence.json');
+  const options = {
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: originalOutPath
+  };
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async writeExternalRecord() {
+      throw new Error('Synthetic initial output interruption.');
+    }
+  })), /initial output interruption/i);
+
+  let releaseStaleRecovery;
+  const holdStaleRecovery = new Promise((resolve) => { releaseStaleRecovery = resolve; });
+  let markStaleRecoveryReady;
+  const staleRecoveryReady = new Promise((resolve) => { markStaleRecoveryReady = resolve; });
+  const staleRecovery = deviceEvidence.verifyDeviceEvidenceArtifacts({
+    ...options,
+    outPath: staleOutPath
+  }, artifactDependencies({
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false,
+    async beforeClaimLock() {
+      markStaleRecoveryReady();
+      await holdStaleRecovery;
+    }
+  }));
+  await staleRecoveryReady;
+
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    ...options,
+    outPath: publishedOutPath
+  }, artifactDependencies({
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false,
+    async writeExternalRecord(path, record) {
+      assert.equal(path, publishedOutPath);
+      await writeFile(path, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
+      throw new Error('Synthetic interruption after latest output publication.');
+    }
+  })), /latest output publication/i);
+  assert.equal(existsSync(publishedOutPath), true);
+
+  releaseStaleRecovery();
+  await assert.rejects(staleRecovery, /published device evidence cannot be retargeted/i);
+  assert.equal(existsSync(staleOutPath), false);
+
+  const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts({
+    ...options,
+    outPath: publishedOutPath
+  }, artifactDependencies({
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  }));
+  assert.equal(recovered.recordPath, publishedOutPath);
+  assert.deepEqual(JSON.parse(await readFile(publishedOutPath, 'utf8')), recovered.record);
+});
+
 test('rejects receipt-only recovery of an artifact-bound verification claim', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x5c });
   const hapPath = join(f.fixture.root, 'mode-bound-signed-entry.hap');

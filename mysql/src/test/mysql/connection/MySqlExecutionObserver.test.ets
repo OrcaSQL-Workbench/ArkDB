@@ -194,6 +194,7 @@ class ObserverTimerTask {
 
 class ObserverTimers implements ConnectionTimerPort {
   now: number = 0;
+  readonly scheduledTimeouts: number[] = [];
   private nextId: number = 1;
   private tasks: Map<number, ObserverTimerTask> = new Map();
 
@@ -203,6 +204,7 @@ class ObserverTimers implements ConnectionTimerPort {
 
   schedule(handler: () => void, timeoutMs: number): number {
     const id = this.nextId++;
+    this.scheduledTimeouts.push(timeoutMs);
     this.tasks.set(id, new ObserverTimerTask(this.now + timeoutMs, handler));
     return id;
   }
@@ -657,6 +659,67 @@ export default function mySqlExecutionObserverTest(): void {
         control.closeAllowed.release();
         await running;
         await fixture.connection.close();
+      }
+    });
+
+    it('deadlineStartCloseBeforeWriteIsNotDispatched', 0, async () => {
+      const observer = new StartCloseObserver();
+      const control = new ObserverCancellationControl();
+      const timers = new ObserverTimers();
+      const transport = new GatedFailingCloseTransport();
+      transport.failure = new Error('Synthetic pre-dispatch deadline close failure.');
+      const fixture = new ObserverFixture(
+        observer, (): CoreDbConnection => control, timers, transport);
+      observer.target = fixture.connection;
+      await fixture.open();
+      observer.kind = MySqlCommandKind.Query;
+      const scheduledBefore = timers.scheduledTimeouts.length;
+      const deadlines = requireMySqlFeatures(fixture.connection).deadlines;
+      if (deadlines === undefined) throw new Error('Expected deadline execution support.');
+      const options = new MySqlDeadlineOptions();
+      options.timeoutMs = 1000;
+      options.cancellationGraceMs = 2000;
+      let settled = false;
+      const querying = executionFailure(deadlines.query(
+        'SELECT deadline_start_close', options))
+        .then((failure: Object | null): Object | null => {
+          settled = true;
+          return failure;
+        });
+      try {
+        await observer.entered.promise;
+        await transport.closeEntered.promise;
+        await flushPrepared();
+        expect(settled).assertFalse();
+        expect(observer.terminals).assertEqual(0);
+        expect(timers.scheduledTimeouts.length).assertEqual(scheduledBefore + 1);
+        expect(timers.scheduledTimeouts[scheduledBefore]).assertEqual(options.timeoutMs);
+        expect(fixture.peer.commands().length).assertEqual(0);
+        expect(control.commands.length).assertEqual(0);
+        const closeTask = observer.reenteredClose;
+        if (closeTask === null) throw new Error('Expected root close start reentry.');
+
+        transport.closeAllowed.release();
+        const closeFailure = await executionFailure(closeTask);
+        const failure = await querying;
+        expect(closeFailure instanceof MySqlOperationError).assertTrue();
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError &&
+          closeFailure instanceof MySqlOperationError) {
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+          expect(failure.cleanupErrors.length).assertEqual(1);
+          expect(failure.cleanupErrors[0] === closeFailure).assertTrue();
+        }
+        expect(fixture.peer.commands().length).assertEqual(0);
+        expect(control.commands.length).assertEqual(0);
+        expect(observer.starts).assertEqual(1);
+        expect(observer.terminals).assertEqual(1);
+      } finally {
+        transport.closeAllowed.release();
+        await querying;
+        if (observer.reenteredClose !== null) {
+          await executionFailure(observer.reenteredClose);
+        }
       }
     });
 

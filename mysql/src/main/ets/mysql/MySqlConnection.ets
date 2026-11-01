@@ -543,6 +543,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     try {
       channel.resetSequence();
       startedAtMs = monotonicNowMs();
+      this.markOrdinaryCommandDispatched(scope);
       this.queryWrite = channel.writePacket(command);
       await this.queryWrite;
       reading = true;
@@ -608,6 +609,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     try {
       channel.resetSequence();
       startedAtMs = monotonicNowMs();
+      this.markOrdinaryCommandDispatched(scope);
       this.queryWrite = channel.writePacket(command);
       await this.queryWrite;
       reading = true;
@@ -804,6 +806,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.commandGate.setPhase(scope, MySqlCommandPhase.Executing);
     try {
       channel.resetSequence();
+      this.markOrdinaryCommandDispatched(scope);
       await channel.writePacket(command);
       reading = true;
       this.expectOk(await channel.readPacket());
@@ -1239,8 +1242,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } catch (error) {
       primary = error as Object;
     }
-    const executionOutcome = primary instanceof MySqlOperationError ? primary.outcome :
-      (primary === null ? MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.NotDispatched);
+    const executionOutcome = primary === null ? MySqlExecutionOutcome.Completed :
+      (!settlement.dispatched ? MySqlExecutionOutcome.NotDispatched :
+        (primary instanceof MySqlOperationError ?
+          primary.outcome : MySqlExecutionOutcome.Unknown));
     const closeJoin = this.ordinaryCloseJoin(scope);
     if (closeJoin !== null) {
       const closeFailure = await closeJoin;
@@ -1570,6 +1575,13 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         (error: Object): ArkDbError | null => toCleanupError(error));
     }
     return settlement.closeJoin;
+  }
+
+  private markOrdinaryCommandDispatched(scope: MySqlCommandScope): void {
+    const settlement = this.ordinaryOperation;
+    if (settlement !== null && settlement.scope === scope) {
+      settlement.dispatched = true;
+    }
   }
 
   private async retireDeadlineScope(scope: MySqlCommandScope,
@@ -2103,6 +2115,7 @@ class OrdinaryCommandSettlement {
   readonly scope: MySqlCommandScope;
   closeResult: Promise<void> | null = null;
   closeJoin: Promise<ArkDbError | null> | null = null;
+  dispatched: boolean = false;
 
   constructor(scope: MySqlCommandScope) {
     this.scope = scope;

@@ -503,6 +503,10 @@ async function readCursorOpen(source: MysqlPacketSource,
   const firstByte = packetFirstByte(first);
   if (firstByte === PacketType.OK) {
     const ok = parseOk(first.payload, capabilities);
+    if ((ok.statusFlags & StatusFlags.MORE_RESULTS_EXISTS) !== 0) {
+      throw ArkDbError.protocol(
+        'Cursor execute returned unsupported continuation results.');
+    }
     return new CursorOpenResponse([], ok.statusFlags, false);
   }
   if (firstByte === PacketType.LOCAL_INFILE) {

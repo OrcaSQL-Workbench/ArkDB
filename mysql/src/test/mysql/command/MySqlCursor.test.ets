@@ -262,6 +262,45 @@ export default function mySqlCursorTest(): void {
       }
     });
 
+    it('executeOkContinuationRetiresBeforePingConsumesStaleResponse', 0,
+      async () => {
+        const fixture = new PreparedExecutionFixture();
+        await fixture.open();
+        const cursors = requireMySqlFeatures(fixture.connection).cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        fixture.peer.responses.push(
+          prepareResponse(7),
+          [
+            okPayload(2 | StatusFlags.MORE_RESULTS_EXISTS),
+            okPayload()
+          ],
+          [okPayload()]);
+        try {
+          const failure = await preparedFailureOf(
+            cursors.open('CALL continuation()', []));
+          const stateAfterOpen = fixture.connection.state;
+          const closeCallsAfterOpen = fixture.peer.closeCalls;
+          const commandsAfterOpen = fixture.peer.commands().join(',');
+          const queuedResponsesAfterOpen = fixture.peer.responses.length;
+          const ping = await preparedFailureOf(fixture.connection.ping());
+
+          expect(ping !== null).assertTrue();
+          expect(failure instanceof MySqlOperationError).assertTrue();
+          if (failure instanceof MySqlOperationError) {
+            expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+            expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          }
+          expect(stateAfterOpen).assertEqual(ConnectionState.Error);
+          expect(closeCallsAfterOpen).assertEqual(1);
+          expect(commandsAfterOpen).assertEqual('22,23');
+          expect(queuedResponsesAfterOpen).assertEqual(1);
+          expect(fixture.peer.commands().join(',')).assertEqual('22,23');
+          expect(fixture.peer.responses.length).assertEqual(1);
+        } finally {
+          await fixture.close();
+        }
+      });
+
     it('executeServerErrorPreservesIdentityAndConnectionReuse', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();

@@ -19,7 +19,9 @@ import {
 
 const SERVER_ERROR_SQL: string = 'SELECT * FROM arkdb_device_acceptance_required_missing_table';
 const EOF_PROTOCOL_SQL: string = 'SELECT 1 AS eof_probe';
-const BINARY_PROTOCOL_SQL: string = 'SELECT ? AS exact_bigint, ? AS exact_decimal, ? AS exact_binary';
+const BINARY_PROTOCOL_SQL: string =
+  'SELECT CAST(? AS UNSIGNED) AS exact_bigint, CAST(? AS DECIMAL(4,2)) AS exact_decimal, ' +
+  'CAST(? AS BINARY(3)) AS exact_binary';
 const AUTHORIZED_SCHEMA_SQL: string =
   'SELECT challenge_value FROM arkdb_device_acceptance WHERE challenge_id = ?';
 const CANCELLATION_SQL: string = 'SELECT SLEEP(10), 1';

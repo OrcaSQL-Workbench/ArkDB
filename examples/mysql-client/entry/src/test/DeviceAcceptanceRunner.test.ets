@@ -59,6 +59,9 @@ export default function deviceAcceptanceRunnerTest(): void {
       expect(response.errors).assertEqual(0);
       expect(response.ignored).assertEqual(0);
       expect(factory.positive.queries.indexOf('SELECT SLEEP(10), 1') >= 0).assertTrue();
+      expect(factory.positive.preparedQueries[0]).assertEqual(
+        'SELECT CAST(? AS UNSIGNED) AS exact_bigint, CAST(? AS DECIMAL(4,2)) AS exact_decimal, ' +
+        'CAST(? AS BINARY(3)) AS exact_binary');
       expect(signer.payload.indexOf(binding.sourceCommit) >= 0).assertTrue();
       expect(signer.payload.indexOf(binding.artifactSha256) >= 0).assertTrue();
       expect(signer.payload.indexOf(request.signedHapSha256) >= 0).assertTrue();
@@ -269,6 +272,7 @@ class FakeDeviceConnection implements DeviceAcceptanceConnection {
   schemaChallenge: string = '';
   mismatchCode: string = 'TLS_HOSTNAME_MISMATCH';
   queries: string[] = [];
+  preparedQueries: string[] = [];
   private mismatch: boolean;
   private sleepReject: ((error: Error) => void) | null = null;
 
@@ -353,8 +357,9 @@ class FakePrepared implements MySqlPreparedExecutor {
     this.connection = connection;
   }
 
-  async execute(_sql: string, parameters: MySqlParameter[],
+  async execute(sql: string, parameters: MySqlParameter[],
     _options?: QueryOptions): Promise<QueryResult> {
+    this.connection.preparedQueries.push(sql);
     const result = new QueryResult();
     if (parameters.length === 1 && parameters[0].value === this.connection.challengeId) {
       result.rows = [[this.connection.schemaChallenge]];

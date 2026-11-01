@@ -1355,6 +1355,104 @@ test('retargets recoverable evidence when the original output was never publishe
   assert.deepEqual(JSON.parse(await readFile(recoveredOutPath, 'utf8')), recovered.record);
 });
 
+test('rejects receipt-only recovery of an artifact-bound verification claim', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x5c });
+  const hapPath = join(f.fixture.root, 'mode-bound-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'mode-bound-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(specEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey, sha256(f.hapBytes)
+  ))}\n`);
+  const stem = 'arkdb-mysql-1.0.0';
+  const outPath = join(f.fixture.root, 'mode-bound-device-evidence.json');
+  const options = {
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath
+  };
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, artifactDependencies({
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async writeExternalRecord() {
+      throw new Error('Synthetic artifact publication interruption.');
+    }
+  })), /artifact publication interruption/i);
+
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath,
+    confirmPhysicalDevice: true,
+    confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  }), /artifact.*mode|receipt-only.*mode|verification mode/i);
+  assert.equal(existsSync(outPath), false);
+
+  const recovered = await deviceEvidence.verifyDeviceEvidenceArtifacts(options,
+    artifactDependencies({
+      now: () => new Date('2026-11-03T00:00:00.000Z'),
+      isProcessAlive: () => false
+    }));
+  assert.deepEqual(JSON.parse(await readFile(outPath, 'utf8')), recovered.record);
+});
+
+test('rejects artifact recovery of a receipt-only verification claim', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x5d });
+  const receiptPath = join(f.fixture.root, 'receipt-mode-bound.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath,
+    confirmPhysicalDevice: true,
+    confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async writeRecord() {
+      throw new Error('Synthetic receipt-record publication interruption.');
+    }
+  }), /receipt-record publication interruption/i);
+
+  const hapPath = join(f.fixture.root, 'receipt-mode-bound.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const stem = 'arkdb-mysql-1.0.0';
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts({
+    root: f.fixture.root,
+    receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, `${stem}.manifest.json`),
+    consumerPath: join(f.bundle.bundleDirectory, `${stem}.consumer.json`),
+    hapPath,
+    profile: 'M1',
+    features: [],
+    outPath: join(f.fixture.root, 'receipt-mode-must-not-upgrade.json')
+  }, artifactDependencies({
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  })), /verification mode/i);
+
+  const recovered = await verifyDeviceEvidence({
+    root: f.fixture.root,
+    driver: 'mysql',
+    bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath,
+    confirmPhysicalDevice: true,
+    confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  });
+  assert.equal(recovered.record.kind, 'arkdb-device-receipt-verification');
+});
+
 test('does not retarget evidence after the original output was published', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x5b });
   const hapPath = join(f.fixture.root, 'published-retarget-signed-entry.hap');

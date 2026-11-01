@@ -1100,14 +1100,19 @@ function validateClaim(claim, receiptBytes, parsed, decision, recordPath, output
     'schemaVersion', 'kind', 'challenge', 'receiptSha256', 'payloadSha256',
     'decision', 'recordName', 'recordSha256', 'outputPath', 'record'
   ], 'Device verification claim');
+  const artifactClaim = decision === 'accepted' &&
+    claim.record?.kind === 'arkdb-device-acceptance' &&
+    typeof claim.outputPath === 'string' && isAbsolute(claim.outputPath);
+  const receiptClaim = decision === 'accepted' &&
+    claim.record?.kind === 'arkdb-device-receipt-verification' && claim.outputPath === null;
+  const rejectionClaim = decision === 'rejected' &&
+    claim.record?.kind === 'arkdb-device-rejection' && claim.outputPath === null;
   if (claim.schemaVersion !== 1 || claim.kind !== 'arkdb-device-verification-claim' ||
     claim.receiptSha256 !== sha256(receiptBytes) ||
     claim.payloadSha256 !== sha256(Buffer.from(parsed.envelope.payload, 'utf8')) ||
     claim.decision !== decision || claim.recordName !== basename(recordPath) ||
     claim.recordSha256 !== sha256(recordBytes(claim.record)) ||
-    (outputPath !== null
-      ? typeof claim.outputPath !== 'string' || !isAbsolute(claim.outputPath)
-      : claim.outputPath !== null) ||
+    (decision === 'accepted' ? !artifactClaim && !receiptClaim : !rejectionClaim) ||
     claim.outputPath !== outputPath) {
     throw new Error('Device verification recovery belongs to a different receipt or decision.');
   }
@@ -1570,6 +1575,15 @@ async function verifyBoundDeviceEvidence({
     throw new Error('Device challenge is not pending or recoverable.');
   }
   const recoverableClaim = claim ?? lockedClaim;
+  if (recoverableClaim?.decision === 'accepted') {
+    const storedArtifactMode = recoverableClaim.record?.kind === 'arkdb-device-acceptance';
+    const storedReceiptMode =
+      recoverableClaim.record?.kind === 'arkdb-device-receipt-verification';
+    if ((!storedArtifactMode && !storedReceiptMode) ||
+      storedArtifactMode !== (acceptanceContext !== null)) {
+      throw new Error('Device verification mode cannot change during recovery.');
+    }
+  }
   if (frozenOutputPath !== null && existsSync(frozenOutputPath)) {
     if (initialClaim && claim.decision === 'accepted') {
       throw new Error('Device evidence output must be unused for a fresh challenge.');
@@ -1587,6 +1601,9 @@ async function verifyBoundDeviceEvidence({
   claim = validateClaim(claim, receiptBytes, parsed, decision, recordPath,
     decision === 'accepted' ? claim.outputPath : null);
   if (decision === 'accepted' && claim.outputPath !== frozenOutputPath) {
+    if (claim.outputPath === null || frozenOutputPath === null) {
+      throw new Error('Device verification mode cannot change during recovery.');
+    }
     if (await validateExistingRecord(claim.outputPath, claim.recordSha256)) {
       throw new Error('Published device evidence cannot be retargeted.');
     }

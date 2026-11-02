@@ -25,6 +25,13 @@
   `:name` markers, reject mixed positional markers and executable comments, bind
   repeated names in source order through the binary prepared protocol, and keep
   values separate from identifier quoting without caching modes or templates.
+- Add the default-off `ConnectionConfig.multipleStatements` text-script option.
+  Validate and snapshot only boolean values, negotiate `CLIENT_MULTI_STATEMENTS`
+  only when explicitly enabled and offered, keep TLS/auth capability words
+  identical, and disable the flag on internal control connections. Send the
+  trusted SQL text once without client-side semicolon splitting; reuse the
+  existing ordered multi-result, 64-result, byte/drain, error-classification,
+  observer and no-replay contracts without widening prepared statements.
 - Add optional binary stored procedure calls through `mysqlFeatures.procedures`.
   Model typed `In`, `Out` and `InOut` arguments with `MySqlProcedureArgument` and
   `MySqlParameterDirection`, encode pure OUT values as typed NULL, recognize the

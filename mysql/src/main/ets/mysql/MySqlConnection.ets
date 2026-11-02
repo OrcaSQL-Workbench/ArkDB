@@ -245,6 +245,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     controlConfig.defaultSchema = undefined;
     controlConfig.autocommit = true;
     controlConfig.session = undefined;
+    controlConfig.multipleStatements = false;
     const control = new MySqlConnection(controlConfig, this.password, undefined, undefined,
       (): DbConnection => {
         throw ArkDbError.unsupported('A MySQL control connection cannot create another control connection.');
@@ -493,7 +494,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
       const withDb = this.config.defaultSchema !== undefined && this.config.defaultSchema.length > 0;
       const withTls = mysqlTlsRequested(this.config.ssl.mode, handshake.capabilities);
-      this.clientCaps = computeClientCapabilities(handshake.capabilities, withDb, withTls);
+      this.clientCaps = computeClientCapabilities(handshake.capabilities, withDb, withTls,
+        this.config.multipleStatements === true);
 
       this.connState = ConnectionState.Authenticating;
       const params = new HandshakeResponseParams();

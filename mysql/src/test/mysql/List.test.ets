@@ -19,6 +19,7 @@ import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider
 import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
 import queryStreamTest from './command/QueryStream.test';
 import longDataTest from './command/LongData.test';
+import multiStatementsTest from './command/MultiStatements.test';
 import preparedStatementTest from './command/PreparedStatement.test';
 import preparedExecuteTest from './command/PreparedExecute.test';
 import preparedStreamTest from './command/PreparedStream.test';
@@ -55,6 +56,7 @@ export default function testsuite(): void {
   mySqlMetadataProviderTest();
   queryStreamTest();
   longDataTest();
+  multiStatementsTest();
   preparedStatementTest();
   preparedExecuteTest();
   preparedStreamTest();

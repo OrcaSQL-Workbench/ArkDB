@@ -28,6 +28,8 @@ export class PreparedSocket extends MockSocket {
   failCommand: number = -1;
   failure: ArkDbError = ArkDbError.network('Synthetic prepared command write failure.');
   onCommand: ((command: number) => void) | null = null;
+  afterSendSettled: ((command: number) => void) | null = null;
+  afterSendTurns: number = 2;
 
   async send(options: Object): Promise<void> {
     const frame = new Uint8Array((options as SentPacket).data).slice();
@@ -36,14 +38,25 @@ export class PreparedSocket extends MockSocket {
     if (this.onCommand !== null) this.onCommand(command);
     if (command === this.failCommand) throw this.failure;
     await super.send(options);
+    const afterSendSettled = this.afterSendSettled;
+    if (afterSendSettled !== null) {
+      let scheduled: Promise<void> = Promise.resolve();
+      for (let turn = 0; turn < this.afterSendTurns; turn += 1) {
+        scheduled = scheduled.then((): void => {});
+      }
+      scheduled.then((): void => {
+        afterSendSettled(command);
+      });
+    }
     if (command === this.holdCommand || (command !== 0x16 && command !== 0x17 &&
+      command !== 0x1a && command !== 0x1c &&
       command !== 0x03 && command !== 0x0e)) return;
     const response = this.responses.shift();
     if (response !== undefined) this.emitResponse(response);
   }
 
-  emitResponse(packets: Uint8Array[]): void {
-    this.emitMessage(framedResponse(packets));
+  emitResponse(packets: Uint8Array[], firstSequence: number = 1): void {
+    this.emitMessage(framedResponse(packets, firstSequence));
   }
 
   commands(): number[] {
@@ -147,6 +160,51 @@ export function binaryIntResult(values: number[], flags: number = 2,
   return packets;
 }
 
+export function cursorOpenResult(name: string, flags: number = 2 | 0x0040,
+  deprecatedEof: boolean = false, type: number = ColumnType.LONG,
+  charset: number = 45): Uint8Array[] {
+  const packets = [new Uint8Array([1]), columnPayload(name, type, 0, 0, charset)];
+  packets.push(deprecatedEof ? okEofPayload(flags) : eofPayload(flags));
+  return packets;
+}
+
+export function cursorFetchResult(values: number[], flags: number,
+  deprecatedEof: boolean = false): Uint8Array[] {
+  const packets: Uint8Array[] = [];
+  for (const value of values) {
+    packets.push(new PacketWriter().writeUInt8(0).writeUInt8(0).writeInt32(value).toUint8Array());
+  }
+  packets.push(deprecatedEof ? okEofPayload(flags) : eofPayload(flags));
+  return packets;
+}
+
+export function cursorFetchEmptyStrings(count: number, flags: number,
+  deprecatedEof: boolean = false): Uint8Array[] {
+  const packets: Uint8Array[] = [];
+  for (let index = 0; index < count; index += 1) {
+    packets.push(new Uint8Array([0, 0, 0]));
+  }
+  packets.push(deprecatedEof ? okEofPayload(flags) : eofPayload(flags));
+  return packets;
+}
+
+export function cursorBufferedFallback(values: number[],
+  flags: number = 2, deprecatedEof: boolean = false): Uint8Array[] {
+  const packets = [new Uint8Array([1]),
+    columnPayload('value', ColumnType.LONG)];
+  if (!deprecatedEof) packets.push(eofPayload(flags));
+  for (const value of values) {
+    packets.push(new PacketWriter().writeUInt8(0).writeUInt8(0)
+      .writeInt32(value).toUint8Array());
+  }
+  packets.push(deprecatedEof ? okEofPayload(flags) : eofPayload(flags));
+  return packets;
+}
+
+export function okEofPayload(flags: number = 2): Uint8Array {
+  return new Uint8Array([0xfe, 0, 0, flags & 0xff, (flags >>> 8) & 0xff, 0, 0]);
+}
+
 export function preparedFailureOf<T>(task: Promise<T>): Promise<ArkDbError | null> {
   return task.then((): ArkDbError | null => null, (error: Object): ArkDbError | null => {
     if (!(error instanceof ArkDbError)) throw error as Error;
@@ -159,10 +217,11 @@ export function framePacket(payload: Uint8Array, sequence: number): Uint8Array {
     .writeBytes(payload).toUint8Array();
 }
 
-export function framedResponse(packets: Uint8Array[]): Uint8Array {
+export function framedResponse(packets: Uint8Array[],
+  firstSequence: number = 1): Uint8Array {
   const writer = new PacketWriter();
   for (let index = 0; index < packets.length; index += 1) {
-    writer.writeBytes(framePacket(packets[index], index + 1));
+    writer.writeBytes(framePacket(packets[index], firstSequence + index));
   }
   return writer.toUint8Array();
 }

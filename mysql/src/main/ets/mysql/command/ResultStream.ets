@@ -28,6 +28,13 @@ export class MySqlResultTerminatorObservation {
   completionStatusFlags: number = 0;
 }
 
+export class MySqlResultTerminator {
+  statusFlags: number = 0;
+  warnings: number = 0;
+  lastInsertId?: bigint;
+  affectedRowsExact?: bigint;
+}
+
 /** Consume one command response using the actual metadata of each result. */
 export async function parseResultStream(source: MysqlPacketSource, capabilities: number,
   options: QueryOptions, sink: QueryResultSink, rowDecoder: MySqlRowDecoder,
@@ -255,7 +262,8 @@ async function emitRowResult(source: MysqlPacketSource, first: MysqlPacket, capa
       columnTerminator.payload.length !== metadataEofLength) {
       throw ArkDbError.protocol('Expected the result metadata EOF packet.');
     }
-    metadataStatusFlags = parseEof(columnTerminator.payload).statusFlags;
+    metadataStatusFlags =
+      parseResultTerminator(columnTerminator, capabilities).statusFlags;
   }
 
   const meta = new QueryResultMeta();
@@ -507,38 +515,23 @@ function recordTriggerPacket(streamState: QueryStreamState,
 async function finishRowResult(terminator: MysqlPacket, capabilities: number, sink: QueryResultSink,
   resultIndex: number, totalRows: number, emittedRows: number, loadedBytes: number,
   truncationReason: string): Promise<ParsedResult> {
-  let statusFlags = 0;
-  let warnings = 0;
-  let lastInsertId: bigint | undefined = undefined;
-  let affectedRowsExact: bigint | undefined = undefined;
-  if ((capabilities & Capabilities.DEPRECATE_EOF) !== 0) {
-    const ok = parseOk(terminator.payload, capabilities);
-    statusFlags = ok.statusFlags;
-    warnings = ok.warnings;
-    lastInsertId = ok.lastInsertId;
-    affectedRowsExact = ok.affectedRowsExact;
-  } else {
-    const finalEofLength = (capabilities & Capabilities.PROTOCOL_41) !== 0 ? 5 : 1;
-    if (terminator.payload.length !== finalEofLength) {
-      throw ArkDbError.protocol('Expected the result EOF packet.');
-    }
-    const eof = parseEof(terminator.payload);
-    statusFlags = eof.statusFlags;
-    warnings = eof.warnings;
-  }
+  const observation = parseResultTerminator(terminator, capabilities);
+  const statusFlags = observation.statusFlags;
 
   let summary: QueryResultSummary = new QueryResultSummary();
-  if (affectedRowsExact !== undefined) {
+  if (observation.affectedRowsExact !== undefined) {
     const nativeSummary = new MySqlQueryResultSummary();
-    nativeSummary.affectedRowsExact = affectedRowsExact;
+    nativeSummary.affectedRowsExact = observation.affectedRowsExact;
     summary = nativeSummary;
   }
   summary.resultIndex = resultIndex;
   summary.rowCount = totalRows;
   summary.loadedRowCount = emittedRows;
   summary.loadedBytes = loadedBytes;
-  summary.warningCount = warnings;
-  if (lastInsertId !== undefined) summary.lastInsertId = lastInsertId;
+  summary.warningCount = observation.warnings;
+  if (observation.lastInsertId !== undefined) {
+    summary.lastInsertId = observation.lastInsertId;
+  }
   summary.truncated = truncationReason.length > 0;
   summary.truncationReason = truncationReason;
   summary.status = statusFromFlags(statusFlags);
@@ -644,8 +637,33 @@ function statusFlagsFromStatus(status: DatabaseSessionStatus): number {
   return flags;
 }
 
-function isResultTerminator(packet: MysqlPacket): boolean {
+export function isResultTerminator(packet: MysqlPacket): boolean {
   return packetFirstByte(packet) === PacketType.EOF && packet.payload.length < 9;
+}
+
+export function parseResultTerminator(packet: MysqlPacket,
+  capabilities: number): MySqlResultTerminator {
+  if (!isResultTerminator(packet)) {
+    throw ArkDbError.protocol('Expected the result terminator packet.');
+  }
+  const result = new MySqlResultTerminator();
+  if ((capabilities & Capabilities.DEPRECATE_EOF) !== 0) {
+    const ok = parseOk(packet.payload, capabilities);
+    result.statusFlags = ok.statusFlags;
+    result.warnings = ok.warnings;
+    result.lastInsertId = ok.lastInsertId;
+    result.affectedRowsExact = ok.affectedRowsExact;
+    return result;
+  }
+  const finalEofLength =
+    (capabilities & Capabilities.PROTOCOL_41) !== 0 ? 5 : 1;
+  if (packet.payload.length !== finalEofLength) {
+    throw ArkDbError.protocol('Expected the result EOF packet.');
+  }
+  const eof = parseEof(packet.payload);
+  result.statusFlags = eof.statusFlags;
+  result.warnings = eof.warnings;
+  return result;
 }
 
 function packetFirstByte(packet: MysqlPacket): number {

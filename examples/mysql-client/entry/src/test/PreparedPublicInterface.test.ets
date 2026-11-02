@@ -4,6 +4,7 @@ import {
   MySqlBatchResult,
   MySqlCommandKind, MySqlConnectionExtensions, MySqlConnectionFeatures,
   MySqlConnectionOptions, MySqlDeadlineExecutor, MySqlDeadlineOptions, MySqlDriverFactory,
+  MySqlCursor, MySqlCursorExecutor, MySqlCursorOptions,
   MySqlExecutionEvent, MySqlExecutionEventType, MySqlExecutionObserver,
   MySqlInsertRowsExecutor, MySqlInsertRowsOptions,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameter, MySqlParameterType,
@@ -23,12 +24,14 @@ export default function preparedPublicInterfaceTest(): void {
       const session: MySqlSession = connection;
       const features: MySqlConnectionFeatures = requireMySqlFeatures(connection);
       const executor: MySqlPreparedExecutor | undefined = features.prepared;
+      const cursors: MySqlCursorExecutor | undefined = features.cursors;
       const namedExecutor: MySqlNamedExecutor | undefined = features.named;
       const procedures: MySqlProcedureCaller | undefined = features.procedures;
       const deadlines: MySqlDeadlineExecutor | undefined = features.deadlines;
       const insertRows: MySqlInsertRowsExecutor | undefined = features.insertRows;
       const sessionController: MySqlSessionController | undefined = features.session;
       expect(executor !== undefined).assertTrue();
+      expect(cursors !== undefined).assertTrue();
       expect(namedExecutor !== undefined).assertTrue();
       expect(procedures !== undefined).assertTrue();
       expect(deadlines !== undefined).assertTrue();
@@ -76,6 +79,16 @@ export default function preparedPublicInterfaceTest(): void {
       deadlineCopy.queryOptions.maxRows = 2;
       expect(deadlineOptions.timeoutMs).assertEqual(25);
       expect(deadlineOptions.queryOptions.maxRows).assertEqual(1);
+      const cursorOptions: MySqlCursorOptions = new MySqlCursorOptions();
+      expect(cursorOptions.fetchRows).assertEqual(200);
+      expect(cursorOptions.maxBufferedBytes).assertEqual(33554432);
+      expect(cursorOptions.maxRows).assertEqual(0);
+      expect(cursorOptions.maxResultBytes).assertEqual(33554432);
+      expect(cursorOptions.validate().length).assertEqual(0);
+      cursorOptions.maxRows = 3;
+      const cursorCopy: MySqlCursorOptions = cursorOptions.clone();
+      cursorCopy.maxRows = 4;
+      expect(cursorOptions.maxRows).assertEqual(3);
       const insertOptions: MySqlInsertRowsOptions = new MySqlInsertRowsOptions();
       expect(insertOptions.maxPacketBytes).assertEqual(16777216);
       expect(insertOptions.validate().length).assertEqual(0);
@@ -221,6 +234,20 @@ async function deadlineSignatures(executor: MySqlDeadlineExecutor,
   options: MySqlDeadlineOptions, parameters: MySqlParameter[]): Promise<QueryResult> {
   await executor.query('SELECT 1', options);
   return executor.execute('SELECT ?', parameters, options);
+}
+
+async function cursorSignatures(executor: MySqlCursorExecutor,
+  options: MySqlCursorOptions): Promise<void> {
+  const cursor: MySqlCursor = await executor.open('SELECT ?', [
+    new MySqlParameter(MySqlParameterType.Int32, 7)
+  ], options);
+  try {
+    const columnCount: number = cursor.columns.length;
+    const done: boolean = cursor.done;
+    await cursor.fetch();
+  } finally {
+    await cursor.close();
+  }
 }
 
 async function namedSignatures(executor: MySqlNamedExecutor, options: QueryOptions,

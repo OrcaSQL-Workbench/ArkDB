@@ -8,6 +8,7 @@ import {
   DatabaseContext, ForeignKeyInfo, DbConnection, DbDriverFactory, MetadataProvider, DbExecutionController,
   ServerMetricsProvider, CoreDbConnection, ConnectionState, ServerInfo, QueryExecutionSummary, QueryResultSummary,
   QueryResultSink, MySqlConnectionFeatures, requireMySqlFeatures, MySqlParameter,
+  MySqlCursor, MySqlCursorExecutor, MySqlCursorOptions,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameterType, MySqlParameterValue,
   MySqlPreparedExecutor, MySqlPreparedStatement,
   MySqlProcedureCaller, MySqlProcedureArgument, MySqlParameterDirection,
@@ -308,6 +309,8 @@ export default function publicInterfaceTest(): void {
     it('preparedPublicImportsCompile', 0, () => {
       const features: MySqlConnectionFeatures = new MySqlConnectionFeatures();
       expect(features.prepared === undefined).assertTrue();
+      const omittedCursors: MySqlCursorExecutor | undefined = features.cursors;
+      expect(omittedCursors === undefined).assertTrue();
       expect(features.named === undefined).assertTrue();
       expect(features.procedures === undefined).assertTrue();
       const bytes = new Uint8Array([1, 2]);
@@ -342,6 +345,18 @@ export default function publicInterfaceTest(): void {
       expect(procedureResult.outValues.length).assertEqual(0);
       expect(quoteMySqlIdentifier(['schema', 'a`b'])).assertEqual('`schema`.`a``b`');
       expect(mysqlPlaceholders(2)).assertEqual('?,?');
+      const cursorOptions = new MySqlCursorOptions();
+      expect(cursorOptions.fetchRows).assertEqual(200);
+      expect(cursorOptions.maxBufferedBytes).assertEqual(33554432);
+      expect(cursorOptions.maxRows).assertEqual(0);
+      expect(cursorOptions.maxResultBytes).assertEqual(33554432);
+      expect(cursorOptions.validate().length).assertEqual(0);
+      cursorOptions.maxRows = 3;
+      const cursorCopy = cursorOptions.clone();
+      cursorCopy.fetchRows = 1;
+      cursorCopy.maxRows = 4;
+      expect(cursorOptions.fetchRows).assertEqual(200);
+      expect(cursorOptions.maxRows).assertEqual(3);
     });
 
     it('createsPreparedFeatureWithoutOpeningTheConnection', 0, async () => {
@@ -351,10 +366,35 @@ export default function publicInterfaceTest(): void {
       expect(connection.mysqlFeatures !== undefined).assertTrue();
       const features: MySqlConnectionFeatures = requireMySqlFeatures(connection);
       expect(features.prepared !== undefined).assertTrue();
+      expect(features.cursors !== undefined).assertTrue();
       expect(features.insertRows !== undefined).assertTrue();
       expect(features.named !== undefined).assertTrue();
       expect(features.procedures !== undefined).assertTrue();
       await connection.close();
+    });
+
+    it('checksPublicCursorOpenForAllCreationPathsBeforeConnectAndAfterClose', 0, async () => {
+      const factory = new MySqlDriverFactory();
+      const nativeFactory: DbDriverFactory = factory;
+      const config = publicConfig();
+      const connections: DbConnection[] = [
+        new MySqlConnection(config, ''), createMySqlConnection(config, ''),
+        factory.create(new MySqlConnectionOptions(config, '')),
+        nativeFactory.createConnection(config, '')
+      ];
+      for (const connection of connections) {
+        const cursors = publicCursors(connection);
+        for (let phase = 0; phase < 2; phase += 1) {
+          expect(connection.state).assertEqual(
+            phase === 0 ? ConnectionState.Idle : ConnectionState.Closed);
+          const failure = await publicFailure((): Promise<MySqlCursor> =>
+            cursors.open('SELECT ?', [
+              new MySqlParameter(MySqlParameterType.Int32, 7)
+            ]));
+          expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+          await connection.close();
+        }
+      }
     });
 
     it('checksEveryPublicProcedureCallForAllCreationPathsBeforeConnectAndAfterClose', 0, async () => {
@@ -703,6 +743,14 @@ function publicPrepared(connection: DbConnection): MySqlPreparedExecutor {
   const prepared = requireMySqlFeatures(connection).prepared;
   if (prepared === undefined) throw ArkDbError.unsupported('Expected public prepared support.');
   return prepared;
+}
+
+function publicCursors(connection: DbConnection): MySqlCursorExecutor {
+  const cursors = requireMySqlFeatures(connection).cursors;
+  if (cursors === undefined) {
+    throw ArkDbError.unsupported('Expected public cursor support.');
+  }
+  return cursors;
 }
 
 function publicInsertRows(connection: DbConnection): MySqlInsertRowsExecutor {

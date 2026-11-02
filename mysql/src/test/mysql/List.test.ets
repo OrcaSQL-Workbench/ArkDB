@@ -21,6 +21,7 @@ import queryStreamTest from './command/QueryStream.test';
 import preparedStatementTest from './command/PreparedStatement.test';
 import preparedExecuteTest from './command/PreparedExecute.test';
 import preparedStreamTest from './command/PreparedStream.test';
+import mySqlCursorTest from './command/MySqlCursor.test';
 import packetChannelTest from './protocol/PacketChannel.test';
 import packetCodecTest from './protocol/PacketCodec.test';
 import mySqlSqlHelpersTest from './value/MySqlSqlHelpers.test';
@@ -54,6 +55,7 @@ export default function testsuite(): void {
   preparedStatementTest();
   preparedExecuteTest();
   preparedStreamTest();
+  mySqlCursorTest();
   packetChannelTest();
   packetCodecTest();
   mySqlSqlHelpersTest();

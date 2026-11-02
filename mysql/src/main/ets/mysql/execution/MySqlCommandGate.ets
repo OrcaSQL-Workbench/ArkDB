@@ -9,6 +9,7 @@ export enum MySqlCommandKind {
   Transaction = 'transaction',
   Prepare = 'prepare',
   StatementClose = 'statement_close',
+  Cursor = 'cursor',
   Reset = 'reset',
   Close = 'close'
 }

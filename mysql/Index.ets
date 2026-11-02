@@ -53,6 +53,8 @@ export { MySqlCommandKind } from './src/main/ets/mysql/execution/MySqlCommandGat
 export type { MySqlSession } from './src/main/ets/mysql/driver/MySqlSession';
 export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
   './src/main/ets/mysql/driver/MySqlPreparedContracts';
+export type { MySqlCursor, MySqlCursorExecutor } from
+  './src/main/ets/mysql/driver/MySqlCursorContracts';
 export type { MySqlBatchExecutor } from './src/main/ets/mysql/execution/MySqlBatchExecutor';
 export type { MySqlDeadlineExecutor } from './src/main/ets/mysql/execution/MySqlDeadlineExecutor';
 export type { MySqlInsertRowsExecutor } from './src/main/ets/mysql/execution/MySqlInsertRowsExecutor';
@@ -62,6 +64,7 @@ export type { MySqlSessionController } from './src/main/ets/mysql/execution/MySq
 export type { MySqlTransactionRunner } from './src/main/ets/mysql/execution/MySqlTransactionRunner';
 export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
   './src/main/ets/mysql/model/MySqlBatch';
+export { MySqlCursorOptions } from './src/main/ets/mysql/model/MySqlCursorOptions';
 export { MySqlExecutionOutcome, MySqlOperationError } from
   './src/main/ets/mysql/model/MySqlOperationError';
 export { MySqlInsertRowsOptions } from './src/main/ets/mysql/model/MySqlInsertRows';

@@ -171,8 +171,9 @@ fields to core. One cursor retains one physical command owner until final fetch
 or close, so callers cannot interleave another command or return the connection
 to a pool. `MySqlCursorOptions` extends `QueryOptions` and enforces inherited
 `maxRows`/`maxResultBytes` cumulatively across FETCH calls; `fetchRows` accepts
-1..10000. A future pool adapter must close the cursor before resetting or
-releasing its physical connection.
+1..10000. The MySQL pool adapter binds cursors to the lease token, awaits active
+fetch settlement and closes idle cursors before resetting or releasing the
+physical connection.
 
 MySQL's optional `mysqlFeatures.procedures` interface performs stored procedure
 calls only through prepared binary execution. `MySqlProcedureArgument` and

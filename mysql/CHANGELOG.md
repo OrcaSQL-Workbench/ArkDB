@@ -74,8 +74,9 @@
   `fetchRows` to 200 with a 1..10000 range, bound each decoded batch, extend
   `QueryOptions`, enforce cumulative `maxRows`/`maxResultBytes`, RESET
   before early CLOSE, never read a CLOSE acknowledgement, and retire instead
-  of buffering a server fallback. Keep the feature independent of pooling; a
-  future pool lease must close the cursor before session reset or release.
+  of buffering a server fallback. Keep the physical cursor implementation
+  independent of pooling; pool leases bind cursors to their token and close
+  them before session reset or release.
 - Add optional restricted multi-row INSERT through `mysqlFeatures.insertRows`.
   Quote table and column identifiers, bind only typed prepared parameters,
   snapshot every request before dispatch, and greedily group rows by exact
@@ -91,6 +92,16 @@
   row before reading hostile parameter getters; cover exact PREPARE UTF-8
   bytes, EXECUTE-only splits, 65535-parameter partitioning and length-encoded
   250/251 and 65535/65536 boundaries.
+- Add `createMySqlPool` with bounded FIFO acquisition and exclusive revocable
+  `MySqlConnectionLease` sessions. Count opening slots toward `maxSize`, bound
+  queue/acquire/release/idle/close budgets, reject the default 65th waiter,
+  prevent late connection completion from reviving an expired acquire, and
+  reset every successfully released physical session before reuse. Revoke
+  saved session/feature/prepared/cursor handles at release start, wait for active
+  cancellation, cursor fetch and long-data upload settlement, close idle cursors
+  before statement cleanup/reset, discard on reset or network failure, snapshot
+  TLS/observer/multi-statement creation options, and keep raw physical
+  connections private.
 - Expose positional `mapMySqlRows` projection without changing native value types
   or coercing exact decimal, temporal, JSON, NULL or byte values.
 - Add optional native `affectedRowsExact` bigint observations while preserving the

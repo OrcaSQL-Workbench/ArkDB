@@ -33,6 +33,8 @@ import mySqlRowMapperTest from './value/MySqlRowMapper.test';
 import typeMapperTest from './value/TypeMapper.test';
 import binaryParameterEncoderTest from './value/BinaryParameterEncoder.test';
 import binaryRowDecoderTest from './value/BinaryRowDecoder.test';
+import mySqlPoolTest from './pool/MySqlPool.test';
+import mySqlLeaseIsolationTest from './pool/MySqlLeaseIsolation.test';
 
 export default function testsuite(): void {
   authenticationTest();
@@ -70,4 +72,6 @@ export default function testsuite(): void {
   typeMapperTest();
   binaryParameterEncoderTest();
   binaryRowDecoderTest();
+  mySqlPoolTest();
+  mySqlLeaseIsolationTest();
 }

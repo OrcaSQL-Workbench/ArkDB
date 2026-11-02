@@ -40,6 +40,7 @@ export type { MySqlByteSource } from './src/main/ets/mysql/model/MySqlByteSource
 export {
   MySqlLongDataOptions, MySqlLongParameter, MySqlLongParameterKind
 } from './src/main/ets/mysql/model/MySqlLongDataOptions';
+export { MySqlPoolOptions } from './src/main/ets/mysql/model/MySqlPoolOptions';
 export { ServerFamily, MySqlServerInfo, MySqlServerInfo as ServerInfo } from
   './src/main/ets/mysql/model/MySqlServerInfo';
 export { MySqlColumnDef, MySqlColumnDef as ColumnDef, MySqlQueryResult, MySqlQueryResult as QueryResult } from
@@ -55,6 +56,8 @@ export type { MySqlExecutionObserver } from
   './src/main/ets/mysql/diagnostics/MySqlExecutionObserver';
 export { MySqlCommandKind } from './src/main/ets/mysql/execution/MySqlCommandGate';
 export type { MySqlSession } from './src/main/ets/mysql/driver/MySqlSession';
+export type { MySqlConnectionLease } from './src/main/ets/mysql/pool/MySqlConnectionLease';
+export type { MySqlPool } from './src/main/ets/mysql/pool/MySqlPool';
 export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
   './src/main/ets/mysql/driver/MySqlPreparedContracts';
 export type { MySqlCursor, MySqlCursorExecutor } from
@@ -82,6 +85,7 @@ export {
 export { mapMySqlRows } from './src/main/ets/mysql/value/MySqlRowMapper';
 export { quoteMySqlIdentifier, mysqlPlaceholders } from './src/main/ets/mysql/value/MySqlSqlHelpers';
 export { MySqlConnection, createMySqlConnection } from './src/main/ets/mysql/MySqlConnection';
+export { createMySqlPool } from './src/main/ets/mysql/pool/MySqlPool';
 export { MySqlDriverFactory } from './src/main/ets/mysql/driver/MySqlDriverFactory';
 export { MySqlExecutionController } from './src/main/ets/mysql/execution/MySqlExecutionController';
 export { MySqlMetadataProvider } from './src/main/ets/mysql/metadata/MySqlMetadataProvider';

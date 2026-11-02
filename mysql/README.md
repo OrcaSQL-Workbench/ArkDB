@@ -249,8 +249,9 @@ then reset and closed without returning partial rows. The same drain/reset/close
 rule applies if a batch would exceed the remaining cumulative
 inherited `maxRows` or `maxResultBytes` budget. Reaching either cumulative limit
 exactly returns the allowed rows and closes the cursor before `fetch()` resolves.
-This feature has no pool dependency; a future pool lease must await cursor close
-before resetting or returning the physical connection.
+This feature has no physical-pool dependency. A pool lease binds the cursor to
+its lease token, awaits any active fetch, and closes an idle cursor before
+resetting or returning the physical connection.
 
 ### SQL-mode-aware named parameters
 
@@ -490,10 +491,10 @@ rather than pretending rollback occurred. Unknown command, commit or
 cancellation outcomes remain `Unknown`. Rollback and control-cleanup failures
 are retained without replacing the original primary failure.
 
-No pool is exposed. Read-only server cursors, prepared long-data upload and
-opt-in buffered text-query/prepared-execute deadlines are available through
-separate MySQL features; legacy `QueryOptions.statementTimeoutMs` remains
-validation-only.
+A bounded FIFO pool is exposed separately from physical connections. Read-only
+server cursors, prepared long-data upload and opt-in buffered
+text-query/prepared-execute deadlines are available through lease-bound MySQL
+features; legacy `QueryOptions.statementTimeoutMs` remains validation-only.
 
 Built-in root connections also expose `mysqlFeatures.session`.
 `MySqlSessionController.reset()` sends `COM_RESET_CONNECTION` (`0x1f`) through
@@ -516,11 +517,39 @@ initialization closes the physical connection and retains cleanup failures.
 `MySqlSession` is a restricted borrowing interface with read-only feature,
 server-info and session-status properties plus native `query`/`queryStream` and
 transaction-scoped savepoint methods. It does not own connection
-creation/closure, implement a pool lease or enforce read-only SQL. Savepoint
+creation/closure or enforce read-only SQL. Savepoint
 methods reject on a root connection or an expired callback facade.
 `quoteMySqlIdentifier(parts)` quotes each nonempty identifier segment;
 `mysqlPlaceholders(count)` returns comma-separated `?` markers for 1..65535
 values. Neither interpolates values or implements text-protocol binding.
+
+## FIFO connection leases
+
+`createMySqlPool(new MySqlConnectionOptions(config, password), poolOptions?)`
+creates a bounded pool without exposing its physical connections.
+`await pool.acquire()` returns a `MySqlConnectionLease`; use only
+`lease.session`, then await `lease.release()` for reset and safe reuse or
+`lease.destroy()` to discard the physical connection. The first release or
+destroy call revokes the lease synchronously, and repeated terminal calls share
+one settlement. Saved sessions, feature adapters, prepared statements and
+cursors cannot operate after revocation or against a later borrower.
+
+Defaults are `maxSize=4`, `minIdle=0`, `maxQueueSize=64`,
+`acquireTimeoutMs=10000`, `releaseTimeoutMs=5000`,
+`idleTimeoutMs=60000` and `closeTimeoutMs=5000`. Creating connections count
+toward `maxSize`; waiters are FIFO; the 65th queued waiter is rejected by
+default. Acquire timeout includes queueing and connection creation. Setting
+`idleTimeoutMs=0` disables idle eviction, and `minIdle=0` performs no warmup.
+
+Release first waits for lease-started queries, transactions, cursor fetches and
+long-data uploads, then closes lease-owned cursors before explicit prepared
+statements and invokes physical session reset. Only a successful reset can
+return the slot to FIFO handoff or idle storage. Operation, cursor, statement,
+timeout, reset or network cleanup failures destroy the physical connection and
+are reported; SQL is never replayed. `pool.close()` rejects new and queued
+acquires, waits for active leases within its single close budget, then revokes
+and destroys remaining leases rather than starting a second release budget or
+reporting a false clean release.
 
 ## Connect, query, close
 
@@ -1009,11 +1038,12 @@ MySQL also exposes these through `features.metadata` and `features.metrics`; gen
 - **Streaming.** `queryStream(sql, options, sink)` awaits each `QueryResultSink` callback. Set row/chunk/result/drain budgets in `QueryOptions`, handle truncation and unknown status explicitly, and avoid accumulating every chunk. Awaiting a sink does not pause socket delivery; the separate receive queue remains bounded and fails closed on overflow.
 - **Timeouts.** `connectTimeoutMs` covers connection opening and root session reset. Only the optional `mysqlFeatures.deadlines` query/execute interface starts a statement-cancellation timer and owns its convergence/grace cleanup. It joins every cancellation attempt registered for the owned scope, including later public calls, and keeps grace active until the operation and all recorded attempts settle. Timeout and grace delays are chunked to at most `2147483647` ms and re-armed from monotonic absolute expiry. Any unknown attempt or retirement has priority over an original OK result and retains its failure; grace starts target abort before control cleanup, then allows one bounded event-loop turn for prompt unwind. The low-level driver still validates `QueryOptions.statementTimeoutMs` without activating it.
 - **Transactions.** Generic features expose `begin`, `commit`, `rollback` and known session status. MySQL also retains native `setAutocommit` and the optional `mysqlFeatures.transactions` callback runner with typed options and scoped savepoints. The callback facade expires at settlement and does not expose root prepared/batch/nested transaction executors. Failure can invalidate status or leave an unknown execution outcome; never replay writes.
+- **Pool leases.** Pool sessions expose token-bound current MySQL features, including cursors and long-data upload, but never expose the physical connection or session reset controller. Release closes idle cursors before statement cleanup/reset and waits for active cursor fetch or upload convergence within the configured budget.
 - **Cancellation.** The generic connection feature owns its MySQL control-session lifetime. The retained handle-based factory helper does not. Ownership is retained until required cancellation/close cleanup settles. Only the wire-query phase can be killed, not an interrupted-result end callback or an internal status-refresh ping. Status refresh waits for any pending control request and its cleanup; an unknown KILL outcome retires the target and keeps final execution outcome `Unknown`, even after an original OK response. Await the original query and request, then inspect reuse/status before another command.
 - **Errors.** `ArkDbError` and `ArkDbErrorKind` expose common categories and server error code/SQLSTATE. No Workbench-name compatibility aliases are exported. Server messages can contain sensitive data; do not copy them into public logs.
 - **Logging.** `Logger`, `LogSink`, and the five `ArkDB.*` subsystem tags describe driver activity only. Host UI, storage, and RPC logging stay outside the driver. File output remains an explicit opt-in convenience.
 
-The factory also exposes capability flags and metadata/server-metrics providers. SQL is not portable between engines. MariaDB metrics are explicitly unsupported. Typed prepared binding is available through the optional MySQL feature above; text-query interpolation, pooling, a managed Worker client and PostgreSQL are not implemented. Never interpolate untrusted input into SQL.
+The factory also exposes capability flags and metadata/server-metrics providers. SQL is not portable between engines. MariaDB metrics are explicitly unsupported. Typed prepared binding, read-only cursors, prepared long-data upload and bounded FIFO leasing are available through the MySQL-specific interfaces above; text-query interpolation, a managed Worker client and PostgreSQL are not implemented. Never interpolate untrusted input into SQL.
 
 ## Verification limits
 

@@ -19,7 +19,8 @@ import {
   MySqlByteSource, MySqlLongDataExecutor, MySqlLongDataOptions,
   MySqlLongParameter, MySqlLongParameterKind,
   MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
-  mysqlPlaceholders, mapMySqlRows, createMySqlConnection,
+  mysqlPlaceholders, mapMySqlRows, createMySqlConnection, createMySqlPool,
+  MySqlPool, MySqlPoolOptions, MySqlConnectionLease,
   CoreQueryResultSink, CoreQueryResultMeta, CoreQueryRowChunk, CoreQueryResultSummary
 } from '../../../Index';
 import {
@@ -306,6 +307,17 @@ export default function publicInterfaceTest(): void {
       const afterClose = await publicFailure((): Promise<void> => session.reset());
       expect(afterClose.kind).assertEqual(ArkDbErrorKind.Protocol);
       expect(connection.state).assertEqual(ConnectionState.Closed);
+    });
+
+    it('poolPublicImportsUseBoundedDefaultsWithoutOpeningAConnection', 0, async () => {
+      const options = new MySqlPoolOptions();
+      const pool: MySqlPool = createMySqlPool(
+        new MySqlConnectionOptions(publicConfig(), ''), options);
+      const lease: MySqlConnectionLease | null = null;
+      expect(options.maxSize).assertEqual(4);
+      expect(options.maxQueueSize).assertEqual(64);
+      expect(lease === null).assertTrue();
+      await pool.close();
     });
 
     it('longDataPublicImportsCloneAndRemainOptional', 0, async () => {

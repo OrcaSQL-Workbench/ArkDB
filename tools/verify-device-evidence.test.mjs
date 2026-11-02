@@ -1951,7 +1951,9 @@ test('rejects an unrelated existing external record before consuming the challen
     profile: 'M1',
     features: [],
     outPath
-  }, artifactDependencies()), /fresh challenge|must be unused|already exists/i);
+  }, artifactDependencies({
+    now: () => new Date('2026-11-01T01:00:00.000Z')
+  })), /fresh challenge|must be unused|already exists/i);
   assert.equal(existsSync(f.prepared.challengePath), true);
   assert.equal(existsSync(f.prepared.workDirectory), true);
   assert.equal(await readFile(outPath, 'utf8'), '{"unrelated":true}\n');

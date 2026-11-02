@@ -1097,11 +1097,13 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       }
     }
     if (control !== null) {
-      try {
-        await control.close();
-      } catch (cleanup) {
-        Logger.w(LogTag.Conn, 'cancellation cleanup failed error=' + Logger.errorToken(cleanup));
-        cleanupErrors.push(toCleanupError(cleanup as Object));
+      if (control.state !== ConnectionState.Closed) {
+        try {
+          await control.close();
+        } catch (cleanup) {
+          Logger.w(LogTag.Conn, 'cancellation cleanup failed error=' + Logger.errorToken(cleanup));
+          cleanupErrors.push(toCleanupError(cleanup as Object));
+        }
       }
       if (this.cancellationControl === control) this.cancellationControl = null;
     }
@@ -1235,6 +1237,19 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     } catch (error) {
       if (primary === null) primary = error as Object;
       else cleanupErrors.push(toCleanupError(error as Object));
+    }
+    const cancellationControl = this.cancellationControl;
+    if (cancellationControl !== null &&
+      cancellationControl.state !== ConnectionState.Closed) {
+      try {
+        await cancellationControl.close();
+      } catch (cleanup) {
+        Logger.w(LogTag.Conn,
+          'close cancellation control cleanup failed error=' +
+          Logger.errorToken(cleanup));
+        if (primary === null) primary = cleanup as Object;
+        else cleanupErrors.push(toCleanupError(cleanup as Object));
+      }
     }
     try {
       if (this.cancelTask !== null) await this.cancelTask;

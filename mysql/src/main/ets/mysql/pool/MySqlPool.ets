@@ -47,6 +47,7 @@ class DefaultMySqlPoolRuntime implements MySqlPoolRuntime {
 class MySqlPoolWaiter {
   readonly promise: Promise<MySqlConnectionLease>;
   active: boolean = true;
+  failureReserved: boolean = false;
   timerId: number = 0;
   private resolvePromise:
     (lease: MySqlConnectionLease | PromiseLike<MySqlConnectionLease>) => void =
@@ -178,6 +179,23 @@ class MySqlPoolVoidTask {
     task.then(
       (): void => this.resolvePromise(),
       (error: Object): void => this.rejectPromise(error));
+  }
+}
+
+class MySqlPoolFailureObservation {
+  failures: Object[] = [];
+  settled: boolean = false;
+
+  observe(settlement: Promise<Object[]>): void {
+    settlement.then(
+      (failures: Object[]): void => {
+        this.failures = failures;
+        this.settled = true;
+      },
+      (error: Object): void => {
+        this.failures = [error];
+        this.settled = true;
+      });
   }
 }
 
@@ -345,7 +363,7 @@ class FifoMySqlPool implements MySqlPool {
       const demandCreation = slot.demandCreation;
       slot.demandCreation = false;
       const waiter = demandCreation && this.state === MySqlPoolState.Open ?
-        this.takeNextWaiter() : null;
+        this.reserveNextWaiterForFailure() : null;
       if (slot.connection !== null) {
         try {
           await this.ensurePhysicalClose(slot);
@@ -354,11 +372,15 @@ class FifoMySqlPool implements MySqlPool {
         }
       }
       this.removeSlot(slot);
-      if (waiter !== null && waiter.active) {
+      if (waiter !== null) {
+        removeItem(this.waiters, waiter);
+        waiter.failureReserved = false;
+      }
+      if (waiter === null || !waiter.active) {
+        appendPoolFailure(this.backgroundErrors, failure);
+      } else {
         this.cancelWaiterTimer(waiter);
         waiter.fail(failure);
-      } else {
-        appendPoolFailure(this.backgroundErrors, failure);
       }
       this.dispatch(demandCreation);
       return;
@@ -412,6 +434,9 @@ class FifoMySqlPool implements MySqlPool {
     slot.state = MySqlPoolSlotState.Releasing;
     const failures: Object[] = [];
     let settlementTimedOut = false;
+    const operationSettlement = context.waitForOperations();
+    const operationObservation = new MySqlPoolFailureObservation();
+    operationObservation.observe(operationSettlement);
     let cursorSettlement: Promise<Object[]> | null = null;
     let statementSettlement: Promise<Object[]> | null = null;
     let resetSettlement: Promise<Object | null> | null = null;
@@ -426,7 +451,7 @@ class FifoMySqlPool implements MySqlPool {
       context.onForce((error: ArkDbError): void => budget.cancel(error));
       try {
         try {
-          const operationFailures = await budget.wait(context.waitForOperations());
+          const operationFailures = await budget.wait(operationSettlement);
           for (const failure of operationFailures) appendPoolFailure(failures, failure);
         } catch (error) {
           settlementTimedOut = true;
@@ -492,6 +517,11 @@ class FifoMySqlPool implements MySqlPool {
         await closing;
       } catch (error) {
         appendPoolFailure(failures, error as Object);
+      }
+      if (operationObservation.settled) {
+        for (const failure of operationObservation.failures) {
+          appendPoolFailure(failures, failure);
+        }
       }
       if (cursorSettlement !== null) {
         try {
@@ -596,9 +626,31 @@ class FifoMySqlPool implements MySqlPool {
   }
 
   private takeNextWaiter(): MySqlPoolWaiter | null {
-    while (this.waiters.length > 0) {
-      const waiter = this.waiters.shift();
-      if (waiter !== undefined && waiter.active) return waiter;
+    for (let index = 0; index < this.waiters.length; index++) {
+      const waiter = this.waiters[index];
+      if (!waiter.active) {
+        this.waiters.splice(index, 1);
+        index--;
+        continue;
+      }
+      if (waiter.failureReserved) continue;
+      this.waiters.splice(index, 1);
+      return waiter;
+    }
+    return null;
+  }
+
+  private reserveNextWaiterForFailure(): MySqlPoolWaiter | null {
+    for (let index = 0; index < this.waiters.length; index++) {
+      const waiter = this.waiters[index];
+      if (!waiter.active) {
+        this.waiters.splice(index, 1);
+        index--;
+        continue;
+      }
+      if (waiter.failureReserved) continue;
+      waiter.failureReserved = true;
+      return waiter;
     }
     return null;
   }
@@ -606,7 +658,7 @@ class FifoMySqlPool implements MySqlPool {
   private activeWaiterCount(): number {
     let count = 0;
     for (const waiter of this.waiters) {
-      if (waiter.active) count++;
+      if (waiter.active && !waiter.failureReserved) count++;
     }
     return count;
   }

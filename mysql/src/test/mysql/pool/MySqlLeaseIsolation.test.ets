@@ -135,6 +135,42 @@ export default function mySqlLeaseIsolationTest(): void {
       await pool.close();
     });
 
+    it('releaseTimeoutRetainsOperationFailureSettledDuringPhysicalClose', 0,
+      async () => {
+        const runtime = new PoolRuntime();
+        const connection = new PoolConnection(1);
+        const operationFailure =
+          ArkDbError.network('Synthetic operation failure during close.');
+        connection.queryGate = new PoolDeferred<MySqlQueryResult>();
+        connection.closeGate = new PoolDeferred<void>();
+        runtime.enqueue(connection);
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const pool = createTestPool(runtime, options);
+        const lease = await pool.acquire();
+        const query = new PoolOutcome<MySqlQueryResult>(
+          lease.session.query('SELECT late failure'));
+        const release = new PoolOutcome<void>(lease.release());
+        await flushPool();
+
+        runtime.timers.advance(10);
+        await flushPool();
+        const releasePendingDuringClose = !release.settled;
+        connection.queryGate.reject(operationFailure);
+        await query.finished;
+        connection.closeGate.resolve(undefined);
+        await release.finished;
+        await pool.close();
+
+        expect(releasePendingDuringClose).assertTrue();
+        expect(query.error === operationFailure).assertTrue();
+        expect(release.error instanceof MySqlOperationError).assertTrue();
+        expect(countFailureIdentity(release.error!, operationFailure))
+          .assertEqual(1);
+        expect(connection.closeCalls).assertEqual(1);
+        expect(connection.resetCalls).assertEqual(0);
+      });
+
     it('releaseTimeoutDoesNotAwaitNeverSettlingTransaction', 0, async () => {
       const runtime = new PoolRuntime();
       const connection = new PoolConnection(1);
@@ -228,6 +264,38 @@ export default function mySqlLeaseIsolationTest(): void {
       expect(release.error === null).assertTrue();
       expect(connection.events.join(',')).assertEqual('cursor-close,reset');
       await pool.close();
+    });
+
+    it('terminalCursorFetchRemovesLeaseRegistryEntry', 0, async () => {
+      const runtime = new PoolRuntime();
+      const connection = new PoolConnection(1);
+      connection.cursorFetchEnds = true;
+      runtime.enqueue(connection);
+      const pool = createTestPool(runtime);
+      const lease = await pool.acquire();
+      const cursors = lease.session.mysqlFeatures.cursors;
+      if (cursors === undefined) throw new Error('Expected cursor support.');
+      const cursor = await cursors.open('SELECT terminal cursor', []);
+      const root = connection.cursors.cursors[0];
+
+      await cursor.fetch();
+      const doneReadsAfterFetch = root.doneReads;
+      const registryProbeFailure =
+        ArkDbError.protocol('Exhausted cursor remained registered.');
+      root.doneFailure = registryProbeFailure;
+      const releaseFailure = await poolFailureOf<void>(lease.release());
+      const doneReadsAfterRelease = root.doneReads;
+      const physicalCloseAfterRelease = connection.closeCalls;
+      await pool.close();
+      const physicalCloseAfterPoolClose = connection.closeCalls;
+
+      expect(doneReadsAfterFetch).assertEqual(1);
+      expect(doneReadsAfterRelease).assertEqual(doneReadsAfterFetch);
+      expect(root.closeCalls).assertEqual(0);
+      expect(releaseFailure === null).assertTrue();
+      expect(connection.resetCalls).assertEqual(1);
+      expect(physicalCloseAfterRelease).assertEqual(0);
+      expect(physicalCloseAfterPoolClose).assertEqual(1);
     });
 
     it('cursorCloseOverlapRejectionDoesNotPoisonRetryOrRelease', 0, async () => {

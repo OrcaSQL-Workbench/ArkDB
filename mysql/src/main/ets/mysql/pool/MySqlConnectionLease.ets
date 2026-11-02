@@ -506,7 +506,11 @@ class LeaseCursor implements MySqlCursor {
 
   fetch(): Promise<MySqlValue[][]> {
     return this.context.runOperation(
-      (): Promise<MySqlValue[][]> => this.root.fetch());
+      (): Promise<MySqlValue[][]> => this.root.fetch())
+      .then((rows: MySqlValue[][]): MySqlValue[][] => {
+        if (this.root.done) this.context.forgetCursor(this);
+        return rows;
+      });
   }
 
   close(): Promise<void> {

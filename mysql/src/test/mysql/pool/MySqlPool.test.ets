@@ -1,7 +1,8 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, ConnectionTimerPort,
-  DatabaseContext, DbConnectionFeatures, QueryOptions
+  DatabaseContext, DbConnection, DbConnectionFeatures, QueryOptions,
+  QueryResult, ServerInfo
 } from '@arkdb/core';
 import { MySqlLongDataExecutor } from '../../../main/ets/mysql/command/LongData';
 import {
@@ -68,6 +69,7 @@ import { MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperatio
 import { MySqlCommandKind } from '../../../main/ets/mysql/execution/MySqlCommandGate';
 import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
+import { TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
 import {
   PreparedSocket, errorPayload, flushPrepared, framePacket, handshake, okPayload,
   prepareResponse
@@ -246,6 +248,8 @@ export class PoolCursor implements MySqlCursor {
   readonly columns: MySqlColumnDef[] = [];
   fetchCalls: number = 0;
   closeCalls: number = 0;
+  doneReads: number = 0;
+  doneFailure: Object | null = null;
   private connection: PoolConnection;
   private ended: boolean = false;
   private fetching: boolean = false;
@@ -255,20 +259,24 @@ export class PoolCursor implements MySqlCursor {
   }
 
   get done(): boolean {
+    this.doneReads++;
+    if (this.doneFailure !== null) throw this.doneFailure as Error;
     return this.ended;
   }
 
   async fetch(): Promise<MySqlValue[][]> {
     this.fetchCalls++;
+    let rows: MySqlValue[][] = [];
     if (this.connection.cursorFetchGate !== null) {
       this.fetching = true;
       try {
-        return await this.connection.cursorFetchGate.promise;
+        rows = await this.connection.cursorFetchGate.promise;
       } finally {
         this.fetching = false;
       }
     }
-    return [];
+    if (this.connection.cursorFetchEnds) this.ended = true;
+    return rows;
   }
 
   async close(): Promise<void> {
@@ -429,6 +437,7 @@ export class PoolConnection implements MySqlPoolConnection {
   closeGate: PoolDeferred<void> | null = null;
   closeSettlesQuery: boolean = false;
   cursorRejectCloseWhileFetching: boolean = false;
+  cursorFetchEnds: boolean = false;
   resetFailure: Object | null = null;
   connectFailure: Object | null = null;
   closeFailure: Object | null = null;
@@ -653,6 +662,49 @@ class ObservedPoolConnection extends MySqlPoolConnectionAdapter {
   }
 }
 
+class OpeningCancellationControl implements DbConnection {
+  state: ConnectionState = ConnectionState.Idle;
+  readonly serverInfo: ServerInfo = new ServerInfo();
+  readonly connectEntered: PoolDeferred<void> = new PoolDeferred<void>();
+  readonly opening: PoolDeferred<void> = new PoolDeferred<void>();
+  closeCalls: number = 0;
+  closed: boolean = false;
+
+  async connect(): Promise<void> {
+    this.connectEntered.resolve(undefined);
+    await this.opening.promise;
+    if (this.closed) {
+      throw ArkDbError.cancelled('Synthetic control connection closed while opening.');
+    }
+    this.state = ConnectionState.Ready;
+  }
+
+  async query(_sql: string): Promise<QueryResult> {
+    return new QueryResult();
+  }
+
+  async close(): Promise<void> {
+    this.closeCalls++;
+    this.closed = true;
+    this.state = ConnectionState.Closed;
+    this.opening.resolve(undefined);
+  }
+}
+
+class CancellationPoolRuntime implements MySqlPoolRuntime {
+  readonly timers: PoolTimers = new PoolTimers();
+  readonly peer: PreparedSocket = new PreparedSocket();
+  readonly control: OpeningCancellationControl =
+    new OpeningCancellationControl();
+
+  createConnection(options: MySqlConnectionOptions): MySqlPoolConnection {
+    socket.nextTcp = this.peer;
+    return new MySqlPoolConnectionAdapter(new MySqlConnection(
+      options.config, options.password, new TcpTransport(), this.timers,
+      (): DbConnection => this.control));
+  }
+}
+
 class ReentrantPoolCloseObserver implements MySqlExecutionObserver {
   readonly connected: PoolDeferred<void> = new PoolDeferred<void>();
   private reentered: boolean = false;
@@ -689,6 +741,12 @@ function observedConnectionOptions(
 }
 
 function completeObservedConnect(runtime: ObservedPoolRuntime): void {
+  runtime.peer.emitMessage(new PacketWriter()
+    .writeBytes(handshake(Capabilities.PROTOCOL_41))
+    .writeBytes(framePacket(okPayload(), 2)).toUint8Array());
+}
+
+function completeCancellationPoolConnect(runtime: CancellationPoolRuntime): void {
   runtime.peer.emitMessage(new PacketWriter()
     .writeBytes(handshake(Capabilities.PROTOCOL_41))
     .writeBytes(framePacket(okPayload(), 2)).toUint8Array());
@@ -1164,6 +1222,46 @@ export default function mySqlPoolTest(): void {
       }
     });
 
+    it('poolCloseCancelsWaiterDuringFailedCreationCleanup', 0, async () => {
+      const runtime = new PoolRuntime();
+      const failed = new PoolConnection(1);
+      const connectFailure =
+        ArkDbError.network('Synthetic connect failure during pool close.');
+      const cleanupFailure =
+        ArkDbError.network('Synthetic connect cleanup during pool close.');
+      failed.connectFailure = connectFailure;
+      failed.closeFailure = cleanupFailure;
+      failed.closeGate = new PoolDeferred<void>();
+      runtime.enqueue(failed);
+      const pool = createTestPool(runtime);
+
+      const acquiring = new PoolOutcome<MySqlConnectionLease>(pool.acquire());
+      await flushPool();
+      const closing = new PoolOutcome<void>(pool.close());
+      await flushPool();
+      const acquireSettledDuringClose = acquiring.settled;
+      const acquireFailureDuringClose = acquiring.error;
+      const timersDuringClose = runtime.timers.size;
+
+      failed.closeGate.resolve(undefined);
+      await acquiring.finished;
+      await closing.finished;
+
+      expect(acquireSettledDuringClose).assertTrue();
+      expect(acquireFailureDuringClose instanceof ArkDbError).assertTrue();
+      expect((acquireFailureDuringClose as ArkDbError).kind)
+        .assertEqual(ArkDbErrorKind.Cancelled);
+      expect(acquiring.error === acquireFailureDuringClose).assertTrue();
+      expect(acquiring.value === null).assertTrue();
+      expect(timersDuringClose).assertEqual(1);
+      expect(closing.error instanceof MySqlOperationError).assertTrue();
+      if (closing.error instanceof MySqlOperationError) {
+        expect(closing.error.primary === connectFailure).assertTrue();
+        expect(closing.error.cleanupErrors.length).assertEqual(1);
+        expect(closing.error.cleanupErrors[0] === cleanupFailure).assertTrue();
+      }
+    });
+
     it('zeroQueueAcceptsWaiterCoveredByExistingDemandReservation', 0, async () => {
       const runtime = new PoolRuntime();
       const activeConnection = new PoolConnection(1);
@@ -1580,6 +1678,60 @@ export default function mySqlPoolTest(): void {
       expect(connection.closeCalls).assertEqual(1);
       expect(runtime.timers.size).assertEqual(0);
     });
+
+    it('releaseAndPoolCloseBudgetsAbortOpeningCancellationControl', 0,
+      async () => {
+        const runtime = new CancellationPoolRuntime();
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        options.closeTimeoutMs = 20;
+        const config = new ConnectionConfig();
+        config.host = 'cancellation-pool.invalid';
+        config.user = 'pool';
+        config.ssl.mode = SslMode.DISABLED;
+        const pool = createMySqlPoolInternal(
+          new MySqlConnectionOptions(config, ''), options, runtime);
+        const acquiring = pool.acquire();
+        completeCancellationPoolConnect(runtime);
+        const lease = await acquiring;
+        const deadlines = lease.session.mysqlFeatures.deadlines;
+        if (deadlines === undefined) {
+          throw new Error('Expected deadline support.');
+        }
+        const deadlineOptions = new MySqlDeadlineOptions();
+        deadlineOptions.timeoutMs = 5;
+        deadlineOptions.cancellationGraceMs = 100;
+        runtime.peer.holdCommand = 0x03;
+        const running = new PoolOutcome<MySqlQueryResult>(
+          deadlines.query('SELECT held cancellation', deadlineOptions));
+        await flushPool();
+        runtime.timers.advance(5);
+        await runtime.control.connectEntered.promise;
+
+        const release = new PoolOutcome<void>(lease.release());
+        const closing = new PoolOutcome<void>(pool.close());
+        runtime.timers.advance(20);
+        await flushPool();
+        const releaseSettledAtBudget = release.settled;
+        const closeSettledAtBudget = closing.settled;
+        const controlCloseCallsAtBudget = runtime.control.closeCalls;
+
+        runtime.control.opening.resolve(undefined);
+        await release.finished;
+        await closing.finished;
+        await running.finished;
+
+        expect(releaseSettledAtBudget).assertTrue();
+        expect(closeSettledAtBudget).assertTrue();
+        expect(controlCloseCallsAtBudget).assertEqual(1);
+        expect(release.error instanceof ArkDbError).assertTrue();
+        expect((release.error as ArkDbError).kind)
+          .assertEqual(ArkDbErrorKind.Timeout);
+        expect(closing.error instanceof ArkDbError).assertTrue();
+        expect((closing.error as ArkDbError).kind)
+          .assertEqual(ArkDbErrorKind.Timeout);
+        expect(runtime.timers.size).assertEqual(0);
+      });
 
     it('poolOptionsRejectEveryOutOfRangeValue', 0, () => {
       const invalid: MySqlPoolOptions[] = [];

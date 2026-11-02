@@ -503,10 +503,7 @@ async function readCursorOpen(source: MysqlPacketSource,
   const firstByte = packetFirstByte(first);
   if (firstByte === PacketType.OK) {
     const ok = parseOk(first.payload, capabilities);
-    if ((ok.statusFlags & StatusFlags.MORE_RESULTS_EXISTS) !== 0) {
-      throw ArkDbError.protocol(
-        'Cursor execute returned unsupported continuation results.');
-    }
+    assertNoCursorContinuation(ok.statusFlags, 'Cursor execute');
     return new CursorOpenResponse([], ok.statusFlags, false);
   }
   if (firstByte === PacketType.LOCAL_INFILE) {
@@ -540,6 +537,8 @@ async function readCursorOpen(source: MysqlPacketSource,
       'The server returned buffered rows instead of a read-only cursor.');
   }
   const observation = parseResultTerminator(terminator, capabilities);
+  assertNoCursorContinuation(
+    observation.statusFlags, 'Cursor metadata terminator');
   const cursorExists =
     (observation.statusFlags & StatusFlags.CURSOR_EXISTS) !== 0;
   if (!cursorExists) {
@@ -566,6 +565,8 @@ async function readCursorFetch(source: MysqlPacketSource,
       await readCursorPacket(source, capabilities);
     if (isResultTerminator(packet)) {
       const observation = parseResultTerminator(packet, capabilities);
+      assertNoCursorContinuation(
+        observation.statusFlags, 'Cursor fetch terminator');
       const cursorExists =
         (observation.statusFlags & StatusFlags.CURSOR_EXISTS) !== 0;
       const lastRowSent =
@@ -625,7 +626,17 @@ async function readCursorReset(source: MysqlPacketSource,
   if (packetFirstByte(packet) !== PacketType.OK) {
     throw ArkDbError.protocol('Expected the cursor reset OK packet.');
   }
-  return parseOk(packet.payload, capabilities).statusFlags;
+  const statusFlags = parseOk(packet.payload, capabilities).statusFlags;
+  assertNoCursorContinuation(statusFlags, 'Cursor reset');
+  return statusFlags;
+}
+
+function assertNoCursorContinuation(
+  statusFlags: number, operation: string): void {
+  if ((statusFlags & StatusFlags.MORE_RESULTS_EXISTS) !== 0) {
+    throw ArkDbError.protocol(
+      operation + ' returned unsupported continuation results.');
+  }
 }
 
 function packetFirstByte(packet: MysqlPacket): number {

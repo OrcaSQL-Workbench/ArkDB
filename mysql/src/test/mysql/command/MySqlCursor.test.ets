@@ -301,6 +301,100 @@ export default function mySqlCursorTest(): void {
         }
       });
 
+    it('metadataContinuationRetiresBeforeFetchConsumesStaleResponse', 0,
+      async () => {
+        const fixture = new PreparedExecutionFixture();
+        await fixture.open();
+        const cursors = requireMySqlFeatures(fixture.connection).cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        const openResponse = cursorOpenResult(
+          'value',
+          StatusFlags.AUTOCOMMIT |
+            StatusFlags.CURSOR_EXISTS |
+            StatusFlags.MORE_RESULTS_EXISTS);
+        openResponse.push(okPayload());
+        fixture.peer.responses.push(
+          prepareResponse(7),
+          openResponse,
+          cursorFetchResult([7], StatusFlags.AUTOCOMMIT | StatusFlags.LAST_ROW_SENT));
+        let opened = false;
+        let failure: ArkDbError | null = null;
+        let fetchFailure: ArkDbError | null = null;
+        try {
+          try {
+            const cursor = await cursors.open('SELECT continuation', []);
+            opened = true;
+            fetchFailure = await preparedFailureOf(cursor.fetch());
+          } catch (error) {
+            if (!(error instanceof ArkDbError)) throw error as Error;
+            failure = error;
+          }
+          expect(opened).assertFalse();
+          expect(failure instanceof MySqlOperationError).assertTrue();
+          if (failure instanceof MySqlOperationError) {
+            expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+            expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          }
+          expect(fetchFailure === null).assertTrue();
+          expect(fixture.connection.state).assertEqual(ConnectionState.Error);
+          expect(fixture.peer.closeCalls).assertEqual(1);
+          expect(fixture.peer.commands().join(',')).assertEqual('22,23');
+          expect(fixture.peer.responses.length).assertEqual(1);
+        } finally {
+          await fixture.close();
+        }
+      });
+
+    it('fetchContinuationWithOpenCursorRetiresBeforeCleanup', 0,
+      async () => {
+        await expectFetchContinuationRetires(
+          StatusFlags.AUTOCOMMIT |
+            StatusFlags.CURSOR_EXISTS |
+            StatusFlags.MORE_RESULTS_EXISTS);
+      });
+
+    it('terminalFetchContinuationRetiresBeforeCleanup', 0,
+      async () => {
+        await expectFetchContinuationRetires(
+          StatusFlags.AUTOCOMMIT |
+            StatusFlags.LAST_ROW_SENT |
+            StatusFlags.MORE_RESULTS_EXISTS);
+      });
+
+    it('resetContinuationRetiresBeforeStatementCloseConsumesStaleResponse', 0,
+      async () => {
+        const fixture = new PreparedExecutionFixture();
+        await fixture.open();
+        const cursors = requireMySqlFeatures(fixture.connection).cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        fixture.peer.responses.push(
+          prepareResponse(7),
+          cursorOpenResult('value'),
+          [
+            okPayload(StatusFlags.AUTOCOMMIT | StatusFlags.MORE_RESULTS_EXISTS),
+            okPayload()
+          ],
+          [okPayload()]);
+        try {
+          const cursor = await cursors.open('SELECT continuation', []);
+          const failure = await preparedFailureOf(cursor.close());
+          const ping = await preparedFailureOf(fixture.connection.ping());
+
+          expect(failure instanceof MySqlOperationError).assertTrue();
+          if (failure instanceof MySqlOperationError) {
+            expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+            expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+          }
+          expect(ping !== null).assertTrue();
+          expect(fixture.connection.state).assertEqual(ConnectionState.Error);
+          expect(fixture.peer.closeCalls).assertEqual(1);
+          expect(fixture.peer.commands().join(',')).assertEqual('22,23,26');
+          expect(fixture.peer.responses.length).assertEqual(1);
+        } finally {
+          await fixture.close();
+        }
+      });
+
     it('executeServerErrorPreservesIdentityAndConnectionReuse', 0, async () => {
       const fixture = new PreparedExecutionFixture();
       await fixture.open();
@@ -924,6 +1018,40 @@ export default function mySqlCursorTest(): void {
       }
     });
   });
+}
+
+async function expectFetchContinuationRetires(
+  statusFlags: number): Promise<void> {
+  const fixture = new PreparedExecutionFixture();
+  await fixture.open();
+  const cursors = requireMySqlFeatures(fixture.connection).cursors;
+  if (cursors === undefined) throw new Error('Expected cursor support.');
+  const fetchResponse = cursorFetchResult([7], statusFlags);
+  fetchResponse.push(okPayload());
+  fixture.peer.responses.push(
+    prepareResponse(7),
+    cursorOpenResult('value'),
+    fetchResponse,
+    [okPayload()]);
+  try {
+    const cursor = await cursors.open('SELECT continuation', []);
+    const failure = await preparedFailureOf(cursor.fetch());
+    await preparedFailureOf(cursor.close());
+    const ping = await preparedFailureOf(fixture.connection.ping());
+
+    expect(failure instanceof MySqlOperationError).assertTrue();
+    if (failure instanceof MySqlOperationError) {
+      expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+      expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+    }
+    expect(ping !== null).assertTrue();
+    expect(fixture.connection.state).assertEqual(ConnectionState.Error);
+    expect(fixture.peer.closeCalls).assertEqual(1);
+    expect(fixture.peer.commands().join(',')).assertEqual('22,23,28');
+    expect(fixture.peer.responses.length).assertEqual(1);
+  } finally {
+    await fixture.close();
+  }
 }
 
 function expectCursorServerFailure(failure: ArkDbError | null,

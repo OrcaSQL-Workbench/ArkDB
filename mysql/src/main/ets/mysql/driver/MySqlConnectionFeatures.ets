@@ -9,12 +9,14 @@ import { MySqlNamedExecutor } from '../execution/MySqlNamedExecutor';
 import { MySqlProcedureCaller } from '../execution/MySqlProcedureCaller';
 import { MySqlSessionController } from '../execution/MySqlSessionController';
 import { MySqlTransactionRunner } from '../execution/MySqlTransactionRunner';
+import { MySqlLongDataExecutor } from '../command/LongData';
 
 export class MySqlConnectionFeatures {
   batch?: MySqlBatchExecutor;
   cursors?: MySqlCursorExecutor;
   deadlines?: MySqlDeadlineExecutor;
   insertRows?: MySqlInsertRowsExecutor;
+  longData?: MySqlLongDataExecutor;
   named?: MySqlNamedExecutor;
   prepared?: MySqlPreparedExecutor;
   procedures?: MySqlProcedureCaller;

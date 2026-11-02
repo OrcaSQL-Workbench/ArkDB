@@ -55,18 +55,47 @@ export class PrepareResponse {
       .writeUInt32(this.statementId).toUint8Array();
   }
 
-  executePayload(encoded: EncodedBinaryParameters, cursorFlags: number = 0): Uint8Array {
+  longDataPayload(parameterIndex: number, chunk: Uint8Array): Uint8Array {
+    if (!Number.isSafeInteger(parameterIndex) || parameterIndex < 0 ||
+      parameterIndex >= this.parameterCount) {
+      throw ArkDbError.validation('Long parameter index exceeds the prepared statement parameter count.');
+    }
+    return new PacketWriter().writeUInt8(Command.STMT_SEND_LONG_DATA)
+      .writeUInt32(this.statementId).writeUInt16(parameterIndex)
+      .writeBytes(chunk).toUint8Array();
+  }
+
+  executePayload(encoded: EncodedBinaryParameters,
+    cursorFlags: number = 0,
+    omittedValueIndexes?: Set<number>): Uint8Array {
     if (encoded.types.length !== this.parameterCount * 2 ||
-      encoded.nullBitmap.length !== Math.ceil(this.parameterCount / 8)) {
+      encoded.nullBitmap.length !== Math.ceil(this.parameterCount / 8) ||
+      encoded.valueOffsets.length !== this.parameterCount + 1 ||
+      encoded.valueOffsets[0] !== 0 ||
+      encoded.valueOffsets[this.parameterCount] !== encoded.values.length) {
       throw ArkDbError.validation('Parameter count must match the prepared statement');
     }
     if (cursorFlags !== 0 && cursorFlags !== 1) {
       throw ArkDbError.validation('Unsupported prepared statement cursor flags.');
     }
-    const writer = new PacketWriter().writeUInt8(Command.STMT_EXECUTE)
-      .writeUInt32(this.statementId).writeUInt8(cursorFlags).writeUInt32(1);
+    for (let index = 0; index < this.parameterCount; index += 1) {
+      if (encoded.valueOffsets[index] > encoded.valueOffsets[index + 1]) {
+        throw ArkDbError.validation('Encoded parameter value offsets are invalid.');
+      }
+    }
+    const writer = new PacketWriter().writeUInt8(Command.STMT_EXECUTE).writeUInt32(this.statementId)
+      .writeUInt8(cursorFlags).writeUInt32(1);
     if (this.parameterCount > 0) {
-      writer.writeBytes(encoded.nullBitmap).writeUInt8(1).writeBytes(encoded.types).writeBytes(encoded.values);
+      writer.writeBytes(encoded.nullBitmap).writeUInt8(1).writeBytes(encoded.types);
+      if (omittedValueIndexes === undefined) {
+        writer.writeBytes(encoded.values);
+      } else {
+        for (let index = 0; index < this.parameterCount; index += 1) {
+          if (omittedValueIndexes.has(index)) continue;
+          writer.writeBytes(encoded.values.subarray(
+            encoded.valueOffsets[index], encoded.valueOffsets[index + 1]));
+        }
+      }
     }
     return writer.toUint8Array();
   }

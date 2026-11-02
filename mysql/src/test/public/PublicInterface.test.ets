@@ -16,6 +16,8 @@ import {
   MySqlSession, MySqlBatchError, MySqlBatchOptions, MySqlBatchResult,
   MySqlInsertRowsExecutor, MySqlInsertRowsOptions,
   MySqlDeadlineOptions, MySqlDeadlineExecutor, MySqlSessionController,
+  MySqlByteSource, MySqlLongDataExecutor, MySqlLongDataOptions,
+  MySqlLongParameter, MySqlLongParameterKind,
   MySqlOperationError, MySqlExecutionOutcome, quoteMySqlIdentifier,
   mysqlPlaceholders, mapMySqlRows, createMySqlConnection,
   CoreQueryResultSink, CoreQueryResultMeta, CoreQueryRowChunk, CoreQueryResultSummary
@@ -306,11 +308,81 @@ export default function publicInterfaceTest(): void {
       expect(connection.state).assertEqual(ConnectionState.Closed);
     });
 
+    it('longDataPublicImportsCloneAndRemainOptional', 0, async () => {
+      const source: MySqlByteSource = new PublicByteSource();
+      const parameter = new MySqlLongParameter(0, MySqlLongParameterKind.Binary, source);
+      const options = new MySqlLongDataOptions();
+      expect(options.chunkBytes).assertEqual(65536);
+      expect(options.maxTotalBytes).assertEqual(67108864);
+      expect(options.uploadTimeoutMs).assertEqual(30000);
+      expect(options.validate().length).assertEqual(0);
+      options.chunkBytes = 1024;
+      options.queryOptions.maxRows = 1;
+      const copy = options.clone();
+      copy.chunkBytes = 2048;
+      copy.queryOptions.maxRows = 2;
+      expect(options.chunkBytes).assertEqual(1024);
+      expect(options.queryOptions.maxRows).assertEqual(1);
+      expect(parameter.parameterIndex).assertEqual(0);
+      expect(parameter.kind).assertEqual(MySqlLongParameterKind.Binary);
+      expect(parameter.source === source).assertTrue();
+
+      const optional = new MySqlConnectionFeatures();
+      const omitted: MySqlLongDataExecutor | undefined = optional.longData;
+      expect(omitted === undefined).assertTrue();
+      const connection = new MySqlDriverFactory().createConnection(new ConnectionConfig(), '');
+      expect(requireMySqlFeatures(connection).longData !== undefined).assertTrue();
+      await connection.close();
+    });
+
+    it('longDataOptionsRejectUnsafeBudgets', 0, () => {
+      const invalid: MySqlLongDataOptions[] = [];
+      const zeroChunk = new MySqlLongDataOptions();
+      zeroChunk.chunkBytes = 0;
+      invalid.push(zeroChunk);
+      const largeChunk = new MySqlLongDataOptions();
+      largeChunk.chunkBytes = 1048577;
+      invalid.push(largeChunk);
+      const zeroTotal = new MySqlLongDataOptions();
+      zeroTotal.maxTotalBytes = 0;
+      invalid.push(zeroTotal);
+      const zeroTimeout = new MySqlLongDataOptions();
+      zeroTimeout.uploadTimeoutMs = 0;
+      invalid.push(zeroTimeout);
+      const largeTimeout = new MySqlLongDataOptions();
+      largeTimeout.uploadTimeoutMs = 86400001;
+      invalid.push(largeTimeout);
+      const invalidQuery = new MySqlLongDataOptions();
+      invalidQuery.queryOptions.maxDrainTimeMs = 0;
+      invalid.push(invalidQuery);
+      for (const options of invalid) {
+        expect(options.validate().length > 0).assertTrue();
+      }
+    });
+
+    it('longDataCallsRemainStateCheckedBeforeConnectAndAfterClose', 0, async () => {
+      const connection = new MySqlDriverFactory().createConnection(new ConnectionConfig(), '');
+      const longData = requireMySqlFeatures(connection).longData;
+      if (longData === undefined) throw ArkDbError.unsupported('Expected public long-data support.');
+      const statement = new PublicPreparedStatement();
+      const parameters = [new MySqlParameter(MySqlParameterType.Binary, new Uint8Array(0))];
+      const sources = [new MySqlLongParameter(
+        0, MySqlLongParameterKind.Binary, new PublicByteSource())];
+      for (let phase = 0; phase < 2; phase += 1) {
+        const failure = await publicFailure((): Promise<QueryResult> =>
+          longData.execute(statement, parameters, sources));
+        expect(failure.kind).assertEqual(ArkDbErrorKind.Protocol);
+        if (phase === 0) await connection.close();
+      }
+    });
+
     it('preparedPublicImportsCompile', 0, () => {
       const features: MySqlConnectionFeatures = new MySqlConnectionFeatures();
       expect(features.prepared === undefined).assertTrue();
       const omittedCursors: MySqlCursorExecutor | undefined = features.cursors;
       expect(omittedCursors === undefined).assertTrue();
+      const omittedLongData: MySqlLongDataExecutor | undefined = features.longData;
+      expect(omittedLongData === undefined).assertTrue();
       expect(features.named === undefined).assertTrue();
       expect(features.procedures === undefined).assertTrue();
       const bytes = new Uint8Array([1, 2]);
@@ -368,6 +440,7 @@ export default function publicInterfaceTest(): void {
       expect(features.prepared !== undefined).assertTrue();
       expect(features.cursors !== undefined).assertTrue();
       expect(features.insertRows !== undefined).assertTrue();
+      expect(features.longData !== undefined).assertTrue();
       expect(features.named !== undefined).assertTrue();
       expect(features.procedures !== undefined).assertTrue();
       await connection.close();
@@ -730,6 +803,28 @@ class PublicPortableSink implements CoreQueryResultSink {
   async onResultStart(value: CoreQueryResultMeta): Promise<void> { this.starts.push(value); }
   async onRows(value: CoreQueryRowChunk): Promise<void> { this.chunks.push(value); }
   async onResultEnd(value: CoreQueryResultSummary): Promise<void> { this.ends.push(value); }
+}
+
+class PublicByteSource implements MySqlByteSource {
+  async read(_maxBytes: number): Promise<Uint8Array | null> { return null; }
+  async close(): Promise<void> {}
+}
+
+class PublicPreparedStatement implements MySqlPreparedStatement {
+  readonly closed: boolean = false;
+  readonly parameterCount: number = 1;
+  readonly columns: ColumnDef[] = [];
+
+  async execute(_parameters: MySqlParameter[], _options?: QueryOptions): Promise<QueryResult> {
+    return new QueryResult();
+  }
+
+  async executeStream(_parameters: MySqlParameter[], _options: QueryOptions,
+    _sink: QueryResultSink): Promise<QueryExecutionSummary> {
+    return new QueryExecutionSummary();
+  }
+
+  async close(): Promise<void> {}
 }
 
 function publicConfig(): ConnectionConfig {

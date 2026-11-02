@@ -7,11 +7,12 @@ import { MySqlParameter } from '../model/MySqlParameter';
 import { MySqlColumnDef, MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { Capabilities, Command, PacketType } from '../protocol/Constants';
+import { Capabilities, Command, PacketType, StatusFlags } from '../protocol/Constants';
 import { utf8Encode } from '../protocol/Charsets';
 import { PacketChannel } from '../protocol/PacketChannel';
 import { EncodedBinaryParameters } from '../value/BinaryParameterEncoder';
 import { PrepareResponse, prepareServerError } from './PrepareResponse';
+import { parseOk } from './ResultPackets';
 
 const MAX_PREPARE_COMMAND_BYTES = 16 * 1024 * 1024;
 const OPTIONAL_RESULTSET_METADATA = 0x02000000;
@@ -105,10 +106,12 @@ export class MySqlPreparedSession {
   }
 
   async executeOwned<T>(scope: MySqlCommandScope, statement: MySqlPreparedStatement,
-    encoded: EncodedBinaryParameters, operation: (command: Uint8Array) => Promise<T>): Promise<T> {
+    encoded: EncodedBinaryParameters, operation: (command: Uint8Array) => Promise<T>,
+    omittedValueIndexes?: Set<number>): Promise<T> {
     const channel = this.requireOwnedSession(scope);
     this.assertUsable(scope, statement);
-    const command = this.ownedHandle(statement).executePayload(encoded);
+    const command = this.ownedHandle(statement).executePayload(
+      encoded, 0, omittedValueIndexes);
     beginPreparedCommand(channel);
     try {
       return await operation(command);
@@ -126,6 +129,24 @@ export class MySqlPreparedSession {
     beginPreparedCommand(channel);
     try {
       return await operation(command);
+    } finally {
+      pendingPreparedChannels.delete(channel);
+    }
+  }
+
+  async sendLongDataOwned(scope: MySqlCommandScope, statement: MySqlPreparedStatement,
+    parameterIndex: number, chunk: Uint8Array, timeoutMs: number): Promise<void> {
+    const channel = this.requireOwnedSession(scope);
+    this.assertUsable(scope, statement);
+    const command = this.ownedHandle(statement).longDataPayload(parameterIndex, chunk);
+    beginPreparedCommand(channel);
+    try {
+      this.gate.setPhase(scope, MySqlCommandPhase.Uploading);
+      channel.resetSequence();
+      await channel.writePacket(command, timeoutMs);
+      this.requireOwnedSession(scope);
+    } catch (error) {
+      throw await this.fail(scope, error as Object, false);
     } finally {
       pendingPreparedChannels.delete(channel);
     }
@@ -157,6 +178,48 @@ export class MySqlPreparedSession {
     } finally {
       pendingPreparedChannels.delete(channel);
     }
+  }
+
+  async resetLongDataOwned(scope: MySqlCommandScope, statement: MySqlPreparedStatement,
+    timeoutMs: number): Promise<void> {
+    const channel = this.requireOwnedSession(scope);
+    this.assertUsable(scope, statement);
+    const command = this.ownedHandle(statement).resetPayload();
+    beginPreparedCommand(channel);
+    try {
+      this.gate.setPhase(scope, MySqlCommandPhase.Resetting);
+      channel.resetSequence();
+      await channel.writePacket(command, timeoutMs);
+      this.requireOwnedSession(scope);
+      const response = await channel.readPacket(timeoutMs);
+      this.requireOwnedSession(scope);
+      if (response.payload[0] === PacketType.ERR) {
+        throw prepareServerError(response.payload, this.capabilities);
+      }
+      if (response.payload[0] !== PacketType.OK) {
+        throw ArkDbError.protocol('Expected a prepared statement reset OK packet.');
+      }
+      const statusFlags = parseOk(response.payload, this.capabilities).statusFlags;
+      if ((statusFlags & StatusFlags.MORE_RESULTS_EXISTS) !== 0) {
+        throw ArkDbError.protocol(
+          'Prepared statement reset returned unsupported continuation results.');
+      }
+    } catch (error) {
+      throw await this.fail(scope, error as Object, false);
+    } finally {
+      pendingPreparedChannels.delete(channel);
+    }
+  }
+
+  async retireLongDataWriteOwned(scope: MySqlCommandScope,
+    error: ArkDbError): Promise<void> {
+    this.gate.assertOwner(scope);
+    if (!this.samePhysicalSession() || this.host.state === ConnectionState.Closed) return;
+    this.retired = true;
+    for (const handle of this.handles) handle.invalidate();
+    this.handles = [];
+    this.gate.setPhase(scope, MySqlCommandPhase.Cleaning);
+    await this.host.retire(error);
   }
 
   async execute(statement: MySqlPreparedStatement, parameters: MySqlParameter[],
@@ -465,12 +528,18 @@ class PreparedHandle implements MySqlPreparedStatement {
   }
 
   executePayload(encoded: EncodedBinaryParameters,
-    cursorFlags: number = 0): Uint8Array {
-    return this.response.executePayload(encoded, cursorFlags);
+    cursorFlags: number = 0,
+    omittedValueIndexes?: Set<number>): Uint8Array {
+    return this.response.executePayload(
+      encoded, cursorFlags, omittedValueIndexes);
   }
 
   fetchPayload(fetchRows: number): Uint8Array {
     return this.response.fetchPayload(fetchRows);
+  }
+
+  longDataPayload(parameterIndex: number, chunk: Uint8Array): Uint8Array {
+    return this.response.longDataPayload(parameterIndex, chunk);
   }
 
   resetPayload(): Uint8Array {

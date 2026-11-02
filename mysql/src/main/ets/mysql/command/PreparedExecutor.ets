@@ -10,20 +10,16 @@ import { MySqlStatementCache, MySqlStatementCacheBorrow } from '../execution/MyS
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
 import { EncodedBinaryParameters, encodeBinaryParameters } from '../value/BinaryParameterEncoder';
 import {
-  MySqlPreparedSession, MySqlPreparedSessionHost, MySqlPreparedStatementRunner,
+  MySqlPreparedSession, MySqlPreparedStatementRunner,
   preparedCleanup, preparedFailure
 } from './PreparedStatement';
+import { validateQueryOptions } from './ResultStream';
 import {
-  MySqlResultTerminatorObservation, validateQueryOptions
-} from './ResultStream';
+  MySqlLongDataHost, MySqlPreparedLongDataExecutor
+} from './LongData';
 
-export interface MySqlPreparedExecutorHost extends MySqlPreparedSessionHost {
+export interface MySqlPreparedExecutorHost extends MySqlLongDataHost {
   readonly preparedCacheSize: number;
-  runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
-    cachedConvenience?: boolean): Promise<T>;
-  executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
-    observer?: (result: MySqlQueryResult) => void,
-    observations?: MySqlResultTerminatorObservation[]): Promise<MySqlQueryResult>;
   streamPrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
 }
@@ -32,11 +28,13 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
   private host: MySqlPreparedExecutorHost;
   private session: MySqlPreparedSession;
   private cache: MySqlStatementCache;
+  readonly longData: MySqlPreparedLongDataExecutor;
 
   constructor(host: MySqlPreparedExecutorHost) {
     this.host = host;
     this.session = new MySqlPreparedSession(host, this);
     this.cache = new MySqlStatementCache(host.preparedCacheSize, host.commandGate, this.session);
+    this.longData = new MySqlPreparedLongDataExecutor(host, this.session);
   }
 
   invalidate(): void {

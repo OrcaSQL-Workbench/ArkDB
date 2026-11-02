@@ -398,6 +398,69 @@ before command tracking begins, it returns the same rejected
 Awaiting callers receive the original error identity and outcome, while ignored
 calls do not leak an unhandled rejection.
 
+### Prepared long parameters
+
+Prepared long parameters are available from the optional
+`requireMySqlFeatures(connection).longData` feature. Prepare an explicit
+statement first, then pass ordinary typed parameters plus
+`MySqlLongParameter` sources for unique zero-based parameter indexes. A binary
+source requires an empty Binary placeholder; a text source requires an empty
+Text placeholder. Streams are not implicitly converted from JSON, temporal
+values or arbitrary objects. Each long parameter must also own a distinct
+`MySqlByteSource` object; sharing one one-shot source across indexes is rejected
+before the driver reads or closes it.
+
+`MySqlByteSource.read(maxBytes)` returns a nonempty chunk no larger than the
+requested maximum or `null` for EOF. `close()` is called exactly once for every
+accepted source, including unread later sources after an earlier failure, and
+must cause any pending `read()` to settle before the close promise settles.
+`MySqlLongDataOptions` defaults to 65536-byte chunks, a cumulative 67108864-byte
+limit and a 30000 ms upload timeout. Sources are read serially. Each nonempty
+chunk is sent with response-free `COM_STMT_SEND_LONG_DATA`; after every source
+reaches EOF and closes successfully, one prepared EXECUTE uses the typed empty
+placeholders. EXECUTE still sends the null bitmap and type metadata for every
+parameter. It omits value bytes only for indexes that successfully sent at least
+one long-data chunk, because the server consumes those indexes from its
+long-data state. A zero-chunk source sends no `0x18` and therefore keeps its
+matching empty placeholder value in EXECUTE.
+
+An invalid chunk, source/close failure, size breach or upload timeout never sends
+EXECUTE. Synchronized source/read/chunk/limit/close failures reset the
+caller-owned statement with `COM_STMT_RESET`, including failures before the first
+chunk. An in-flight or failed packet write is instead joined with physical
+retirement before source cleanup, so reset cannot race a late `0x18`. The pump
+arms its authoritative upload deadline before invoking the packet writer; at an
+equal transport deadline, upload Timeout remains primary while a distinct
+transport/write failure is retained as cleanup evidence. An unconfirmed reset
+also retires the physical connection and invalidates its handles.
+
+The upload owns one close subscription, not one callback per chunk. Failure
+cleanup starts every source's retained close task before applying the separate
+`queryOptions.maxDrainTimeMs` budget. Expiry is retained as cleanup evidence but
+does not skip unread sources or abandon an initiated close: the operation still
+joins every close task and retains its eventual actual failure before returning.
+Upload and reset phases do not send `KILL QUERY`; cancellation after EXECUTE
+starts uses the existing prepared cancellation convergence. Connection close
+interrupts a pending source read, joins source cleanup and prevents late execute.
+No source or SQL is replayed. Long-data and read-only cursor operations share
+the same physical command gate, so either active owner rejects the other before
+source reads or cursor wire work. Execution observation emits one Query start
+and terminal for the complete upload/reset-or-execute/cleanup scope and never
+includes SQL or source bytes.
+
+Every read, write and close completion rechecks the same monotonic absolute
+upload expiry before canceling its timer. A callback that settles after expiry
+cannot turn an overdue operation into success or replace Timeout with its own
+error. Pending reads are retained; after timeout or close, the pump starts source
+close and joins that exact read settlement. A late read value is ignored, while
+a late read failure remains cleanup evidence.
+
+If a source read or close rejects with the public `ArkDbError`, that exact error
+remains the operation primary. If it rejects with an ordinary `Error`, the
+driver classifies the operation with a protocol `ArkDbError` while preserving
+the exact ordinary object as `MySqlOperationError.originalCause`. Cleanup
+composition does not duplicate that same underlying cause.
+
 Built-in connections also expose the optional
 `requireMySqlFeatures(connection).transactions` runner. Check that member
 separately. `MySqlTransactionOptions` defaults to
@@ -427,9 +490,10 @@ rather than pretending rollback occurred. Unknown command, commit or
 cancellation outcomes remain `Unknown`. Rollback and control-cleanup failures
 are retained without replacing the original primary failure.
 
-No pool or long-data upload is exposed. Read-only server cursors and opt-in
-buffered text-query/prepared-execute deadlines are available through separate
-MySQL features; legacy `QueryOptions.statementTimeoutMs` remains validation-only.
+No pool is exposed. Read-only server cursors, prepared long-data upload and
+opt-in buffered text-query/prepared-execute deadlines are available through
+separate MySQL features; legacy `QueryOptions.statementTimeoutMs` remains
+validation-only.
 
 Built-in root connections also expose `mysqlFeatures.session`.
 `MySqlSessionController.reset()` sends `COM_RESET_CONNECTION` (`0x1f`) through

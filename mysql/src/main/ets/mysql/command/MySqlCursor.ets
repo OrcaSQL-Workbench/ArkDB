@@ -29,6 +29,7 @@ import {
 } from '../value/BinaryParameterEncoder';
 import { BinaryRowDecoder } from '../value/BinaryRowDecoder';
 import { parseColumnDef } from './ColumnDefinition';
+import { MYSQL_CURSOR_OPERATION_IN_PROGRESS_MESSAGE } from './MySqlCursorErrors';
 import {
   copyMySqlColumnDef, MySqlPreparedSession, MySqlPreparedSessionHost,
   preparedCleanup, preparedFailure
@@ -232,7 +233,7 @@ class MySqlServerCursor implements MySqlCursor {
     if (this.ended) return Promise.resolve<MySqlValue[][]>([]);
     if (this.fetchTask !== null || this.closeTask !== null) {
       return Promise.reject<MySqlValue[][]>(
-        ArkDbError.protocol('Another cursor operation is already in progress.'));
+        ArkDbError.protocol(MYSQL_CURSOR_OPERATION_IN_PROGRESS_MESSAGE));
     }
     let begin: () => void = (): void => {};
     const task = new Promise<MySqlValue[][]>(
@@ -283,7 +284,7 @@ class MySqlServerCursor implements MySqlCursor {
     if (this.ended || this.invalid) return Promise.resolve();
     if (this.fetchTask !== null) {
       return Promise.reject<void>(
-        ArkDbError.protocol('Another cursor operation is already in progress.'));
+        ArkDbError.protocol(MYSQL_CURSOR_OPERATION_IN_PROGRESS_MESSAGE));
     }
     let begin: () => void = (): void => {};
     const task = new Promise<void>((resolve: () => void,

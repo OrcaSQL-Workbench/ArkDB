@@ -4,6 +4,9 @@ import {
   DatabaseContext, DbConnectionFeatures, QueryOptions
 } from '@arkdb/core';
 import { MySqlLongDataExecutor } from '../../../main/ets/mysql/command/LongData';
+import {
+  MYSQL_CURSOR_OPERATION_IN_PROGRESS_MESSAGE
+} from '../../../main/ets/mysql/command/MySqlCursorErrors';
 import { MySqlConnectionFeatures } from '../../../main/ets/mysql/driver/MySqlConnectionFeatures';
 import {
   MySqlConnectionExtensions
@@ -245,6 +248,7 @@ export class PoolCursor implements MySqlCursor {
   closeCalls: number = 0;
   private connection: PoolConnection;
   private ended: boolean = false;
+  private fetching: boolean = false;
 
   constructor(connection: PoolConnection) {
     this.connection = connection;
@@ -257,13 +261,21 @@ export class PoolCursor implements MySqlCursor {
   async fetch(): Promise<MySqlValue[][]> {
     this.fetchCalls++;
     if (this.connection.cursorFetchGate !== null) {
-      return await this.connection.cursorFetchGate.promise;
+      this.fetching = true;
+      try {
+        return await this.connection.cursorFetchGate.promise;
+      } finally {
+        this.fetching = false;
+      }
     }
     return [];
   }
 
   async close(): Promise<void> {
     if (this.ended) return;
+    if (this.connection.cursorRejectCloseWhileFetching && this.fetching) {
+      throw ArkDbError.protocol(MYSQL_CURSOR_OPERATION_IN_PROGRESS_MESSAGE);
+    }
     this.closeCalls++;
     this.connection.events.push('cursor-close');
     if (this.connection.cursorCloseGate !== null) {
@@ -416,6 +428,7 @@ export class PoolConnection implements MySqlPoolConnection {
   resetGate: PoolDeferred<void> | null = null;
   closeGate: PoolDeferred<void> | null = null;
   closeSettlesQuery: boolean = false;
+  cursorRejectCloseWhileFetching: boolean = false;
   resetFailure: Object | null = null;
   connectFailure: Object | null = null;
   closeFailure: Object | null = null;
@@ -1087,9 +1100,68 @@ export default function mySqlPoolTest(): void {
 
       expect(firstValueWhileCleanup === null).assertTrue();
       expect(secondValueWhileCleanup !== null).assertTrue();
-      expect(timersWhileCleanup).assertEqual(0);
+      expect(timersWhileCleanup).assertEqual(1);
       expect(firstFailure === connectFailure).assertTrue();
       expect(second.value !== null).assertTrue();
+    });
+
+    it('failedCreationCleanupDoesNotCancelAcquireDeadline', 0, async () => {
+      const runtime = new PoolRuntime();
+      const failed = new PoolConnection(1);
+      const connectFailure =
+        ArkDbError.network('Synthetic delayed connect failure.');
+      const cleanupFailure =
+        ArkDbError.network('Synthetic delayed connect cleanup failure.');
+      failed.connectFailure = connectFailure;
+      failed.closeFailure = cleanupFailure;
+      failed.closeGate = new PoolDeferred<void>();
+      const replacement = new PoolConnection(2);
+      runtime.enqueue(failed);
+      runtime.enqueue(replacement);
+      const options = poolOptions(2);
+      options.acquireTimeoutMs = 10;
+      const pool = createTestPool(runtime, options);
+
+      let firstCompletions = 0;
+      const firstTask = pool.acquire();
+      firstTask.then(
+        (_lease: MySqlConnectionLease): void => {
+          firstCompletions++;
+        },
+        (_error: Object): void => {
+          firstCompletions++;
+        });
+      const first = new PoolOutcome<MySqlConnectionLease>(firstTask);
+      const second = new PoolOutcome<MySqlConnectionLease>(pool.acquire());
+      await flushPool();
+
+      runtime.timers.advance(10);
+      await flushPool();
+      const firstSettledAtDeadline = first.settled;
+      const firstFailureAtDeadline = first.error;
+      const timersAtDeadline = runtime.timers.size;
+
+      failed.closeGate.resolve(undefined);
+      await first.finished;
+      await second.finished;
+      if (second.value !== null) await second.value.destroy();
+      const closeFailure = await poolFailureOf<void>(pool.close());
+
+      expect(firstSettledAtDeadline).assertTrue();
+      expect(firstFailureAtDeadline instanceof ArkDbError).assertTrue();
+      expect((firstFailureAtDeadline as ArkDbError).kind)
+        .assertEqual(ArkDbErrorKind.Timeout);
+      expect(first.error === firstFailureAtDeadline).assertTrue();
+      expect(first.value === null).assertTrue();
+      expect(firstCompletions).assertEqual(1);
+      expect(timersAtDeadline).assertEqual(0);
+      expect(second.value !== null).assertTrue();
+      expect(closeFailure instanceof MySqlOperationError).assertTrue();
+      if (closeFailure instanceof MySqlOperationError) {
+        expect(closeFailure.primary === connectFailure).assertTrue();
+        expect(closeFailure.cleanupErrors.length).assertEqual(1);
+        expect(closeFailure.cleanupErrors[0] === cleanupFailure).assertTrue();
+      }
     });
 
     it('zeroQueueAcceptsWaiterCoveredByExistingDemandReservation', 0, async () => {

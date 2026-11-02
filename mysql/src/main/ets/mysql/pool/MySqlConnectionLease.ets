@@ -1,6 +1,7 @@
-import { ArkDbError, QueryOptions } from '@arkdb/core';
+import { ArkDbError, ArkDbErrorKind, QueryOptions } from '@arkdb/core';
 import { MySqlConnection } from '../MySqlConnection';
 import { MySqlLongDataExecutor } from '../command/LongData';
+import { MYSQL_CURSOR_OPERATION_IN_PROGRESS_MESSAGE } from '../command/MySqlCursorErrors';
 import { MySqlConnectionFeatures } from '../driver/MySqlConnectionFeatures';
 import {
   MySqlCursor, MySqlCursorExecutor
@@ -513,12 +514,22 @@ class LeaseCursor implements MySqlCursor {
     const active = this.context.isActive;
     const closing = this.context.runOperation(
       (): Promise<void> => this.root.close());
-    this.publicCloseTask = closing.then((): void => {
-      this.context.forgetCursor(this);
-    });
-    if (active) this.releaseCloseTask = this.publicCloseTask;
-    this.publicCloseTask.catch((_error: Object): void => {});
-    return this.publicCloseTask;
+    let published: Promise<void>;
+    published = closing.then(
+      (): void => {
+        this.context.forgetCursor(this);
+      },
+      (error: Object): void => {
+        if (isCursorCloseOverlap(error)) {
+          if (this.publicCloseTask === published) this.publicCloseTask = null;
+          if (this.releaseCloseTask === published) this.releaseCloseTask = null;
+        }
+        throw error as Error;
+      });
+    this.publicCloseTask = published;
+    if (active) this.releaseCloseTask = published;
+    published.catch((_error: Object): void => {});
+    return published;
   }
 
   async closeForRelease(): Promise<void> {
@@ -751,6 +762,12 @@ class LeaseTransactionRunner implements MySqlTransactionRunner {
         (session: MySqlSession): Promise<T> =>
           body(new LeaseScopedTransactionSession(this.context, session))));
   }
+}
+
+function isCursorCloseOverlap(error: Object): boolean {
+  return error instanceof ArkDbError &&
+    error.kind === ArkDbErrorKind.Protocol &&
+    error.message === MYSQL_CURSOR_OPERATION_IN_PROGRESS_MESSAGE;
 }
 
 function leaseFeatures(context: MySqlLeaseContext,

@@ -230,6 +230,63 @@ export default function mySqlLeaseIsolationTest(): void {
       await pool.close();
     });
 
+    it('cursorCloseOverlapRejectionDoesNotPoisonRetryOrRelease', 0, async () => {
+      const runtime = new PoolRuntime();
+      const connection = new PoolConnection(1);
+      connection.cursorRejectCloseWhileFetching = true;
+      connection.cursorFetchGate = new PoolDeferred<MySqlValue[][]>();
+      connection.cursorCloseGate = new PoolDeferred<void>();
+      runtime.enqueue(connection);
+      const pool = createTestPool(runtime);
+      const lease = await pool.acquire();
+      const cursors = lease.session.mysqlFeatures.cursors;
+      if (cursors === undefined) throw new Error('Expected cursor support.');
+      const cursor = await cursors.open('SELECT cursor', []);
+      const root = connection.cursors.cursors[0];
+      const fetch = new PoolOutcome<MySqlValue[][]>(cursor.fetch());
+      await flushPool();
+
+      const rejected = cursor.close();
+      const overlapFailure = await poolFailureOf<void>(rejected);
+      expect(overlapFailure instanceof ArkDbError).assertTrue();
+      expect(overlapFailure!.kind).assertEqual(ArkDbErrorKind.Protocol);
+      expect(root.closeCalls).assertEqual(0);
+
+      connection.cursorFetchGate.resolve([]);
+      await fetch.finished;
+      const accepted = cursor.close();
+      const repeated = cursor.close();
+      const retry = new PoolOutcome<void>(accepted);
+      const release = new PoolOutcome<void>(lease.release());
+      await flushPool();
+      const closeCallsWhileAccepted = root.closeCalls;
+      const retryPending = !retry.settled;
+      const releasePending = !release.settled;
+      const resetBeforeCleanup = connection.resetCalls;
+      const physicalCloseBeforeCleanup = connection.closeCalls;
+
+      connection.cursorCloseGate.resolve(undefined);
+      await retry.finished;
+      await release.finished;
+      const events = connection.events.join(',');
+      const resetAfterCleanup = connection.resetCalls;
+      const physicalCloseAfterCleanup = connection.closeCalls;
+      await pool.close();
+
+      expect(accepted === rejected).assertFalse();
+      expect(accepted === repeated).assertTrue();
+      expect(closeCallsWhileAccepted).assertEqual(1);
+      expect(retryPending).assertTrue();
+      expect(releasePending).assertTrue();
+      expect(resetBeforeCleanup).assertEqual(0);
+      expect(physicalCloseBeforeCleanup).assertEqual(0);
+      expect(retry.error === null).assertTrue();
+      expect(release.error === null).assertTrue();
+      expect(events).assertEqual('cursor-close,reset');
+      expect(resetAfterCleanup).assertEqual(1);
+      expect(physicalCloseAfterCleanup).assertEqual(0);
+    });
+
     it('oldCursorCannotFetchOrCloseTheNextBorrower', 0, async () => {
       const runtime = new PoolRuntime();
       const pool = createTestPool(runtime);

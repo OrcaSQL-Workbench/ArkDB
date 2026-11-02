@@ -346,7 +346,6 @@ class FifoMySqlPool implements MySqlPool {
       slot.demandCreation = false;
       const waiter = demandCreation && this.state === MySqlPoolState.Open ?
         this.takeNextWaiter() : null;
-      if (waiter !== null) this.cancelWaiterTimer(waiter);
       if (slot.connection !== null) {
         try {
           await this.ensurePhysicalClose(slot);
@@ -356,6 +355,7 @@ class FifoMySqlPool implements MySqlPool {
       }
       this.removeSlot(slot);
       if (waiter !== null && waiter.active) {
+        this.cancelWaiterTimer(waiter);
         waiter.fail(failure);
       } else {
         appendPoolFailure(this.backgroundErrors, failure);

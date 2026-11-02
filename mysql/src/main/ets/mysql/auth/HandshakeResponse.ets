@@ -1,3 +1,4 @@
+import { ArkDbError } from '@arkdb/core';
 import { PacketWriter } from '../protocol/PacketWriter';
 import { Capabilities, Collation } from '../protocol/Constants';
 
@@ -13,7 +14,8 @@ export class HandshakeResponseParams {
 }
 
 /** Capability flags the client asserts, gated by what the server offers. */
-export function computeClientCapabilities(serverCaps: number, withDb: boolean, withSsl: boolean): number {
+export function computeClientCapabilities(serverCaps: number, withDb: boolean, withSsl: boolean,
+  withMultiStatements: boolean = false): number {
   let caps = Capabilities.PROTOCOL_41
     | Capabilities.SECURE_CONNECTION
     | Capabilities.PLUGIN_AUTH
@@ -26,6 +28,13 @@ export function computeClientCapabilities(serverCaps: number, withDb: boolean, w
   }
   if ((serverCaps & Capabilities.PS_MULTI_RESULTS) !== 0) {
     caps = caps | Capabilities.PS_MULTI_RESULTS;
+  }
+  if (withMultiStatements) {
+    if ((serverCaps & Capabilities.MULTI_STATEMENTS) === 0) {
+      throw ArkDbError.unsupported(
+        'The MySQL server does not offer CLIENT_MULTI_STATEMENTS.');
+    }
+    caps = caps | Capabilities.MULTI_STATEMENTS;
   }
   if (withDb) {
     caps = caps | Capabilities.CONNECT_WITH_DB;

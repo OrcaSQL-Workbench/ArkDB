@@ -20,6 +20,7 @@ export enum ConnectionConfigField {
   Session = 'session',
   SessionTimeZone = 'session.timeZone',
   SessionSqlMode = 'session.sqlMode',
+  MultipleStatements = 'multipleStatements',
   PreparedCacheSize = 'preparedCacheSize'
 }
 
@@ -67,6 +68,7 @@ export class ConnectionConfig {
   defaultSchema?: string;
   ssl: SslConfig = new SslConfig();
   session?: MySqlSessionOptions;
+  multipleStatements?: boolean = false;
   preparedCacheSize?: number;
 
   connectTimeoutMs: number = 10000;
@@ -121,6 +123,7 @@ export class ConnectionConfig {
       }
     }
     appendSessionValidationIssues(issues, this.session);
+    appendMultipleStatementsValidationIssues(issues, this.multipleStatements);
     appendPreparedCacheValidationIssues(issues, this.preparedCacheSize);
     return issues;
   }
@@ -141,6 +144,10 @@ export class ConnectionConfig {
       c.session.timeZone = session.timeZone;
       c.session.sqlMode = session.sqlMode;
     }
+    const multiStatementIssues: ConnectionValidationIssue[] = [];
+    appendMultipleStatementsValidationIssues(multiStatementIssues, this.multipleStatements);
+    if (multiStatementIssues.length > 0) throw multiStatementIssues[0].error;
+    c.multipleStatements = this.multipleStatements;
     c.connectTimeoutMs = this.connectTimeoutMs;
     c.autocommit = this.autocommit;
     const cacheIssues: ConnectionValidationIssue[] = [];
@@ -148,6 +155,14 @@ export class ConnectionConfig {
     if (cacheIssues.length > 0) throw cacheIssues[0].error;
     c.preparedCacheSize = this.preparedCacheSize;
     return c;
+  }
+}
+
+function appendMultipleStatementsValidationIssues(issues: ConnectionValidationIssue[],
+  enabled: boolean | undefined): void {
+  if (enabled !== undefined && typeof enabled !== 'boolean') {
+    issues.push(new ConnectionValidationIssue(ConnectionConfigField.MultipleStatements,
+      ArkDbError.validation('multipleStatements must be a boolean.')));
   }
 }
 

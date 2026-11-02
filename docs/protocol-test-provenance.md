@@ -86,6 +86,28 @@ callbacks; they do not change transport or logical-packet bounds. These local
 protocol fixtures do not establish live prepared execution or device/server
 interoperability.
 
+## Explicit text multi-statement fixtures
+
+The registered `MultiStatements.test.ets` suite uses a self-contained synthetic
+socket, server handshake, authentication response, TLS-upgrade pair, command
+recorder, and framed query-response queue. Independent capability literals
+verify that the client leaves `CLIENT_MULTI_STATEMENTS` clear by default and
+when explicitly false, sets it in both the SSL request and authentication
+response only after an explicit true request and server offer, rejects a
+missing offer before credentials, and continues to negotiate
+`CLIENT_PS_MULTI_RESULTS` independently.
+
+Command vectors record one exact `COM_QUERY` payload containing quoted
+semicolons without client splitting. Response vectors cover multiple OK
+packets, ordered OK/row/OK buffering, streamed result indexes, a success
+followed by ERR with a subsequent synchronized query, and the existing
+64-result boundary. Configuration vectors cover clone preservation and
+non-boolean rejection. Integration vectors verify that control connections
+leave the capability clear and that an entire script emits one query observer
+start/terminal pair. These synthetic checks establish local packet,
+synchronization, budget, and error-classification behavior only; they do not
+establish live-server, TLS-engine, device, or SQL-injection safety.
+
 ## Internal prepared statement lifecycle
 
 `MySqlPreparedSession` is an internal PREPARE/CLOSE owner, not a public prepared

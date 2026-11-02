@@ -124,6 +124,35 @@ observer is removed before the driver emits a tokenized warning, and it receives
 no retry or later event. Internal cancellation control connections do not inherit
 the target connection's observer.
 
+`ConnectionConfig.multipleStatements` is an optional boolean with semantic
+default `false`. Validation and cloning preserve `undefined`, `false`, or
+`true` exactly and reject null, numeric, string, array, and object values with
+the `multipleStatements` field id. A connection snapshots the option at
+construction. Internal cancellation control connections explicitly reset it to
+false.
+
+When the option is true, the MySQL handshake requests
+`CLIENT_MULTI_STATEMENTS` only if the server offered that capability. A missing
+offer fails opening with `Unsupported` and `NotDispatched` before an SSL
+request, credential calculation, or authentication response. The one computed
+capability word is used for both the SSL request and authentication response.
+`CLIENT_PS_MULTI_RESULTS` remains independently controlled by the server offer;
+prepared, named, procedure, restricted INSERT, cursor, and long-data interfaces
+do not acquire a text-script contract.
+
+Text scripts are one ordinary query command and one observer operation. The
+driver emits one exact `COM_QUERY` containing the caller's complete trusted SQL
+string and never splits or rewrites semicolons. Buffered results preserve wire
+order through the first result plus `additionalResults`; streaming preserves
+zero-based result indexes. Existing row, decoded-byte, 64-result-set, drain,
+receive, cancellation, and deadline contracts apply to the whole response.
+A later valid server ERR rejects the complete buffered operation without a
+partial-success facade, preserves its native code and SQLSTATE, marks session
+status unknown, and is reusable only after complete consumption. Malformed,
+truncated, over-budget, or otherwise unsynchronized responses remain `Unknown`
+and fail closed. No script is retried or replayed. This option is not a
+parameterization, escaping, identifier-quoting, or SQL-parsing facility.
+
 MySQL-specific prepared statements use the separate optional
 `mysqlFeatures.prepared` interface. `requireMySqlFeatures` reports a missing
 container with the canonical `Unsupported` error; callers still check the

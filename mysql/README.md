@@ -626,6 +626,7 @@ Huawei's [Worker guide](https://developer.huawei.com/consumer/cn/doc/harmonyos-g
 | `connectTimeoutMs` | `10000` | Positive integer; total connection-opening or session-reset deadline |
 | `autocommit` | `true` | Requested initial autocommit state |
 | `session` | unset | Optional `MySqlSessionOptions`; `timeZone` and `sqlMode` are individually unset by default |
+| `multipleStatements` | `false` | Opt in to server-executed text scripts through `CLIENT_MULTI_STATEMENTS` |
 | `preparedCacheSize` | unset; off | Integer from 0 to 256; 0 disables the private convenience-statement cache |
 
 `validate()` returns typed errors; `validateIssues()` additionally identifies the field. Neither opens a connection. `clone()` copies the options and isolates nested TLS and session configuration. A connection snapshots these options when constructed; later caller mutations do not change that connection.
@@ -638,11 +639,57 @@ Invalid `preparedCacheSize` values are rejected by `validateIssues()`/`validate(
 and `clone()` with the `preparedCacheSize` field id; values are not rounded or
 coerced. The connection snapshots the capacity with its other options.
 
+`multipleStatements` accepts only `undefined`, `false`, or `true`; malformed
+JSON values are rejected with the `multipleStatements` field id before network
+work. The option is disabled by default. When enabled, connection opening
+requires the server to offer `CLIENT_MULTI_STATEMENTS`; otherwise opening fails
+with `Unsupported` before an SSL request, credential calculation, or
+authentication response is sent. Internal cancellation control connections
+always disable the option.
+
 Timezone and SQL-mode semantics belong to the server: local validation accepts empty and unknown names without checking a local timezone list. A server may reject a timezone name, for example when its timezone tables are unavailable; that error propagates without a local-timezone fallback. Configured values use checked UTF-8 byte expressions, not raw SQL interpolation or backslash-escaping assumptions. Initialization completes within the existing opening deadline before `connect()` reports Ready. Failure rejects connection opening and cleans up the partial connection, retaining primary and cleanup errors.
 
 Neither ordinary commands nor enabled convenience-statement cache lookups add hidden session-fingerprint probes, restore previous-statement counters with SQL, or replay SQL. Named execution is the explicit exception: every call uses the internal four-field fingerprint SQL to obtain the current session mode before scanning its template. The utility is not a transparent cache guard or a new public connection method. Non-cache command admission retires the private prepared reuse context; disconnect, physical retirement and a new session invalidate physical ownership. Failed or uncertain SQL is never replayed. Cancellation control connections retain authentication, TLS, and transport policy but skip the default database, `autocommit=false`, user session initialization, and recursive control creation.
 
 Profile IDs, names, grouping, and credential storage belong to the host. Select the driver through its factory, not a tag inside connection options. Top-level SQL-mode/charset/compression/connection-attribute switches, file-engine paths, and generic future-option bags are not exposed; use only the typed `session.sqlMode` option described above for SQL mode.
+
+## Opt-in text scripts
+
+Set `config.multipleStatements = true` only for SQL text that is fully trusted
+by the application. This option broadens what a compromised text string can
+execute. It is not parameterization, escaping, identifier quoting, or a
+statement parser, and it must not be used to concatenate untrusted input.
+Prepared, named, procedure, restricted `insertRows`, cursor, and long-data
+interfaces retain their own protocol and single-statement contracts.
+
+ArkDB sends the caller's complete string exactly once in one `COM_QUERY` packet;
+it never splits on semicolons. Quoted semicolons therefore remain ordinary SQL
+text:
+
+```typescript
+const config = new ConnectionConfig();
+config.host = host;
+config.user = user;
+config.multipleStatements = true;
+
+const connection = new MySqlDriverFactory().createConnection(config, password);
+await connection.connect();
+const result = await connection.query("SELECT ';' AS marker; SELECT 2 AS value");
+```
+
+Buffered results retain wire order: the first result is returned directly and
+later results are placed in `additionalResults`. Streaming callbacks retain
+their zero-based `resultIndex`. The existing defaults, including
+`maxResultSets = 64`, cumulative decoded-byte limits, and synchronization-drain
+limits, apply across the whole script.
+
+A server ERR in any later statement rejects the overall buffered operation; no
+partial-success result object is returned. A consumed valid ERR preserves its
+native code and SQLSTATE as `ServerRejected`, leaves session status unknown,
+and permits reuse only because the response was fully consumed. Malformed or
+truncated responses, result 65 under the default budget, and any response whose
+synchronization cannot be proven fail closed with outcome `Unknown`. ArkDB
+never retries or replays the script.
 
 ## Reading typed results
 
@@ -958,6 +1005,7 @@ MySQL also exposes these through `features.metadata` and `features.metrics`; gen
 - **One connection, serialized operations.** The driver does not create a Worker, queue concurrent requests, or reconnect/replay SQL. Query/stream, ping, context and transaction commands reject overlap with a `Protocol` error. Await each operation; stream callbacks must not reenter the same connection, and the coarse `Ready` lifecycle state is not an ownership permit. Use one connection per Worker session. Live connection objects do not cross Worker messages.
 - **Typed values.** Rows are arrays aligned with `columns`. SQL NULL is `null`; BIGINT is `bigint`; DECIMAL and temporal values remain strings; binary values are `Uint8Array`. Preserve these types when designing your own Worker DTOs.
 - **Bounded results.** `query()` uses the bounded streaming implementation and exposes `truncated`, `truncationReason`, and `additionalResults`. It is not an unlimited collector.
+- **Opt-in text scripts.** `multipleStatements` is default-off and affects only exact, unsplit text `COM_QUERY` payloads. Treat the whole script as one operation; existing result/drain budgets and no-replay rules apply.
 - **Streaming.** `queryStream(sql, options, sink)` awaits each `QueryResultSink` callback. Set row/chunk/result/drain budgets in `QueryOptions`, handle truncation and unknown status explicitly, and avoid accumulating every chunk. Awaiting a sink does not pause socket delivery; the separate receive queue remains bounded and fails closed on overflow.
 - **Timeouts.** `connectTimeoutMs` covers connection opening and root session reset. Only the optional `mysqlFeatures.deadlines` query/execute interface starts a statement-cancellation timer and owns its convergence/grace cleanup. It joins every cancellation attempt registered for the owned scope, including later public calls, and keeps grace active until the operation and all recorded attempts settle. Timeout and grace delays are chunked to at most `2147483647` ms and re-armed from monotonic absolute expiry. Any unknown attempt or retirement has priority over an original OK result and retains its failure; grace starts target abort before control cleanup, then allows one bounded event-loop turn for prompt unwind. The low-level driver still validates `QueryOptions.statementTimeoutMs` without activating it.
 - **Transactions.** Generic features expose `begin`, `commit`, `rollback` and known session status. MySQL also retains native `setAutocommit` and the optional `mysqlFeatures.transactions` callback runner with typed options and scoped savepoints. The callback facade expires at settlement and does not expose root prepared/batch/nested transaction executors. Failure can invalidate status or leave an unknown execution outcome; never replay writes.

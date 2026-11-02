@@ -93,7 +93,7 @@ export class MySqlPreparedLongDataExecutor implements MySqlLongDataExecutor {
       }
       let primary = failure.primary;
       let originalCause = failure.originalCause;
-      if (primary instanceof MySqlOperationError) {
+      if (failure.writeUncertain && primary instanceof MySqlOperationError) {
         for (const nested of primary.cleanupErrors) cleanup.unshift(nested);
         if (originalCause === undefined) originalCause = primary.originalCause;
         primary = primary.primary;

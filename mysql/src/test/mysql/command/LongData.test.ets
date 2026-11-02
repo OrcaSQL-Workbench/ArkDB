@@ -19,7 +19,7 @@ import { MySqlParameter, MySqlParameterType } from '../../../main/ets/mysql/mode
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../../../main/ets/mysql/model/MySqlOperationError';
-import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
+import { Capabilities, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import {
   PreparedExecutionFixture, PreparedGate, PreparedSocket, cursorOpenResult,
@@ -886,6 +886,70 @@ export default function longDataTest(): void {
         expect(failure instanceof MySqlOperationError).assertTrue();
         if (failure instanceof MySqlOperationError) {
           expect(failure.primary === sourceFailure).assertTrue();
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
+        }
+        expect(fixture.peer.commands().join(',')).assertEqual('22,26');
+        expect(statement.closed).assertFalse();
+        await statement.close();
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it('resetContinuationRetiresBeforeReturningTheUploadFailure', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      const prepared = await fixture.open();
+      fixture.peer.responses.push(prepareResponse(7, 1),
+        [okPayload(StatusFlags.MORE_RESULTS_EXISTS)], [okPayload()]);
+      const sourceFailure = ArkDbError.network('Synthetic source read failure.');
+      const source = new FailingByteSource([], sourceFailure);
+      try {
+        const statement = await prepared.prepare('DO ?');
+        const longData = fixture.connection.mysqlFeatures.longData;
+        if (longData === undefined) throw new Error('Expected prepared long-data support.');
+        const failure = await preparedFailureOf(longData.execute(statement,
+          [new MySqlParameter(MySqlParameterType.Binary, new Uint8Array(0))],
+          [new MySqlLongParameter(0, MySqlLongParameterKind.Binary, source)]));
+
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary === sourceFailure).assertTrue();
+          expect(failure.cleanupErrors.length > 0).assertTrue();
+          expect(failure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        }
+        expect(fixture.peer.commands().join(',')).assertEqual('22,26');
+        expect(fixture.connection.state).assertEqual(ConnectionState.Closed);
+        expect(statement.closed).assertTrue();
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it('preservesSourceOperationErrorIdentityAndOutcome', 0, async () => {
+      const fixture = new PreparedExecutionFixture();
+      const prepared = await fixture.open();
+      fixture.peer.responses.push(prepareResponse(7, 1), [okPayload()]);
+      const sourcePrimary = ArkDbError.network('Synthetic nested source failure.');
+      const sourceCleanup = ArkDbError.protocol('Synthetic nested source cleanup failure.');
+      const sourceFailure = new MySqlOperationError(sourcePrimary,
+        [sourceCleanup], MySqlExecutionOutcome.Completed);
+      const source = new FailingByteSource([], sourceFailure);
+      try {
+        const statement = await prepared.prepare('DO ?');
+        const longData = fixture.connection.mysqlFeatures.longData;
+        if (longData === undefined) throw new Error('Expected prepared long-data support.');
+        const failure = await preparedFailureOf(longData.execute(statement,
+          [new MySqlParameter(MySqlParameterType.Binary, new Uint8Array(0))],
+          [new MySqlLongParameter(0, MySqlLongParameterKind.Binary, source)]));
+
+        expect(failure instanceof MySqlOperationError).assertTrue();
+        if (failure instanceof MySqlOperationError) {
+          expect(failure.primary === sourceFailure).assertTrue();
+          expect(failure.primary instanceof MySqlOperationError).assertTrue();
+          if (failure.primary instanceof MySqlOperationError) {
+            expect(failure.primary.outcome).assertEqual(MySqlExecutionOutcome.Completed);
+          }
+          expect(failure.cleanupErrors.length).assertEqual(0);
           expect(failure.outcome).assertEqual(MySqlExecutionOutcome.NotDispatched);
         }
         expect(fixture.peer.commands().join(',')).assertEqual('22,26');

@@ -108,6 +108,33 @@ class RecordingWriter implements MySqlUploadChunkWriter {
   async retire(_error: ArkDbError): Promise<void> {}
 }
 
+class NullCloseSource implements MySqlByteSource {
+  readCount: number = 0;
+  closeCount: number = 0;
+
+  async read(_maxBytes: number): Promise<Uint8Array | null> {
+    this.readCount += 1;
+    return null;
+  }
+
+  close(): Promise<void> {
+    this.closeCount += 1;
+    return Promise.reject<void>(null);
+  }
+}
+
+class NullRejectingWriter implements MySqlUploadChunkWriter {
+  retireCount: number = 0;
+
+  write(_sourceIndex: number, _chunk: Uint8Array, _timeoutMs: number): Promise<void> {
+    return Promise.reject<void>(null);
+  }
+
+  async retire(_error: ArkDbError): Promise<void> {
+    this.retireCount += 1;
+  }
+}
+
 class PendingCloseSource implements MySqlByteSource {
   closeCount: number = 0;
   private failClose: (reason?: Object) => void = (_reason?: Object): void => {};
@@ -375,6 +402,38 @@ export default function mySqlUploadPumpTest(): void {
         expect(failure.cleanupErrors[0] === source.closeFailure).assertTrue();
         expect(failure.writeUncertain).assertFalse();
       }
+      expect(source.closeCount).assertEqual(1);
+    });
+
+    it('nullCloseRejectionFailsAndClosesLaterUnreadSources', 0, async () => {
+      const source = new NullCloseSource();
+      const later = new RecordingSource([new Uint8Array([1]), null]);
+      const failure = await uploadFailure(new MySqlUploadPump(new UploadTimers())
+        .upload([source, later], 1, 4, 100, new RecordingWriter()));
+
+      expect(failure instanceof MySqlUploadFailure).assertTrue();
+      if (failure instanceof MySqlUploadFailure) {
+        expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect(failure.cleanupErrors.length).assertEqual(0);
+        expect(failure.writeUncertain).assertFalse();
+      }
+      expect(source.closeCount).assertEqual(1);
+      expect(later.readCount).assertEqual(0);
+      expect(later.closeCount).assertEqual(1);
+    });
+
+    it('nullWriteRejectionRetiresAndFailsTheUpload', 0, async () => {
+      const writer = new NullRejectingWriter();
+      const source = new RecordingSource([new Uint8Array([1]), null]);
+      const failure = await uploadFailure(new MySqlUploadPump(new UploadTimers())
+        .upload([source], 1, 4, 100, writer));
+
+      expect(failure instanceof MySqlUploadFailure).assertTrue();
+      if (failure instanceof MySqlUploadFailure) {
+        expect(failure.primary.kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect(failure.writeUncertain).assertTrue();
+      }
+      expect(writer.retireCount).assertEqual(1);
       expect(source.closeCount).assertEqual(1);
     });
 

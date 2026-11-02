@@ -7,7 +7,7 @@ import { MySqlParameter } from '../model/MySqlParameter';
 import { MySqlColumnDef, MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { Capabilities, Command, PacketType } from '../protocol/Constants';
+import { Capabilities, Command, PacketType, StatusFlags } from '../protocol/Constants';
 import { utf8Encode } from '../protocol/Charsets';
 import { PacketChannel } from '../protocol/PacketChannel';
 import { EncodedBinaryParameters } from '../value/BinaryParameterEncoder';
@@ -199,7 +199,11 @@ export class MySqlPreparedSession {
       if (response.payload[0] !== PacketType.OK) {
         throw ArkDbError.protocol('Expected a prepared statement reset OK packet.');
       }
-      parseOk(response.payload, this.capabilities);
+      const statusFlags = parseOk(response.payload, this.capabilities).statusFlags;
+      if ((statusFlags & StatusFlags.MORE_RESULTS_EXISTS) !== 0) {
+        throw ArkDbError.protocol(
+          'Prepared statement reset returned unsupported continuation results.');
+      }
     } catch (error) {
       throw await this.fail(scope, error as Object, false);
     } finally {

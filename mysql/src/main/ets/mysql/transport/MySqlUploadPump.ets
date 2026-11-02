@@ -130,9 +130,9 @@ class UploadSourceState {
   close(): Promise<void> {
     if (this.closeTask !== null) return this.closeTask;
     try {
-      this.closeTask = this.source.close();
+      this.closeTask = normalizeUploadPromise(this.source.close());
     } catch (error) {
-      this.closeTask = Promise.reject<void>(error as Object);
+      this.closeTask = Promise.reject<void>(uploadRejection(error as Object));
     }
     return this.closeTask;
   }
@@ -219,7 +219,7 @@ class UploadDeadline {
         settled = true;
         if (this.activeAbort === abortWaiter) this.activeAbort = null;
         this.timers.cancel(timerId);
-        reject(error as Object);
+        reject(uploadRejection(error as Object));
         return;
       }
       task.then((value: T): void => {
@@ -239,7 +239,7 @@ class UploadDeadline {
         if (interruption !== null) {
           reject(uploadFailure(interruption, [uploadCleanup(error)]));
         } else {
-          reject(error);
+          reject(uploadRejection(error));
         }
       });
     });
@@ -311,7 +311,7 @@ class UploadObservation<T = void> {
       this.value = value;
       this.settledNow = true;
     }, (error: Object): void => {
-      this.failure = error;
+      this.failure = uploadRejection(error);
       this.settledNow = true;
     });
   }
@@ -338,6 +338,16 @@ function uploadCleanup(error: Object): ArkDbError {
 function uploadError(error: Object): ArkDbError {
   return error instanceof ArkDbError ? error :
     ArkDbError.protocol('Unexpected MySQL upload failure.');
+}
+
+function uploadRejection(error: Object): Object {
+  return error === null ?
+    ArkDbError.protocol('MySQL upload operation rejected with null.') : error;
+}
+
+function normalizeUploadPromise<T>(task: Promise<T>): Promise<T> {
+  return task.then((value: T): T => value,
+    (error: Object): Promise<T> => Promise.reject<T>(uploadRejection(error)));
 }
 
 async function settleUploadObservations<T>(observations: UploadObservation<T>[]): Promise<void> {

@@ -101,17 +101,25 @@ import {
 const MAX_MYSQL_DEADLINE_TIMER_DELAY_MS: number = 2147483647;
 
 class MySqlExecutionObserverCapability {}
+class MySqlBufferedQueryCapability {}
 
 const mysqlExecutionObserverCapability: Object =
   new MySqlExecutionObserverCapability();
+const mysqlBufferedQueryCapability: Object =
+  new MySqlBufferedQueryCapability();
 
 type MySqlExecutionObserverBinding =
   (capability: Object, observer: MySqlExecutionObserver,
     executionClock: () => number) => void;
+type MySqlBufferedQueryBinding =
+  (capability: Object, sql: string, onAdmitted: () => void) => Promise<QueryResult>;
 
 const mySqlExecutionObserverBindings:
   WeakMap<MySqlConnection, MySqlExecutionObserverBinding> =
   new WeakMap<MySqlConnection, MySqlExecutionObserverBinding>();
+const mySqlBufferedQueryBindings:
+  WeakMap<MySqlConnection, MySqlBufferedQueryBinding> =
+  new WeakMap<MySqlConnection, MySqlBufferedQueryBinding>();
 
 /**
  * A single MySQL/MariaDB connection over TCP with an optional in-handshake TLS upgrade.
@@ -182,6 +190,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
         mySqlExecutionObserverBindings.delete(this);
         this.commandGate = new MySqlCommandGate(
           new MySqlExecutionDispatcher(observer, executionClock));
+      });
+    mySqlBufferedQueryBindings.set(this,
+      (capability: Object, sql: string,
+        onAdmitted: () => void): Promise<QueryResult> => {
+        if (capability !== mysqlBufferedQueryCapability) {
+          throw ArkDbError.protocol('Invalid MySQL buffered query capability.');
+        }
+        return this.queryWithAdmission(sql, onAdmitted);
       });
     this.createControlConnection = createControlConnection !== undefined ? createControlConnection :
       (): DbConnection => this.createDefaultControlConnection();
@@ -587,8 +603,14 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   /** Run a text SQL statement and return the (fully buffered) result. */
   async query(sql: string): Promise<QueryResult> {
+    return this.queryWithAdmission(sql);
+  }
+
+  private queryWithAdmission(sql: string,
+    onAdmitted?: () => void): Promise<QueryResult> {
     return this.runOrdinaryCommand<QueryResult>(MySqlCommandKind.Query,
-      (scope: MySqlCommandScope): Promise<QueryResult> => this.queryOwned(scope, sql));
+      (scope: MySqlCommandScope): Promise<QueryResult> =>
+        this.queryOwned(scope, sql), onAdmitted);
   }
 
   private async queryWithDeadline(sql: string, options: MySqlDeadlineOptions): Promise<QueryResult> {
@@ -1368,10 +1390,12 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   private async runOrdinaryCommand<T>(kind: MySqlCommandKind,
-    operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T> {
+    operation: (scope: MySqlCommandScope) => Promise<T>,
+    onAdmitted?: () => void): Promise<T> {
     const scope = this.reserveCommandOwnership(kind);
     const settlement = new OrdinaryCommandSettlement(scope);
     this.ordinaryOperation = settlement;
+    if (onAdmitted !== undefined) onAdmitted();
     let value: T | undefined;
     let primary: Object | null = null;
     const cleanup: ArkDbError[] = [];
@@ -2798,6 +2822,17 @@ export function synchronizationRefreshFailure(error: Object): ArkDbError {
 /** Convenience factory mirroring the documented public API. */
 export function createMySqlConnection(config: ConnectionConfig, password: string): MySqlConnection {
   return new MySqlConnection(config, password);
+}
+
+export async function runMySqlBufferedQueryInternal(
+  connection: MySqlConnection, sql: string,
+  onAdmitted: () => void): Promise<QueryResult> {
+  const binding = mySqlBufferedQueryBindings.get(connection);
+  if (binding === undefined) {
+    throw ArkDbError.protocol(
+      'Internal buffered query admission is unavailable for this connection.');
+  }
+  return binding(mysqlBufferedQueryCapability, sql, onAdmitted);
 }
 
 export function initializeMySqlExecutionObserverInternal(connection: MySqlConnection,

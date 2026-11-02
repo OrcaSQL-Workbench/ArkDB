@@ -210,6 +210,7 @@ class FifoMySqlPool implements MySqlPool {
   private emptyWaiters: Array<() => void> = [];
   private closeTask: Promise<void> | null = null;
   private backgroundErrors: Object[] = [];
+  private backgroundRetainedErrors: Object[] = [];
 
   constructor(connectionOptions: MySqlConnectionOptions,
     poolOptions: MySqlPoolOptions, runtime: MySqlPoolRuntime) {
@@ -252,7 +253,10 @@ class FifoMySqlPool implements MySqlPool {
 
   private async closeCore(): Promise<void> {
     const failures: Object[] = this.backgroundErrors.slice();
+    const retainedFailures: Object[] =
+      this.backgroundRetainedErrors.slice();
     this.backgroundErrors = [];
+    this.backgroundRetainedErrors = [];
     this.rejectAllWaiters();
 
     const idle = this.idle.slice();
@@ -288,10 +292,20 @@ class FifoMySqlPool implements MySqlPool {
     }
     budget.dispose();
 
-    for (const error of this.backgroundErrors) appendPoolFailure(failures, error);
+    for (const error of this.backgroundErrors) {
+      if (error instanceof MySqlOperationError &&
+        containsPoolFailureLeaf(this.backgroundRetainedErrors, error)) {
+        appendRetainedPoolFailure(failures, retainedFailures, error);
+      } else {
+        appendPoolFailure(failures, error);
+      }
+    }
     this.backgroundErrors = [];
+    this.backgroundRetainedErrors = [];
     this.state = MySqlPoolState.Closed;
-    if (failures.length > 0) throw poolOperationFailure(failures);
+    if (failures.length > 0) {
+      throw poolOperationFailure(failures, retainedFailures);
+    }
   }
 
   private rejectAllWaiters(): void {
@@ -437,6 +451,7 @@ class FifoMySqlPool implements MySqlPool {
     const operationSettlement = context.waitForOperations();
     const operationObservation = new MySqlPoolFailureObservation();
     operationObservation.observe(operationSettlement);
+    const retainedOperationFailures: Object[] = [];
     let cursorSettlement: Promise<Object[]> | null = null;
     let statementSettlement: Promise<Object[]> | null = null;
     let resetSettlement: Promise<Object | null> | null = null;
@@ -512,43 +527,72 @@ class FifoMySqlPool implements MySqlPool {
     }
 
     if (settlementTimedOut) {
+      let closeBoundQuerySettlement: Promise<Object | null> | null = null;
+      if (context.connection.closeBoundQuerySettlement !== undefined) {
+        closeBoundQuerySettlement =
+          context.connection.closeBoundQuerySettlement();
+      }
       const closing = this.ensurePhysicalClose(slot);
+      let closeFailure: Object | null = null;
       try {
         await closing;
       } catch (error) {
-        appendPoolFailure(failures, error as Object);
+        closeFailure = error as Object;
       }
-      if (operationObservation.settled) {
-        for (const failure of operationObservation.failures) {
-          appendPoolFailure(failures, failure);
+      if (closeFailure !== null) appendPoolFailure(failures, closeFailure);
+      if (closeBoundQuerySettlement !== null) {
+        const closeBoundQueryFailure = await closeBoundQuerySettlement;
+        if (closeBoundQueryFailure !== null) {
+          appendRetainedPoolFailure(
+            failures, retainedOperationFailures, closeBoundQueryFailure);
+        }
+        const lateOperationFailures = await operationSettlement;
+        for (const failure of lateOperationFailures) {
+          appendRetainedPoolFailure(
+            failures, retainedOperationFailures, failure);
+        }
+      } else {
+        if (operationObservation.settled) {
+          for (const failure of operationObservation.failures) {
+            appendRetainedPoolFailure(
+              failures, retainedOperationFailures, failure);
+          }
         }
       }
       if (cursorSettlement !== null) {
         try {
           const lateCursorFailures = await cursorSettlement;
           for (const failure of lateCursorFailures) {
-            appendPoolFailure(failures, failure);
+            appendRetainedPoolFailure(
+              failures, retainedOperationFailures, failure);
           }
         } catch (error) {
-          appendPoolFailure(failures, error as Object);
+          appendRetainedPoolFailure(
+            failures, retainedOperationFailures, error as Object);
         }
       }
       if (statementSettlement !== null) {
         try {
           const lateStatementFailures = await statementSettlement;
           for (const failure of lateStatementFailures) {
-            appendPoolFailure(failures, failure);
+            appendRetainedPoolFailure(
+              failures, retainedOperationFailures, failure);
           }
         } catch (error) {
-          appendPoolFailure(failures, error as Object);
+          appendRetainedPoolFailure(
+            failures, retainedOperationFailures, error as Object);
         }
       }
       if (resetSettlement !== null) {
         try {
           const lateResetFailure = await resetSettlement;
-          if (lateResetFailure !== null) appendPoolFailure(failures, lateResetFailure);
+          if (lateResetFailure !== null) {
+            appendRetainedPoolFailure(
+              failures, retainedOperationFailures, lateResetFailure);
+          }
         } catch (error) {
-          appendPoolFailure(failures, error as Object);
+          appendRetainedPoolFailure(
+            failures, retainedOperationFailures, error as Object);
         }
       }
     } else {
@@ -563,9 +607,19 @@ class FifoMySqlPool implements MySqlPool {
     this.removeSlot(slot);
     this.dispatch(true);
     if (this.state === MySqlPoolState.Closing) {
-      for (const failure of failures) appendPoolFailure(this.backgroundErrors, failure);
+      for (const failure of failures) {
+        if (failure instanceof MySqlOperationError &&
+          containsPoolFailureLeaf(retainedOperationFailures, failure)) {
+          appendRetainedPoolFailure(
+            this.backgroundErrors, this.backgroundRetainedErrors, failure);
+        } else {
+          appendPoolFailure(this.backgroundErrors, failure);
+        }
+      }
     }
-    if (failures.length > 0) throw poolOperationFailure(failures);
+    if (failures.length > 0) {
+      throw poolOperationFailure(failures, retainedOperationFailures);
+    }
   }
 
   private makeIdle(slot: MySqlPoolSlot): void {
@@ -801,11 +855,24 @@ function appendPoolFailure(failures: Object[], error: Object): void {
   }
 }
 
+function appendRetainedPoolFailure(failures: Object[],
+  retained: Object[], error: Object): void {
+  if (error instanceof MySqlOperationError) {
+    if (!containsPoolFailureLeaf(retained, error)) retained.push(error);
+    if (!containsPoolFailureLeaf(failures, error)) failures.push(error);
+    return;
+  }
+  appendPoolFailure(failures, error);
+}
+
 function appendPoolFailureLeaves(leaves: Object[], error: Object): void {
   if (error instanceof MySqlOperationError) {
     appendPoolFailureLeaves(leaves, error.primary);
     for (const cleanup of error.cleanupErrors) {
       appendPoolFailureLeaves(leaves, cleanup);
+    }
+    if (error.originalCause !== undefined) {
+      appendPoolFailureLeaves(leaves, error.originalCause);
     }
     return;
   }
@@ -819,24 +886,106 @@ function containsPoolFailureLeaf(leaves: Object[], expected: Object): boolean {
   return false;
 }
 
-function poolOperationFailure(failures: Object[]): MySqlOperationError {
-  const leaves: Object[] = [];
-  for (const failure of failures) appendPoolFailureLeaves(leaves, failure);
+function poolOperationFailure(failures: Object[],
+  retainedOperationFailures: Object[] = []): MySqlOperationError {
   const first = failures[0];
   const cleanup: ArkDbError[] = [];
-  const primary = poolArkDbError(leaves[0]);
+  let primary: ArkDbError;
   let outcome = MySqlExecutionOutcome.Unknown;
   let originalCause: Object | undefined;
   if (first instanceof MySqlOperationError) {
+    primary = first.primary;
     outcome = first.outcome;
     originalCause = first.originalCause;
+    for (const error of first.cleanupErrors) cleanup.push(error);
   } else if (!(first instanceof ArkDbError)) {
+    primary = poolArkDbError(first);
     originalCause = first;
+  } else {
+    primary = first;
   }
-  for (let index = 1; index < leaves.length; index++) {
-    cleanup.push(poolArkDbError(leaves[index]));
+  const included: Object[] = [];
+  appendPoolFailureLeaves(included, primary);
+  if (originalCause !== undefined) {
+    appendPoolFailureLeaves(included, originalCause);
+  }
+  for (const error of cleanup) appendPoolFailureLeaves(included, error);
+  for (let index = 1; index < failures.length; index++) {
+    appendPoolCleanup(cleanup, included, failures[index],
+      retainedOperationFailures);
   }
   return new MySqlOperationError(primary, cleanup, outcome, originalCause);
+}
+
+function appendPoolCleanup(cleanup: ArkDbError[],
+  included: Object[], error: Object,
+  retainedOperationFailures: Object[]): void {
+  const incoming: Object[] = [];
+  appendPoolFailureLeaves(incoming, error);
+  if (error instanceof MySqlOperationError &&
+    containsPoolFailureLeaf(retainedOperationFailures, error)) {
+    appendRetainedPoolCleanup(cleanup, included, error);
+    return;
+  }
+  if (error instanceof MySqlOperationError &&
+    containsPoolOriginalCause(error)) {
+    if (hasNewPoolFailureIdentity(included, incoming)) {
+      cleanup.push(error);
+      appendPoolFailureLeaves(included, error);
+    }
+    return;
+  }
+  for (const failure of incoming) {
+    if (containsPoolFailureLeaf(included, failure)) continue;
+    cleanup.push(poolArkDbError(failure));
+    appendPoolFailureLeaves(included, failure);
+  }
+}
+
+function appendRetainedPoolCleanup(cleanup: ArkDbError[],
+  included: Object[], error: MySqlOperationError): void {
+  for (const existing of cleanup) {
+    if (existing === error) return;
+  }
+  let insertionIndex = cleanup.length;
+  for (let index = cleanup.length - 1; index >= 0; index--) {
+    const existing = cleanup[index];
+    if (!containsPoolFailureIdentity(error, existing)) continue;
+    insertionIndex = index;
+    cleanup.splice(index, 1);
+  }
+  cleanup.splice(insertionIndex, 0, error);
+  appendPoolFailureLeaves(included, error);
+}
+
+function containsPoolFailureIdentity(error: Object,
+  expected: Object): boolean {
+  if (error === expected) return true;
+  if (!(error instanceof MySqlOperationError)) return false;
+  if (containsPoolFailureIdentity(error.primary, expected)) return true;
+  for (const cleanup of error.cleanupErrors) {
+    if (containsPoolFailureIdentity(cleanup, expected)) return true;
+  }
+  return error.originalCause !== undefined &&
+    containsPoolFailureIdentity(error.originalCause, expected);
+}
+
+function containsPoolOriginalCause(error: Object): boolean {
+  if (!(error instanceof MySqlOperationError)) return false;
+  if (error.originalCause !== undefined) return true;
+  if (containsPoolOriginalCause(error.primary)) return true;
+  for (const cleanup of error.cleanupErrors) {
+    if (containsPoolOriginalCause(cleanup)) return true;
+  }
+  return false;
+}
+
+function hasNewPoolFailureIdentity(existing: Object[],
+  incoming: Object[]): boolean {
+  for (const failure of incoming) {
+    if (!containsPoolFailureLeaf(existing, failure)) return true;
+  }
+  return false;
 }
 
 function observePoolSettlement(start: () => Promise<void>): Promise<Object | null> {

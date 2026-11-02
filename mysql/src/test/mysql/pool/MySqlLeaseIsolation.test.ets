@@ -9,7 +9,9 @@ import {
 } from '../../../main/ets/mysql/model/MySqlOperationError';
 import { MySqlPreparedExecutor } from '../../../main/ets/mysql/driver/MySqlPreparedContracts';
 import { MySqlSession } from '../../../main/ets/mysql/driver/MySqlSession';
-import { MySqlBatchResult } from '../../../main/ets/mysql/model/MySqlBatch';
+import {
+  MySqlBatchError, MySqlBatchResult
+} from '../../../main/ets/mysql/model/MySqlBatch';
 import { MySqlParameter } from '../../../main/ets/mysql/model/MySqlParameter';
 import { MySqlProcedureResult } from '../../../main/ets/mysql/model/MySqlProcedure';
 import { MySqlTransactionOptions } from '../../../main/ets/mysql/model/MySqlTransactionOptions';
@@ -26,6 +28,26 @@ function countFailureIdentity(error: Object, expected: Object): number {
     count += countFailureIdentity(cleanup, expected);
   }
   return count;
+}
+
+function containsOriginalCause(error: Object, expected: Object): boolean {
+  if (!(error instanceof MySqlOperationError)) return false;
+  if (error.originalCause === expected) return true;
+  if (containsOriginalCause(error.primary, expected)) return true;
+  for (const cleanup of error.cleanupErrors) {
+    if (containsOriginalCause(cleanup, expected)) return true;
+  }
+  return false;
+}
+
+class PoolLongDataSourceFailure extends Error {
+  readonly evidenceId: string;
+
+  constructor(message: string, evidenceId: string) {
+    super(message);
+    this.name = 'PoolLongDataSourceFailure';
+    this.evidenceId = evidenceId;
+  }
 }
 
 export default function mySqlLeaseIsolationTest(): void {
@@ -166,6 +188,98 @@ export default function mySqlLeaseIsolationTest(): void {
         expect(query.error === operationFailure).assertTrue();
         expect(release.error instanceof MySqlOperationError).assertTrue();
         expect(countFailureIdentity(release.error!, operationFailure))
+          .assertEqual(1);
+        expect(connection.closeCalls).assertEqual(1);
+        expect(connection.resetCalls).assertEqual(0);
+      });
+
+    it('releaseTimeoutPreservesLateLongDataSourceCause', 0, async () => {
+      const runtime = new PoolRuntime();
+      const connection = new PoolConnection(1);
+      connection.longDataGate = new PoolDeferred<MySqlQueryResult>();
+      connection.closeGate = new PoolDeferred<void>();
+      runtime.enqueue(connection);
+      const options = poolOptions();
+      options.releaseTimeoutMs = 10;
+      const pool = createTestPool(runtime, options);
+      const lease = await pool.acquire();
+      const prepared = lease.session.mysqlFeatures.prepared;
+      const longData = lease.session.mysqlFeatures.longData;
+      if (prepared === undefined || longData === undefined) {
+        throw new Error('Expected prepared long-data support.');
+      }
+      const statement = await prepared.prepare('SELECT late_source');
+      const sourceCause = new PoolLongDataSourceFailure(
+        'Synthetic late long-data source failure.', 'source-evidence-42');
+      const lateFailure = new MySqlOperationError(
+        ArkDbError.protocol('Synthetic long-data source read failed.'),
+        [], MySqlExecutionOutcome.Unknown, sourceCause);
+      const upload = new PoolOutcome<MySqlQueryResult>(
+        longData.execute(statement, [], []));
+      const release = new PoolOutcome<void>(lease.release());
+      await flushPool();
+
+      runtime.timers.advance(10);
+      await flushPool();
+      connection.longDataGate.reject(lateFailure);
+      await upload.finished;
+      connection.closeGate.resolve(undefined);
+      await release.finished;
+      await pool.close();
+
+      expect(upload.error === lateFailure).assertTrue();
+      expect(release.error instanceof MySqlOperationError).assertTrue();
+      expect(countFailureIdentity(release.error!, lateFailure)).assertEqual(1);
+      expect(containsOriginalCause(release.error!, sourceCause)).assertTrue();
+      expect(sourceCause.evidenceId).assertEqual('source-evidence-42');
+      expect(connection.closeCalls).assertEqual(1);
+      expect(connection.resetCalls).assertEqual(0);
+    });
+
+    it('releaseTimeoutDeduplicatesSharedCloseLeafInLateSourceFailure', 0,
+      async () => {
+        const runtime = new PoolRuntime();
+        const connection = new PoolConnection(1);
+        connection.longDataGate = new PoolDeferred<MySqlQueryResult>();
+        connection.closeGate = new PoolDeferred<void>();
+        const sharedCloseFailure =
+          ArkDbError.network('Synthetic shared physical close failure.');
+        connection.closeFailure = sharedCloseFailure;
+        runtime.enqueue(connection);
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const pool = createTestPool(runtime, options);
+        const lease = await pool.acquire();
+        const prepared = lease.session.mysqlFeatures.prepared;
+        const longData = lease.session.mysqlFeatures.longData;
+        if (prepared === undefined || longData === undefined) {
+          throw new Error('Expected prepared long-data support.');
+        }
+        const statement = await prepared.prepare('SELECT shared_close_leaf');
+        const sourceCause = new PoolLongDataSourceFailure(
+          'Synthetic shared-leaf source failure.', 'shared-source-evidence-7');
+        const lateFailure = new MySqlOperationError(
+          sharedCloseFailure, [], MySqlExecutionOutcome.Unknown, sourceCause);
+        const upload = new PoolOutcome<MySqlQueryResult>(
+          longData.execute(statement, [], []));
+        const release = new PoolOutcome<void>(lease.release());
+        await flushPool();
+
+        runtime.timers.advance(10);
+        await flushPool();
+        expect(release.settled).assertFalse();
+        connection.longDataGate.reject(lateFailure);
+        await upload.finished;
+        connection.closeGate.resolve(undefined);
+        await release.finished;
+        await pool.close();
+
+        expect(upload.error === lateFailure).assertTrue();
+        expect(release.error instanceof MySqlOperationError).assertTrue();
+        expect(countFailureIdentity(release.error!, lateFailure)).assertEqual(1);
+        expect(containsOriginalCause(release.error!, sourceCause)).assertTrue();
+        expect(sourceCause.evidenceId).assertEqual('shared-source-evidence-7');
+        expect(countFailureIdentity(release.error!, sharedCloseFailure))
           .assertEqual(1);
         expect(connection.closeCalls).assertEqual(1);
         expect(connection.resetCalls).assertEqual(0);
@@ -477,6 +591,277 @@ export default function mySqlLeaseIsolationTest(): void {
       expect(countFailureIdentity(release.error!, physicalFailure)).assertEqual(1);
       await pool.close();
     });
+
+    it('cursorTimeoutDeduplicatesSharedPhysicalCloseLeafWithCause', 0,
+      async () => {
+        const runtime = new PoolRuntime();
+        const connection = new PoolConnection(1);
+        const sharedCloseFailure =
+          ArkDbError.network('Synthetic cause-bearing shared close failure.');
+        const nestedCleanup =
+          ArkDbError.protocol('Synthetic nested cursor cleanup failure.');
+        const sourceCause = new PoolLongDataSourceFailure(
+          'Synthetic cursor source failure.', 'cursor-source-evidence-9');
+        const lateFailure = new MySqlOperationError(
+          sharedCloseFailure, [nestedCleanup],
+          MySqlExecutionOutcome.Unknown, sourceCause);
+        connection.cursorCloseGate = new PoolDeferred<void>();
+        connection.cursorCloseFailure = lateFailure;
+        connection.closeFailure = sharedCloseFailure;
+        runtime.enqueue(connection);
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const pool = createTestPool(runtime, options);
+        const lease = await pool.acquire();
+        const cursors = lease.session.mysqlFeatures.cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        await cursors.open('SELECT cursor', []);
+        const release = new PoolOutcome<void>(lease.release());
+        await flushPool();
+
+        runtime.timers.advance(10);
+        await flushPool();
+        expect(release.settled).assertFalse();
+        expect(connection.closeCalls).assertEqual(1);
+        connection.cursorCloseGate.resolve(undefined);
+        await release.finished;
+        await pool.close();
+
+        expect(release.error instanceof MySqlOperationError).assertTrue();
+        expect((release.error as MySqlOperationError).primary.kind)
+          .assertEqual(ArkDbErrorKind.Timeout);
+        expect(countFailureIdentity(release.error!, lateFailure)).assertEqual(1);
+        expect(containsOriginalCause(release.error!, sourceCause)).assertTrue();
+        expect(sourceCause.evidenceId).assertEqual('cursor-source-evidence-9');
+        expect(countFailureIdentity(release.error!, nestedCleanup))
+          .assertEqual(1);
+        expect(countFailureIdentity(release.error!, sharedCloseFailure))
+          .assertEqual(1);
+        expect(connection.resetCalls).assertEqual(0);
+      });
+
+    it('cursorTimeoutPreservesCauseFreeBatchErrorAndDeduplicatesCloseLeaf', 0,
+      async () => {
+        const runtime = new PoolRuntime();
+        const connection = new PoolConnection(1);
+        const sharedCloseFailure =
+          ArkDbError.network('Synthetic structured shared close failure.');
+        const nestedCleanup =
+          ArkDbError.protocol('Synthetic structured nested cleanup.');
+        const completedFirst = new MySqlQueryResult();
+        const completedSecond = new MySqlQueryResult();
+        const batchFailure = new MySqlBatchError(
+          new MySqlOperationError(
+            sharedCloseFailure, [nestedCleanup],
+            MySqlExecutionOutcome.Unknown),
+          [completedFirst, completedSecond], 2);
+        connection.cursorCloseGate = new PoolDeferred<void>();
+        connection.cursorCloseFailure = batchFailure;
+        connection.closeFailure = sharedCloseFailure;
+        runtime.enqueue(connection);
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const pool = createTestPool(runtime, options);
+        const lease = await pool.acquire();
+        const cursors = lease.session.mysqlFeatures.cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        await cursors.open('SELECT cursor', []);
+        const release = new PoolOutcome<void>(lease.release());
+        await flushPool();
+
+        runtime.timers.advance(10);
+        await flushPool();
+        expect(release.settled).assertFalse();
+        expect(connection.closeCalls).assertEqual(1);
+        connection.cursorCloseGate.resolve(undefined);
+        await release.finished;
+        await pool.close();
+
+        expect(release.error instanceof MySqlOperationError).assertTrue();
+        expect((release.error as MySqlOperationError).primary.kind)
+          .assertEqual(ArkDbErrorKind.Timeout);
+        expect(batchFailure.completedResults.length).assertEqual(2);
+        expect(batchFailure.completedResults[0] === completedFirst).assertTrue();
+        expect(batchFailure.completedResults[1] === completedSecond).assertTrue();
+        expect(batchFailure.failedIndex).assertEqual(2);
+        expect(batchFailure.failedOutcome)
+          .assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(batchFailure.outcome).assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(batchFailure.originalCause === undefined).assertTrue();
+        expect(countFailureIdentity(release.error!, batchFailure)).assertEqual(1);
+        expect(countFailureIdentity(release.error!, nestedCleanup))
+          .assertEqual(1);
+        expect(countFailureIdentity(release.error!, sharedCloseFailure))
+          .assertEqual(1);
+        expect(connection.resetCalls).assertEqual(0);
+      });
+
+    it('poolCloseRetainsLateCauseFreeBatchErrorFromLeaseCleanup', 0,
+      async () => {
+        const runtime = new PoolRuntime();
+        const connection = new PoolConnection(1);
+        const sharedCloseFailure =
+          ArkDbError.network('Synthetic background shared close failure.');
+        const nestedCleanup =
+          ArkDbError.protocol('Synthetic background nested cleanup.');
+        const completedResult = new MySqlQueryResult();
+        const batchFailure = new MySqlBatchError(
+          new MySqlOperationError(
+            sharedCloseFailure, [nestedCleanup],
+            MySqlExecutionOutcome.Unknown),
+          [completedResult], 1);
+        connection.cursorCloseGate = new PoolDeferred<void>();
+        connection.cursorCloseFailure = batchFailure;
+        connection.closeFailure = sharedCloseFailure;
+        runtime.enqueue(connection);
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        options.closeTimeoutMs = 100;
+        const pool = createTestPool(runtime, options);
+        const lease = await pool.acquire();
+        const cursors = lease.session.mysqlFeatures.cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        await cursors.open('SELECT cursor', []);
+        const release = new PoolOutcome<void>(lease.release());
+        const closing = new PoolOutcome<void>(pool.close());
+        await flushPool();
+
+        runtime.timers.advance(10);
+        await flushPool();
+        expect(release.settled).assertFalse();
+        expect(closing.settled).assertFalse();
+        expect(connection.closeCalls).assertEqual(1);
+        connection.cursorCloseGate.resolve(undefined);
+        await release.finished;
+        await closing.finished;
+
+        expect(release.error instanceof MySqlOperationError).assertTrue();
+        expect(closing.error instanceof MySqlOperationError).assertTrue();
+        expect((closing.error as MySqlOperationError).primary.kind)
+          .assertEqual(ArkDbErrorKind.Timeout);
+        expect(countFailureIdentity(release.error!, batchFailure)).assertEqual(1);
+        expect(countFailureIdentity(closing.error!, batchFailure)).assertEqual(1);
+        expect(batchFailure.completedResults.length).assertEqual(1);
+        expect(batchFailure.completedResults[0] === completedResult).assertTrue();
+        expect(batchFailure.failedIndex).assertEqual(1);
+        expect(batchFailure.failedOutcome)
+          .assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(countFailureIdentity(closing.error!, nestedCleanup))
+          .assertEqual(1);
+        expect(countFailureIdentity(closing.error!, sharedCloseFailure))
+          .assertEqual(1);
+        expect(connection.resetCalls).assertEqual(0);
+      });
+
+    it('cursorTimeoutKeepsDistinctPhysicalCloseBeforeLateFailure', 0,
+      async () => {
+        const runtime = new PoolRuntime();
+        const connection = new PoolConnection(1);
+        const physicalFailure =
+          ArkDbError.network('Synthetic distinct physical close failure.');
+        const lateCursorFailure =
+          ArkDbError.protocol('Synthetic distinct late cursor failure.');
+        connection.cursorCloseGate = new PoolDeferred<void>();
+        connection.cursorCloseFailure = lateCursorFailure;
+        connection.closeFailure = physicalFailure;
+        runtime.enqueue(connection);
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const pool = createTestPool(runtime, options);
+        const lease = await pool.acquire();
+        const cursors = lease.session.mysqlFeatures.cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        await cursors.open('SELECT cursor', []);
+        const release = new PoolOutcome<void>(lease.release());
+        await flushPool();
+
+        runtime.timers.advance(10);
+        await flushPool();
+        expect(release.settled).assertFalse();
+        expect(connection.closeCalls).assertEqual(1);
+        connection.cursorCloseGate.resolve(undefined);
+        await release.finished;
+        await pool.close();
+
+        expect(release.error instanceof MySqlOperationError).assertTrue();
+        if (!(release.error instanceof MySqlOperationError)) {
+          throw new Error('Expected distinct timed-out cleanup graph.');
+        }
+        expect(release.error.primary.kind).assertEqual(ArkDbErrorKind.Timeout);
+        expect(release.error.cleanupErrors.length).assertEqual(2);
+        expect(release.error.cleanupErrors[0] === physicalFailure).assertTrue();
+        expect(release.error.cleanupErrors[1] === lateCursorFailure).assertTrue();
+        expect(countFailureIdentity(release.error, physicalFailure)).assertEqual(1);
+        expect(countFailureIdentity(release.error, lateCursorFailure)).assertEqual(1);
+        expect(connection.resetCalls).assertEqual(0);
+      });
+
+    it('cursorTimeoutSubsumesExactStructuredCloseNodeInsideRetainedParent', 0,
+      async () => {
+        const runtime = new PoolRuntime();
+        const connection = new PoolConnection(1);
+        const sharedLeaf =
+          ArkDbError.network('Synthetic structured shared leaf.');
+        const closeNested =
+          ArkDbError.protocol('Synthetic close-node cleanup.');
+        const closeCause = new PoolLongDataSourceFailure(
+          'Synthetic structured close cause.', 'close-node-evidence-11');
+        const closeNode = new MySqlOperationError(
+          sharedLeaf, [closeNested],
+          MySqlExecutionOutcome.Unknown, closeCause);
+        const siblingCleanup =
+          ArkDbError.validation('Synthetic sibling cleanup.');
+        const siblingNode = new MySqlOperationError(
+          sharedLeaf, [siblingCleanup], MySqlExecutionOutcome.Unknown);
+        const parentPrimary =
+          ArkDbError.protocol('Synthetic structured parent failure.');
+        const completedResult = new MySqlQueryResult();
+        const parentNode = new MySqlBatchError(
+          new MySqlOperationError(
+            parentPrimary, [closeNode, siblingNode],
+            MySqlExecutionOutcome.Unknown),
+          [completedResult], 1);
+        connection.cursorCloseGate = new PoolDeferred<void>();
+        connection.cursorCloseFailure = parentNode;
+        connection.closeFailure = closeNode;
+        runtime.enqueue(connection);
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const pool = createTestPool(runtime, options);
+        const lease = await pool.acquire();
+        const cursors = lease.session.mysqlFeatures.cursors;
+        if (cursors === undefined) throw new Error('Expected cursor support.');
+        await cursors.open('SELECT cursor', []);
+        const release = new PoolOutcome<void>(lease.release());
+        await flushPool();
+
+        runtime.timers.advance(10);
+        await flushPool();
+        expect(release.settled).assertFalse();
+        expect(connection.closeCalls).assertEqual(1);
+        connection.cursorCloseGate.resolve(undefined);
+        await release.finished;
+        await pool.close();
+
+        expect(release.error instanceof MySqlOperationError).assertTrue();
+        expect((release.error as MySqlOperationError).primary.kind)
+          .assertEqual(ArkDbErrorKind.Timeout);
+        expect(countFailureIdentity(release.error!, parentNode)).assertEqual(1);
+        expect(countFailureIdentity(release.error!, closeNode)).assertEqual(1);
+        expect(countFailureIdentity(release.error!, siblingNode)).assertEqual(1);
+        expect(countFailureIdentity(release.error!, closeNested)).assertEqual(1);
+        expect(countFailureIdentity(release.error!, siblingCleanup)).assertEqual(1);
+        expect(countFailureIdentity(release.error!, sharedLeaf)).assertEqual(2);
+        expect(containsOriginalCause(release.error!, closeCause)).assertTrue();
+        expect(closeCause.evidenceId).assertEqual('close-node-evidence-11');
+        expect(parentNode.completedResults.length).assertEqual(1);
+        expect(parentNode.completedResults[0] === completedResult).assertTrue();
+        expect(parentNode.failedIndex).assertEqual(1);
+        expect(parentNode.failedOutcome)
+          .assertEqual(MySqlExecutionOutcome.Unknown);
+        expect(countFailureIdentity(release.error!, parentPrimary)).assertEqual(1);
+        expect(connection.resetCalls).assertEqual(0);
+      });
 
     it('statementCleanupTimeoutRetainsLateFailureAndSkipsReset', 0, async () => {
       const runtime = new PoolRuntime();

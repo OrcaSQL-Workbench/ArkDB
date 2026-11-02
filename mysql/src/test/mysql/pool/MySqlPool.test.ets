@@ -71,8 +71,8 @@ import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
 import { TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
 import {
-  PreparedSocket, errorPayload, flushPrepared, framePacket, handshake, okPayload,
-  prepareResponse
+  PreparedSocket, columnPayload, eofPayload, errorPayload, flushPrepared,
+  framePacket, handshake, okPayload, prepareResponse
 } from '../command/PreparedExecutionFixture';
 import { socket } from '../../../mock/NetworkKit.mock';
 
@@ -593,6 +593,29 @@ class ReentrantLeaseFinishObserver implements MySqlExecutionObserver {
   }
 }
 
+class TerminalQueryReentryObserver implements MySqlExecutionObserver {
+  lease: MySqlConnectionLease | null = null;
+  private secondQuery: Promise<MySqlQueryResult> | null = null;
+  private started: boolean = false;
+
+  onEvent(event: MySqlExecutionEvent): void {
+    if (event.type !== MySqlExecutionEventType.Terminal ||
+      event.commandKind !== MySqlCommandKind.Query ||
+      this.lease === null || this.started) return;
+    this.started = true;
+    this.secondQuery =
+      this.lease.session.query('SELECT terminal reentrant held query');
+  }
+
+  requireSecondQuery(): Promise<MySqlQueryResult> {
+    const task = this.secondQuery;
+    if (task === null) {
+      throw new Error('Expected the terminal observer to start query #2.');
+    }
+    return task;
+  }
+}
+
 class ReentrantStatementCloseObserver implements MySqlExecutionObserver {
   statement: MySqlPreparedStatement | null = null;
   repeated: Promise<void> | null = null;
@@ -750,6 +773,16 @@ function completeCancellationPoolConnect(runtime: CancellationPoolRuntime): void
   runtime.peer.emitMessage(new PacketWriter()
     .writeBytes(handshake(Capabilities.PROTOCOL_41))
     .writeBytes(framePacket(okPayload(), 2)).toUint8Array());
+}
+
+function poolResetFingerprintResult(): Uint8Array[] {
+  const row = new PacketWriter().writeUInt8(0xfb).writeLenEncString('')
+    .writeLenEncString('utf8mb4').writeLenEncString('SYSTEM').toUint8Array();
+  return [
+    new Uint8Array([4]), columnPayload('database'), columnPayload('sql_mode'),
+    columnPayload('character_set_client'), columnPayload('time_zone'), eofPayload(),
+    row, eofPayload()
+  ];
 }
 
 function poolFailureContainsIdentity(error: Object, expected: Object): boolean {
@@ -1732,6 +1765,188 @@ export default function mySqlPoolTest(): void {
           .assertEqual(ArkDbErrorKind.Timeout);
         expect(runtime.timers.size).assertEqual(0);
       });
+
+    it('releaseTimeoutCapturesPromptRootQueryFailureAfterClose', 0,
+      async () => {
+        const runtime = new CancellationPoolRuntime();
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const config = new ConnectionConfig();
+        config.host = 'root-query-pool.invalid';
+        config.user = 'pool';
+        config.ssl.mode = SslMode.DISABLED;
+        const pool = createMySqlPoolInternal(
+          new MySqlConnectionOptions(config, ''), options, runtime);
+        const acquiring = pool.acquire();
+        completeCancellationPoolConnect(runtime);
+        const lease = await acquiring;
+        runtime.peer.holdCommand = 0x03;
+        const query = new PoolOutcome<MySqlQueryResult>(
+          lease.session.query('SELECT prompt close join'));
+        await flushPool();
+
+        const release = new PoolOutcome<void>(lease.release());
+        runtime.timers.advance(10);
+        await release.finished;
+        await query.finished;
+        const queryFailure = query.error;
+        const releaseFailure = release.error;
+        await pool.close();
+
+        expect(queryFailure instanceof ArkDbError).assertTrue();
+        expect(releaseFailure instanceof MySqlOperationError).assertTrue();
+        expect(poolFailureContainsIdentity(releaseFailure!, queryFailure!))
+          .assertTrue();
+        expect(runtime.peer.closeCalls).assertEqual(1);
+        expect(runtime.timers.size).assertEqual(0);
+      });
+
+    it('releaseTimeoutCapturesConsecutiveRootQueryFailureAfterClose', 0,
+      async () => {
+        const runtime = new CancellationPoolRuntime();
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const config = new ConnectionConfig();
+        config.host = 'consecutive-root-query-pool.invalid';
+        config.user = 'pool';
+        config.ssl.mode = SslMode.DISABLED;
+        const pool = createMySqlPoolInternal(
+          new MySqlConnectionOptions(config, ''), options, runtime);
+        const acquiring = pool.acquire();
+        completeCancellationPoolConnect(runtime);
+        const lease = await acquiring;
+        runtime.peer.responses.push([okPayload()]);
+        const firstQuery = lease.session.query('SELECT first query');
+        const secondStarted =
+          new PoolDeferred<PoolOutcome<MySqlQueryResult>>();
+        await firstQuery.then((_result: MySqlQueryResult): void => {
+          runtime.peer.holdCommand = 0x03;
+          secondStarted.resolve(new PoolOutcome<MySqlQueryResult>(
+            lease.session.query('SELECT consecutive held query')));
+        });
+        const secondQuery = await secondStarted.promise;
+        await flushPool();
+
+        const release = new PoolOutcome<void>(lease.release());
+        runtime.timers.advance(10);
+        await release.finished;
+        await secondQuery.finished;
+        const queryFailure = secondQuery.error;
+        const releaseFailure = release.error;
+        await pool.close();
+
+        expect(queryFailure instanceof ArkDbError).assertTrue();
+        expect(releaseFailure instanceof MySqlOperationError).assertTrue();
+        expect(poolFailureContainsIdentity(releaseFailure!, queryFailure!))
+          .assertTrue();
+        expect(runtime.peer.closeCalls).assertEqual(1);
+        expect(runtime.timers.size).assertEqual(0);
+      });
+
+    it('releaseTimeoutCapturesTerminalReentrantRootQueryFailureAfterClose', 0,
+      async () => {
+        const runtime = new ObservedPoolRuntime();
+        const observer = new TerminalQueryReentryObserver();
+        const options = poolOptions();
+        options.releaseTimeoutMs = 10;
+        const pool = createObservedPool(runtime, observer, options);
+        const acquiring = pool.acquire();
+        completeObservedConnect(runtime);
+        const lease = await acquiring;
+        observer.lease = lease;
+        runtime.peer.holdCommand = 0x03;
+        const firstQuery = new PoolOutcome<MySqlQueryResult>(
+          lease.session.query('SELECT first terminal query'));
+        await flushPool();
+
+        const rejectedOverlap = new PoolOutcome<MySqlQueryResult>(
+          lease.session.query('SELECT rejected overlap'));
+        await rejectedOverlap.finished;
+        expect(rejectedOverlap.error instanceof ArkDbError).assertTrue();
+        expect((rejectedOverlap.error as ArkDbError).kind)
+          .assertEqual(ArkDbErrorKind.Protocol);
+        expect(firstQuery.settled).assertFalse();
+
+        runtime.peer.emitResponse([okPayload()]);
+        await firstQuery.finished;
+        const secondQuery = new PoolOutcome<MySqlQueryResult>(
+          observer.requireSecondQuery());
+        await flushPool();
+        expect(firstQuery.error === null).assertTrue();
+        expect(secondQuery.settled).assertFalse();
+
+        const release = new PoolOutcome<void>(lease.release());
+        runtime.timers.advance(10);
+        await release.finished;
+        await secondQuery.finished;
+        const queryFailure = secondQuery.error;
+        const releaseFailure = release.error;
+        await pool.close();
+
+        expect(queryFailure instanceof ArkDbError).assertTrue();
+        expect(releaseFailure instanceof MySqlOperationError).assertTrue();
+        expect(poolFailureContainsIdentity(releaseFailure!, queryFailure!))
+          .assertTrue();
+        expect(poolFailureContainsIdentity(
+          releaseFailure!, rejectedOverlap.error!)).assertFalse();
+        expect(runtime.peer.closeCalls).assertEqual(1);
+        expect(runtime.timers.size).assertEqual(0);
+      });
+
+    it('sameTurnRejectedOverlapCannotPoisonRelease', 0, async () => {
+      const runtime = new CancellationPoolRuntime();
+      const config = new ConnectionConfig();
+      config.host = 'same-turn-overlap-pool.invalid';
+      config.user = 'pool';
+      config.ssl.mode = SslMode.DISABLED;
+      const pool = createMySqlPoolInternal(
+        new MySqlConnectionOptions(config, ''), poolOptions(), runtime);
+      const acquiring = pool.acquire();
+      completeCancellationPoolConnect(runtime);
+      const lease = await acquiring;
+      runtime.peer.holdCommand = 0x03;
+      runtime.peer.onCommand = (command: number): void => {
+        if (command !== 0x1f) return;
+        runtime.peer.holdCommand = -1;
+        runtime.peer.responses.push(
+          [okPayload()], poolResetFingerprintResult());
+        Promise.resolve().then((): void => {
+          runtime.peer.emitResponse([okPayload()]);
+        });
+      };
+      const query = new PoolOutcome<MySqlQueryResult>(
+        lease.session.query('SELECT admitted query'));
+      await flushPool();
+
+      const rejectedOverlap = new PoolOutcome<MySqlQueryResult>(
+        lease.session.query('SELECT rejected same-turn overlap'));
+      const release = new PoolOutcome<void>(lease.release());
+      runtime.peer.emitResponse([okPayload()]);
+      await query.finished;
+      await rejectedOverlap.finished;
+      await release.finished;
+      const overlapFailure = rejectedOverlap.error;
+      const releaseFailure = release.error;
+      const closeCallsBeforePoolClose = runtime.peer.closeCalls;
+      const closing = new PoolOutcome<void>(pool.close());
+      await closing.finished;
+
+      expect(query.error === null).assertTrue();
+      expect(overlapFailure instanceof ArkDbError).assertTrue();
+      expect((overlapFailure as ArkDbError).kind)
+        .assertEqual(ArkDbErrorKind.Protocol);
+      const releaseContainsOverlap = releaseFailure !== null &&
+        poolFailureContainsIdentity(releaseFailure, overlapFailure!);
+      const closeContainsOverlap = closing.error !== null &&
+        poolFailureContainsIdentity(closing.error, overlapFailure!);
+      expect(releaseContainsOverlap).assertFalse();
+      expect(releaseFailure === null).assertTrue();
+      expect(closeContainsOverlap).assertFalse();
+      expect(closing.error === null).assertTrue();
+      expect(closeCallsBeforePoolClose).assertEqual(0);
+      expect(runtime.peer.closeCalls).assertEqual(1);
+      expect(runtime.timers.size).assertEqual(0);
+    });
 
     it('poolOptionsRejectEveryOutOfRangeValue', 0, () => {
       const invalid: MySqlPoolOptions[] = [];

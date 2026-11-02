@@ -1,5 +1,9 @@
-import { ArkDbError, ArkDbErrorKind, QueryOptions } from '@arkdb/core';
-import { MySqlConnection } from '../MySqlConnection';
+import {
+  ArkDbError, ArkDbErrorKind, QueryOptions
+} from '@arkdb/core';
+import {
+  MySqlConnection, runMySqlBufferedQueryInternal
+} from '../MySqlConnection';
 import { MySqlLongDataExecutor } from '../command/LongData';
 import { MYSQL_CURSOR_OPERATION_IN_PROGRESS_MESSAGE } from '../command/MySqlCursorErrors';
 import { MySqlConnectionFeatures } from '../driver/MySqlConnectionFeatures';
@@ -43,13 +47,28 @@ export interface MySqlConnectionLease {
   destroy(): Promise<void>;
 }
 
+export class MySqlPoolOperationAttempt<T> {
+  readonly task: Promise<T>;
+  readonly admitted: boolean;
+
+  constructor(task: Promise<T>, admitted: boolean) {
+    this.task = task;
+    this.admitted = admitted;
+  }
+}
+
 export interface MySqlPoolConnection extends MySqlSession {
   connect(): Promise<void>;
   close(): Promise<void>;
+  closeBoundQuerySettlement?(): Promise<Object | null> | null;
+  startBufferedQuery?(
+    sql: string, onAdmitted?: () => void):
+    MySqlPoolOperationAttempt<MySqlQueryResult>;
 }
 
 export class MySqlPoolConnectionAdapter implements MySqlPoolConnection {
   private root: MySqlConnection;
+  private bufferedQuerySettlement: Promise<Object | null> | null = null;
 
   constructor(root: MySqlConnection) {
     this.root = root;
@@ -75,8 +94,36 @@ export class MySqlPoolConnectionAdapter implements MySqlPoolConnection {
     return this.root.close();
   }
 
+  closeBoundQuerySettlement(): Promise<Object | null> | null {
+    return this.bufferedQuerySettlement;
+  }
+
+  startBufferedQuery(
+    sql: string, onAdmitted?: () => void):
+    MySqlPoolOperationAttempt<MySqlQueryResult> {
+    let admitted = false;
+    const task = runMySqlBufferedQueryInternal(
+      this.root, sql, (): void => {
+        admitted = true;
+        if (onAdmitted !== undefined) onAdmitted();
+      });
+    if (admitted) {
+      const settlement = normalizeBufferedQuerySettlement(task);
+      this.bufferedQuerySettlement = settlement;
+      const clear = (): void => {
+        if (this.bufferedQuerySettlement === settlement) {
+          this.bufferedQuerySettlement = null;
+        }
+      };
+      task.then(
+        (_result: MySqlQueryResult): void => clear(),
+        (_error: Object): void => clear());
+    }
+    return new MySqlPoolOperationAttempt<MySqlQueryResult>(task, admitted);
+  }
+
   query(sql: string): Promise<MySqlQueryResult> {
-    return this.root.query(sql);
+    return this.startBufferedQuery(sql).task;
   }
 
   queryStream(sql: string, options: QueryOptions,
@@ -95,6 +142,13 @@ export class MySqlPoolConnectionAdapter implements MySqlPoolConnection {
   releaseSavepoint(name: string): Promise<void> {
     return this.root.releaseSavepoint(name);
   }
+}
+
+function normalizeBufferedQuerySettlement(
+  task: Promise<MySqlQueryResult>): Promise<Object | null> {
+  return task.then(
+    (_result: MySqlQueryResult): Object | null => null,
+    (error: Object): Object | null => error);
 }
 
 export type MySqlLeaseFinish =
@@ -237,6 +291,32 @@ export class MySqlLeaseContext {
     return task;
   }
 
+  runAdmittedOperation<T>(
+    operation: (onAdmitted: () => void) =>
+    MySqlPoolOperationAttempt<T>): Promise<T> {
+    const tracked = new LeaseOperation();
+    let published = false;
+    const publish = (): void => {
+      if (published) return;
+      published = true;
+      this.operations.push(tracked);
+      tracked.settlement.then((): void => {
+        const index = this.operations.indexOf(tracked);
+        if (index >= 0) this.operations.splice(index, 1);
+      });
+    };
+    let attempt: MySqlPoolOperationAttempt<T>;
+    try {
+      this.assertActive();
+      attempt = operation(publish);
+    } catch (error) {
+      return Promise.reject(error as Object);
+    }
+    if (!attempt.admitted) return attempt.task;
+    tracked.observe(attempt.task);
+    return attempt.task;
+  }
+
   async waitForOperations(): Promise<Object[]> {
     const pending = this.operations.slice();
     const failures: Object[] = [];
@@ -350,6 +430,13 @@ class LeaseSession implements MySqlSession {
   }
 
   query(sql: string): Promise<MySqlQueryResult> {
+    const connection = this.context.connection;
+    if (connection.startBufferedQuery !== undefined) {
+      return this.context.runAdmittedOperation(
+        (onAdmitted: () => void):
+        MySqlPoolOperationAttempt<MySqlQueryResult> =>
+          connection.startBufferedQuery!(sql, onAdmitted));
+    }
     return this.context.runOperation(
       (): Promise<MySqlQueryResult> => this.root.query(sql));
   }

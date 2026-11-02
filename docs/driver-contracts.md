@@ -10,7 +10,7 @@ not changed by this migration. PostgreSQL is not implemented.
 | Module | Owns |
 | --- | --- |
 | `core` / `@arkdb/core` | One runtime error identity, portable results and server information, minimal connections, optional capability interfaces, deadlines and HarmonyOS diagnostics |
-| `mysql` / `@arkdb/mysql` | MySQL options/TLS posture, wire protocol, authentication, native columns/server information, SQL, context aliases, control-session cancellation, opt-in statement deadlines and vendor metrics |
+| `mysql` / `@arkdb/mysql` | MySQL options/TLS posture, wire protocol, authentication, native columns/server information, SQL, context aliases, control-session cancellation, opt-in statement deadlines, bounded prepared long-data upload and vendor metrics |
 | Driver-local `arkdb-package.json` | Tooling-only shared/driver classification and driver-owned verification declaration; not an OHPM schema extension |
 | `tools` | Dependency discovery, source/import constraints and exact-archive verification/distribution |
 
@@ -240,6 +240,70 @@ An unsupported server reports the canonical
 replaying SQL. A timeout, malformed response or uncertain transport outcome
 closes the physical connection instead of returning it for reuse. The feature
 is additive: core and old custom MySQL connections acquire no required method.
+
+MySQL also exposes optional `mysqlFeatures.longData` execution for explicit
+prepared statements. `MySqlByteSource` is a pull interface: each read receives a
+maximum and returns a nonempty bounded byte chunk or EOF, and every accepted
+source is closed exactly once. Source `close()` owns interruption of its source:
+it must cause any pending read to settle before the close promise settles.
+`MySqlLongDataOptions` owns an absolute upload timeout, cumulative byte limit,
+chunk limit and cloned result budget. Binary and text sources require matching
+typed empty placeholders; long input is not a generic object, JSON or temporal
+conversion interface. Parameter indexes and `MySqlByteSource` object identities
+must both be unique. Reusing one one-shot source across parameters is rejected
+before any source read, close or wire command.
+
+The protocol adapter serially sends response-free `COM_STMT_SEND_LONG_DATA`
+commands while one prepared command scope owns the connection, then dispatches
+exactly one existing prepared EXECUTE. Upload/source/close failures never execute
+SQL. Any synchronized pump failure requires an acknowledged `COM_STMT_RESET`,
+including first-read, invalid-first-chunk and zero-byte close failures. A packet
+write failure or timeout is uncertain: the writer adapter retires the physical
+session and the pump joins both retirement and the original write before source
+cleanup, so reset cannot race a late packet. The pump arms its upload-deadline
+waiter before calling the writer with the same remaining budget. If pump and
+transport deadlines are equal, the upload Timeout is authoritative; a distinct
+transport timeout/protocol failure remains cleanup evidence rather than
+replacing the primary.
+
+The final EXECUTE always emits null-bitmap and type metadata for every parameter.
+The adapter records exactly which parameter indexes completed at least one
+`COM_STMT_SEND_LONG_DATA` write and omits ordinary value bytes only for those
+indexes, preserving the byte alignment of following scalar values. A source
+that reaches EOF before sending a chunk has no server long-data state, so its
+typed empty Text/Binary placeholder remains in EXECUTE. Ordinary prepared,
+cached and batch execution continue to emit every encoded value.
+
+Upload and reset are deliberately outside the KILL-eligible execute phases.
+There is one upload-level close subscription with one active wait notifier;
+callbacks do not grow with chunk count. Root connection close interrupts pending
+source work and prevents late dispatch. Failure cleanup initiates every retained
+source close before racing collective settlement against
+`QueryOptions.maxDrainTimeMs`. Timeout is cleanup evidence, not permission to
+skip a later source or return with close pending: all initiated close tasks are
+joined and their eventual actual failures retained. The protocol-neutral pump
+owns source reads, writer backpressure, byte/time budgets, write-retirement
+joining and close composition, but no SQL execution outcome. A later LOCAL
+INFILE adapter can reuse it while assigning its own dispatched/unknown semantics
+and without importing statement IDs, reset or execute policy.
+
+Long-data and read-only cursor execution share the same physical command gate.
+Whichever feature owns the session rejects the other before source reads or
+cursor wire work. One execution-observer start/terminal pair covers the complete
+long-data scope, including upload, reset or execute and cleanup, and carries no
+SQL or source bytes.
+
+Read/write/close callbacks recheck the monotonic absolute expiry before they can
+cancel the deadline timer or publish success/failure. If a callback runs after
+expiry, Timeout is authoritative and a distinct late failure is cleanup
+evidence. The pump retains the exact active read; timeout/abort starts the
+source's one close task and joins both close and that read before returning.
+Late read values are discarded and can never become chunks after timeout.
+Source read/close and protocol-neutral writer rejection identities are retained:
+an `ArkDbError` remains the typed primary, while an ordinary `Error` is
+classified for public operation handling and preserved by exact identity as
+`originalCause`. Rewrapping and cleanup composition deduplicate the same
+underlying ordinary cause.
 
 MySQL also exposes the optional `mysqlFeatures.transactions`
 `MySqlTransactionRunner`. It accepts `MySqlTransactionOptions`, owns one

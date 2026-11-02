@@ -40,6 +40,7 @@ export class Command {
   static readonly PING = 0x0e;
   static readonly STMT_PREPARE = 0x16;
   static readonly STMT_EXECUTE = 0x17;
+  static readonly STMT_SEND_LONG_DATA = 0x18;
   static readonly STMT_CLOSE = 0x19;
   static readonly STMT_RESET = 0x1a;
   static readonly STMT_FETCH = 0x1c;

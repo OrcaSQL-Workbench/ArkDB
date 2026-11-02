@@ -36,6 +36,10 @@ export { MySqlSessionOptions } from './src/main/ets/mysql/model/MySqlSessionOpti
 export { MySqlTransactionIsolation, MySqlTransactionOptions } from
   './src/main/ets/mysql/model/MySqlTransactionOptions';
 export { MySqlDeadlineOptions } from './src/main/ets/mysql/model/MySqlDeadlineOptions';
+export type { MySqlByteSource } from './src/main/ets/mysql/model/MySqlByteSource';
+export {
+  MySqlLongDataOptions, MySqlLongParameter, MySqlLongParameterKind
+} from './src/main/ets/mysql/model/MySqlLongDataOptions';
 export { ServerFamily, MySqlServerInfo, MySqlServerInfo as ServerInfo } from
   './src/main/ets/mysql/model/MySqlServerInfo';
 export { MySqlColumnDef, MySqlColumnDef as ColumnDef, MySqlQueryResult, MySqlQueryResult as QueryResult } from
@@ -55,6 +59,7 @@ export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
   './src/main/ets/mysql/driver/MySqlPreparedContracts';
 export type { MySqlCursor, MySqlCursorExecutor } from
   './src/main/ets/mysql/driver/MySqlCursorContracts';
+export type { MySqlLongDataExecutor } from './src/main/ets/mysql/command/LongData';
 export type { MySqlBatchExecutor } from './src/main/ets/mysql/execution/MySqlBatchExecutor';
 export type { MySqlDeadlineExecutor } from './src/main/ets/mysql/execution/MySqlDeadlineExecutor';
 export type { MySqlInsertRowsExecutor } from './src/main/ets/mysql/execution/MySqlInsertRowsExecutor';

@@ -93,6 +93,10 @@ import {
 } from './command/ResultStream';
 import { prepareServerError } from './command/PrepareResponse';
 import { BinaryRowDecoder } from './value/BinaryRowDecoder';
+import { MySqlLongDataExecutor } from './command/LongData';
+import {
+  MySqlLongDataOptions, MySqlLongParameter
+} from './model/MySqlLongDataOptions';
 
 const MAX_MYSQL_DEADLINE_TIMER_DELAY_MS: number = 2147483647;
 
@@ -204,6 +208,8 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       (): MySqlPreparedInsertRowsExecutor => this.insertRowsExecutor());
     this.mysqlFeatures.named = new MySqlConnectionNamedExecutor(
       (): MySqlNamedExecutor => this.namedExecutor());
+    this.mysqlFeatures.longData = new MySqlConnectionLongDataExecutor(
+      (): MySqlLongDataExecutor => this.internalPreparedExecutor().longData);
     this.mysqlFeatures.prepared = new MySqlConnectionPreparedExecutor(
       (): MySqlPreparedExecutor => this.preparedExecutor());
     this.mysqlFeatures.procedures = new MySqlConnectionProcedureCaller(
@@ -211,6 +217,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     this.mysqlFeatures.session = new MySqlConnectionSessionController(
       (): Promise<void> => this.resetSession());
     this.mysqlFeatures.transactions = new MySqlConnectionTransactionRunner(this.transactionHost());
+  }
+
+  private preparedCloseSignal(scope: MySqlCommandScope): Promise<ArkDbError> {
+    const operation = this.preparedOperation;
+    if (operation === null || operation.scope !== scope) {
+      return Promise.reject<ArkDbError>(
+        ArkDbError.protocol('Prepared operation close signal is unavailable.'));
+    }
+    return operation.closeRequested;
   }
 
   get state(): ConnectionState {
@@ -340,13 +355,15 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   private preparedHost(): PreparedConnectionHost {
-    return new PreparedConnectionHost(this.commandGate,
+    return new PreparedConnectionHost(this.commandGate, this.timers,
       (): PacketChannel | null => this.channel, (): number => this.clientCaps,
       (): ConnectionState => this.connState,
       (error: ArkDbError): Promise<void> => this.retirePreparedSession(error),
       <T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
         cachedConvenience?: boolean): Promise<T> =>
         this.runPreparedCommand<T>(kind, operation, cachedConvenience),
+      (scope: MySqlCommandScope): Promise<ArkDbError> =>
+        this.preparedCloseSignal(scope),
       (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
         observer?: (result: QueryResult) => void,
         observations?: MySqlResultTerminatorObservation[]): Promise<QueryResult> =>
@@ -1138,7 +1155,11 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       const ordinary = this.ordinaryOperation;
       if (ordinary !== null && ordinary.scope === scope) ordinary.closeResult = closing;
       const prepared = this.preparedOperation;
-      if (prepared !== null && prepared.scope === scope) prepared.closeResult = closing;
+      if (prepared !== null && prepared.scope === scope) {
+        prepared.closeResult = closing;
+        prepared.signalClose(
+          ArkDbError.cancelled('Connection closed during a MySQL operation.'));
+      }
       if (cursor !== null && (cursor.scope === scope || ownsScope)) {
         cursor.closeResult = closing;
       }
@@ -2166,6 +2187,19 @@ class MySqlConnectionPreparedExecutor implements MySqlPreparedExecutor {
   }
 }
 
+class MySqlConnectionLongDataExecutor implements MySqlLongDataExecutor {
+  private getExecutor: () => MySqlLongDataExecutor;
+
+  constructor(getExecutor: () => MySqlLongDataExecutor) {
+    this.getExecutor = getExecutor;
+  }
+
+  async execute(statement: MySqlPreparedStatement, parameters: MySqlParameter[],
+    sources: MySqlLongParameter[], options?: MySqlLongDataOptions): Promise<QueryResult> {
+    return this.getExecutor().execute(statement, parameters, sources, options);
+  }
+}
+
 class MySqlConnectionCursorExecutor implements MySqlCursorExecutor {
   private getExecutor: () => MySqlCursorExecutor;
 
@@ -2364,12 +2398,14 @@ type CursorCommandFinisher = (scope: MySqlCommandScope,
 class PreparedConnectionHost implements MySqlNamedExecutorHost,
   MySqlCursorExecutorHost {
   readonly commandGate: MySqlCommandGate;
+  readonly timers: ConnectionTimerPort;
   readonly preparedCacheSize: number;
   private readChannel: () => PacketChannel | null;
   private readCapabilities: () => number;
   private readState: () => ConnectionState;
   private retireSession: (error: ArkDbError) => Promise<void>;
   private run: PreparedCommandRunner;
+  private readCloseSignal: (scope: MySqlCommandScope) => Promise<ArkDbError>;
   private buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
     observer?: (result: QueryResult) => void,
     observations?: MySqlResultTerminatorObservation[]) => Promise<QueryResult>;
@@ -2382,9 +2418,11 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost,
   private applyOwnedCursorStatus: CursorStatusApplier;
   private finishOwnedCursor: CursorCommandFinisher;
 
-  constructor(gate: MySqlCommandGate, readChannel: () => PacketChannel | null,
+  constructor(gate: MySqlCommandGate, timers: ConnectionTimerPort,
+    readChannel: () => PacketChannel | null,
     readCapabilities: () => number, readState: () => ConnectionState,
     retire: (error: ArkDbError) => Promise<void>, run: PreparedCommandRunner,
+    readCloseSignal: (scope: MySqlCommandScope) => Promise<ArkDbError>,
     buffered: (scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
       observer?: (result: QueryResult) => void,
       observations?: MySqlResultTerminatorObservation[]) => Promise<QueryResult>,
@@ -2398,12 +2436,14 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost,
     finishCursor: CursorCommandFinisher,
     preparedCacheSize: number) {
     this.commandGate = gate;
+    this.timers = timers;
     this.preparedCacheSize = preparedCacheSize;
     this.readChannel = readChannel;
     this.readCapabilities = readCapabilities;
     this.readState = readState;
     this.retireSession = retire;
     this.run = run;
+    this.readCloseSignal = readCloseSignal;
     this.buffered = buffered;
     this.stream = stream;
     this.readSqlMode = readSqlMode;
@@ -2423,6 +2463,10 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost,
   runCommand<T>(kind: MySqlCommandKind, operation: (scope: MySqlCommandScope) => Promise<T>,
     cachedConvenience: boolean = false): Promise<T> {
     return this.run<T>(kind, operation, cachedConvenience);
+  }
+
+  closeSignal(scope: MySqlCommandScope): Promise<ArkDbError> {
+    return this.readCloseSignal(scope);
   }
 
   executePrepared(scope: MySqlCommandScope, command: Uint8Array, options: QueryOptions,
@@ -2470,12 +2514,26 @@ class PreparedConnectionHost implements MySqlNamedExecutorHost,
 class PreparedCommandSettlement {
   readonly scope: MySqlCommandScope;
   readonly cancellations: Promise<QueryCancellationResult>[] = [];
+  readonly closeRequested: Promise<ArkDbError>;
   joinedCancellations: number = 0;
   closeResult: Promise<void> | null = null;
   closeJoined: boolean = false;
+  private resolveClose: (error: ArkDbError) => void =
+    (_error: ArkDbError): void => {};
+  private closeSignalled: boolean = false;
 
   constructor(scope: MySqlCommandScope) {
     this.scope = scope;
+    this.closeRequested = new Promise<ArkDbError>(
+      (resolve: (error: ArkDbError) => void): void => {
+        this.resolveClose = resolve;
+      });
+  }
+
+  signalClose(error: ArkDbError): void {
+    if (this.closeSignalled) return;
+    this.closeSignalled = true;
+    this.resolveClose(error);
   }
 }
 

@@ -211,9 +211,67 @@ in both EOF modes. Deadline regressions additionally prove exact scope/serial ti
 ownership, PREPARE expiry before EXECUTE, lost KILL acknowledgement retention,
 multiple cancellation-attempt joining, grace target-abort ordering, bounded
 post-abort observation, platform-range timeout/grace chunking, idempotent
-expired prepared close and joined close cleanup. They do not establish
-live-server or device timing interoperability, prepared CALL/OUT support,
-cursor, long-data, pooling or automatic retries.
+expired prepared close and joined close cleanup. Those prepared execution/deadline fixtures do not establish live-server or
+device timing interoperability, prepared CALL/OUT support, cursor, long-data,
+pooling or automatic retries.
+
+## Prepared long-data upload fixtures
+
+The long-data fixtures use the existing prepared statement owner, packet channel,
+typed placeholder encoder and execution/cancellation pipeline. Independent
+little-endian literals verify `COM_STMT_SEND_LONG_DATA` payloads as command `18`,
+four-byte statement identifier, two-byte zero-based parameter index and raw
+chunk bytes. Every long-data command resets its packet sequence and reads no
+response. `COM_STMT_RESET` is command `1a` plus the private statement identifier
+and must consume one OK response before a failed upload can reuse the handle.
+Final EXECUTE fixtures decode the bitmap, new-types flag, full type table and
+remaining value bytes. They cover long-before-scalar, scalar-before-long, two
+sent long parameters and a zero-chunk source. Sent long indexes omit only their
+ordinary placeholder value ranges; following scalar bytes remain aligned, while
+zero-chunk input retains the empty placeholder because no long-data state was
+created.
+
+The protocol-neutral pump fixtures use deterministic byte sources, writers and
+monotonic timer ports. They cover empty/oversized chunks, exact and exceeded
+cumulative limits, one absolute read/write/close timeout, serial multi-source
+ordering, exactly-once source close, one abort subscription independent of chunk
+count, and a separate cleanup budget. Multi-source cleanup fixtures prove every
+close starts before timeout observation, timeout evidence does not settle the
+pump, unread-source closes still run exactly once, and all actual close
+settlements/failures are joined before return. Timed-out writer fixtures prove
+the pump timer is registered before an equal-deadline transport timer, upload
+Timeout remains primary, transport Protocol remains cleanup evidence,
+retirement is requested and the original write settles before cleanup/return.
+Pump failures expose no SQL execution outcome.
+
+Absolute-expiry fixtures advance the monotonic clock without firing the retained
+timer, then settle a read or write callback. They prove late success cannot
+bypass Timeout, late failure is cleanup evidence, the timer is canceled only
+after the absolute-expiry recheck, and no late chunk is written. A gated-read
+fixture proves timeout starts source close, the pump remains pending, and the
+exact read settlement is joined; a late read failure is retained. The source
+fixture's close follows the public contract by not settling before its pending
+read.
+
+Ordinary-error fixtures reject source read, source close and the
+protocol-neutral writer with distinct `Error` objects. They prove the neutral
+upload failure and final `MySqlOperationError` preserve exact `originalCause`
+identity, retain NotDispatched/Unknown outcome ownership in the adapter, and do
+not duplicate the same cause during close cleanup.
+
+Connection fixtures cover zero-byte input, two long parameters, reset
+success/failure, first-read/invalid-first-chunk/zero-byte-close reset, upload
+timeout without KILL, a timed-out `0x18` that retires without reset, manual cancel
+during upload, prepared cancellation after EXECUTE begins, and root close while
+a source read is pending. Preflight fixtures separately reject duplicate
+parameter indexes and duplicate byte-source object identities before any read,
+close or upload command. Post-cursor integration fixtures keep both optional
+features on one connection, reject long-data ownership while a cursor is active,
+and reject cursor wire work while long-data owns Uploading. Observer assertions
+require one Query start and one matching terminal only after
+upload/reset-or-execute/cleanup convergence; lifecycle events contain command
+metadata only, never SQL or source bytes. These local fixtures do not establish
+live server, device, throughput or large-LOB interoperability.
 
 ## Read-only prepared server cursors
 

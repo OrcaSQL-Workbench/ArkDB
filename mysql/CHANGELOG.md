@@ -88,6 +88,29 @@
   or coercing exact decimal, temporal, JSON, NULL or byte values.
 - Add optional native `affectedRowsExact` bigint observations while preserving the
   established numeric `affectedRows` field and unchanged legacy data literals.
+- Add optional prepared long-parameter uploads through bounded `MySqlByteSource`
+  inputs, serial response-free `COM_STMT_SEND_LONG_DATA`, cumulative byte/time
+  budgets, statement reset on pre-execute failure, and physical retirement when
+  synchronization cannot be confirmed. Preserve source-close and cleanup errors,
+  use one operation-level close subscription, join timed-out writes with
+  retirement before cleanup, arm the authoritative upload timer before the
+  transport timer, start every source close before recording a separate
+  cleanup-budget timeout, then join all actual close settlements, interrupt
+  pending uploads on connection close, and reuse existing prepared cancellation
+  only after EXECUTE starts. Keep the reusable pump free of SQL execution
+  outcomes so later protocol adapters assign their own semantics. Recheck
+  absolute monotonic expiry when task callbacks settle, require source close to
+  settle pending reads, and join the retained read before returning so late
+  success cannot dispatch and late failure remains cleanup evidence. Reject a
+  shared one-shot byte-source identity across long-parameter indexes before
+  taking source ownership. Track indexes that successfully sent long-data
+  chunks and omit only their ordinary EXECUTE value bytes while retaining every
+  null-bitmap/type entry; zero-chunk sources keep their empty placeholder.
+  Preserve exact ordinary source read/close and neutral writer rejection objects
+  as operation `originalCause` instead of replacing them with a generic error.
+  Share one physical command gate with read-only cursors and emit one
+  privacy-safe Query observer lifecycle across upload, reset or execute, and
+  cleanup.
 - Enable the built-in factory's prepared capability hint without adding required
   methods to core or old custom connections. Add a restricted `MySqlSession`
   borrowing interface and retain native/portable text-stream defaults.

@@ -9,6 +9,7 @@ export interface EncodedBinaryParameters {
   readonly nullBitmap: Uint8Array;
   readonly types: Uint8Array;
   readonly values: Uint8Array;
+  readonly valueOffsets: number[];
 }
 
 const MAX_PARAMETERS = 65535;
@@ -46,9 +47,11 @@ export function encodeBinaryParameters(parameters: MySqlParameter[], expectedCou
   const nullBitmap = new Uint8Array(bitmapBytes);
   const types = new Uint8Array(parameterCount * 2);
   const values = new Uint8Array(valueBytes);
+  const valueOffsets: number[] = new Array<number>(parameterCount + 1).fill(0);
   let offset = 0;
   for (let index = 0; index < parameterCount; index += 1) {
     const parameter = snapshots[index];
+    valueOffsets[index] = offset;
     types[index * 2] = parameterColumnType(parameter.type);
     types[index * 2 + 1] = parameter.type === MySqlParameterType.UInt64 ? 0x80 : 0;
     if (parameter.value === null) {
@@ -57,7 +60,11 @@ export function encodeBinaryParameters(parameters: MySqlParameter[], expectedCou
       offset = writeParameterValue(values, offset, parameter);
     }
   }
-  return { nullBitmap: nullBitmap, types: types, values: values };
+  valueOffsets[parameterCount] = offset;
+  return {
+    nullBitmap: nullBitmap, types: types, values: values,
+    valueOffsets: valueOffsets
+  };
 }
 
 function parameterColumnType(type: MySqlParameterType): number {

@@ -7,6 +7,8 @@ import {
   MySqlCursor, MySqlCursorExecutor, MySqlCursorOptions,
   MySqlExecutionEvent, MySqlExecutionEventType, MySqlExecutionObserver,
   MySqlInsertRowsExecutor, MySqlInsertRowsOptions,
+  MySqlByteSource, MySqlLongDataExecutor, MySqlLongDataOptions,
+  MySqlLongParameter, MySqlLongParameterKind,
   MySqlNamedExecutor, MySqlNamedParameter, MySqlParameter, MySqlParameterType,
   MySqlParameterValue, MySqlPreparedExecutor,
   MySqlPreparedStatement, MySqlProcedureCaller, MySqlProcedureArgument,
@@ -30,6 +32,7 @@ export default function preparedPublicInterfaceTest(): void {
       const deadlines: MySqlDeadlineExecutor | undefined = features.deadlines;
       const insertRows: MySqlInsertRowsExecutor | undefined = features.insertRows;
       const sessionController: MySqlSessionController | undefined = features.session;
+      const longData: MySqlLongDataExecutor | undefined = features.longData;
       expect(executor !== undefined).assertTrue();
       expect(cursors !== undefined).assertTrue();
       expect(namedExecutor !== undefined).assertTrue();
@@ -37,6 +40,7 @@ export default function preparedPublicInterfaceTest(): void {
       expect(deadlines !== undefined).assertTrue();
       expect(insertRows !== undefined).assertTrue();
       expect(sessionController !== undefined).assertTrue();
+      expect(longData !== undefined).assertTrue();
       expect(session.mysqlFeatures === features).assertTrue();
       expect(session.serverInfo === connection.serverInfo).assertTrue();
       expect(factory.capabilities.supportsPreparedStatements).assertTrue();
@@ -92,6 +96,18 @@ export default function preparedPublicInterfaceTest(): void {
       const insertOptions: MySqlInsertRowsOptions = new MySqlInsertRowsOptions();
       expect(insertOptions.maxPacketBytes).assertEqual(16777216);
       expect(insertOptions.validate().length).assertEqual(0);
+      const byteSource: MySqlByteSource = new ConsumerByteSource();
+      const longParameter = new MySqlLongParameter(
+        0, MySqlLongParameterKind.Binary, byteSource);
+      const longOptions = new MySqlLongDataOptions();
+      expect(longOptions.chunkBytes).assertEqual(65536);
+      expect(longOptions.maxTotalBytes).assertEqual(67108864);
+      expect(longOptions.uploadTimeoutMs).assertEqual(30000);
+      expect(longOptions.validate().length).assertEqual(0);
+      const longCopy = longOptions.clone();
+      longCopy.queryOptions.maxRows = 2;
+      expect(longOptions.queryOptions.maxRows).assertEqual(0);
+      expect(longParameter.source === byteSource).assertTrue();
       await connection.close();
       if (sessionController === undefined) throw ArkDbError.unsupported('Expected session reset support.');
       let resetFailure: Object | null = null;
@@ -277,4 +293,17 @@ async function insertRowsSignatures(executor: MySqlInsertRowsExecutor,
     new MySqlParameter(MySqlParameterType.Int32, 1),
     new MySqlParameter(MySqlParameterType.Text, 'one')
   ]], options);
+}
+
+async function longDataSignatures(executor: MySqlLongDataExecutor,
+  statement: MySqlPreparedStatement, source: MySqlByteSource): Promise<QueryResult> {
+  return executor.execute(statement,
+    [new MySqlParameter(MySqlParameterType.Binary, new Uint8Array(0))],
+    [new MySqlLongParameter(0, MySqlLongParameterKind.Binary, source)],
+    new MySqlLongDataOptions());
+}
+
+class ConsumerByteSource implements MySqlByteSource {
+  async read(_maxBytes: number): Promise<Uint8Array | null> { return null; }
+  async close(): Promise<void> {}
 }

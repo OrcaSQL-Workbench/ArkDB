@@ -1,4 +1,4 @@
-import { ArkDbError, DbConnection, QueryOptions } from '@arkdb/core';
+import { ArkDbError, ConnectionTimerPort, DbConnection, QueryOptions } from '@arkdb/core';
 import { MySqlConnection } from '../../../main/ets/mysql/MySqlConnection';
 import { MySqlPreparedExecutor } from '../../../main/ets/mysql/driver/MySqlPreparedContracts';
 import { ConnectionConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
@@ -72,12 +72,13 @@ export class PreparedExecutionFixture {
   clientCapabilities: number = 0;
   private capabilities: number;
 
-  constructor(capabilities: number = Capabilities.PROTOCOL_41, control?: () => DbConnection) {
+  constructor(capabilities: number = Capabilities.PROTOCOL_41, control?: () => DbConnection,
+    timers?: ConnectionTimerPort) {
     const config = new ConnectionConfig();
     config.host = 'synthetic.invalid';
     config.ssl.mode = SslMode.DISABLED;
     this.capabilities = capabilities;
-    this.connection = new PreparedTestConnection(config, '', new TcpTransport(), undefined, control);
+    this.connection = new PreparedTestConnection(config, '', new TcpTransport(), timers, control);
   }
 
   async open(): Promise<MySqlPreparedExecutor> {

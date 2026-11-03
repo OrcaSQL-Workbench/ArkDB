@@ -13,6 +13,8 @@ const RELEASE_TAG = 'mysql-v1.0.2';
 const SOURCE_COMMIT = 'f532d0c37adf4dbba7a1a313679f0024822ed752';
 const HAR_SHA256 = '8974e3bda9415fda26036b7b5b7d335a2c8f901ceda74381d1e657362c093986';
 const PACKAGE_ROOT_EXPORTS_SHA256 = '47d7d77ef98de298946d2d84b6633082658a964cd9c77b80ea485d15c0873254';
+const CYCLE = Symbol('cycle');
+const INVALID = Symbol('invalid');
 
 test('rejects a published value export demoted to a type-only export', () => {
   const published = [{ name: 'PublishedFactory', kind: 'value' }];
@@ -147,6 +149,38 @@ test('resolves cyclic star barrels through their non-cyclic exports', () => {
   ]);
 });
 
+test('resolves mixed named and star cycles through a non-cyclic branch', () => {
+  const barrel = "export { PublishedFactory } from './Bridge';\n";
+  assert.deepEqual(packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Alias.ets', "export { PublishedFactory } from './Bridge';\n"],
+    ['Bridge.ets', "export * from './Alias';\nexport * from './Implementation';\n"],
+    ['Implementation.ets', 'export class PublishedFactory {}\n']
+  ])), [{ name: 'PublishedFactory', kind: 'value' }]);
+});
+
+test('resolves indirect named cycles through a non-cyclic star branch', () => {
+  const barrel = "export { PublishedFactory } from './Bridge';\n";
+  assert.deepEqual(packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Alias.ets', "export { PublishedFactory } from './Relay';\n"],
+    ['Relay.ets', "export { PublishedFactory } from './Bridge';\n"],
+    ['Bridge.ets', "export * from './Alias';\nexport * from './Implementation';\n"],
+    ['Implementation.ets', 'export class PublishedFactory {}\n']
+  ])), [{ name: 'PublishedFactory', kind: 'value' }]);
+});
+
+test('does not fall through from a cyclic explicit export to a star export', () => {
+  const barrel = "export { PublishedFactory } from './Alias';\n";
+  assert.throws(() => packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Alias.ets', "export { PublishedFactory } from './Cycle';\n" +
+      "export * from './Valid';\n"],
+    ['Cycle.ets', "export { PublishedFactory } from './Alias';\n"],
+    ['Valid.ets', 'export class PublishedFactory {}\n']
+  ])), /Cyclic package-root export: PublishedFactory/);
+});
+
 test('collapses default and named paths to the same declaration', () => {
   const barrel = "export * from './Diamond';\n";
   assert.deepEqual(packageRootExports(barrel, 'Index.ets', new Map([
@@ -167,6 +201,66 @@ test('keeps identifier-default and named paths as distinct bindings', () => {
     ['NamedPath.ets', "export { api as PublicApi } from './Common';\n"],
     ['Common.ets', 'export namespace api {}\nexport default api;\n']
   ])), /Duplicate package-root star export: PublicApi/);
+});
+
+test('detects an identifier-default class changed into a type-only declaration', () => {
+  const barrel = "export { default as PublishedFactory } from './Factory';\n";
+  const published = packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Factory.ets', 'class PublishedFactory {}\nexport default PublishedFactory;\n']
+  ]));
+  const current = packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Factory.ets', 'interface PublishedFactory {}\nexport default PublishedFactory;\n']
+  ]));
+  assert.throws(() => assertPublishedExportsRetained(published, current),
+    /PublishedFactory \(value -> type\)/);
+});
+
+test('keeps global identifier default expressions as runtime values', () => {
+  const barrel = "export { default as PublishedValue } from './Value';\n";
+  assert.deepEqual(packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Value.ets', 'export default undefined;\n']
+  ])), [{ name: 'PublishedValue', kind: 'value' }]);
+});
+
+test('rejects default expressions backed by missing imported bindings', () => {
+  const barrel = "export { default as PublishedValue } from './Value';\n";
+  assert.throws(() => packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Value.ets', "import Missing from './Target';\nexport default Missing;\n"],
+    ['Target.ets', 'export const Other = 1;\n']
+  ])), /Cannot resolve imported binding Missing/);
+
+  assert.throws(() => packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Value.ets', "import { Missing } from './Target';\nexport default Missing;\n"],
+    ['Target.ets', 'export const Other = 1;\n']
+  ])), /Cannot resolve imported binding Missing/);
+});
+
+test('rejects multi-module default import and export cycles', () => {
+  const barrel = "export { default as PublishedValue } from './First';\n";
+  assert.throws(() => packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['First.ets', "import value from './Second';\nexport default value;\n"],
+    ['Second.ets', "import value from './First';\nexport default value;\n"]
+  ])), /Cyclic package-root export: PublishedValue/);
+});
+
+test('detects a class changed into an erased namespace', () => {
+  const barrel = "export { PublishedFactory } from './Factory';\n";
+  const published = packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Factory.ets', 'export class PublishedFactory {}\n']
+  ]));
+  const current = packageRootExports(barrel, 'Index.ets', new Map([
+    ['Index.ets', barrel],
+    ['Factory.ets', 'export namespace PublishedFactory { export interface Options {} }\n']
+  ]));
+  assert.throws(() => assertPublishedExportsRetained(published, current),
+    /PublishedFactory \(value -> type\)/);
 });
 
 test('discovers direct and inherited namespace exports', () => {
@@ -232,7 +326,7 @@ test('validates local imported bindings before type-only coercion', () => {
   assert.throws(() => packageRootExports(missingType, 'Index.ets', new Map([
     ['Index.ets', missingType],
     ['Types.ets', 'export interface DifferentType {}\n']
-  ])), /Cannot resolve local exported declaration Missing/);
+  ])), /Cannot resolve imported binding Missing/);
 
   const missingNamespace = "import * as MissingNamespace from './Missing';\n" +
     'export { MissingNamespace };\n';
@@ -403,13 +497,19 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
       if (!ts.isStringLiteral(declaration.moduleSpecifier)) {
         throw new Error(`Unsupported package-root export source in ${file}.`);
       }
-      kind = exportedKind(
-        moduleFile(file, declaration.moduleSpecifier.text), localName, seen);
+      const target = moduleFile(file, declaration.moduleSpecifier.text);
+      if (seen.has(`${normalize(target)}\0${localName}`)) return CYCLE;
+      kind = exportedKind(target, localName, seen);
+      if (kind === CYCLE) return CYCLE;
       if (kind === undefined) {
         throw new Error(`Cannot resolve exported declaration ${localName} from ${file}.`);
       }
     } else {
       kind = localKind(file, localName, seen);
+      if (kind === CYCLE) return CYCLE;
+      if (kind === INVALID) {
+        throw new Error(`Cannot resolve imported binding ${localName} in ${file}.`);
+      }
       if (kind === undefined) {
         throw new Error(`Cannot resolve local exported declaration ${localName} in ${file}.`);
       }
@@ -424,13 +524,16 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
       if (!ts.isStringLiteral(declaration.moduleSpecifier)) {
         throw new Error(`Unsupported package-root export source in ${file}.`);
       }
-      origin = exportedOrigin(
-        moduleFile(file, declaration.moduleSpecifier.text), localName, seen);
+      const target = moduleFile(file, declaration.moduleSpecifier.text);
+      if (seen.has(`${normalize(target)}\0${localName}`)) return CYCLE;
+      origin = exportedOrigin(target, localName, seen);
+      if (origin === CYCLE) return CYCLE;
       if (origin === undefined) {
         throw new Error(`Cannot resolve exported declaration ${localName} from ${file}.`);
       }
     } else {
       origin = localOrigin(file, localName, seen);
+      if (origin === CYCLE) return CYCLE;
       if (origin === undefined) {
         throw new Error(`Cannot resolve local exported declaration ${localName} in ${file}.`);
       }
@@ -441,11 +544,13 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
   function exportedOrigin(file, name, seen) {
     const normalized = normalize(file);
     const key = `${normalized}\0${name}`;
-    if (seen.has(key)) return undefined;
+    if (seen.has(key)) return CYCLE;
     seen.add(key);
     try {
+      let cycle = false;
       const explicitOrigins = directDeclarationOrigins(
         syntax(normalized).statements, name, true, normalized);
+      let explicitMatched = explicitOrigins.length > 0;
       for (const statement of syntax(normalized).statements) {
         if (!ts.isExportDeclaration(statement) || statement.exportClause === undefined) {
           continue;
@@ -453,29 +558,37 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
         if (ts.isNamedExports(statement.exportClause)) {
           for (const element of statement.exportClause.elements) {
             if (element.name.text === name) {
-              explicitOrigins.push(elementOrigin(normalized, statement, element, seen));
+              explicitMatched = true;
+              const origin = elementOrigin(normalized, statement, element, seen);
+              if (origin === CYCLE) cycle = true;
+              else if (origin !== undefined) explicitOrigins.push(origin);
             }
           }
         } else if (ts.isNamespaceExport(statement.exportClause) &&
           statement.exportClause.name.text === name &&
           statement.moduleSpecifier !== undefined && ts.isStringLiteral(statement.moduleSpecifier)) {
+          explicitMatched = true;
           explicitOrigins.push(`namespace:${moduleFile(normalized, statement.moduleSpecifier.text)}`);
         }
       }
-      if (explicitOrigins.length > 0) {
-        return uniqueOrigin(explicitOrigins, `Ambiguous explicit package-root export: ${name}`);
+      if (explicitMatched) {
+        return explicitOrigins.length > 0
+          ? uniqueOrigin(explicitOrigins, `Ambiguous explicit package-root export: ${name}`)
+          : cycle ? CYCLE : undefined;
       }
-      if (name === 'default') return undefined;
+      if (name === 'default') return cycle ? CYCLE : undefined;
       const starOrigins = [];
       for (const statement of syntax(normalized).statements) {
         if (ts.isExportDeclaration(statement) && statement.exportClause === undefined &&
           statement.moduleSpecifier !== undefined && ts.isStringLiteral(statement.moduleSpecifier)) {
           const origin = exportedOrigin(
             moduleFile(normalized, statement.moduleSpecifier.text), name, seen);
-          if (origin !== undefined) starOrigins.push(origin);
+          if (origin === CYCLE) cycle = true;
+          else if (origin !== undefined) starOrigins.push(origin);
         }
       }
-      return uniqueOrigin(starOrigins, `Ambiguous package-root star export: ${name}`);
+      return uniqueOrigin(starOrigins, `Ambiguous package-root star export: ${name}`) ??
+        (cycle ? CYCLE : undefined);
     } finally {
       seen.delete(key);
     }
@@ -484,45 +597,73 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
   function exportedKind(file, name, seen) {
     const normalized = normalize(file);
     const key = `${normalized}\0${name}`;
-    if (seen.has(key)) return undefined;
+    if (seen.has(key)) return CYCLE;
     seen.add(key);
     try {
-      const explicitKinds = directDeclarationKinds(syntax(normalized).statements, name, true);
-      for (const statement of syntax(normalized).statements) {
+      let cycle = false;
+      const statements = syntax(normalized).statements;
+      const explicitKinds = statements
+        .filter((statement) => !ts.isExportAssignment(statement))
+        .flatMap((statement) => directDeclarationEntries(statement, true))
+        .filter((entry) => entry.name === name)
+        .map((entry) => entry.kind);
+      let explicitMatched = explicitKinds.length > 0;
+      for (const statement of statements) {
+        if (ts.isExportAssignment(statement) && !statement.isExportEquals && name === 'default') {
+          explicitMatched = true;
+          const kind = ts.isIdentifier(statement.expression)
+            ? localKind(normalized, statement.expression.text, seen)
+            : 'value';
+          if (kind === CYCLE) cycle = true;
+          else if (kind === INVALID) {
+            throw new Error(`Cannot resolve imported binding ${statement.expression.text} in ${normalized}.`);
+          }
+          else explicitKinds.push(kind ?? 'value');
+        }
+      }
+      for (const statement of statements) {
         if (!ts.isExportDeclaration(statement)) continue;
         if (statement.exportClause !== undefined && ts.isNamedExports(statement.exportClause)) {
           for (const element of statement.exportClause.elements) {
             if (element.name.text === name) {
-              explicitKinds.push(elementKind(normalized, statement, element, seen));
+              explicitMatched = true;
+              const kind = elementKind(normalized, statement, element, seen);
+              if (kind === CYCLE) cycle = true;
+              else if (kind !== undefined) explicitKinds.push(kind);
             }
           }
         } else if (statement.exportClause !== undefined &&
           ts.isNamespaceExport(statement.exportClause) &&
           statement.exportClause.name.text === name &&
           statement.moduleSpecifier !== undefined && ts.isStringLiteral(statement.moduleSpecifier)) {
+          explicitMatched = true;
           moduleFile(normalized, statement.moduleSpecifier.text);
           explicitKinds.push(statement.isTypeOnly ? 'type' : 'value');
         }
       }
-      if (explicitKinds.length > 0) {
+      if (explicitMatched) {
+        if (explicitKinds.length === 0) return cycle ? CYCLE : undefined;
         const origin = exportedOrigin(normalized, name, new Set());
+        if (origin === CYCLE) return CYCLE;
         if (origin === undefined) return undefined;
         return strongestKind(explicitKinds);
       }
-      if (name === 'default') return undefined;
+      if (name === 'default') return cycle ? CYCLE : undefined;
       const origin = exportedOrigin(normalized, name, new Set());
+      if (origin === CYCLE) return CYCLE;
       if (origin === undefined) return undefined;
       const starKinds = [];
-      for (const statement of syntax(normalized).statements) {
+      for (const statement of statements) {
         if (ts.isExportDeclaration(statement) && statement.exportClause === undefined &&
           statement.moduleSpecifier !== undefined &&
           ts.isStringLiteral(statement.moduleSpecifier)) {
           const target = moduleFile(normalized, statement.moduleSpecifier.text);
           const kind = exportedKind(target, name, seen);
-          if (kind !== undefined) starKinds.push(statement.isTypeOnly ? 'type' : kind);
+          if (kind === CYCLE) cycle = true;
+          else if (kind !== undefined) starKinds.push(statement.isTypeOnly ? 'type' : kind);
         }
       }
-      return strongestKind(starKinds);
+      return strongestKind(starKinds) ?? (cycle ? CYCLE : undefined);
     } finally {
       seen.delete(key);
     }
@@ -531,6 +672,8 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
   function localKind(file, name, seen) {
     const statements = syntax(file).statements;
     const kinds = directDeclarationKinds(statements, name, false);
+    let cycle = false;
+    let invalidImport = false;
     for (const statement of statements) {
       if (!ts.isImportDeclaration(statement) || statement.importClause === undefined ||
         statement.moduleSpecifier === undefined || !ts.isStringLiteral(statement.moduleSpecifier)) {
@@ -540,7 +683,9 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
       if (clause.name?.text === name) {
         const target = moduleFile(file, statement.moduleSpecifier.text);
         const importedKind = exportedKind(target, 'default', seen);
-        if (importedKind !== undefined) kinds.push(clause.isTypeOnly ? 'type' : importedKind);
+        if (importedKind === CYCLE) cycle = true;
+        else if (importedKind === undefined) invalidImport = true;
+        else kinds.push(clause.isTypeOnly ? 'type' : importedKind);
       }
       if (clause.namedBindings !== undefined && ts.isNamedImports(clause.namedBindings)) {
         for (const element of clause.namedBindings.elements) {
@@ -548,7 +693,9 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
           const target = moduleFile(file, statement.moduleSpecifier.text);
           const importedName = element.propertyName?.text ?? element.name.text;
           const importedKind = exportedKind(target, importedName, seen);
-          if (importedKind !== undefined) {
+          if (importedKind === CYCLE) cycle = true;
+          else if (importedKind === undefined) invalidImport = true;
+          else {
             kinds.push(clause.isTypeOnly || element.isTypeOnly ? 'type' : importedKind);
           }
         }
@@ -558,12 +705,13 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
         kinds.push(clause.isTypeOnly ? 'type' : 'value');
       }
     }
-    return strongestKind(kinds);
+    return strongestKind(kinds) ?? (cycle ? CYCLE : invalidImport ? INVALID : undefined);
   }
 
   function localOrigin(file, name, seen) {
     const statements = syntax(file).statements;
     const origins = directDeclarationOrigins(statements, name, false, normalize(file));
+    let cycle = false;
     for (const statement of statements) {
       if (!ts.isImportDeclaration(statement) || statement.importClause === undefined ||
         statement.moduleSpecifier === undefined || !ts.isStringLiteral(statement.moduleSpecifier)) {
@@ -573,7 +721,8 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
       if (clause.name?.text === name) {
         const target = moduleFile(file, statement.moduleSpecifier.text);
         const origin = exportedOrigin(target, 'default', seen);
-        if (origin !== undefined) origins.push(origin);
+        if (origin === CYCLE) cycle = true;
+        else if (origin !== undefined) origins.push(origin);
       }
       if (clause.namedBindings !== undefined && ts.isNamedImports(clause.namedBindings)) {
         for (const element of clause.namedBindings.elements) {
@@ -581,14 +730,16 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
           const target = moduleFile(file, statement.moduleSpecifier.text);
           const importedName = element.propertyName?.text ?? element.name.text;
           const origin = exportedOrigin(target, importedName, seen);
-          if (origin !== undefined) origins.push(origin);
+          if (origin === CYCLE) cycle = true;
+          else if (origin !== undefined) origins.push(origin);
         }
       } else if (clause.namedBindings !== undefined &&
         ts.isNamespaceImport(clause.namedBindings) && clause.namedBindings.name.text === name) {
         origins.push(`namespace:${moduleFile(file, statement.moduleSpecifier.text)}`);
       }
     }
-    return uniqueOrigin(origins, `Ambiguous local package-root export: ${name}`);
+    return uniqueOrigin(origins, `Ambiguous local package-root export: ${name}`) ??
+      (cycle ? CYCLE : undefined);
   }
 
   function exportsOf(file, seen = new Set()) {
@@ -608,7 +759,13 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
             if (element.name.text !== 'default') {
               explicit.push({
                 name: element.name.text,
-                kind: elementKind(normalized, statement, element)
+                kind: (() => {
+                  const kind = elementKind(normalized, statement, element);
+                  if (kind === CYCLE) {
+                    throw new Error(`Cyclic package-root export: ${element.name.text}`);
+                  }
+                  return kind;
+                })()
               });
             }
           }
@@ -634,7 +791,7 @@ function exportResolver(rootFile, rootSource, virtualFiles) {
         for (const entry of exportsOf(target, seen)) {
           if (explicitNames.has(entry.name)) continue;
           const origin = exportedOrigin(target, entry.name, new Set());
-          if (origin === undefined) {
+          if (origin === CYCLE || origin === undefined) {
             throw new Error(`Cannot resolve package-root star export: ${entry.name}`);
           }
           const kind = statement.isTypeOnly ? 'type' : entry.kind;
@@ -719,9 +876,16 @@ function directDeclarationEntries(statement, exportedOnly) {
     ? 'default'
     : undefined;
   if ((ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement) ||
-    ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) &&
+    ts.isEnumDeclaration(statement)) &&
     (exportedName !== undefined || statement.name !== undefined)) {
     return [{ name: exportedName ?? statement.name.text, kind: 'value' }];
+  }
+  if (ts.isModuleDeclaration(statement) &&
+    (exportedName !== undefined || statement.name !== undefined)) {
+    return [{
+      name: exportedName ?? statement.name.text,
+      kind: ts.isInstantiatedModule(statement, false) ? 'value' : 'type'
+    }];
   }
   if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) {
     return [{ name: exportedName ?? statement.name.text, kind: 'type' }];
@@ -748,14 +912,14 @@ function hasModifier(node, kind) {
 }
 
 function strongestKind(kinds) {
-  const resolved = kinds.filter((kind) => kind !== undefined);
+  const resolved = kinds.filter((kind) => kind === 'type' || kind === 'value');
   if (resolved.includes('value')) return 'value';
   if (resolved.includes('type')) return 'type';
   return undefined;
 }
 
 function uniqueOrigin(origins, message) {
-  const unique = [...new Set(origins.filter((origin) => origin !== undefined))];
+  const unique = [...new Set(origins.filter((origin) => typeof origin === 'string'))];
   if (unique.length > 1) throw new Error(message);
   return unique[0];
 }

@@ -1,11 +1,13 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ColumnDef, ColumnInfo, ConnectionConfig, ConnectionConfigField,
-  ConnectionState, DatabaseContext, DatabaseSessionStatus,
+  ConnectionState, CoreDbConnection, CoreDbDriverFactory, CoreQueryResultMeta,
+  CoreQueryResultSummary, CoreSqlValue, DatabaseContext, DatabaseSessionStatus,
   DbConnection, DbDriverFactory, DbExecutionController, DbObjectInfo, DbObjectKind, DbValueKind,
   DriverCapabilities, ForeignKeyInfo, IndexInfo, CatalogInfo, SchemaInfo, MetadataProvider,
-  MySqlDriverFactory, MySqlSessionOptions, QueryExecutionSummary, QueryOptions, QueryResult, QueryResultMeta,
-  QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation, ServerFamily, ServerInfo,
+  MySqlConnection, MySqlConnectionOptions, MySqlDriverFactory, MySqlSessionOptions,
+  QueryExecutionSummary, QueryOptions, QueryResult, QueryResultMeta, QueryResultSink,
+  QueryResultSummary, QueryRowChunk, QueryTruncation, ServerFamily, ServerInfo,
   ServerMetricsProvider, SqlValue, mapMySqlRows
 } from '@arkdb/mysql';
 
@@ -28,10 +30,17 @@ export default function legacyPublicInterfaceTest(): void {
       await connection.close();
     });
 
-    it('preservesPublishedDefaultsAndNumericErrorCodes', 0, () => {
+    it('preservesPublishedDefaultsAndNativeErrorCodes', 0, () => {
       const error: ArkDbError = ArkDbError.server('Synthetic server error.', 1064, '42000');
       const code: number | undefined = error.code;
+      const numericNativeCode: number | string | undefined = error.nativeCode;
+      const textualError = new ArkDbError(
+        ArkDbErrorKind.Tls, 'Synthetic TLS error.', 'ERR_TLS_CERT_ALTNAME_INVALID');
+      const textualNativeCode: number | string | undefined = textualError.nativeCode;
       expect(code).assertEqual(1064);
+      expect(numericNativeCode).assertEqual(1064);
+      expect(textualNativeCode).assertEqual('ERR_TLS_CERT_ALTNAME_INVALID');
+      expect(textualError.code === undefined).assertTrue();
       expect(new QueryResult().autocommit).assertTrue();
       expect(new DatabaseSessionStatus().autocommit).assertTrue();
       expect(new DriverCapabilities().supportsSchemas).assertTrue();
@@ -191,6 +200,15 @@ async function publishedConnectionUsage(connection: DbConnection, options: Query
   const result: QueryResult = await connection.query('SELECT 1');
   const values: SqlValue[][] = result.rows;
   return result;
+}
+
+function publishedV102PortableAliases(factory: MySqlDriverFactory, connection: DbConnection,
+  meta: QueryResultMeta, summary: QueryResultSummary, rows: SqlValue[][]): void {
+  const portableFactory: CoreDbDriverFactory<MySqlConnectionOptions, MySqlConnection> = factory;
+  const portableConnection: CoreDbConnection = connection;
+  const portableMeta: CoreQueryResultMeta = meta;
+  const portableSummary: CoreQueryResultSummary = summary;
+  const portableRows: CoreSqlValue[][] = rows;
 }
 
 function publishedValueBytes(value: SqlValue): number {

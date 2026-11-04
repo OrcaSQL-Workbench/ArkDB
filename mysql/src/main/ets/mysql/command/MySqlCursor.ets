@@ -3,8 +3,8 @@ import {
 } from '@arkdb/core';
 import {
   MySqlCursor, MySqlCursorExecutor
-} from '../driver/MySqlCursorContracts';
-import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
+} from '../api/MySqlCursorContracts';
+import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import {
   MySqlCommandPhase, MySqlCommandScope
 } from '../execution/MySqlCommandGate';

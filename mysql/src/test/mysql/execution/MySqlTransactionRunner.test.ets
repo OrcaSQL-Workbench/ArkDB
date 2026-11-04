@@ -3,10 +3,10 @@ import { errorManager } from '@kit.AbilityKit';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryResult, ServerInfo
 } from '@arkdb/core';
-import { MySqlSession } from '../../../main/ets/mysql/driver/MySqlSession';
+import { MySqlSession } from '../../../main/ets/mysql/api/MySqlSession';
 import {
   MySqlInsertRowsExecutor
-} from '../../../main/ets/mysql/execution/MySqlInsertRowsExecutor';
+} from '../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   MySqlInsertRowsOptions
 } from '../../../main/ets/mysql/model/MySqlInsertRows';

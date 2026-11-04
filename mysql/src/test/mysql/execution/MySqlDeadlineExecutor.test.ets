@@ -12,7 +12,7 @@ import { MySqlDeadlineOptions } from '../../../main/ets/mysql/model/MySqlDeadlin
 import { MySqlParameter } from '../../../main/ets/mysql/model/MySqlParameter';
 import {
   MySqlDeadlineExecutor
-} from '../../../main/ets/mysql/execution/MySqlDeadlineExecutor';
+} from '../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   MAX_RECEIVE_BUFFER_BYTES, TcpTransport
 } from '../../../main/ets/mysql/transport/TcpTransport';

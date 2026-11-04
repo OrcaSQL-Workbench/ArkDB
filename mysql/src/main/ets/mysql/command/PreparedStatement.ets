@@ -1,5 +1,5 @@
 import { ArkDbError, ConnectionState, Logger, LogTag, QueryOptions } from '@arkdb/core';
-import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
+import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from '../execution/MySqlCommandGate';

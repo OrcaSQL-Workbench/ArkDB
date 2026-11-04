@@ -9,58 +9,60 @@ import {
 } from './architecture-graph.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const KNOWN_CYCLES = [
-  [
-    'mysql/src/main/ets/mysql/driver/MySqlConnectionFeatures.ets',
-    'mysql/src/main/ets/mysql/driver/MySqlContracts.ets',
-    'mysql/src/main/ets/mysql/driver/MySqlSession.ets',
-    'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets'
-  ]
-];
+const APPROVED_CYCLES = [];
 const TOOL_LAYER_RULES = [
   {
     from: /^tools\/lib\//,
     to: /^tools\/(?:workspace|artifact|build|consumer|release|device)\//,
+    transitive: true,
     message: 'Tool lib must not depend on workflow layers.'
   },
   {
     from: /^tools\/workspace\//,
     to: /^tools\/(?:artifact|build|consumer|release|device)\//,
+    transitive: true,
     message: 'Tool workspace ownership must not depend on higher workflow layers.'
   },
   {
     from: /^tools\/artifact\//,
     to: /^tools\/(?:build|consumer|release|device)\//,
+    transitive: true,
     message: 'Tool artifact primitives must not depend on workflow orchestration.'
   },
   {
     from: /^tools\/build\//,
     to: /^tools\/(?:consumer|release|device)\//,
+    transitive: true,
     message: 'Tool build ownership must not depend on downstream workflows.'
   },
   {
     from: /^tools\/consumer\//,
     to: /^tools\/(?:build|release|device)\//,
+    transitive: true,
     message: 'Tool consumer ownership must not depend on build, release, or device workflows.'
   },
   {
     from: /^tools\/release\//,
     to: /^tools\/(?:build|device)\//,
+    transitive: true,
     message: 'Tool release ownership must not depend on build or device workflows.'
   },
   {
     from: /^tools\/device\//,
     to: /^tools\/build\//,
+    transitive: true,
     message: 'Tool device ownership must not depend on build orchestration.'
   },
   {
     from: /^tools\/device\//,
     to: /^tools\/release\/(?!(?:contracts|bundle)\.mjs$)/,
+    transitive: true,
     message: 'Tool device ownership may depend only on sealed release contracts.'
   },
   {
     from: /^tools\/device\//,
     to: /^tools\/consumer\/(?!evidence\.mjs$)/,
+    transitive: true,
     message: 'Tool device ownership may depend only on sealed consumer evidence contracts.'
   }
 ];
@@ -97,7 +99,7 @@ const OWNED_TOOL_DIRECTORIES = [
   'workspace'
 ];
 const ARCHITECTURE_POLICY = {
-  allowedCycles: KNOWN_CYCLES,
+  allowedCycles: APPROVED_CYCLES,
   allowedRootToolFiles: ALLOWED_ROOT_TOOL_FILES,
   ownedToolDirectories: OWNED_TOOL_DIRECTORIES,
   prohibitedDependencies: [
@@ -105,6 +107,11 @@ const ARCHITECTURE_POLICY = {
       from: /^core\//,
       to: /^mysql\//,
       message: 'Shared core must not depend on the MySQL driver.'
+    },
+    {
+      from: /^mysql\/src\/main\/ets\/mysql\/api\//,
+      to: /^mysql\/src\/main\/ets\/mysql\/(?:MySqlConnection\.ets|command\/|driver\/|execution\/|protocol\/|transport\/)/,
+      message: 'MySQL public contracts must not depend on implementation ownership.'
     },
     ...TOOL_LAYER_RULES
   ]
@@ -122,10 +129,10 @@ async function fixture(t, files) {
   return root;
 }
 
-test('reports the current ArkTS and tooling cycles deterministically', () => {
+test('reports the current architecture with no import cycles', () => {
   const graph = readArkTsGraph(ROOT);
 
-  assert.deepEqual(stronglyConnectedFiles(graph), KNOWN_CYCLES);
+  assert.deepEqual(stronglyConnectedFiles(graph), APPROVED_CYCLES);
   assert.doesNotThrow(() => assertImportPolicy(graph, ARCHITECTURE_POLICY));
 });
 
@@ -578,7 +585,7 @@ test('rejects every cycle that is not an exact known finding', () => {
   };
 
   assert.throws(
-    () => assertImportPolicy(graph, { allowedCycles: KNOWN_CYCLES }),
+    () => assertImportPolicy(graph, { allowedCycles: APPROVED_CYCLES }),
     /Unexpected import cycle: tools\/new-a\.mjs -> tools\/new-b\.mjs/
   );
 });
@@ -706,4 +713,24 @@ test('rejects production tooling in unowned nested directories', () => {
     allowedRootToolFiles: [],
     ownedToolDirectories: OWNED_TOOL_DIRECTORIES
   }), /Unowned tooling source: tools\/misc\/helper\.mjs/);
+});
+
+test('rejects MySQL api dependencies on implementation ownership', () => {
+  const graph = {
+    files: [
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets',
+      'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets'
+    ],
+    dependencies: {
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets': [
+        'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets'
+      ],
+      'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets': []
+    }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+    /MySQL public contracts must not depend on implementation ownership.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/execution\/MySqlTransactionRunner\.ets/
+  );
 });

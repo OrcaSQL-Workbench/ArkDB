@@ -18,6 +18,7 @@ import ts from 'typescript';
  *   prohibitedDependencies?: Array<{
  *     from: ArchitecturePathPattern,
  *     to: ArchitecturePathPattern,
+ *     transitive?: boolean,
  *     message?: string
  *   }>
  * }} ArchitecturePolicy
@@ -583,7 +584,11 @@ export function assertImportPolicy(graph, policy) {
     }
     for (const file of files) {
       if (!matchesPath(file, rule.from)) continue;
-      for (const [dependency, path] of dependencyPaths(file, dependencies)) {
+      const paths = rule.transitive === true
+        ? dependencyPaths(file, dependencies)
+        : new Map(dependencies.get(file).map((dependency) =>
+          [dependency, [file, dependency]]));
+      for (const [dependency, path] of paths) {
         if (!matchesPath(dependency, rule.to)) continue;
         const message = rule.message ?? 'Prohibited dependency';
         throw new Error(`${message}: ${path.join(' -> ')}`);

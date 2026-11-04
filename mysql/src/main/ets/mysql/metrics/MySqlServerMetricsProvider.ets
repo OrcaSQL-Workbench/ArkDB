@@ -10,7 +10,7 @@ import {
   ServerMetricsModel, ServerOverviewSnapshot, ServerProcessInfo, ServerProcessSnapshot
 } from './MySqlServerMetrics';
 import { MySqlMetricsProvider } from './MySqlMetricsProvider';
-import { MySqlDbConnection } from '../driver/MySqlContracts';
+import { MySqlDbConnection } from '../api/MySqlContracts';
 import { MySqlQueryResultSink } from '../model/MySqlQueryStream';
 import { utf8Decode, utf8Encode } from '../protocol/Charsets';
 import {

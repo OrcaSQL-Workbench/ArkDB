@@ -4,7 +4,8 @@ import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
 } from '../command/PreparedStatement';
 import { MySqlResultTerminatorObservation } from '../command/ResultStream';
-import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
+import { MySqlProcedureCaller } from '../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
 import { MySqlParameter, MySqlParameterType } from '../model/MySqlParameter';
 import {
@@ -23,11 +24,6 @@ import {
   mysqlPlaceholders, quoteMySqlIdentifier
 } from '../value/MySqlSqlHelpers';
 import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
-
-export interface MySqlProcedureCaller {
-  call(procedure: string[], procedureArguments: MySqlProcedureArgument[],
-    options?: QueryOptions): Promise<MySqlProcedureResult>;
-}
 
 export class MySqlPreparedProcedureCaller implements MySqlProcedureCaller {
   private host: MySqlPreparedExecutorHost;

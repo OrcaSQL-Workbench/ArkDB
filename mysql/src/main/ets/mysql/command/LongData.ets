@@ -3,6 +3,9 @@ import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
 import {
   MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from '../execution/MySqlCommandGate';
+import {
+  mysqlOperationFailure
+} from '../execution/MySqlFailure';
 import { MySqlByteSource } from '../model/MySqlByteSource';
 import {
   MySqlLongDataOptions, MySqlLongParameter, MySqlLongParameterKind,
@@ -19,7 +22,8 @@ import {
   MySqlUploadFailure, MySqlUploadPump
 } from '../transport/MySqlUploadPump';
 import {
-  MySqlPreparedSession, MySqlPreparedSessionHost, preparedCleanup, preparedFailure
+  MySqlPreparedSession, MySqlPreparedSessionHost,
+  preparedCleanup, preparedFailure
 } from './PreparedStatement';
 import { MySqlResultTerminatorObservation } from './ResultStream';
 
@@ -80,7 +84,8 @@ export class MySqlPreparedLongDataExecutor implements MySqlLongDataExecutor {
         input.options.queryOptions.maxDrainTimeMs);
     } catch (error) {
       const failure = error instanceof MySqlUploadFailure ?
-        error : new MySqlUploadFailure(preparedCleanup(error as Object), [], false);
+        error : new MySqlUploadFailure(
+          preparedCleanup(error as Object), [], false);
       const cleanup: ArkDbError[] = failure.cleanupErrors.slice();
       if (!failure.writeUncertain && this.session.isAlive()) {
         try {
@@ -91,16 +96,13 @@ export class MySqlPreparedLongDataExecutor implements MySqlLongDataExecutor {
           cleanup.push(preparedCleanup(resetError as Object));
         }
       }
-      let primary = failure.primary;
-      let originalCause = failure.originalCause;
-      if (failure.writeUncertain && primary instanceof MySqlOperationError) {
-        for (const nested of primary.cleanupErrors) cleanup.unshift(nested);
-        if (originalCause === undefined) originalCause = primary.originalCause;
-        primary = primary.primary;
-      }
       const outcome = failure.writeUncertain || !this.session.isAlive() ?
         MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.NotDispatched;
-      throw new MySqlOperationError(primary, cleanup, outcome, originalCause);
+      if (failure.writeUncertain && failure.primary instanceof MySqlOperationError) {
+        throw mysqlOperationFailure(failure.primary, cleanup, outcome);
+      }
+      throw new MySqlOperationError(
+        failure.primary, cleanup, outcome, failure.originalCause);
     }
     return this.session.executeOwned(scope, statement, encoded,
       (command: Uint8Array): Promise<MySqlQueryResult> =>

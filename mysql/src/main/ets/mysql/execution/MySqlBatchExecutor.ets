@@ -101,22 +101,27 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
               await this.session.closeOwned(scope, statement);
             } catch (error) {
               if (primary === null) {
-                throw preparedFailure(error as Object, [], MySqlExecutionOutcome.Completed);
+                throw preparedFailure(
+                  error as Object, [], MySqlExecutionOutcome.Completed);
               }
               cleanup.push(preparedCleanup(error as Object));
             }
           }
           if (primary !== null) {
-            throw preparedFailure(primary, cleanup, primary instanceof MySqlOperationError ?
+            throw preparedFailure(primary, cleanup,
+              primary instanceof MySqlOperationError ?
               primary.outcome : MySqlExecutionOutcome.NotDispatched);
           }
           if (cleanup.length > 0) {
-            throw preparedFailure(cleanup[0], cleanup.slice(1), MySqlExecutionOutcome.Completed);
+            throw preparedFailure(
+              cleanup[0], cleanup.slice(1),
+              MySqlExecutionOutcome.Completed);
           }
           return new MySqlBatchResult(completed);
         });
     } catch (error) {
-      const failure = preparedFailure(error as Object, [], error instanceof MySqlOperationError ?
+      const failure = preparedFailure(error as Object, [],
+        error instanceof MySqlOperationError ?
         error.outcome : (scopeEntered ? MySqlExecutionOutcome.Unknown : MySqlExecutionOutcome.NotDispatched));
       throw new MySqlBatchError(failure, completed, failedIndex);
     }

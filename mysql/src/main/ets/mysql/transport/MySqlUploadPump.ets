@@ -1,4 +1,5 @@
 import { ArkDbError, ConnectionTimerPort } from '@arkdb/core';
+import { mergeCleanupEvidence } from '../execution/MySqlFailure';
 import { MySqlByteSource } from '../model/MySqlByteSource';
 
 export interface MySqlUploadChunkWriter {
@@ -358,26 +359,32 @@ function appendUploadCleanup(cleanup: ArkDbError[], error: Object,
   primary: Object): void {
   if (containsUploadCause(primary, error)) return;
   const failure = uploadCleanup(error);
-  for (const existing of cleanup) {
-    if (sameUploadEvidence(existing, failure)) return;
-  }
-  cleanup.push(failure);
+  const merged = mergeUploadCleanup(cleanup, [failure]);
+  if (merged.length > cleanup.length) cleanup.push(merged[merged.length - 1]);
 }
 
 function mergeUploadCleanup(existing: ArkDbError[],
   additions: ArkDbError[]): ArkDbError[] {
-  const merged = existing.slice();
+  const canonical: ArkDbError[] = [];
   for (const addition of additions) {
-    let found = false;
-    for (const current of merged) {
+    let evidence = addition;
+    for (const current of existing) {
       if (sameUploadEvidence(current, addition)) {
-        found = true;
+        evidence = current;
         break;
       }
     }
-    if (!found) merged.push(addition);
+    if (evidence === addition) {
+      for (const current of canonical) {
+        if (sameUploadEvidence(current, addition)) {
+          evidence = current;
+          break;
+        }
+      }
+    }
+    canonical.push(evidence);
   }
-  return merged;
+  return mergeCleanupEvidence(existing, canonical);
 }
 
 async function readUploadSource(source: UploadSourceState, maxBytes: number,

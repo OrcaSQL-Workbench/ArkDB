@@ -10,6 +10,7 @@ import mySqlCancellationTest from './execution/MySqlCancellation.test';
 import mySqlBatchExecutorTest from './execution/MySqlBatchExecutor.test';
 import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
 import mySqlDeadlineExecutorTest from './execution/MySqlDeadlineExecutor.test';
+import mySqlFailureTest from './execution/MySqlFailure.test';
 import mySqlInsertRowsExecutorTest from './execution/MySqlInsertRowsExecutor.test';
 import mySqlStatementCacheTest from './execution/MySqlStatementCache.test';
 import mySqlNamedExecutorTest from './execution/MySqlNamedExecutor.test';
@@ -47,6 +48,7 @@ export default function testsuite(): void {
   mySqlBatchExecutorTest();
   mySqlCommandGateTest();
   mySqlDeadlineExecutorTest();
+  mySqlFailureTest();
   mySqlInsertRowsExecutorTest();
   mySqlStatementCacheTest();
   mySqlNamedExecutorTest();

@@ -94,6 +94,24 @@ class RecordingSource implements MySqlByteSource {
   }
 }
 
+class OrdinaryCloseFailureSource implements MySqlByteSource {
+  closeCount: number = 0;
+  private failure: Object;
+
+  constructor(failure: Object) {
+    this.failure = failure;
+  }
+
+  async read(_maxBytes: number): Promise<Uint8Array | null> {
+    return null;
+  }
+
+  close(): Promise<void> {
+    this.closeCount += 1;
+    return Promise.reject<void>(this.failure);
+  }
+}
+
 class RecordingWriter implements MySqlUploadChunkWriter {
   chunks: Uint8Array[] = [];
   sourceIndexes: number[] = [];
@@ -403,6 +421,31 @@ export default function mySqlUploadPumpTest(): void {
         expect(failure.writeUncertain).assertFalse();
       }
       expect(source.closeCount).assertEqual(1);
+    });
+
+    it('deduplicatesCleanupWrappersSharingOneOrdinaryCause', 0, async () => {
+      const primary = new RecordingSource([]);
+      primary.readFailure = ArkDbError.network('Synthetic source read failure.');
+      const sharedCause = new Error('Synthetic shared source close failure.');
+      const firstCleanup = new OrdinaryCloseFailureSource(sharedCause);
+      const secondCleanup = new OrdinaryCloseFailureSource(sharedCause);
+
+      const failure = await uploadFailure(new MySqlUploadPump(new UploadTimers())
+        .upload([primary, firstCleanup, secondCleanup], 4, 8, 100,
+          new RecordingWriter()));
+
+      expect(failure instanceof MySqlUploadFailure).assertTrue();
+      if (failure instanceof MySqlUploadFailure) {
+        expect(failure.primary === primary.readFailure).assertTrue();
+        expect(failure.cleanupErrors.length).assertEqual(1);
+        const cleanup = failure.cleanupErrors[0];
+        expect(cleanup instanceof MySqlUploadFailure).assertTrue();
+        if (cleanup instanceof MySqlUploadFailure) {
+          expect(cleanup.originalCause === sharedCause).assertTrue();
+        }
+      }
+      expect(firstCleanup.closeCount).assertEqual(1);
+      expect(secondCleanup.closeCount).assertEqual(1);
     });
 
     it('nullCloseRejectionFailsAndClosesLaterUnreadSources', 0, async () => {

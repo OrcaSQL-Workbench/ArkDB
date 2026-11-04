@@ -3,6 +3,9 @@ import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from '../execution/MySqlCommandGate';
+import {
+  mysqlCleanupError, mysqlOperationFailure
+} from '../execution/MySqlFailure';
 import { MySqlParameter } from '../model/MySqlParameter';
 import { MySqlColumnDef, MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';
@@ -382,7 +385,8 @@ export class MySqlPreparedSession {
       }
       if (currentPhysicalSession && this.host.state !== ConnectionState.Closed) {
         try {
-          await this.host.retire(preparedFailure(error, [], MySqlExecutionOutcome.Unknown));
+          await this.host.retire(preparedFailure(
+            error, [], MySqlExecutionOutcome.Unknown));
         } catch (failure) {
           cleanup.push(preparedCleanup(failure as Object));
         }
@@ -416,7 +420,8 @@ export class MySqlPreparedSession {
             this.gate.release(scope);
             resolve(value);
           } catch (error) {
-            reject(preparedFailure(preparedCleanup(error as Object), [],
+            reject(preparedFailure(
+              preparedCleanup(error as Object), [],
               MySqlExecutionOutcome.Completed));
           }
         }, (error: Object): void => {
@@ -643,23 +648,6 @@ function preparePayload(sql: string): Uint8Array {
   return payload;
 }
 
-export function preparedFailure(error: Object, cleanup: ArkDbError[],
-  outcome: MySqlExecutionOutcome): MySqlOperationError {
-  if (error instanceof MySqlOperationError) {
-    return new MySqlOperationError(error.primary, error.cleanupErrors.concat(cleanup),
-      outcome, error.originalCause);
-  }
-  const primary = error instanceof ArkDbError ? error :
-    ArkDbError.protocol('Unexpected prepared statement operation failure.');
-  return new MySqlOperationError(primary, cleanup, outcome,
-    error instanceof ArkDbError ? undefined : error);
-}
-
-export function preparedCleanup(error: Object): ArkDbError {
-  return error instanceof ArkDbError ? error :
-    preparedFailure(error, [], MySqlExecutionOutcome.Unknown);
-}
-
 export function copyMySqlColumnDef(column: MySqlColumnDef): MySqlColumnDef {
   const copy = new MySqlColumnDef();
   copy.name = column.name;
@@ -677,4 +665,20 @@ export function copyMySqlColumnDef(column: MySqlColumnDef): MySqlColumnDef {
   copy.flags = column.flags;
   copy.decimals = column.decimals;
   return copy;
+}
+
+function preparedFailureCause(error: Object): Object {
+  if (error instanceof ArkDbError) return error;
+  return new MySqlOperationError(
+    ArkDbError.protocol('Unexpected prepared statement operation failure.'),
+    [], MySqlExecutionOutcome.Unknown, error);
+}
+
+export function preparedFailure(error: Object, cleanup: ArkDbError[],
+  outcome: MySqlExecutionOutcome): MySqlOperationError {
+  return mysqlOperationFailure(preparedFailureCause(error), cleanup, outcome);
+}
+
+export function preparedCleanup(error: Object): ArkDbError {
+  return mysqlCleanupError(preparedFailureCause(error));
 }

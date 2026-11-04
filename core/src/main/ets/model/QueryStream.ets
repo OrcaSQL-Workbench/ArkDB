@@ -1,3 +1,4 @@
+import { ArkDbError } from './ArkDbError';
 import { ColumnDef, SqlValue } from './QueryResult';
 
 export const MAX_STATEMENT_TIMEOUT_MS: number = 24 * 60 * 60 * 1000;
@@ -38,6 +39,37 @@ export class QueryOptions {
     options.maxDrainBytes = this.maxDrainBytes;
     options.maxDrainTimeMs = this.maxDrainTimeMs;
     return options;
+  }
+}
+
+export function validateQueryOptions(options: QueryOptions): void {
+  if (options.statementTimeoutMs < 0 || options.statementTimeoutMs > MAX_STATEMENT_TIMEOUT_MS ||
+    Math.floor(options.statementTimeoutMs) !== options.statementTimeoutMs) {
+    throw ArkDbError.validation('statementTimeoutMs must be between 0 and ' +
+      MAX_STATEMENT_TIMEOUT_MS);
+  }
+  if (!Number.isSafeInteger(options.maxRows) || options.maxRows < 0) {
+    throw ArkDbError.validation('maxRows must be a non-negative integer');
+  }
+  if (!Number.isSafeInteger(options.maxChunkRows) || options.maxChunkRows < 1) {
+    throw ArkDbError.validation('maxChunkRows must be a positive integer');
+  }
+  if (!Number.isSafeInteger(options.maxChunkBytes) || options.maxChunkBytes < 1) {
+    throw ArkDbError.validation('maxChunkBytes must be a positive integer');
+  }
+  if (!Number.isSafeInteger(options.maxResultBytes) || options.maxResultBytes < 1) {
+    throw ArkDbError.validation('maxResultBytes must be a positive integer');
+  }
+  if (!Number.isSafeInteger(options.maxResultSets) || options.maxResultSets < 1) {
+    throw ArkDbError.validation('maxResultSets must be a positive integer');
+  }
+  if (!Number.isSafeInteger(options.maxDrainBytes) || options.maxDrainBytes < 1) {
+    throw ArkDbError.validation('maxDrainBytes must be a positive integer');
+  }
+  if (!Number.isSafeInteger(options.maxDrainTimeMs) || options.maxDrainTimeMs < 1 ||
+    options.maxDrainTimeMs > MAX_QUERY_DRAIN_TIME_MS) {
+    throw ArkDbError.validation('maxDrainTimeMs must be between 1 and ' +
+      MAX_QUERY_DRAIN_TIME_MS);
   }
 }
 

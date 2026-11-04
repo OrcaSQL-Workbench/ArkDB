@@ -1,9 +1,8 @@
-import { ArkDbError, QueryOptions } from '@arkdb/core';
+import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
 import { MySqlPreparedExecutorHost } from '../command/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
 } from '../command/PreparedStatement';
-import { validateQueryOptions } from '../command/ResultStream';
 import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
 import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';

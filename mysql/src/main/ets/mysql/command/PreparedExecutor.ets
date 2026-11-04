@@ -1,4 +1,4 @@
-import { ArkDbError, QueryOptions } from '@arkdb/core';
+import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
 import {
   MySqlPreparedExecutor as PreparedExecutorContract, MySqlPreparedStatement
 } from '../driver/MySqlPreparedContracts';
@@ -13,7 +13,6 @@ import {
   MySqlPreparedSession, MySqlPreparedStatementRunner,
   preparedCleanup, preparedFailure
 } from './PreparedStatement';
-import { validateQueryOptions } from './ResultStream';
 import {
   MySqlLongDataHost, MySqlPreparedLongDataExecutor
 } from './LongData';

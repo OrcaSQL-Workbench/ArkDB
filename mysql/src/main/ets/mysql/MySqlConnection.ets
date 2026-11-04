@@ -5,7 +5,8 @@ import {
   CancellationOutcome, ConnectionReuse, QueryCancellationResult, DatabaseSessionStatus,
   QueryExecutionSummary, QueryOptions, QueryResultSink, ArkDbError, ArkDbErrorKind, DbConnection,
   ConnectionDeadline, ConnectionTimerPort, SystemConnectionTimerPort, Logger,
-  LogTag, monotonicNowMs, QueryResultMeta, QueryResultSummary, QueryRowChunk, QueryTruncation
+  LogTag, monotonicNowMs, QueryResultMeta, QueryResultSummary, QueryRowChunk, QueryTruncation,
+  validateQueryOptions
 } from '@arkdb/core';
 import { MySqlServerInfo as ServerInfo } from './model/MySqlServerInfo';
 import { MySqlQueryResult as QueryResult } from './model/MySqlQueryResult';
@@ -30,7 +31,7 @@ import {
 } from './auth/HandshakeResponse';
 import { parseErr, parseOk } from './command/ResultPackets';
 import {
-  buildComQuery, parseQueryStream, parseResultSet, TextRowDecoder, validateQueryOptions
+  buildComQuery, parseQueryStream, parseResultSet, TextRowDecoder
 } from './command/Query';
 import { mysqlContextPolicy, mysqlDatabaseForContext } from './model/MySqlContext';
 import { MySqlMetadataProvider } from './metadata/MySqlMetadataProvider';

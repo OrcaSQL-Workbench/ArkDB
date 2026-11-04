@@ -1,5 +1,4 @@
-import { ArkDbError, QueryOptions } from '@arkdb/core';
-import { validateQueryOptions } from '../command/ResultStream';
+import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
 
 const MAX_CURSOR_FETCH_ROWS = 10000;
 const MAX_CURSOR_BUFFERED_BYTES = 32 * 1024 * 1024;

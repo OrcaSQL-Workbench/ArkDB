@@ -2,7 +2,9 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionReuse, ConnectionState, ContextChangeMode,
   DatabaseContext, DatabaseSessionStatus, DbConnection, DbDriverRegistry, DriverCapabilities,
-  estimateSqlRowBytes, MetricKind, MetricMeasurement, ServerMetricsAvailability, ServerMetricsSnapshot
+  estimateSqlRowBytes, MAX_QUERY_DRAIN_TIME_MS, MAX_STATEMENT_TIMEOUT_MS, MetricKind,
+  MetricMeasurement, QueryOptions, ServerMetricsAvailability, ServerMetricsSnapshot,
+  validateQueryOptions
 } from '../../Index';
 import { ProbeFactory, ProbeOptions } from './ReferenceAdapter';
 
@@ -105,5 +107,167 @@ export default function sharedContractsTest(): void {
       snapshot.measurements.push(metric);
       expect(snapshot.validate().length > 0).assertTrue();
     });
+
+    it('validatesStatementTimeoutAtThePortableBoundary', 0, () => {
+      const negative = new QueryOptions();
+      negative.statementTimeoutMs = -1;
+      expectQueryValidationFailure(negative,
+        'statementTimeoutMs must be between 0 and ' + MAX_STATEMENT_TIMEOUT_MS);
+
+      const fractional = new QueryOptions();
+      fractional.statementTimeoutMs = 0.5;
+      expectQueryValidationFailure(fractional,
+        'statementTimeoutMs must be between 0 and ' + MAX_STATEMENT_TIMEOUT_MS);
+
+      const excessive = new QueryOptions();
+      excessive.statementTimeoutMs = MAX_STATEMENT_TIMEOUT_MS + 1;
+      expectQueryValidationFailure(excessive,
+        'statementTimeoutMs must be between 0 and ' + MAX_STATEMENT_TIMEOUT_MS);
+
+      const boundary = new QueryOptions();
+      boundary.statementTimeoutMs = MAX_STATEMENT_TIMEOUT_MS;
+      validateQueryOptions(boundary);
+    });
+
+    it('validatesMaxRowsAtThePortableBoundary', 0, () => {
+      const negative = new QueryOptions();
+      negative.maxRows = -1;
+      expectQueryValidationFailure(negative, 'maxRows must be a non-negative integer');
+
+      const fractional = new QueryOptions();
+      fractional.maxRows = 0.5;
+      expectQueryValidationFailure(fractional, 'maxRows must be a non-negative integer');
+
+      const unsafe = new QueryOptions();
+      unsafe.maxRows = Number.MAX_SAFE_INTEGER + 1;
+      expectQueryValidationFailure(unsafe, 'maxRows must be a non-negative integer');
+
+      const boundary = new QueryOptions();
+      boundary.maxRows = 0;
+      validateQueryOptions(boundary);
+    });
+
+    it('validatesMaxChunkRowsAtThePortableBoundary', 0, () => {
+      const zero = new QueryOptions();
+      zero.maxChunkRows = 0;
+      expectQueryValidationFailure(zero, 'maxChunkRows must be a positive integer');
+
+      const fractional = new QueryOptions();
+      fractional.maxChunkRows = 0.5;
+      expectQueryValidationFailure(fractional, 'maxChunkRows must be a positive integer');
+
+      const unsafe = new QueryOptions();
+      unsafe.maxChunkRows = Number.MAX_SAFE_INTEGER + 1;
+      expectQueryValidationFailure(unsafe, 'maxChunkRows must be a positive integer');
+
+      const boundary = new QueryOptions();
+      boundary.maxChunkRows = 1;
+      validateQueryOptions(boundary);
+    });
+
+    it('validatesMaxChunkBytesAtThePortableBoundary', 0, () => {
+      const zero = new QueryOptions();
+      zero.maxChunkBytes = 0;
+      expectQueryValidationFailure(zero, 'maxChunkBytes must be a positive integer');
+
+      const fractional = new QueryOptions();
+      fractional.maxChunkBytes = 0.5;
+      expectQueryValidationFailure(fractional, 'maxChunkBytes must be a positive integer');
+
+      const unsafe = new QueryOptions();
+      unsafe.maxChunkBytes = Number.MAX_SAFE_INTEGER + 1;
+      expectQueryValidationFailure(unsafe, 'maxChunkBytes must be a positive integer');
+
+      const boundary = new QueryOptions();
+      boundary.maxChunkBytes = 1;
+      validateQueryOptions(boundary);
+    });
+
+    it('validatesMaxResultBytesAtThePortableBoundary', 0, () => {
+      const zero = new QueryOptions();
+      zero.maxResultBytes = 0;
+      expectQueryValidationFailure(zero, 'maxResultBytes must be a positive integer');
+
+      const fractional = new QueryOptions();
+      fractional.maxResultBytes = 0.5;
+      expectQueryValidationFailure(fractional, 'maxResultBytes must be a positive integer');
+
+      const unsafe = new QueryOptions();
+      unsafe.maxResultBytes = Number.MAX_SAFE_INTEGER + 1;
+      expectQueryValidationFailure(unsafe, 'maxResultBytes must be a positive integer');
+
+      const boundary = new QueryOptions();
+      boundary.maxResultBytes = 1;
+      validateQueryOptions(boundary);
+    });
+
+    it('validatesMaxResultSetsAtThePortableBoundary', 0, () => {
+      const zero = new QueryOptions();
+      zero.maxResultSets = 0;
+      expectQueryValidationFailure(zero, 'maxResultSets must be a positive integer');
+
+      const fractional = new QueryOptions();
+      fractional.maxResultSets = 0.5;
+      expectQueryValidationFailure(fractional, 'maxResultSets must be a positive integer');
+
+      const unsafe = new QueryOptions();
+      unsafe.maxResultSets = Number.MAX_SAFE_INTEGER + 1;
+      expectQueryValidationFailure(unsafe, 'maxResultSets must be a positive integer');
+
+      const boundary = new QueryOptions();
+      boundary.maxResultSets = 1;
+      validateQueryOptions(boundary);
+    });
+
+    it('validatesMaxDrainBytesAtThePortableBoundary', 0, () => {
+      const zero = new QueryOptions();
+      zero.maxDrainBytes = 0;
+      expectQueryValidationFailure(zero, 'maxDrainBytes must be a positive integer');
+
+      const fractional = new QueryOptions();
+      fractional.maxDrainBytes = 0.5;
+      expectQueryValidationFailure(fractional, 'maxDrainBytes must be a positive integer');
+
+      const unsafe = new QueryOptions();
+      unsafe.maxDrainBytes = Number.MAX_SAFE_INTEGER + 1;
+      expectQueryValidationFailure(unsafe, 'maxDrainBytes must be a positive integer');
+
+      const boundary = new QueryOptions();
+      boundary.maxDrainBytes = 1;
+      validateQueryOptions(boundary);
+    });
+
+    it('validatesMaxDrainTimeAtThePortableBoundary', 0, () => {
+      const zero = new QueryOptions();
+      zero.maxDrainTimeMs = 0;
+      expectQueryValidationFailure(zero,
+        'maxDrainTimeMs must be between 1 and ' + MAX_QUERY_DRAIN_TIME_MS);
+
+      const fractional = new QueryOptions();
+      fractional.maxDrainTimeMs = 0.5;
+      expectQueryValidationFailure(fractional,
+        'maxDrainTimeMs must be between 1 and ' + MAX_QUERY_DRAIN_TIME_MS);
+
+      const excessive = new QueryOptions();
+      excessive.maxDrainTimeMs = MAX_QUERY_DRAIN_TIME_MS + 1;
+      expectQueryValidationFailure(excessive,
+        'maxDrainTimeMs must be between 1 and ' + MAX_QUERY_DRAIN_TIME_MS);
+
+      const boundary = new QueryOptions();
+      boundary.maxDrainTimeMs = MAX_QUERY_DRAIN_TIME_MS;
+      validateQueryOptions(boundary);
+    });
   });
+}
+
+function expectQueryValidationFailure(options: QueryOptions, message: string): void {
+  let failure: ArkDbError | null = null;
+  try {
+    validateQueryOptions(options);
+  } catch (error) {
+    failure = error as ArkDbError;
+  }
+  expect(failure instanceof ArkDbError).assertTrue();
+  expect(failure!.kind).assertEqual(ArkDbErrorKind.Validation);
+  expect(failure!.message).assertEqual(message);
 }

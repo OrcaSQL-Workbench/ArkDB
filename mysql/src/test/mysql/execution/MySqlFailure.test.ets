@@ -124,6 +124,21 @@ export default function mySqlFailureTest(): void {
       expect(merged[3] === second).assertTrue();
     });
 
+    it('mergesLargeDistinctEvidenceWithinLinearBudget', 0, () => {
+      const evidence: ArkDbError[] = [];
+      for (let index = 0; index < 50000; index += 1) {
+        evidence.push(ArkDbError.protocol(
+          'Synthetic distinct cleanup evidence ' + index));
+      }
+
+      const startedAt = Date.now();
+      const merged = mergeCleanupEvidence(evidence, []);
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(merged.length).assertEqual(evidence.length);
+      expect(elapsedMs < 750).assertTrue();
+    });
+
     it('containsOnlyNestedOperationErrorReferences', 0, () => {
       const primary = ArkDbError.server(
         'Synthetic nested rejection.', 1205, 'HY000');

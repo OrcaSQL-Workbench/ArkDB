@@ -22,26 +22,17 @@ export function mysqlCleanupError(error: Object): ArkDbError {
 
 export function mergeCleanupEvidence(existing: ArkDbError[],
   additions: ArkDbError[]): ArkDbError[] {
+  const seen: Set<ArkDbError> = new Set<ArkDbError>();
   const merged: ArkDbError[] = [];
   for (const current of existing) {
-    let found = false;
-    for (const evidence of merged) {
-      if (evidence === current) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) merged.push(current);
+    if (seen.has(current)) continue;
+    seen.add(current);
+    merged.push(current);
   }
   for (const addition of additions) {
-    let found = false;
-    for (const current of merged) {
-      if (current === addition) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) merged.push(addition);
+    if (seen.has(addition)) continue;
+    seen.add(addition);
+    merged.push(addition);
   }
   return merged;
 }

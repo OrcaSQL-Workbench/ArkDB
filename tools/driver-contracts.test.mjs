@@ -85,6 +85,10 @@ test('shared contracts describe the privacy-safe execution observer', async () =
     'MySqlConnection.ets'), 'utf8');
   const factory = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'driver', 'MySqlDriverFactory.ets'), 'utf8');
+  const controlFactory = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'connection', 'MySqlControlConnectionFactory.ets'), 'utf8');
+  const lifecycle = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'connection', 'MySqlConnectionLifecycle.ets'), 'utf8');
   const gate = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'execution', 'MySqlCommandGate.ets'), 'utf8');
   const preparedStatement = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
@@ -139,7 +143,17 @@ test('shared contracts describe the privacy-safe execution observer', async () =
   assert.match(factory,
     /initializeMySqlExecutionObserverInternal\([\s\S]{0,160}extensions\.executionObserver[\s\S]{0,80}executionClock\)/);
   assert.match(connection,
-    /createDefaultControlConnection\(\): MySqlConnection[\s\S]{0,420}new MySqlConnection\(controlConfig, this\.password/);
+    /createDefaultControlConnection\(\): MySqlConnection[\s\S]{0,120}this\.lifecycle\.createDefaultControlConnection\(\)/);
+  assert.match(connection,
+    /new MySqlConnection\([\s\S]{0,120}controlConfig, controlPassword[\s\S]{0,120}controlFactory/);
+  assert.match(lifecycle,
+    /createDefaultControlConnection\(\): T[\s\S]{0,160}createMySqlControlConnection<T>/);
+  assert.match(controlFactory,
+    /controlConfig\.defaultSchema = undefined[\s\S]{0,160}controlConfig\.autocommit = true/);
+  assert.match(controlFactory,
+    /controlConfig\.session = undefined[\s\S]{0,120}controlConfig\.multipleStatements = false/);
+  assert.match(controlFactory,
+    /A MySQL control connection cannot create another control connection/);
   const reserveStart = gate.indexOf('reserve(kind: MySqlCommandKind)');
   const startStart = gate.indexOf('start(scope: MySqlCommandScope)');
   const ownerStart = gate.indexOf('isOwner(scope: MySqlCommandScope)');
@@ -148,10 +162,11 @@ test('shared contracts describe the privacy-safe execution observer', async () =
   assert.notEqual(ownerStart, -1);
   assert.doesNotMatch(gate.slice(reserveStart, startStart), /\bonStart\(/);
   assert.match(gate.slice(startStart, ownerStart), /\bonStart\(scope\)/);
-  const preparedSettlement = connection.indexOf('this.preparedOperation = settlement');
+  const preparedSettlement = connection.indexOf(
+    'const settlement = this.lifecycle.createPreparedOperation(scope)');
   const preparedStart = connection.indexOf('this.commandGate.start(scope)', preparedSettlement);
-  const closingPublish = connection.indexOf('this.closing = closing');
-  const closingStart = connection.indexOf(
+  const closingPublish = lifecycle.indexOf('this.closing = closing');
+  const closingStart = lifecycle.indexOf(
     'if (ownsScope) this.commandGate.start(scope)', closingPublish);
   const handleDeferred = preparedStatement.indexOf(
     'const bridge = this.beginCloseResult(true)');

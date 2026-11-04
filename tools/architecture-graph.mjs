@@ -1,6 +1,5 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import JSON5 from 'json5';
 import ts from 'typescript';
 
@@ -26,15 +25,18 @@ const IGNORED_DIRECTORIES = new Set([
   '.git', '.hvigor', '.idea', '.ohpm-cache', '.preview', '.test',
   'build', 'dist', 'node_modules', 'oh_modules', 'test-fixtures'
 ]);
-const NODE_SOURCE = /\.m?js$/;
-const COMMONJS_SOURCE = /\.cjs$/;
+const NODE_SOURCE = /\.mjs$/;
+const NODE_LIKE_SOURCE = /\.(?:[cm]?js|[cm]?ts)$/i;
 
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function pathKey(file) {
-  return resolve(file);
+  const path = resolve(file);
+  if (process.platform !== 'win32') return path;
+  const root = parse(path).root;
+  return `${root.toUpperCase()}${path.slice(root.length)}`;
 }
 
 function repositoryPath(root, file) {
@@ -144,9 +146,12 @@ function toolingSources(root) {
   if (directory === null) return [];
   const files = [];
   walk(directory, (file) => {
-    if (/\.test\.(?:c|m)?js$/.test(file)) return;
-    if (COMMONJS_SOURCE.test(file)) {
-      throw new Error(`CommonJS tooling source is not supported by static import scanning: ${file}`);
+    if (file.toLowerCase().endsWith(`${sep}package.json`.toLowerCase())) {
+      throw new Error(`Nested Node tooling package scope is not supported: ${file}`);
+    }
+    if (/\.test\.(?:[cm]?[jt]s)$/.test(file)) return;
+    if (NODE_LIKE_SOURCE.test(file) && !NODE_SOURCE.test(file)) {
+      throw new Error(`Node tooling source ${file} must use the exact lowercase .mjs suffix.`);
     }
     if (NODE_SOURCE.test(file)) files.push(file);
   });
@@ -171,6 +176,18 @@ function packageEntries(directories) {
   return entries;
 }
 
+function rootPackageName(root) {
+  const manifestFile = exactEntry(root, 'package.json', 'file', { optional: true });
+  if (manifestFile === null) return null;
+  let manifest;
+  try {
+    manifest = JSON5.parse(readFileSync(manifestFile, 'utf8'));
+  } catch (error) {
+    throw new Error(`Cannot parse root Node package manifest: ${manifestFile}`, { cause: error });
+  }
+  return typeof manifest?.name === 'string' && manifest.name.length > 0 ? manifest.name : null;
+}
+
 function sourceSyntax(file) {
   const source = readFileSync(file, 'utf8');
   const kind = file.endsWith('.ets') ? ts.ScriptKind.TS : ts.ScriptKind.JS;
@@ -184,8 +201,13 @@ function sourceSyntax(file) {
 function staticSpecifiers(file) {
   const specifiers = [];
   function visit(node) {
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+    if (NODE_SOURCE.test(file) && ts.isIdentifier(node) && node.text === 'getBuiltinModule') {
+      throw new Error(`Node getBuiltinModule access is not supported: ${file}`);
+    } else if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      if (NODE_SOURCE.test(file) && ['module', 'node:module'].includes(node.moduleSpecifier.text)) {
+        throw new Error(`Node createRequire-capable module imports are not supported: ${file}`);
+      }
       specifiers.push(node.moduleSpecifier.text);
     } else if (ts.isImportEqualsDeclaration(node) &&
       ts.isExternalModuleReference(node.moduleReference) &&
@@ -202,39 +224,104 @@ function staticSpecifiers(file) {
   return specifiers;
 }
 
-function resolveSource(file, specifier, sources, packages) {
+function canonicalNodeRelativePath(specifier) {
+  const path = specifier.split(/[?#]/, 1)[0];
+  if (path.includes('%')) return null;
+  const segments = path.split('/');
+  let start = 0;
+  if (segments[0] === '.') start = 1;
+  else {
+    while (segments[start] === '..') start += 1;
+    if (start === 0) return null;
+  }
+  const remainder = segments.slice(start);
+  if (remainder.length === 0 || remainder.some((segment) =>
+    segment.length === 0 || segment === '.' || segment === '..' ||
+    !/^[A-Za-z0-9._-]+$/.test(segment)) ||
+    !remainder.at(-1).endsWith('.mjs')) {
+    return null;
+  }
+  return path;
+}
+
+function hasNoncanonicalNodeDotSegment(specifier) {
+  const segments = specifier.split(/[?#]/, 1)[0].split('/');
+  let start = 0;
+  if (segments[0] === '.') start = 1;
+  else while (segments[start] === '..') start += 1;
+  return segments.slice(start).some((segment) => /^(?:(?:\.|%2e)){1,2}$/i.test(segment));
+}
+
+function resolveSource(file, specifier, sources, packages, toolingPackage) {
   let base;
-  if (specifier.startsWith('.')) {
-    if (NODE_SOURCE.test(file)) {
-      try {
-        const url = new URL(specifier, pathToFileURL(file));
-        url.search = '';
-        url.hash = '';
-        base = fileURLToPath(url);
-      } catch (error) {
-        throw new Error(`Cannot resolve Node tooling import ${specifier} from ${file}`, { cause: error });
-      }
-    } else {
-      base = resolve(dirname(file), specifier);
+  let required = false;
+  const nodeSource = NODE_SOURCE.test(file);
+  if (nodeSource && /[\u0000-\u0020]/.test(specifier)) {
+    throw new Error(`Node tooling imports must use canonical URL encoding: ${specifier}`);
+  }
+  if (nodeSource && specifier.includes('\\')) {
+    throw new Error(`Node tooling imports must use URL path separators: ${specifier}`);
+  }
+  const nodeRelative = specifier === '.' || specifier === '..' ||
+    specifier.startsWith('./') || specifier.startsWith('../');
+  if (nodeSource && specifier.startsWith('.') && !nodeRelative) {
+    throw new Error(`Node tooling imports require a valid relative Node specifier: ${specifier}`);
+  }
+  if (nodeSource && specifier.startsWith('#')) {
+    throw new Error(`Node package import mappings are not supported by architecture scanning: ${specifier}`);
+  }
+  let absoluteUrl = null;
+  if (nodeSource && !nodeRelative) {
+    try {
+      absoluteUrl = new URL(specifier);
+    } catch {
+      absoluteUrl = null;
     }
+  }
+  if (nodeSource && absoluteUrl !== null && absoluteUrl.protocol !== 'node:') {
+    throw new Error(`Unsupported absolute Node module URL: ${specifier}`);
+  }
+  if (nodeSource && absoluteUrl?.protocol === 'node:') return null;
+  if (nodeSource && specifier.startsWith('/')) {
+    throw new Error(`Unsupported absolute Node module URL: ${specifier}`);
+  }
+  let nodeLocal = false;
+  if (nodeSource && nodeRelative) {
+    const rawPath = specifier.split(/[?#]/, 1)[0];
+    if (/%(?:2f|5c)/i.test(rawPath)) {
+      throw new Error(`Node tooling imports must not use an encoded path separator: ${specifier}`);
+    }
+    if (!rawPath.endsWith('.mjs')) {
+      throw new Error(`Node tooling imports must target .mjs sources: ${specifier}`);
+    }
+    const path = canonicalNodeRelativePath(specifier);
+    if (path === null) {
+      if (hasNoncanonicalNodeDotSegment(specifier)) {
+        throw new Error(`Node tooling imports must not use a noncanonical dot segment: ${specifier}`);
+      }
+      throw new Error(`Node tooling imports require a canonical relative .mjs specifier: ${specifier}`);
+    }
+    nodeLocal = true;
+    required = true;
+    base = resolve(dirname(file), ...path.split('/'));
+  } else if (specifier.startsWith('.')) {
+    base = resolve(dirname(file), specifier);
   } else {
+    if (nodeSource) {
+      if (toolingPackage !== null &&
+        (specifier === toolingPackage || specifier.startsWith(`${toolingPackage}/`))) {
+        throw new Error(`Root Node package self-reference is not supported: ${specifier}`);
+      }
+      return null;
+    }
     const entry = packages.find((candidate) =>
       specifier === candidate.name || specifier.startsWith(`${candidate.name}/`));
     if (!entry) return null;
     const suffix = specifier === entry.name ? 'Index' : specifier.slice(entry.name.length + 1);
     base = resolve(entry.directory, suffix);
   }
-  const candidates = [
-    base,
-    `${base}.ets`,
-    `${base}.d.ets`,
-    `${base}.mjs`,
-    `${base}.js`,
-    `${base}.cjs`,
-    join(base, 'Index.ets'),
-    join(base, 'index.mjs'),
-    join(base, 'index.js'),
-    join(base, 'index.cjs')
+  const candidates = nodeLocal ? [base] : [
+    base, `${base}.ets`, `${base}.d.ets`, join(base, 'Index.ets')
   ];
   for (const candidate of candidates) {
     const target = sources.get(pathKey(candidate));
@@ -246,6 +333,9 @@ function resolveSource(file, specifier, sources, packages) {
       throw new Error(`Architecture imports require exact import path case for ${specifier} ` +
         `from ${file}; found ${target}.`);
     }
+  }
+  if (required) {
+    throw new Error(`Cannot resolve local architecture import ${specifier} from ${file}`);
   }
   return null;
 }
@@ -265,6 +355,7 @@ export function readArkTsGraph(root) {
   }
   const packageRoots = packageDirectories(directory);
   const packages = packageEntries(packageRoots);
+  const toolingPackage = rootPackageName(directory);
   const absoluteFiles = [
     ...packageRoots.flatMap((packageRoot) => packageSources(packageRoot)),
     ...toolingSources(directory)
@@ -277,7 +368,7 @@ export function readArkTsGraph(root) {
     compareText(repositoryPath(directory, left), repositoryPath(directory, right)))) {
     const sourcePath = repositoryPath(directory, file);
     dependencies[sourcePath] = [...new Set(staticSpecifiers(file)
-      .map((specifier) => resolveSource(file, specifier, sources, packages))
+      .map((specifier) => resolveSource(file, specifier, sources, packages, toolingPackage))
       .filter((target) => target !== null)
       .map((target) => repositoryPath(directory, target)))]
       .sort(compareText);

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import {
   assertImportPolicy, readArkTsGraph, stronglyConnectedFiles
@@ -214,18 +214,207 @@ test('rejects unsupported CommonJS tooling instead of omitting require edges', a
     'tools/b.cjs': "require('./a.cjs');"
   });
 
-  assert.throws(() => readArkTsGraph(root), /CommonJS tooling source.*a\.cjs/i);
+  assert.throws(() => readArkTsGraph(root), /Node tooling source.*a\.cjs.*\.mjs/i);
+});
+
+test('rejects JavaScript tooling whose package scope can be CommonJS', async (t) => {
+  const root = await fixture(t, {
+    'tools/commonjs/package.json': '{"type":"commonjs"}',
+    'tools/commonjs/a.js': "require('./b.js');",
+    'tools/commonjs/b.js': "require('./a.js');"
+  });
+
+  assert.throws(() => readArkTsGraph(root), /Node tooling source.*a\.js.*\.mjs/i);
+});
+
+test('rejects native TypeScript tooling outside the supported mjs seam', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mts': "import './b.mts';",
+    'tools/b.mts': "import './a.mts';"
+  });
+
+  assert.throws(() => readArkTsGraph(root), /Node tooling source.*a\.mts.*\.mjs/i);
+});
+
+test('rejects case-drifted Node tooling source suffixes', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.MJS': "import './b.mjs';",
+    'tools/b.mjs': 'export const value = 1;'
+  });
+
+  assert.throws(() => readArkTsGraph(root), /Node tooling source.*a\.MJS.*lowercase \.mjs/i);
+});
+
+test('rejects createRequire tooling that can hide runtime dependency edges', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': `
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+require('./b.mjs');
+`,
+    'tools/b.mjs': "import './a.mjs';"
+  });
+
+  assert.throws(() => readArkTsGraph(root), /createRequire.*not supported.*a\.mjs/i);
+});
+
+test('rejects getBuiltinModule tooling that can create a hidden require', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': `
+const require = process.getBuiltinModule('module').createRequire(import.meta.url);
+require('./b.mjs');
+`,
+    'tools/b.mjs': "import './a.mjs';"
+  });
+
+  assert.throws(() => readArkTsGraph(root), /getBuiltinModule.*not supported.*a\.mjs/i);
+});
+
+test('rejects nested tooling package scopes that can create self-references', async (t) => {
+  const root = await fixture(t, {
+    'tools/local/Package.json': '{"name":"local-pkg","type":"module","exports":"./b.mjs"}',
+    'tools/local/a.mjs': "import 'local-pkg';",
+    'tools/local/b.mjs': "import './a.mjs';"
+  });
+
+  assert.throws(() => readArkTsGraph(root), /nested Node tooling package scope.*package\.json/i);
 });
 
 test('resolves Node static imports with query and hash suffixes', async (t) => {
   const root = await fixture(t, {
-    'tools/a.mjs': "import './b.mjs?graph=1';",
-    'tools/b.mjs': "export { value } from './a.mjs#graph'; export const value = 1;"
+    'tools/a.mjs': "import './b.mjs?redirect=%2Ftmp';",
+    'tools/b.mjs': "export { value } from './a.mjs#route=%5Ctmp'; export const value = 1;"
   });
 
   assert.deepEqual(stronglyConnectedFiles(readArkTsGraph(root)), [
     ['tools/a.mjs', 'tools/b.mjs']
   ]);
+});
+
+test('rejects noncanonical and implicit Node local specifiers', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': "import './b';",
+    'tools/b.mjs': 'export const value = 1;',
+    'tools/.hidden/b.mjs': 'export const hidden = true;',
+    'tools/directory/index.mjs': 'export const value = 1;'
+  });
+  const source = join(root, 'tools', 'a.mjs');
+  assert.throws(() => readArkTsGraph(root), /must target \.mjs.*\.\/b/i);
+
+  await writeFile(source, "import './directory';");
+  assert.throws(() => readArkTsGraph(root),
+    /must target \.mjs.*\.\/directory/i);
+
+  await writeFile(source, "import 'file:.\/b.mjs';");
+  assert.throws(() => readArkTsGraph(root), /unsupported absolute Node module URL.*file:.\/b\.mjs/i);
+
+  await writeFile(source, "import '.hidden/b.mjs';");
+  assert.throws(() => readArkTsGraph(root), /valid relative Node specifier.*\.hidden/i);
+
+  for (const specifier of ['././b.mjs', './x/../b.mjs', './%2e/b.mjs']) {
+    await writeFile(source, `import ${JSON.stringify(specifier)};`);
+    assert.throws(() => readArkTsGraph(root), /noncanonical dot segment/i);
+  }
+
+  for (const specifier of ['./directory//index.mjs', './b%2emjs']) {
+    await writeFile(source, `import ${JSON.stringify(specifier)};`);
+    assert.throws(() => readArkTsGraph(root),
+      /canonical relative \.mjs specifier|must target \.mjs/i);
+  }
+});
+
+test('rejects noncanonical whitespace in file URL imports', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': 'export const pending = true;',
+    'tools/b.mjs': 'export const value = 1;'
+  });
+  const target = pathToFileURL(join(root, 'tools', 'b.mjs')).href;
+  const source = join(root, 'tools', 'a.mjs');
+  await writeFile(source, `import ${JSON.stringify(` ${target}`)};`);
+  assert.throws(() => readArkTsGraph(root), /canonical URL encoding/i);
+
+  await writeFile(source, `import ${JSON.stringify(target.replace('file:', 'fi\tle:'))};`);
+  assert.throws(() => readArkTsGraph(root), /canonical URL encoding/i);
+});
+
+test('rejects encoded Node path separators before filesystem conversion', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': "import './a%5Cb.mjs';"
+  });
+  const source = join(root, 'tools', 'a.mjs');
+  assert.throws(() => readArkTsGraph(root), /encoded path separator.*%5C/i);
+
+  await writeFile(source, "import './a%2Fb.mjs';");
+  assert.throws(() => readArkTsGraph(root), /encoded path separator.*%2F/i);
+});
+
+test('rejects local file URL imports outside the supported relative seam', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': 'export const pending = true;',
+    'tools/b.mjs': "import './a.mjs';"
+  });
+  let target = pathToFileURL(join(root, 'tools', 'b.mjs')).href.replace(/^file:/, 'FILE:');
+  if (process.platform === 'win32') {
+    target = target.replace(/^FILE:\/\/\/([A-Z]):/, (_, drive) => `FILE:///${drive.toLowerCase()}:`);
+  }
+  await writeFile(join(root, 'tools', 'a.mjs'), `import ${JSON.stringify(target)};`);
+
+  assert.throws(() => readArkTsGraph(root), /unsupported absolute Node module URL.*FILE:/i);
+});
+
+test('rejects noncanonical file URL aliases', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': 'export const pending = true;',
+    'tools/b.mjs': 'export const value = 1;'
+  });
+  const source = join(root, 'tools', 'a.mjs');
+  const target = pathToFileURL(join(root, 'tools', 'b.mjs')).href;
+  await writeFile(source, `import ${JSON.stringify(target.replace('/b.mjs', '/./b.mjs'))};`);
+  assert.throws(() => readArkTsGraph(root), /unsupported absolute Node module URL/i);
+
+  const localhost = target.replace(/^file:\/\//, 'file://localhost');
+  await writeFile(source, `import ${JSON.stringify(localhost)};`);
+  assert.throws(() => readArkTsGraph(root), /unsupported absolute Node module URL/i);
+
+  await writeFile(source, `import ${JSON.stringify(target.replace('/b.mjs', '/b%2emjs'))};`);
+  assert.throws(() => readArkTsGraph(root), /unsupported absolute Node module URL/i);
+});
+
+test('keeps Node tooling dependencies separate from ArkTS sources', async (t) => {
+  const root = await fixture(t, {
+    'build-profile.json5': "{modules:[{name:'core',srcPath:'./core'}]}",
+    'core/arkdb-package.json': '{"kind":"shared"}',
+    'core/oh-package.json5': "{name:'@arkdb/core'}",
+    'core/Index.ets': 'export class Root {}',
+    'core/src/main/ets/Runtime.ets': 'export class Runtime {}',
+    'tools/a.mjs': "import '../core/Index.ets';"
+  });
+  assert.throws(() => readArkTsGraph(root), /Node tooling imports must target \.mjs/i);
+
+  await writeFile(join(root, 'tools', 'a.mjs'), "import '@arkdb/core';");
+  assert.deepEqual(readArkTsGraph(root).dependencies['tools/a.mjs'], []);
+});
+
+test('rejects root package self-references that can resolve to tooling files', async (t) => {
+  const root = await fixture(t, {
+    'package.json': '{"name":"local-pkg","type":"module","exports":{"./b":"./tools/b.mjs"}}',
+    'tools/a.mjs': "import 'local-pkg/b';",
+    'tools/b.mjs': "import './a.mjs';"
+  });
+
+  assert.throws(() => readArkTsGraph(root), /root Node package self-reference.*local-pkg\/b/i);
+});
+
+test('rejects data modules that can hide local dependency edges', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': 'export const pending = true;',
+    'tools/b.mjs': "import './a.mjs';"
+  });
+  const target = pathToFileURL(join(root, 'tools', 'b.mjs')).href;
+  const data = `data:text/javascript,${encodeURIComponent(`import ${JSON.stringify(target)};`)}`;
+  await writeFile(join(root, 'tools', 'a.mjs'), `import ${JSON.stringify(data)};`);
+
+  assert.throws(() => readArkTsGraph(root), /unsupported absolute Node module URL.*data:/i);
 });
 
 test('rejects every cycle that is not an exact known finding', () => {

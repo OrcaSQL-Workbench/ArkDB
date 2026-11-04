@@ -18,6 +18,12 @@ import {
   PreparedSocket, columnPayload, eofPayload, errorPayload, flushPrepared, framePacket,
   handshake, okPayload, prepareResponse, preparedFailureOf
 } from '../command/PreparedExecutionFixture';
+import {
+  MySqlCommandScope
+} from '../../../main/ets/mysql/execution/MySqlCommandGate';
+import {
+  MySqlSessionFingerprint
+} from '../../../main/ets/mysql/execution/MySqlSessionInitialization';
 
 const RESET_CHARACTER_SET_SQL = 'SET NAMES utf8mb4 COLLATE utf8mb4_general_ci';
 const SESSION_FINGERPRINT_SQL = 'SELECT DATABASE(), @@SESSION.sql_mode, ' +
@@ -219,6 +225,16 @@ class ResetFixture {
   }
 }
 
+class ResetFingerprintOverrideConnection extends MySqlConnection {
+  fingerprintReads: number = 0;
+
+  protected readMySqlSessionFingerprint(
+    scope: MySqlCommandScope): Promise<MySqlSessionFingerprint> {
+    this.fingerprintReads += 1;
+    return super.readMySqlSessionFingerprint(scope);
+  }
+}
+
 export default function mySqlSessionResetTest(): void {
   describe('MySQL session reset', () => {
     it('resetInvalidatesEveryOldHandle', 0, async () => {
@@ -298,6 +314,30 @@ export default function mySqlSessionResetTest(): void {
       } finally {
         control.queryAllowed.release();
         await preparedFailureOf(cancelling.close());
+      }
+    });
+
+    it('resetPreservesProtectedFingerprintDispatch', 0, async () => {
+      const config = new ConnectionConfig();
+      config.host = 'synthetic.invalid';
+      config.ssl.mode = SslMode.DISABLED;
+      const peer = new ResetSocket();
+      const connection = new ResetFingerprintOverrideConnection(
+        config, '', new TcpTransport());
+      socket.nextTcp = peer;
+      const opening = connection.connect();
+      peer.emitMessage(new PacketWriter().writeBytes(handshake(0))
+        .writeBytes(framePacket(okPayload(), 2)).toUint8Array());
+      await opening;
+      peer.writes = [];
+      try {
+        peer.responses.push(
+          [okPayload(StatusFlags.AUTOCOMMIT)],
+          [okPayload(StatusFlags.AUTOCOMMIT)]);
+        await sessionFeature(connection).reset();
+        expect(connection.fingerprintReads).assertEqual(1);
+      } finally {
+        await connection.close();
       }
     });
 

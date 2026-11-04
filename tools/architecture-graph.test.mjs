@@ -208,6 +208,26 @@ test('rejects case-mismatched local imports instead of hiding their edges', asyn
   assert.throws(() => readArkTsGraph(root), /exact import path case.*B\.mjs.*b\.mjs/i);
 });
 
+test('rejects unsupported CommonJS tooling instead of omitting require edges', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.cjs': "require('./b.cjs');",
+    'tools/b.cjs': "require('./a.cjs');"
+  });
+
+  assert.throws(() => readArkTsGraph(root), /CommonJS tooling source.*a\.cjs/i);
+});
+
+test('resolves Node static imports with query and hash suffixes', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': "import './b.mjs?graph=1';",
+    'tools/b.mjs': "export { value } from './a.mjs#graph'; export const value = 1;"
+  });
+
+  assert.deepEqual(stronglyConnectedFiles(readArkTsGraph(root)), [
+    ['tools/a.mjs', 'tools/b.mjs']
+  ]);
+});
+
 test('rejects every cycle that is not an exact known finding', () => {
   const graph = {
     files: ['tools/new-a.mjs', 'tools/new-b.mjs'],

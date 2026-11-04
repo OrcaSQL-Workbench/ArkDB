@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import JSON5 from 'json5';
 import ts from 'typescript';
 
@@ -25,7 +26,8 @@ const IGNORED_DIRECTORIES = new Set([
   '.git', '.hvigor', '.idea', '.ohpm-cache', '.preview', '.test',
   'build', 'dist', 'node_modules', 'oh_modules', 'test-fixtures'
 ]);
-const NODE_SOURCE = /\.(?:c|m)?js$/;
+const NODE_SOURCE = /\.m?js$/;
+const COMMONJS_SOURCE = /\.cjs$/;
 
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -142,7 +144,11 @@ function toolingSources(root) {
   if (directory === null) return [];
   const files = [];
   walk(directory, (file) => {
-    if (NODE_SOURCE.test(file) && !/\.test\.(?:c|m)?js$/.test(file)) files.push(file);
+    if (/\.test\.(?:c|m)?js$/.test(file)) return;
+    if (COMMONJS_SOURCE.test(file)) {
+      throw new Error(`CommonJS tooling source is not supported by static import scanning: ${file}`);
+    }
+    if (NODE_SOURCE.test(file)) files.push(file);
   });
   return files;
 }
@@ -199,7 +205,18 @@ function staticSpecifiers(file) {
 function resolveSource(file, specifier, sources, packages) {
   let base;
   if (specifier.startsWith('.')) {
-    base = resolve(dirname(file), specifier);
+    if (NODE_SOURCE.test(file)) {
+      try {
+        const url = new URL(specifier, pathToFileURL(file));
+        url.search = '';
+        url.hash = '';
+        base = fileURLToPath(url);
+      } catch (error) {
+        throw new Error(`Cannot resolve Node tooling import ${specifier} from ${file}`, { cause: error });
+      }
+    } else {
+      base = resolve(dirname(file), specifier);
+    }
   } else {
     const entry = packages.find((candidate) =>
       specifier === candidate.name || specifier.startsWith(`${candidate.name}/`));

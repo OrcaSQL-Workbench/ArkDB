@@ -112,6 +112,9 @@ function packageDirectories(root) {
     }
     let current = root;
     for (const part of path.split(sep)) {
+      if (ignoredDirectory(part)) {
+        throw new Error(`Registered module must not use an ignored directory: ${part}`);
+      }
       current = exactEntry(current, part, 'directory');
     }
     if (exactEntry(current, 'arkdb-package.json', 'file', { optional: true }) !== null) {
@@ -219,6 +222,13 @@ function resolveSource(file, specifier, sources, packages) {
   for (const candidate of candidates) {
     const target = sources.get(pathKey(candidate));
     if (target !== undefined) return target;
+  }
+  const foldedCandidates = new Set(candidates.map((candidate) => pathKey(candidate).toLowerCase()));
+  for (const [sourcePath, target] of sources) {
+    if (foldedCandidates.has(sourcePath.toLowerCase())) {
+      throw new Error(`Architecture imports require exact import path case for ${specifier} ` +
+        `from ${file}; found ${target}.`);
+    }
   }
   return null;
 }

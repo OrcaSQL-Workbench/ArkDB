@@ -74,7 +74,7 @@ void import('./dynamic.mjs');
 throw new Error('scanned source was executed');
 `,
     'tools/b.mjs': "export const sideEffect = 'static';",
-    'tools/c.mjs': "import './A.mjs'; export const value = 're-exported';",
+    'tools/c.mjs': "export const value = 're-exported';",
     'tools/dynamic.mjs': "export const ignored = 'dynamic';",
     'tools/ignored.test.mjs': "import './a.mjs';",
     'oh_modules/generated/arkdb-package.json': '{"kind":"shared"}',
@@ -185,6 +185,27 @@ test('rejects case-mismatched registered and fixed architecture paths', async (t
     'TOOLS/a.mjs': 'export const value = 1;'
   });
   assert.throws(() => readArkTsGraph(toolsRoot), /exact path case.*tools/i);
+});
+
+test('rejects registered module roots inside generated directories', async (t) => {
+  const root = await fixture(t, {
+    'build-profile.json5': "{modules:[{name:'core',srcPath:'./build/core'}]}",
+    'build/core/arkdb-package.json': '{"kind":"shared"}',
+    'build/core/oh-package.json5': "{name:'@arkdb/core'}",
+    'build/core/Index.ets': 'export class Root {}',
+    'build/core/src/main/ets/Runtime.ets': 'export class Runtime {}'
+  });
+
+  assert.throws(() => readArkTsGraph(root), /registered module.*ignored directory.*build/i);
+});
+
+test('rejects case-mismatched local imports instead of hiding their edges', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': "import './B.mjs';",
+    'tools/b.mjs': "import './a.mjs';"
+  });
+
+  assert.throws(() => readArkTsGraph(root), /exact import path case.*B\.mjs.*b\.mjs/i);
 });
 
 test('rejects every cycle that is not an exact known finding', () => {

@@ -184,7 +184,8 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
         } catch (error) {
           if (primary === null) {
             throw preparedFailure(
-              error as Object, [], MySqlExecutionOutcome.Completed);
+              error as Object, [],
+              MySqlExecutionOutcome.Completed);
           }
           cleanup.push(preparedCleanup(error as Object));
         }
@@ -287,7 +288,9 @@ export function snapshotMySqlInsertRowsInput(tableParts: string[],
       table, capturedColumns, plan.groups, snapshot);
   } catch (error) {
     throw new MySqlBatchError(
-      preparedFailure(error as Object, [], MySqlExecutionOutcome.NotDispatched),
+      preparedFailure(
+        error as Object, [],
+        MySqlExecutionOutcome.NotDispatched),
       [], failedIndex);
   }
 }
@@ -320,8 +323,8 @@ class InsertRowsPlan {
 
 function insertRowsError(error: Object, progress: InsertRowsProgress,
   fallback: MySqlExecutionOutcome): MySqlBatchError {
-  const failure = preparedFailure(
-    error, [], error instanceof MySqlOperationError ?
+  const failure = preparedFailure(error, [],
+    error instanceof MySqlOperationError ?
       error.outcome : fallback);
   return new MySqlBatchError(
     failure, progress.completed, progress.failedIndex);

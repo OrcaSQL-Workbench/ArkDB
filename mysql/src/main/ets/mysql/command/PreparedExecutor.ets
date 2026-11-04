@@ -149,7 +149,8 @@ export class MySqlPreparedExecutor implements PreparedExecutorContract, MySqlPre
       }
     }
     if (primary !== null) {
-      throw preparedFailure(primary, cleanup, primary instanceof MySqlOperationError ?
+      throw preparedFailure(
+        primary, cleanup, primary instanceof MySqlOperationError ?
         primary.outcome : MySqlExecutionOutcome.NotDispatched);
     }
     return value!;

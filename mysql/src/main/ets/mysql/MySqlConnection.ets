@@ -40,6 +40,11 @@ import {
   MySqlExecutionController, isMySqlInterruptionError, mysqlKillQueryForHandle
 } from './execution/MySqlExecutionController';
 import {
+  mysqlCleanupError as toCleanupError,
+  mysqlOperationContains as operationContainsFailure,
+  mysqlOperationFailure as operationFailure
+} from './execution/MySqlFailure';
+import {
   MySqlBatchExecutor, MySqlPreparedBatchExecutor
 } from './execution/MySqlBatchExecutor';
 import {
@@ -1583,7 +1588,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
           (observed.failure instanceof MySqlOperationError ?
             observed.failure.outcome : (observed.failure === null ?
               MySqlExecutionOutcome.Completed : MySqlExecutionOutcome.Unknown));
-        throw new MySqlOperationError(timeout, cleanup, outcome);
+        throw operationFailure(timeout, cleanup, outcome);
       }
 
       graceTimer.cancel();
@@ -1604,7 +1609,7 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       }
       await this.joinDeadlineClose(scope, cleanup);
       return Promise.reject<T>(
-        new MySqlOperationError(timeout, cleanup, MySqlExecutionOutcome.Unknown));
+        operationFailure(timeout, cleanup, MySqlExecutionOutcome.Unknown));
     } finally {
       if (this.deadlineCancellation === settlement &&
         settlement.scope === scope) this.deadlineCancellation = null;
@@ -2855,31 +2860,6 @@ function toArkDbError(e: Object): ArkDbError {
   const err = e as Error;
   const msg = err !== null && err !== undefined && err.message !== undefined ? err.message : String(e);
   return ArkDbError.protocol(msg);
-}
-
-function toCleanupError(error: Object): ArkDbError {
-  return error instanceof ArkDbError ? error : operationFailure(error, [], MySqlExecutionOutcome.Unknown);
-}
-
-function operationFailure(error: Object, cleanupErrors: ArkDbError[],
-  outcome: MySqlExecutionOutcome): MySqlOperationError {
-  if (error instanceof MySqlOperationError) {
-    const combined = error.cleanupErrors.slice();
-    for (const cleanup of cleanupErrors) combined.push(cleanup);
-    return new MySqlOperationError(error.primary, combined, outcome, error.originalCause);
-  }
-  return new MySqlOperationError(toArkDbError(error), cleanupErrors, outcome,
-    error instanceof ArkDbError ? undefined : error);
-}
-
-function operationContainsFailure(error: Object, expected: ArkDbError): boolean {
-  if (error === expected) return true;
-  if (!(error instanceof MySqlOperationError)) return false;
-  if (operationContainsFailure(error.primary, expected)) return true;
-  for (const cleanup of error.cleanupErrors) {
-    if (operationContainsFailure(cleanup, expected)) return true;
-  }
-  return false;
 }
 
 function callbackFailure(error: Object): MySqlOperationError {

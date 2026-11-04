@@ -23,6 +23,10 @@ import {
 } from '../model/MySqlTransactionOptions';
 import { quoteMySqlIdentifier } from '../value/MySqlSqlHelpers';
 import { MySqlCommandScope } from './MySqlCommandGate';
+import {
+  mysqlCleanupError as toTransactionCleanupError,
+  mysqlOperationFailure as transactionFailure
+} from './MySqlFailure';
 
 export const MYSQL_COMMIT_NO_CHAIN_NO_RELEASE = 'COMMIT AND NO CHAIN NO RELEASE';
 export const MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE = 'ROLLBACK AND NO CHAIN NO RELEASE';
@@ -486,20 +490,4 @@ function toTransactionArkDbError(error: Object): ArkDbError {
   const message = typed !== null && typed !== undefined && typed.message !== undefined ?
     typed.message : String(error);
   return ArkDbError.protocol(message);
-}
-
-function toTransactionCleanupError(error: Object): ArkDbError {
-  return error instanceof ArkDbError ? error :
-    transactionFailure(error, [], MySqlExecutionOutcome.Unknown);
-}
-
-function transactionFailure(error: Object, cleanup: ArkDbError[],
-  outcome: MySqlExecutionOutcome): MySqlOperationError {
-  if (error instanceof MySqlOperationError) {
-    const combined = error.cleanupErrors.slice();
-    for (const failure of cleanup) combined.push(failure);
-    return new MySqlOperationError(error.primary, combined, outcome, error.originalCause);
-  }
-  return new MySqlOperationError(toTransactionArkDbError(error), cleanup, outcome,
-    error instanceof ArkDbError ? undefined : error);
 }

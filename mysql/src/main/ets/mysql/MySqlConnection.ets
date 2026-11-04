@@ -14,7 +14,20 @@ import {
   MySqlCoreStreamingConnection, MySqlDatabaseSessionStatus, MySqlQueryExecutionSummary,
   MySqlQueryResultSink, MySqlResultSinkAdapter, mysqlExecutionSummary, mysqlSessionStatus
 } from './model/MySqlQueryStream';
-import { MySqlDbConnection } from './driver/MySqlContracts';
+import { MySqlDbConnection } from './api/MySqlContracts';
+import {
+  MySqlConnectionFeatures, MySqlSession
+} from './api/MySqlConnectionFeatures';
+import {
+  MySqlBatchExecutor, MySqlInsertRowsExecutor, MySqlLongDataExecutor,
+  MySqlNamedExecutor, MySqlProcedureCaller
+} from './api/MySqlFeatureContracts';
+import {
+  MySqlCursor, MySqlCursorExecutor
+} from './api/MySqlCursorContracts';
+import {
+  MySqlPreparedExecutor, MySqlPreparedStatement
+} from './api/MySqlPreparedContracts';
 import {
   MySqlExecutionDispatcher, MySqlExecutionObserver
 } from './diagnostics/MySqlExecutionObserver';
@@ -44,22 +57,15 @@ import {
   mysqlOperationContains as operationContainsFailure,
   mysqlOperationFailure as operationFailure
 } from './execution/MySqlFailure';
+import { MySqlPreparedBatchExecutor } from './execution/MySqlBatchExecutor';
 import {
-  MySqlBatchExecutor, MySqlPreparedBatchExecutor
-} from './execution/MySqlBatchExecutor';
-import {
-  MySqlNamedExecutor, MySqlNamedExecutorHost, MySqlPreparedNamedExecutor
+  MySqlNamedExecutorHost, MySqlPreparedNamedExecutor
 } from './execution/MySqlNamedExecutor';
 import {
-  MySqlInsertRowsExecutor, MySqlInsertRowsInput,
+  MySqlInsertRowsInput,
   MySqlPreparedInsertRowsExecutor, snapshotMySqlInsertRowsInput
 } from './execution/MySqlInsertRowsExecutor';
-import {
-  MySqlPreparedProcedureCaller, MySqlProcedureCaller
-} from './execution/MySqlProcedureCaller';
-import {
-  MySqlCursor, MySqlCursorExecutor
-} from './driver/MySqlCursorContracts';
+import { MySqlPreparedProcedureCaller } from './execution/MySqlProcedureCaller';
 import { MySqlConnectionDeadlineExecutor } from './execution/MySqlDeadlineExecutor';
 import { MySqlConnectionSessionController } from './execution/MySqlSessionController';
 import {
@@ -82,9 +88,6 @@ import {
 import { MySqlDeadlineOptions } from './model/MySqlDeadlineOptions';
 import { MySqlCursorOptions } from './model/MySqlCursorOptions';
 import { MySqlInsertRowsOptions } from './model/MySqlInsertRows';
-import { MySqlPreparedExecutor, MySqlPreparedStatement } from './driver/MySqlPreparedContracts';
-import { MySqlConnectionFeatures } from './driver/MySqlConnectionFeatures';
-import { MySqlSession } from './driver/MySqlSession';
 import { MySqlParameter } from './model/MySqlParameter';
 import { MySqlNamedParameter } from './model/MySqlNamedParameter';
 import {
@@ -99,7 +102,6 @@ import {
 } from './command/ResultStream';
 import { prepareServerError } from './command/PrepareResponse';
 import { BinaryRowDecoder } from './value/BinaryRowDecoder';
-import { MySqlLongDataExecutor } from './command/LongData';
 import {
   MySqlLongDataOptions, MySqlLongParameter
 } from './model/MySqlLongDataOptions';

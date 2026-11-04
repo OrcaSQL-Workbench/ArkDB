@@ -1,8 +1,10 @@
 import { ArkDbError, ConnectionState, QueryOptions } from '@arkdb/core';
-import { MySqlConnectionFeatures } from '../driver/MySqlConnectionFeatures';
-import { MySqlSession } from '../driver/MySqlSession';
 import {
-  MySqlInsertRowsExecutor, MySqlInsertRowsInput,
+  MySqlConnectionFeatures, MySqlSession, MySqlTransactionRunner
+} from '../api/MySqlConnectionFeatures';
+import { MySqlInsertRowsExecutor } from '../api/MySqlFeatureContracts';
+import {
+  MySqlInsertRowsInput,
   snapshotMySqlInsertRowsInput
 } from './MySqlInsertRowsExecutor';
 import {
@@ -30,11 +32,6 @@ import {
 
 export const MYSQL_COMMIT_NO_CHAIN_NO_RELEASE = 'COMMIT AND NO CHAIN NO RELEASE';
 export const MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE = 'ROLLBACK AND NO CHAIN NO RELEASE';
-
-export interface MySqlTransactionRunner {
-  run<T>(options: MySqlTransactionOptions,
-    body: (session: MySqlSession) => Promise<T>): Promise<T>;
-}
 
 export interface MySqlTransactionRunnerHost {
   readonly state: ConnectionState;

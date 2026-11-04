@@ -2,7 +2,7 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, QueryOptions
 } from '@arkdb/core';
-import { MySqlProcedureCaller } from '../../../main/ets/mysql/execution/MySqlProcedureCaller';
+import { MySqlProcedureCaller } from '../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../../../main/ets/mysql/model/MySqlOperationError';

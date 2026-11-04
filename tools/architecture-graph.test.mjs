@@ -9,13 +9,7 @@ import {
 } from './architecture-graph.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const KNOWN_CYCLES = [
-  [
-    'mysql/src/main/ets/mysql/driver/MySqlConnectionFeatures.ets',
-    'mysql/src/main/ets/mysql/driver/MySqlContracts.ets',
-    'mysql/src/main/ets/mysql/driver/MySqlSession.ets',
-    'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets'
-  ],
+const APPROVED_CYCLES = [
   [
     'tools/delivery-workspace.mjs',
     'tools/har-release.mjs',
@@ -23,12 +17,17 @@ const KNOWN_CYCLES = [
   ]
 ];
 const ARCHITECTURE_POLICY = {
-  allowedCycles: KNOWN_CYCLES,
+  allowedCycles: APPROVED_CYCLES,
   prohibitedDependencies: [
     {
       from: /^core\//,
       to: /^mysql\//,
       message: 'Shared core must not depend on the MySQL driver.'
+    },
+    {
+      from: /^mysql\/src\/main\/ets\/mysql\/api\//,
+      to: /^mysql\/src\/main\/ets\/mysql\/(?:MySqlConnection\.ets|command\/|driver\/|execution\/|protocol\/|transport\/)/,
+      message: 'MySQL public contracts must not depend on implementation ownership.'
     }
   ]
 };
@@ -45,10 +44,10 @@ async function fixture(t, files) {
   return root;
 }
 
-test('reports the current ArkTS and tooling cycles deterministically', () => {
+test('removes the MySQL contract cycle while retaining the approved tools cycle', () => {
   const graph = readArkTsGraph(ROOT);
 
-  assert.deepEqual(stronglyConnectedFiles(graph), KNOWN_CYCLES);
+  assert.deepEqual(stronglyConnectedFiles(graph), APPROVED_CYCLES);
   assert.doesNotThrow(() => assertImportPolicy(graph, ARCHITECTURE_POLICY));
 });
 
@@ -482,7 +481,7 @@ test('rejects every cycle that is not an exact known finding', () => {
   };
 
   assert.throws(
-    () => assertImportPolicy(graph, { allowedCycles: KNOWN_CYCLES }),
+    () => assertImportPolicy(graph, { allowedCycles: APPROVED_CYCLES }),
     /Unexpected import cycle: tools\/new-a\.mjs -> tools\/new-b\.mjs/
   );
 });
@@ -499,5 +498,25 @@ test('rejects prohibited dependencies even when the graph is acyclic', () => {
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
     /Shared core must not depend on the MySQL driver.*core\/Index\.ets -> mysql\/Index\.ets/
+  );
+});
+
+test('rejects MySQL api dependencies on implementation ownership', () => {
+  const graph = {
+    files: [
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets',
+      'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets'
+    ],
+    dependencies: {
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets': [
+        'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets'
+      ],
+      'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets': []
+    }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+    /MySQL public contracts must not depend on implementation ownership.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/execution\/MySqlTransactionRunner\.ets/
   );
 });

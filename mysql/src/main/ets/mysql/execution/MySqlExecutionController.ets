@@ -1,5 +1,5 @@
 import { DbConnection, ArkDbError, CancellationOutcome } from '@arkdb/core';
-import { MySqlDbExecutionController } from '../driver/MySqlContracts';
+import { MySqlDbExecutionController } from '../api/MySqlContracts';
 import { MySqlOperationError, isMySqlServerRejection } from '../model/MySqlOperationError';
 
 const MAX_MYSQL_CONNECTION_ID: bigint = 4294967295n;

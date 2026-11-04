@@ -20,10 +20,10 @@ export { DatabaseSessionStatus as CoreDatabaseSessionStatus, QueryResultMeta as 
   QueryRowChunk as CoreQueryRowChunk, QueryResultSummary as CoreQueryResultSummary,
   QueryExecutionSummary as CoreQueryExecutionSummary, DriverCapabilities as CoreDriverCapabilities } from '@arkdb/core';
 
-export { MySqlDriverCapabilities as DriverCapabilities } from './src/main/ets/mysql/driver/MySqlContracts';
+export { MySqlDriverCapabilities as DriverCapabilities } from './src/main/ets/mysql/api/MySqlContracts';
 export type { MySqlDbConnection as DbConnection, MySqlDbDriverFactory as DbDriverFactory,
   MySqlDbExecutionController as DbExecutionController, MySqlMetadataProviderContract as MetadataProvider } from
-  './src/main/ets/mysql/driver/MySqlContracts';
+  './src/main/ets/mysql/api/MySqlContracts';
 export { MySqlDatabaseSessionStatus as DatabaseSessionStatus, MySqlQueryResultMeta as QueryResultMeta,
   MySqlQueryRowChunk as QueryRowChunk, MySqlQueryResultSummary as QueryResultSummary,
   MySqlQueryExecutionSummary as QueryExecutionSummary } from './src/main/ets/mysql/model/MySqlQueryStream';
@@ -47,26 +47,25 @@ export { MySqlColumnDef, MySqlColumnDef as ColumnDef, MySqlQueryResult, MySqlQue
 export { MySqlConnectionOptions } from './src/main/ets/mysql/driver/MySqlConnectionOptions';
 export { MySqlConnectionExtensions } from './src/main/ets/mysql/driver/MySqlConnectionExtensions';
 export { MySqlConnectionFeatures, requireMySqlFeatures } from
-  './src/main/ets/mysql/driver/MySqlConnectionFeatures';
+  './src/main/ets/mysql/api/MySqlConnectionFeatures';
 export {
   MySqlExecutionEvent, MySqlExecutionEventType
 } from './src/main/ets/mysql/diagnostics/MySqlExecutionObserver';
 export type { MySqlExecutionObserver } from
   './src/main/ets/mysql/diagnostics/MySqlExecutionObserver';
 export { MySqlCommandKind } from './src/main/ets/mysql/execution/MySqlCommandGate';
-export type { MySqlSession } from './src/main/ets/mysql/driver/MySqlSession';
+export type { MySqlSession } from './src/main/ets/mysql/api/MySqlSession';
 export type { MySqlPreparedExecutor, MySqlPreparedStatement } from
-  './src/main/ets/mysql/driver/MySqlPreparedContracts';
+  './src/main/ets/mysql/api/MySqlPreparedContracts';
 export type { MySqlCursor, MySqlCursorExecutor } from
-  './src/main/ets/mysql/driver/MySqlCursorContracts';
-export type { MySqlLongDataExecutor } from './src/main/ets/mysql/command/LongData';
-export type { MySqlBatchExecutor } from './src/main/ets/mysql/execution/MySqlBatchExecutor';
-export type { MySqlDeadlineExecutor } from './src/main/ets/mysql/execution/MySqlDeadlineExecutor';
-export type { MySqlInsertRowsExecutor } from './src/main/ets/mysql/execution/MySqlInsertRowsExecutor';
-export type { MySqlNamedExecutor } from './src/main/ets/mysql/execution/MySqlNamedExecutor';
-export type { MySqlProcedureCaller } from './src/main/ets/mysql/execution/MySqlProcedureCaller';
-export type { MySqlSessionController } from './src/main/ets/mysql/execution/MySqlSessionController';
-export type { MySqlTransactionRunner } from './src/main/ets/mysql/execution/MySqlTransactionRunner';
+  './src/main/ets/mysql/api/MySqlCursorContracts';
+export type {
+  MySqlBatchExecutor, MySqlDeadlineExecutor, MySqlInsertRowsExecutor,
+  MySqlLongDataExecutor, MySqlNamedExecutor, MySqlProcedureCaller,
+  MySqlSessionController
+} from './src/main/ets/mysql/api/MySqlFeatureContracts';
+export type { MySqlTransactionRunner } from
+  './src/main/ets/mysql/api/MySqlConnectionFeatures';
 export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
   './src/main/ets/mysql/model/MySqlBatch';
 export { MySqlCursorOptions } from './src/main/ets/mysql/model/MySqlCursorOptions';

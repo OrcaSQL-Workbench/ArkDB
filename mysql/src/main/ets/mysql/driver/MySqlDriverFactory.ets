@@ -4,7 +4,9 @@ import {
 import { ConnectionConfig } from '../model/ConnectionConfig';
 import { MySqlConnectionExtensions } from './MySqlConnectionExtensions';
 import { MySqlConnectionOptions } from './MySqlConnectionOptions';
-import { MySqlDbConnection, MySqlDbDriverFactory, MySqlDriverCapabilities } from './MySqlContracts';
+import {
+  MySqlDbConnection, MySqlDbDriverFactory, MySqlDriverCapabilities
+} from '../api/MySqlContracts';
 import {
   MySqlConnection, initializeMySqlExecutionObserverInternal
 } from '../MySqlConnection';

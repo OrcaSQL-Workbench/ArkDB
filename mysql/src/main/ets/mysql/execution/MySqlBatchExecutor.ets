@@ -3,7 +3,8 @@ import { MySqlPreparedExecutorHost } from '../command/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
 } from '../command/PreparedStatement';
-import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
+import { MySqlBatchExecutor } from '../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
 } from '../model/MySqlBatch';
@@ -17,10 +18,6 @@ import {
   mySqlBatchItemOptions, mySqlBatchResultBytes
 } from './MySqlBatchSupport';
 import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
-
-export interface MySqlBatchExecutor {
-  execute(sql: string, rows: MySqlParameter[][], options?: MySqlBatchOptions): Promise<MySqlBatchResult>;
-}
 
 export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
   private host: MySqlPreparedExecutorHost;

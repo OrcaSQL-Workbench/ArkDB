@@ -1,6 +1,6 @@
 import { ArkDbError, ConnectionTimerPort, DbConnection, QueryOptions } from '@arkdb/core';
 import { MySqlConnection } from '../../../main/ets/mysql/MySqlConnection';
-import { MySqlPreparedExecutor } from '../../../main/ets/mysql/driver/MySqlPreparedContracts';
+import { MySqlPreparedExecutor } from '../../../main/ets/mysql/api/MySqlPreparedContracts';
 import { ConnectionConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
 import {
   MySqlQueryResultMeta, MySqlQueryResultSink, MySqlQueryResultSummary, MySqlQueryRowChunk

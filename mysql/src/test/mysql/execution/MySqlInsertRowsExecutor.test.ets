@@ -3,7 +3,10 @@ import {
   ArkDbError, ArkDbErrorKind, ConnectionState
 } from '@arkdb/core';
 import {
-  MySqlInsertRowsExecutor, snapshotMySqlInsertRowsInput
+  MySqlInsertRowsExecutor
+} from '../../../main/ets/mysql/api/MySqlFeatureContracts';
+import {
+  snapshotMySqlInsertRowsInput
 } from '../../../main/ets/mysql/execution/MySqlInsertRowsExecutor';
 import {
   MySqlInsertRowsOptions

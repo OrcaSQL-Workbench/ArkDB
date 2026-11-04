@@ -412,6 +412,56 @@ test('retains every mysql-v1.0.2 package-root export', () => {
   assertPublishedExportsRetained(fixture.packageRootExports, current);
 });
 
+test('retains the package-root kinds of relocated MySQL contracts', () => {
+  const names = new Set([
+    'DbConnection',
+    'DbDriverFactory',
+    'DbExecutionController',
+    'DriverCapabilities',
+    'MetadataProvider',
+    'MySqlBatchExecutor',
+    'MySqlConnectionFeatures',
+    'MySqlCursor',
+    'MySqlCursorExecutor',
+    'MySqlDeadlineExecutor',
+    'MySqlInsertRowsExecutor',
+    'MySqlLongDataExecutor',
+    'MySqlNamedExecutor',
+    'MySqlPreparedExecutor',
+    'MySqlPreparedStatement',
+    'MySqlProcedureCaller',
+    'MySqlSession',
+    'MySqlSessionController',
+    'MySqlTransactionRunner',
+    'requireMySqlFeatures'
+  ]);
+  const current = packageRootExports(
+    readFileSync(join(ROOT, 'mysql', 'Index.ets'), 'utf8'), 'mysql/Index.ets');
+
+  assert.deepEqual(current.filter((entry) => names.has(entry.name)), [
+    { name: 'DbConnection', kind: 'type' },
+    { name: 'DbDriverFactory', kind: 'type' },
+    { name: 'DbExecutionController', kind: 'type' },
+    { name: 'DriverCapabilities', kind: 'value' },
+    { name: 'MetadataProvider', kind: 'type' },
+    { name: 'MySqlBatchExecutor', kind: 'type' },
+    { name: 'MySqlConnectionFeatures', kind: 'value' },
+    { name: 'MySqlCursor', kind: 'type' },
+    { name: 'MySqlCursorExecutor', kind: 'type' },
+    { name: 'MySqlDeadlineExecutor', kind: 'type' },
+    { name: 'MySqlInsertRowsExecutor', kind: 'type' },
+    { name: 'MySqlLongDataExecutor', kind: 'type' },
+    { name: 'MySqlNamedExecutor', kind: 'type' },
+    { name: 'MySqlPreparedExecutor', kind: 'type' },
+    { name: 'MySqlPreparedStatement', kind: 'type' },
+    { name: 'MySqlProcedureCaller', kind: 'type' },
+    { name: 'MySqlSession', kind: 'type' },
+    { name: 'MySqlSessionController', kind: 'type' },
+    { name: 'MySqlTransactionRunner', kind: 'type' },
+    { name: 'requireMySqlFeatures', kind: 'value' }
+  ]);
+});
+
 function readFixture() {
   return JSON.parse(readFileSync(FIXTURE_PATH, 'utf8'));
 }

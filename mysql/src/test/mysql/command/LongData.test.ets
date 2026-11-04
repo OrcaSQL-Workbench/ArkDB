@@ -10,7 +10,7 @@ import {
 import {
   initializeMySqlExecutionObserverInternal
 } from '../../../main/ets/mysql/MySqlConnection';
-import { MySqlLongDataExecutor } from '../../../main/ets/mysql/command/LongData';
+import { MySqlLongDataExecutor } from '../../../main/ets/mysql/api/MySqlFeatureContracts';
 import { MySqlByteSource } from '../../../main/ets/mysql/model/MySqlByteSource';
 import {
   MySqlLongDataOptions, MySqlLongParameter, MySqlLongParameterKind

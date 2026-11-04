@@ -1,5 +1,6 @@
 import { ArkDbError, ConnectionTimerPort, QueryOptions } from '@arkdb/core';
-import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
+import { MySqlLongDataExecutor } from '../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import {
   MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from '../execution/MySqlCommandGate';
@@ -26,11 +27,6 @@ import {
   preparedCleanup, preparedFailure
 } from './PreparedStatement';
 import { MySqlResultTerminatorObservation } from './ResultStream';
-
-export interface MySqlLongDataExecutor {
-  execute(statement: MySqlPreparedStatement, parameters: MySqlParameter[],
-    sources: MySqlLongParameter[], options?: MySqlLongDataOptions): Promise<MySqlQueryResult>;
-}
 
 export interface MySqlLongDataHost extends MySqlPreparedSessionHost {
   readonly timers: ConnectionTimerPort;

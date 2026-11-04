@@ -3,7 +3,8 @@ import { MySqlPreparedExecutorHost } from '../command/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
 } from '../command/PreparedStatement';
-import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
+import { MySqlNamedExecutor } from '../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
 import { MySqlParameter } from '../model/MySqlParameter';
@@ -18,13 +19,6 @@ import {
   CompiledSqlTemplate, SqlTemplateScanner
 } from '../value/SqlTemplateScanner';
 import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
-
-export interface MySqlNamedExecutor {
-  execute(sql: string, parameters: MySqlNamedParameter[],
-    options?: QueryOptions): Promise<MySqlQueryResult>;
-  executeStream(sql: string, parameters: MySqlNamedParameter[], options: QueryOptions,
-    sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
-}
 
 export interface MySqlNamedExecutorHost extends MySqlPreparedExecutorHost {
   readSessionSqlMode(scope: MySqlCommandScope): Promise<string>;

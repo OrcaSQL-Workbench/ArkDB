@@ -112,31 +112,34 @@ See [release and verification requirements](docs/releasing.md) before publishing
 | `AppScope/`, `hvigor/`, root build files | Required metadata for the current HAR-only Hvigor workspace; no application UI or runtime |
 | `docs/` | Release guidance and extraction/upstream provenance |
 | `examples/mysql-client/` | A runnable Stage-model HAP/Worker sample consuming the actual HAR, with offline lifecycle tests |
+| `examples/mysql-device-acceptance/` | A dedicated release-bound device acceptance HAP/Worker harness, excluded from the ordinary consumer fingerprint |
 | `tools/` | Maintainer-only launchers, checks, and packaging; not driver runtime dependencies |
 
 `dist/`, `.hvigor/`, module `build/` and `.test/` directories, generated `BuildProfile.ets` files, `node_modules/`, and `oh_modules/` are generated and ignored. Root npm dependencies support maintenance. Development source imports core; the emitted MySQL HAR embeds that source and has no external core dependency. Root and module build manifests have different roles: source-workspace orchestration versus delivery compilation.
 
 Local validation includes SDK-free checks and actual ArkTS compilation/native contract suites. The exact-archive consumer gate restores one HAR with a fresh cache and unavailable registry before compiling its packaged examples and sample HAP. Only then does it acquire the test framework and run offline cases, including driver-created error identity. Records bind evidence to candidate bytes; source checks alone are not archive-consumption evidence. Device networking/TLS/cancellation remain unverified. Publication requires the separate authorized clean-source release workflow.
 
-The sample also contains an acceptance-disabled device suite. Preparation
-requires exact clean sealed source, copies the sample and sealed HAR to an
-isolated workspace, embeds one Ed25519 private key, compiles the unsigned HAP,
-records that exact HAP digest/size, removes the private source copy, and commits
-the 24-hour pending challenge last. After owner signing, the operator records
-the actual signed/installed HAP digest and evidence ID in the bound page. The
-signed canonical receipt binds profile/features, run ID, clean source, HAR,
-sample, signed HAP, API/device class, verified TLS mode, auth plugin, run times,
-immutable challenge window, operator evidence ID and ordered case durations/verdicts. The UI exports its
-exact JSON through an explicit clipboard action. No host, port, account,
-password, schema, CA path or query data is included. The validator separately
-hashes the supplied signed HAP, compares its signing-independent application
-content with the prepared harness, verifies the package signature with
-`hap-sign-tool.jar verify-app`, and checks the sealed manifest/consumer before
-publishing external evidence. The verified certificate-chain and provisioning
-profile digests are retained in that evidence. Operator evidence is bound, but
-direct physical-device and authorized-schema attestations are not inferred.
-Preparation and synthetic tests are not device evidence; hardware attestation,
-read-only grants and production certification remain explicitly false.
+The dedicated device-acceptance harness is separate from the ordinary sample.
+Preparation requires exact clean sealed source, verifies the release-bound
+ordinary consumer fingerprint, independently captures the acceptance harness
+fingerprint, copies that harness and the sealed HAR to an isolated workspace,
+embeds one Ed25519 private key, compiles the unsigned HAP, records that exact HAP
+digest/size, removes the private source copy, and commits the 24-hour pending
+challenge last. The schema-2 canonical receipt binds both fingerprints plus
+profile/features, run ID, clean source, HAR, signed HAP, API/device class,
+verified TLS mode, auth plugin, run times, immutable challenge window, operator
+evidence ID and ordered case durations/verdicts. Immutable schema-1
+pending/verifying/terminal records retain their original `sampleFingerprint`
+contract and are read without rewriting. The UI exports exact JSON through an
+explicit clipboard action; no host, port, account, password, schema, CA path or
+query data is included. The validator separately hashes the supplied signed HAP,
+compares its signing-independent application content with the prepared harness,
+verifies the package signature with `hap-sign-tool.jar verify-app`, and checks
+the sealed manifest/consumer before publishing external evidence. Operator
+evidence is bound, but direct physical-device and authorized-schema attestations
+are not inferred. Preparation and synthetic tests are not device evidence;
+hardware attestation, read-only grants and production certification remain
+explicitly false.
 
 Use the matching source/consumer when verifying an older major release. Historical single-HAR and dependency-set records remain readable without treating them as evidence for the current architecture.
 

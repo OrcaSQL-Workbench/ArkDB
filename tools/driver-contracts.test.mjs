@@ -17,7 +17,13 @@ test('core is a real independent shared HAR, not an extra database driver', () =
   assert.deepEqual(discoverPackages().map((entry) => [entry.id, entry.kind]), [['core', 'shared'], ['mysql', 'driver']]);
   assert.deepEqual(dependencyClosure().map((entry) => entry.id), ['core', 'mysql']);
   assert.throws(() => resolveDriver(ROOT, 'core'), /not a database driver/);
-  assert.deepEqual(driverVerification().nativeModules, ['core', 'mysql']);
+  const verification = driverVerification();
+  assert.deepEqual(verification.nativeModules, ['core', 'mysql']);
+  assert.equal(verification.consumer, 'examples/mysql-client');
+  assert.equal(verification.deviceConsumer, 'examples/mysql-device-acceptance');
+  assert.equal(verification.consumerDirectory, join(ROOT, 'examples', 'mysql-client'));
+  assert.equal(verification.deviceConsumerDirectory,
+    join(ROOT, 'examples', 'mysql-device-acceptance'));
 });
 
 test('shared contracts describe callback-scoped transaction sessions', async () => {

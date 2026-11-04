@@ -85,14 +85,15 @@ class DeviceCaseResult {
 }
 
 class DeviceReceiptPayload {
-  schemaVersion: number = 1;
+  schemaVersion: number = 2;
   profile: string = '';
   features: string[] = [];
   runId: string = '';
   sourceCommit: string = '';
   sourceClean: boolean = true;
   harSha256: string = '';
-  sampleFingerprint: string = '';
+  consumerFingerprint: string = '';
+  acceptanceFingerprint: string = '';
   hapSha256: string = '';
   apiVersion: number = 0;
   deviceClass: string = '';
@@ -394,7 +395,8 @@ export class DeviceAcceptanceRunner {
     receipt.sourceCommit = this.binding.sourceCommit;
     receipt.sourceClean = true;
     receipt.harSha256 = this.binding.artifactSha256;
-    receipt.sampleFingerprint = this.binding.sampleFingerprint;
+    receipt.consumerFingerprint = this.binding.consumerFingerprint;
+    receipt.acceptanceFingerprint = this.binding.acceptanceFingerprint;
     receipt.hapSha256 = hapSha256;
     receipt.apiVersion = platformInfo.sdkApiVersion;
     receipt.deviceClass = platformInfo.deviceType;
@@ -424,7 +426,8 @@ function validBinding(binding: DeviceEvidenceIdentity): boolean {
     /^[0-9a-f]{40}$/.test(binding.sourceCommit) &&
     /^[0-9a-f]{64}$/.test(binding.artifactSha256) &&
     Number.isSafeInteger(binding.artifactByteLength) && binding.artifactByteLength > 0 &&
-    /^[0-9a-f]{64}$/.test(binding.sampleFingerprint) &&
+    /^[0-9a-f]{64}$/.test(binding.consumerFingerprint) &&
+    /^[0-9a-f]{64}$/.test(binding.acceptanceFingerprint) &&
     /^[A-Za-z0-9+/]+={0,2}$/.test(binding.publicKeySpkiBase64) &&
     /^[0-9a-f]{64}$/.test(binding.publicKeySpkiSha256) &&
     /^[A-Za-z0-9+/]+={0,2}$/.test(binding.privateKeyPkcs8Base64) &&

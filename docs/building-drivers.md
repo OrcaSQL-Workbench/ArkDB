@@ -63,16 +63,22 @@ regression and is not retroactively rewritten.
 This is local compilation evidence, not a signed/deployed application identity
 or device result.
 
-The device suite is another separate layer. Its committed sample is disabled.
+The device suite is another separate layer under
+`examples/mysql-device-acceptance`; the ordinary `examples/mysql-client`
+consumer contains no acceptance implementation. The committed acceptance
+harness is disabled.
 After `release:prepare` has produced an immutable bundle, `npm run
 device:prepare -- --driver mysql --bundle dist\mysql-v<version>` requires
-clean `HEAD == sourceCommit`, rechecks source/sample/bundle identity, copies the
-sample and exact sealed HAR into an isolated workspace, generates one Ed25519
-key pair, embeds the private key, and builds the unsigned HAP. The challenge
-binds its exact digest/size plus the release-set digest, source commit, HAR
-digest/size, sample fingerprint, case-manifest digest, API-24 platform, nonce
-and canonical 24-hour timestamps. Generated source and private key are removed;
-the pending challenge is committed last. Preparation does not sign for
+clean `HEAD == sourceCommit`, rechecks source/bundle identity and the ordinary
+consumer fingerprint, independently fingerprints the acceptance harness, copies
+that harness and the exact sealed HAR into an isolated workspace, generates one
+Ed25519 key pair, embeds the private key, and builds the unsigned HAP. New
+schema-2 challenges bind the ordinary `consumerFingerprint` and separate
+`acceptanceFingerprint` plus the exact HAP digest/size, release-set digest,
+source commit, HAR digest/size, case-manifest digest, API-24 platform, nonce and
+canonical 24-hour timestamps. Generated source and private key are removed; the
+pending challenge is committed last. Immutable schema-1 states keep their
+original `sampleFingerprint` meaning. Preparation does not sign for
 distribution, install or run the HAP and cannot establish device acceptance.
 
 A later captured receipt is copied exactly from the app and checked with `npm

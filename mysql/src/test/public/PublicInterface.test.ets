@@ -13,7 +13,8 @@ import {
   MySqlPreparedExecutor, MySqlPreparedStatement,
   MySqlProcedureCaller, MySqlProcedureArgument, MySqlParameterDirection,
   MySqlProcedureResult,
-  MySqlSession, MySqlBatchError, MySqlBatchOptions, MySqlBatchResult,
+  MySqlSession, MySqlTransactionOptions, MySqlTransactionRunner,
+  MySqlBatchError, MySqlBatchOptions, MySqlBatchResult,
   MySqlInsertRowsExecutor, MySqlInsertRowsOptions,
   MySqlDeadlineOptions, MySqlDeadlineExecutor, MySqlSessionController,
   MySqlByteSource, MySqlLongDataExecutor, MySqlLongDataOptions,
@@ -732,6 +733,35 @@ export default function publicInterfaceTest(): void {
       expect(features.prepared === undefined).assertTrue();
       expect(features.named === undefined).assertTrue();
     });
+
+    it('keepsSessionAndTransactionContractsStructurallyAssignableAtThePackageRoot', 0, async () => {
+      const features = new MySqlConnectionFeatures();
+      const session = new PublicContractSession(features);
+      const controller = new PublicContractSessionController();
+      const runner: MySqlTransactionRunner = new PublicContractTransactionRunner(session);
+      features.session = controller;
+      features.transactions = runner;
+
+      const transactions = features.transactions;
+      if (transactions === undefined) throw new Error('Expected transaction contract.');
+      const result = await transactions.run<string>(new MySqlTransactionOptions(),
+        async (borrowed: MySqlSession): Promise<string> => {
+          const borrowedFeatures: MySqlConnectionFeatures = borrowed.mysqlFeatures;
+          expect(borrowedFeatures === features).assertTrue();
+          await borrowed.savepoint('public');
+          await borrowed.rollbackTo('public');
+          await borrowed.releaseSavepoint('public');
+          return (await borrowed.query('SELECT 1')).rows.length.toString();
+        });
+      const sessionController = features.session;
+      if (sessionController === undefined) throw new Error('Expected session contract.');
+      await sessionController.reset();
+
+      expect(result).assertEqual('0');
+      expect(session.operations.join(',')).assertEqual(
+        'savepoint:public,rollbackTo:public,releaseSavepoint:public,query:SELECT 1');
+      expect(controller.resetCount).assertEqual(1);
+    });
   });
 }
 
@@ -758,6 +788,60 @@ class LegacyCustomConnection extends QueryOnlyConnection implements DbConnection
 
 class FeatureOnlyConnection extends LegacyCustomConnection {
   readonly mysqlFeatures: MySqlConnectionFeatures = new MySqlConnectionFeatures();
+}
+
+class PublicContractSessionController implements MySqlSessionController {
+  resetCount: number = 0;
+
+  async reset(): Promise<void> {
+    this.resetCount += 1;
+  }
+}
+
+class PublicContractTransactionRunner implements MySqlTransactionRunner {
+  private readonly session: MySqlSession;
+
+  constructor(session: MySqlSession) {
+    this.session = session;
+  }
+
+  run<T>(_options: MySqlTransactionOptions,
+    body: (session: MySqlSession) => Promise<T>): Promise<T> {
+    return body(this.session);
+  }
+}
+
+class PublicContractSession implements MySqlSession {
+  readonly mysqlFeatures: MySqlConnectionFeatures;
+  readonly serverInfo: ServerInfo = new ServerInfo();
+  readonly sessionStatus: DatabaseSessionStatus = new DatabaseSessionStatus();
+  readonly operations: string[] = [];
+
+  constructor(features: MySqlConnectionFeatures) {
+    this.mysqlFeatures = features;
+  }
+
+  async query(sql: string): Promise<QueryResult> {
+    this.operations.push('query:' + sql);
+    return new QueryResult();
+  }
+
+  async queryStream(_sql: string, _options: QueryOptions,
+    _sink: QueryResultSink): Promise<QueryExecutionSummary> {
+    return new QueryExecutionSummary();
+  }
+
+  async savepoint(name: string): Promise<void> {
+    this.operations.push('savepoint:' + name);
+  }
+
+  async rollbackTo(name: string): Promise<void> {
+    this.operations.push('rollbackTo:' + name);
+  }
+
+  async releaseSavepoint(name: string): Promise<void> {
+    this.operations.push('releaseSavepoint:' + name);
+  }
 }
 
 class PublicExecutionObserver implements MySqlExecutionObserver {

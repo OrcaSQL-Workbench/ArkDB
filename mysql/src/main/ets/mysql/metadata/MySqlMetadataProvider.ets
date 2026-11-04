@@ -5,7 +5,7 @@ import {
 import { utf8Decode } from '../protocol/Charsets';
 import { mysqlMetadataLiteral } from './MySqlMetadataSql';
 import { mysqlDatabaseForContext } from '../model/MySqlContext';
-import { MySqlMetadataProviderContract } from '../driver/MySqlContracts';
+import { MySqlMetadataProviderContract } from '../api/MySqlContracts';
 
 const SYSTEM_SCHEMAS: string[] = ['information_schema', 'mysql', 'performance_schema', 'sys'];
 

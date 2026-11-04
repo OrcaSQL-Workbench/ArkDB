@@ -2,7 +2,7 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryResult, ServerInfo
 } from '@arkdb/core';
-import { MySqlBatchExecutor } from '../../../main/ets/mysql/execution/MySqlBatchExecutor';
+import { MySqlBatchExecutor } from '../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult
 } from '../../../main/ets/mysql/model/MySqlBatch';

@@ -3,7 +3,7 @@ import { ArkDbError, ArkDbErrorKind, ConnectionState, QueryOptions } from '@arkd
 import {
   MySqlPreparedSession, MySqlPreparedSessionHost
 } from '../../../main/ets/mysql/command/PreparedStatement';
-import { MySqlPreparedStatement } from '../../../main/ets/mysql/driver/MySqlPreparedContracts';
+import { MySqlPreparedStatement } from '../../../main/ets/mysql/api/MySqlPreparedContracts';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandLifecycleObserver, MySqlCommandScope
 } from '../../../main/ets/mysql/execution/MySqlCommandGate';

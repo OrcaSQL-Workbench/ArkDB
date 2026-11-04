@@ -1,6 +1,4 @@
-export interface MySqlSessionController {
-  reset(): Promise<void>;
-}
+import { MySqlSessionController } from '../api/MySqlFeatureContracts';
 
 export class MySqlConnectionSessionController implements MySqlSessionController {
   private resetSession: () => Promise<void>;

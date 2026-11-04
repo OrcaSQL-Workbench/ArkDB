@@ -1,7 +1,7 @@
 import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
 import {
   MySqlPreparedExecutor as PreparedExecutorContract, MySqlPreparedStatement
-} from '../driver/MySqlPreparedContracts';
+} from '../api/MySqlPreparedContracts';
 import { MySqlParameter } from '../model/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';

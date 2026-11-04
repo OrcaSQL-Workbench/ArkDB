@@ -1,12 +1,7 @@
+import { MySqlDeadlineExecutor } from '../api/MySqlFeatureContracts';
 import { MySqlParameter } from '../model/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlDeadlineOptions } from '../model/MySqlDeadlineOptions';
-
-export interface MySqlDeadlineExecutor {
-  query(sql: string, options?: MySqlDeadlineOptions): Promise<MySqlQueryResult>;
-  execute(sql: string, parameters: MySqlParameter[],
-    options?: MySqlDeadlineOptions): Promise<MySqlQueryResult>;
-}
 
 type MySqlDeadlineQueryRunner =
   (sql: string, options: MySqlDeadlineOptions) => Promise<MySqlQueryResult>;

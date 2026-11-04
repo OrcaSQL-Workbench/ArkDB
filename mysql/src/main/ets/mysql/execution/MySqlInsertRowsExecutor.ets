@@ -3,7 +3,8 @@ import { MySqlPreparedExecutorHost } from '../command/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
 } from '../command/PreparedStatement';
-import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
+import { MySqlInsertRowsExecutor } from '../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import { MySqlParameter } from '../model/MySqlParameter';
 import {
   MySqlInsertRowsOptions, validateMySqlInsertRowsOptions
@@ -26,11 +27,6 @@ import {
   mySqlBatchItemOptions, mySqlBatchResultBytes
 } from './MySqlBatchSupport';
 import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
-
-export interface MySqlInsertRowsExecutor {
-  execute(tableParts: string[], columns: string[], rows: MySqlParameter[][],
-    options?: MySqlInsertRowsOptions): Promise<MySqlBatchResult>;
-}
 
 export class MySqlInsertRowsInput {
   readonly tableParts: string[];

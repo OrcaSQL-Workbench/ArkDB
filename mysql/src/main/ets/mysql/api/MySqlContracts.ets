@@ -10,14 +10,16 @@ import {
   MySqlDatabaseSessionStatus, MySqlQueryExecutionSummary, MySqlQueryResultSink
 } from '../model/MySqlQueryStream';
 import { MySqlMetricsProvider } from '../metrics/MySqlMetricsProvider';
-import { MySqlConnectionFeatures } from './MySqlConnectionFeatures';
+import {
+  MySqlConnectionFeatures, MySqlFeatureConnection
+} from './MySqlConnectionFeatures';
 
 export class MySqlDriverCapabilities extends DriverCapabilities {
   supportsSchemas: boolean = true;
   supportsTransactions: boolean = true;
 }
 
-export interface MySqlDbConnection extends CoreDbConnection {
+export interface MySqlDbConnection extends CoreDbConnection, MySqlFeatureConnection {
   connect(): Promise<void>;
   ping(): Promise<void>;
   query(sql: string): Promise<MySqlQueryResult>;

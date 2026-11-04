@@ -1,6 +1,6 @@
 import { ArkDbError } from '@arkdb/core';
 import { MySqlPreparedSession } from '../command/PreparedStatement';
-import { MySqlPreparedStatement } from '../driver/MySqlPreparedContracts';
+import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import { MySqlCommandGate, MySqlCommandScope } from './MySqlCommandGate';
 
 export interface MySqlStatementCacheBorrow {

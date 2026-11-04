@@ -2,7 +2,7 @@ import {
   ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryOptions, QueryResult, ServerInfo
 } from '@arkdb/core';
 import { describe, expect, it } from '@ohos/hypium';
-import { MySqlNamedExecutor } from '../../../main/ets/mysql/execution/MySqlNamedExecutor';
+import { MySqlNamedExecutor } from '../../../main/ets/mysql/api/MySqlFeatureContracts';
 import { MySqlNamedParameter } from '../../../main/ets/mysql/model/MySqlNamedParameter';
 import { MySqlExecutionOutcome, MySqlOperationError } from
   '../../../main/ets/mysql/model/MySqlOperationError';

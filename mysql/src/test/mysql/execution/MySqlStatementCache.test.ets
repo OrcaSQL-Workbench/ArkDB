@@ -3,7 +3,9 @@ import {
   ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionState, DbConnection, QueryOptions, QueryTruncation
 } from '@arkdb/core';
 import { MySqlConnection } from '../../../main/ets/mysql/MySqlConnection';
-import { MySqlPreparedExecutor, MySqlPreparedStatement } from '../../../main/ets/mysql/driver/MySqlPreparedContracts';
+import {
+  MySqlPreparedExecutor, MySqlPreparedStatement
+} from '../../../main/ets/mysql/api/MySqlPreparedContracts';
 import {
   MySqlPreparedSession, MySqlPreparedSessionHost
 } from '../../../main/ets/mysql/command/PreparedStatement';

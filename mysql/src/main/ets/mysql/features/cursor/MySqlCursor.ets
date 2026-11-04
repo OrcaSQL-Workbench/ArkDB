@@ -3,41 +3,41 @@ import {
 } from '@arkdb/core';
 import {
   MySqlCursor, MySqlCursorExecutor
-} from '../api/MySqlCursorContracts';
-import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+} from '../../api/MySqlCursorContracts';
+import { MySqlPreparedStatement } from '../../api/MySqlPreparedContracts';
 import {
   MySqlCommandPhase, MySqlCommandScope
-} from '../execution/MySqlCommandGate';
+} from '../../execution/MySqlCommandGate';
 import {
   MySqlCursorOptions, validateMySqlCursorOptions
-} from '../model/MySqlCursorOptions';
+} from './MySqlCursorOptions';
 import {
   MySqlExecutionOutcome, MySqlOperationError
-} from '../model/MySqlOperationError';
-import { MySqlParameter } from '../features/prepared/MySqlParameter';
+} from '../../model/MySqlOperationError';
+import { MySqlParameter } from '../prepared/MySqlParameter';
 import {
   MySqlColumnDef, MySqlValue
-} from '../model/MySqlQueryResult';
+} from '../../model/MySqlQueryResult';
 import {
   Capabilities, PacketType, StatusFlags
-} from '../protocol/Constants';
+} from '../../protocol/Constants';
 import {
   MysqlPacket, MysqlPacketSource
-} from '../protocol/PacketChannel';
+} from '../../protocol/PacketChannel';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../features/prepared/BinaryParameterEncoder';
-import { BinaryRowDecoder } from '../features/prepared/BinaryRowDecoder';
-import { parseColumnDef } from './ColumnDefinition';
+} from '../prepared/BinaryParameterEncoder';
+import { BinaryRowDecoder } from '../prepared/BinaryRowDecoder';
+import { parseColumnDef } from '../../command/ColumnDefinition';
 import {
   copyMySqlColumnDef, MySqlPreparedSession, MySqlPreparedSessionHost,
   preparedCleanup, preparedFailure
-} from '../features/prepared/PreparedStatement';
-import { prepareServerError } from '../features/prepared/PrepareResponse';
+} from '../prepared/PreparedStatement';
+import { prepareServerError } from '../prepared/PrepareResponse';
 import {
   isResultTerminator, parseResultTerminator
-} from './ResultStream';
-import { parseOk } from './ResultPackets';
+} from '../../command/ResultStream';
+import { parseOk } from '../../command/ResultPackets';
 
 export interface MySqlCursorExecutorHost extends MySqlPreparedSessionHost {
   startCursor<T>(operation: (scope: MySqlCommandScope) => Promise<T>): Promise<T>;

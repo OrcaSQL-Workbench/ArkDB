@@ -1,9 +1,9 @@
 import { buffer } from '@kit.ArkTS';
 import { ArkDbError } from '@arkdb/core';
-import { MySqlParameter, MySqlParameterType } from '../model/MySqlParameter';
-import { utf8Encode } from '../protocol/Charsets';
-import { ColumnType } from '../protocol/Constants';
-import { PacketWriter } from '../protocol/PacketWriter';
+import { MySqlParameter, MySqlParameterType } from './MySqlParameter';
+import { utf8Encode } from '../../protocol/Charsets';
+import { ColumnType } from '../../protocol/Constants';
+import { PacketWriter } from '../../protocol/PacketWriter';
 
 export interface EncodedBinaryParameters {
   readonly nullBitmap: Uint8Array;

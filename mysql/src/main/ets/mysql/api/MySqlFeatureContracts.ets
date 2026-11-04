@@ -7,7 +7,7 @@ import {
   MySqlLongDataOptions, MySqlLongParameter
 } from '../model/MySqlLongDataOptions';
 import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
-import { MySqlParameter } from '../model/MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {
   MySqlProcedureArgument, MySqlProcedureResult
 } from '../model/MySqlProcedure';

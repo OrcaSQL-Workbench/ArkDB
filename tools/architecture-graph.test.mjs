@@ -110,7 +110,7 @@ const ARCHITECTURE_POLICY = {
     },
     {
       from: /^mysql\/src\/main\/ets\/mysql\/api\//,
-      to: /^mysql\/src\/main\/ets\/mysql\/(?:MySqlConnection\.ets|command\/|driver\/|execution\/|protocol\/|transport\/)/,
+      to: /^mysql\/src\/main\/ets\/mysql\/(?:MySqlConnection\.ets|command\/|driver\/|execution\/|features\/prepared\/(?!MySqlParameter\.ets$)|protocol\/|transport\/)/,
       message: 'MySQL public contracts must not depend on implementation ownership.'
     },
     ...TOOL_LAYER_RULES
@@ -732,5 +732,25 @@ test('rejects MySQL api dependencies on implementation ownership', () => {
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
     /MySQL public contracts must not depend on implementation ownership.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/execution\/MySqlTransactionRunner\.ets/
+  );
+});
+
+test('rejects MySQL api dependencies on prepared implementation ownership', () => {
+  const graph = {
+    files: [
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets',
+      'mysql/src/main/ets/mysql/features/prepared/PreparedExecutor.ets'
+    ],
+    dependencies: {
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets': [
+        'mysql/src/main/ets/mysql/features/prepared/PreparedExecutor.ets'
+      ],
+      'mysql/src/main/ets/mysql/features/prepared/PreparedExecutor.ets': []
+    }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+    /MySQL public contracts must not depend on implementation ownership.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/features\/prepared\/PreparedExecutor\.ets/
   );
 });

@@ -4,7 +4,7 @@ import {
 import {
   MySqlCursorExecutorHost
 } from '../command/MySqlCursor';
-import { prepareServerError } from '../command/PrepareResponse';
+import { prepareServerError } from '../features/prepared/PrepareResponse';
 import {
   MySqlResultTerminatorObservation
 } from '../command/ResultStream';

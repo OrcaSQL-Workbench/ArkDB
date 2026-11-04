@@ -1,5 +1,5 @@
 import { QueryOptions } from '@arkdb/core';
-import { MySqlParameter } from '../model/MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import { MySqlColumnDef, MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';
 

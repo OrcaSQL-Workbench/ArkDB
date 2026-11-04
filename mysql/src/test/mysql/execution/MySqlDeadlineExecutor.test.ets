@@ -9,7 +9,9 @@ import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../../../main/ets/mysql/model/MySqlOperationError';
 import { MySqlDeadlineOptions } from '../../../main/ets/mysql/model/MySqlDeadlineOptions';
-import { MySqlParameter } from '../../../main/ets/mysql/model/MySqlParameter';
+import {
+  MySqlParameter
+} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {
   MySqlDeadlineExecutor
 } from '../../../main/ets/mysql/api/MySqlFeatureContracts';

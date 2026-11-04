@@ -15,9 +15,13 @@ import {
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../model/MySqlOperationError';
-import { MySqlParameter, MySqlParameterType } from '../model/MySqlParameter';
+import {
+  MySqlParameter, MySqlParameterType
+} from '../features/prepared/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
-import { encodeBinaryParameters } from '../value/BinaryParameterEncoder';
+import {
+  encodeBinaryParameters
+} from '../features/prepared/BinaryParameterEncoder';
 import {
   MySqlPromiseUploadAbortSignal, MySqlUploadChunkWriter,
   MySqlUploadFailure, MySqlUploadPump
@@ -25,7 +29,7 @@ import {
 import {
   MySqlPreparedSession, MySqlPreparedSessionHost,
   preparedCleanup, preparedFailure
-} from './PreparedStatement';
+} from '../features/prepared/PreparedStatement';
 import { MySqlResultTerminatorObservation } from './ResultStream';
 
 export interface MySqlLongDataHost extends MySqlPreparedSessionHost {

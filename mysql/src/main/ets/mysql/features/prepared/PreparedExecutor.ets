@@ -1,21 +1,31 @@
 import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
 import {
   MySqlPreparedExecutor as PreparedExecutorContract, MySqlPreparedStatement
-} from '../api/MySqlPreparedContracts';
-import { MySqlParameter } from '../model/MySqlParameter';
-import { MySqlQueryResult } from '../model/MySqlQueryResult';
-import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';
-import { MySqlCommandKind, MySqlCommandScope } from '../execution/MySqlCommandGate';
-import { MySqlStatementCache, MySqlStatementCacheBorrow } from '../execution/MySqlStatementCache';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { EncodedBinaryParameters, encodeBinaryParameters } from '../value/BinaryParameterEncoder';
+} from '../../api/MySqlPreparedContracts';
+import { MySqlParameter } from './MySqlParameter';
+import { MySqlQueryResult } from '../../model/MySqlQueryResult';
+import {
+  MySqlQueryExecutionSummary, MySqlQueryResultSink
+} from '../../model/MySqlQueryStream';
+import {
+  MySqlCommandKind, MySqlCommandScope
+} from '../../execution/MySqlCommandGate';
+import {
+  MySqlStatementCache, MySqlStatementCacheBorrow
+} from './MySqlStatementCache';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../model/MySqlOperationError';
+import {
+  EncodedBinaryParameters, encodeBinaryParameters
+} from './BinaryParameterEncoder';
 import {
   MySqlPreparedSession, MySqlPreparedStatementRunner,
   preparedCleanup, preparedFailure
 } from './PreparedStatement';
 import {
   MySqlLongDataHost, MySqlPreparedLongDataExecutor
-} from './LongData';
+} from '../../command/LongData';
 
 export interface MySqlPreparedExecutorHost extends MySqlLongDataHost {
   readonly preparedCacheSize: number;

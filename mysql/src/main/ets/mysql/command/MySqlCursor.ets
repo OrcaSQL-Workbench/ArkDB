@@ -14,7 +14,7 @@ import {
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../model/MySqlOperationError';
-import { MySqlParameter } from '../model/MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {
   MySqlColumnDef, MySqlValue
 } from '../model/MySqlQueryResult';
@@ -26,14 +26,14 @@ import {
 } from '../protocol/PacketChannel';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../value/BinaryParameterEncoder';
-import { BinaryRowDecoder } from '../value/BinaryRowDecoder';
+} from '../features/prepared/BinaryParameterEncoder';
+import { BinaryRowDecoder } from '../features/prepared/BinaryRowDecoder';
 import { parseColumnDef } from './ColumnDefinition';
 import {
   copyMySqlColumnDef, MySqlPreparedSession, MySqlPreparedSessionHost,
   preparedCleanup, preparedFailure
-} from './PreparedStatement';
-import { prepareServerError } from './PrepareResponse';
+} from '../features/prepared/PreparedStatement';
+import { prepareServerError } from '../features/prepared/PrepareResponse';
 import {
   isResultTerminator, parseResultTerminator
 } from './ResultStream';

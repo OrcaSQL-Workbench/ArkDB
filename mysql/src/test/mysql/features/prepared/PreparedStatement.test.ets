@@ -2,19 +2,23 @@ import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind, ConnectionState, QueryOptions } from '@arkdb/core';
 import {
   MySqlPreparedSession, MySqlPreparedSessionHost
-} from '../../../main/ets/mysql/command/PreparedStatement';
-import { MySqlPreparedStatement } from '../../../main/ets/mysql/api/MySqlPreparedContracts';
+} from '../../../../main/ets/mysql/features/prepared/PreparedStatement';
+import {
+  MySqlPreparedStatement
+} from '../../../../main/ets/mysql/api/MySqlPreparedContracts';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandLifecycleObserver, MySqlCommandScope
-} from '../../../main/ets/mysql/execution/MySqlCommandGate';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperationError';
+} from '../../../../main/ets/mysql/execution/MySqlCommandGate';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlQueryResultMeta, MySqlQueryResultSink, MySqlQueryResultSummary, MySqlQueryRowChunk
-} from '../../../main/ets/mysql/model/MySqlQueryStream';
-import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
-import { PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
-import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
-import { PacketTransportFixture } from '../protocol/PacketTransportFixture';
+} from '../../../../main/ets/mysql/model/MySqlQueryStream';
+import { Capabilities } from '../../../../main/ets/mysql/protocol/Constants';
+import { PacketChannel } from '../../../../main/ets/mysql/protocol/PacketChannel';
+import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
+import { PacketTransportFixture } from '../../protocol/PacketTransportFixture';
 
 class PreparedTransport extends PacketTransportFixture {
   failWriteAt: number = 0;

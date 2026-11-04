@@ -1,21 +1,29 @@
 import { ArkDbError, ConnectionState, Logger, LogTag, QueryOptions } from '@arkdb/core';
-import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+import { MySqlPreparedStatement } from '../../api/MySqlPreparedContracts';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
-} from '../execution/MySqlCommandGate';
+} from '../../execution/MySqlCommandGate';
 import {
   mysqlCleanupError, mysqlOperationFailure
-} from '../execution/MySqlFailure';
-import { MySqlParameter } from '../model/MySqlParameter';
-import { MySqlColumnDef, MySqlQueryResult } from '../model/MySqlQueryResult';
-import { MySqlQueryExecutionSummary, MySqlQueryResultSink } from '../model/MySqlQueryStream';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { Capabilities, Command, PacketType, StatusFlags } from '../protocol/Constants';
-import { utf8Encode } from '../protocol/Charsets';
-import { PacketChannel } from '../protocol/PacketChannel';
-import { EncodedBinaryParameters } from '../value/BinaryParameterEncoder';
+} from '../../execution/MySqlFailure';
+import { MySqlParameter } from './MySqlParameter';
+import {
+  MySqlColumnDef, MySqlQueryResult
+} from '../../model/MySqlQueryResult';
+import {
+  MySqlQueryExecutionSummary, MySqlQueryResultSink
+} from '../../model/MySqlQueryStream';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../model/MySqlOperationError';
+import {
+  Capabilities, Command, PacketType, StatusFlags
+} from '../../protocol/Constants';
+import { utf8Encode } from '../../protocol/Charsets';
+import { PacketChannel } from '../../protocol/PacketChannel';
+import { EncodedBinaryParameters } from './BinaryParameterEncoder';
 import { PrepareResponse, prepareServerError } from './PrepareResponse';
-import { parseOk } from './ResultPackets';
+import { parseOk } from '../../command/ResultPackets';
 
 const MAX_PREPARE_COMMAND_BYTES = 16 * 1024 * 1024;
 const OPTIONAL_RESULTSET_METADATA = 0x02000000;

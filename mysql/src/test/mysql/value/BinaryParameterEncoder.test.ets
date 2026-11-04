@@ -1,7 +1,11 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
-import { MySqlParameter, MySqlParameterType, MySqlParameterValue } from '../../../main/ets/mysql/model/MySqlParameter';
-import { encodeBinaryParameters } from '../../../main/ets/mysql/value/BinaryParameterEncoder';
+import {
+  MySqlParameter, MySqlParameterType, MySqlParameterValue
+} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
+import {
+  encodeBinaryParameters
+} from '../../../main/ets/mysql/features/prepared/BinaryParameterEncoder';
 
 export default function binaryParameterEncoderTest(): void {
   describe('BinaryParameterEncoder', () => {

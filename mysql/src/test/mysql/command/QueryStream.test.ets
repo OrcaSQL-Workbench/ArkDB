@@ -5,7 +5,9 @@ import {
 } from '@arkdb/core';
 import { parseQueryStream, parseResultSet } from '../../../main/ets/mysql/command/Query';
 import { parseBufferedResultStream, parseResultStream } from '../../../main/ets/mysql/command/ResultStream';
-import { BinaryRowDecoder } from '../../../main/ets/mysql/value/BinaryRowDecoder';
+import {
+  BinaryRowDecoder
+} from '../../../main/ets/mysql/features/prepared/BinaryRowDecoder';
 import { Capabilities, ColumnType, FieldFlag, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
 import { MysqlPacket, MysqlPacketSource, PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';

@@ -1,11 +1,14 @@
 import { ArkDbError } from '@arkdb/core';
-import { MySqlPreparedExecutorHost } from '../command/PreparedExecutor';
+import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
-} from '../command/PreparedStatement';
+} from '../features/prepared/PreparedStatement';
 import { MySqlInsertRowsExecutor } from '../api/MySqlFeatureContracts';
 import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
-import { MySqlParameter } from '../model/MySqlParameter';
+import {
+  OwnedStatementLifecycle
+} from '../features/prepared/OwnedStatementLifecycle';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {
   MySqlInsertRowsOptions, validateMySqlInsertRowsOptions
 } from '../model/MySqlInsertRows';
@@ -19,7 +22,7 @@ import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import { utf8Encode } from '../protocol/Charsets';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../value/BinaryParameterEncoder';
+} from '../features/prepared/BinaryParameterEncoder';
 import {
   mysqlPlaceholders, quoteMySqlIdentifier
 } from '../value/MySqlSqlHelpers';
@@ -57,6 +60,7 @@ export class MySqlInsertRowsGroup {
 export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor {
   private host: MySqlPreparedExecutorHost;
   private session: MySqlPreparedSession;
+  private lifecycle: OwnedStatementLifecycle;
   private executionBarrier: ((
     scope: MySqlCommandScope) => Promise<void>) | null;
 
@@ -65,6 +69,7 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
       scope: MySqlCommandScope) => Promise<void>) {
     this.host = host;
     this.session = new MySqlPreparedSession(host);
+    this.lifecycle = new OwnedStatementLifecycle(this.session);
     this.executionBarrier =
       executionBarrier === undefined ? null : executionBarrier;
   }
@@ -114,89 +119,62 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
         throw ArkDbError.validation(
           'Restricted INSERT buffered result budget is exhausted.');
       }
-      let statement: MySqlPreparedStatement | null = null;
-      let primary: Object | null = null;
-      const cleanup: ArkDbError[] = [];
-      try {
-        const sql = insertSql(
-          input.tableParts, input.columns, group.rows.length);
-        statement = await this.session.prepareOwned(scope, sql);
-        const parameters: MySqlParameter[] =
-          flattenParameters(group.rows);
-        const encoded: EncodedBinaryParameters =
-          encodeBinaryParameters(parameters, statement.parameterCount);
-        this.host.commandGate.assertDeadlineActive(scope);
-        let capturedResult: MySqlQueryResult | null = null;
-        let result: MySqlQueryResult | null = null;
-        let executionFailure: Object | null = null;
-        try {
-          result = await this.session.executeOwned(
-            scope, statement, encoded,
-            (command: Uint8Array): Promise<MySqlQueryResult> =>
-              this.host.executePrepared(
-                scope, command,
-                mySqlBatchItemOptions(
-                  input.options.queryOptions, remainingBytes),
-                (decoded: MySqlQueryResult): void => {
-                  capturedResult = decoded;
-                }));
-        } catch (error) {
-          executionFailure = error as Object;
-        }
-
-        const decodedResult: MySqlQueryResult | null =
-          capturedResult === null ? result : capturedResult;
-        if (decodedResult !== null) {
-          progress.completed.push(decodedResult);
-          const loadedBytes = mySqlBatchResultBytes(decodedResult);
-          remainingBytes = loadedBytes >= remainingBytes ?
-            0 : remainingBytes - loadedBytes;
-        }
-
-        let barrierFailure: Object | null = null;
-        if (this.executionBarrier !== null) {
+      const sql = insertSql(
+        input.tableParts, input.columns, group.rows.length);
+      await this.lifecycle.withOwnedStatement<void>(
+        scope, sql,
+        async (statement: MySqlPreparedStatement): Promise<void> => {
+          const parameters: MySqlParameter[] =
+            flattenParameters(group.rows);
+          const encoded: EncodedBinaryParameters =
+            encodeBinaryParameters(parameters, statement.parameterCount);
+          this.host.commandGate.assertDeadlineActive(scope);
+          let capturedResult: MySqlQueryResult | null = null;
+          let result: MySqlQueryResult | null = null;
+          let executionFailure: Object | null = null;
           try {
-            await this.executionBarrier(scope);
+            result = await this.session.executeOwned(
+              scope, statement, encoded,
+              (command: Uint8Array): Promise<MySqlQueryResult> =>
+                this.host.executePrepared(
+                  scope, command,
+                  mySqlBatchItemOptions(
+                    input.options.queryOptions, remainingBytes),
+                  (decoded: MySqlQueryResult): void => {
+                    capturedResult = decoded;
+                  }));
           } catch (error) {
-            barrierFailure = error as Object;
+            executionFailure = error as Object;
           }
-        }
-        if (executionFailure !== null) {
+
+          const decodedResult: MySqlQueryResult | null =
+            capturedResult === null ? result : capturedResult;
+          if (decodedResult !== null) {
+            progress.completed.push(decodedResult);
+            const loadedBytes = mySqlBatchResultBytes(decodedResult);
+            remainingBytes = loadedBytes >= remainingBytes ?
+              0 : remainingBytes - loadedBytes;
+          }
+
+          let barrierFailure: Object | null = null;
+          if (this.executionBarrier !== null) {
+            try {
+              await this.executionBarrier(scope);
+            } catch (error) {
+              barrierFailure = error as Object;
+            }
+          }
+          if (executionFailure !== null) {
+            if (barrierFailure !== null) {
+              throw combinedExecutionFailure(
+                executionFailure, barrierFailure);
+            }
+            throw executionFailure as Error;
+          }
           if (barrierFailure !== null) {
-            throw combinedExecutionFailure(
-              executionFailure, barrierFailure);
+            throw barrierFailure as Error;
           }
-          throw executionFailure as Error;
-        }
-        if (barrierFailure !== null) {
-          throw barrierFailure as Error;
-        }
-      } catch (error) {
-        primary = error as Object;
-      }
-      if (statement !== null) {
-        try {
-          await this.session.closeOwned(scope, statement);
-        } catch (error) {
-          if (primary === null) {
-            throw preparedFailure(
-              error as Object, [],
-              MySqlExecutionOutcome.Completed);
-          }
-          cleanup.push(preparedCleanup(error as Object));
-        }
-      }
-      if (primary !== null) {
-        throw preparedFailure(
-          primary, cleanup,
-          primary instanceof MySqlOperationError ?
-            primary.outcome : MySqlExecutionOutcome.NotDispatched);
-      }
-      if (cleanup.length > 0) {
-        throw preparedFailure(
-          cleanup[0], cleanup.slice(1),
-          MySqlExecutionOutcome.Completed);
-      }
+        });
     }
     return new MySqlBatchResult(progress.completed);
   }

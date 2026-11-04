@@ -1,13 +1,18 @@
 import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
-import { MySqlPreparedExecutorHost } from '../command/PreparedExecutor';
+import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor';
 import {
-  MySqlPreparedSession, preparedCleanup, preparedFailure
-} from '../command/PreparedStatement';
+  MySqlPreparedSession, preparedFailure
+} from '../features/prepared/PreparedStatement';
 import { MySqlResultTerminatorObservation } from '../command/ResultStream';
 import { MySqlProcedureCaller } from '../api/MySqlFeatureContracts';
 import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+import {
+  OwnedStatementLifecycle
+} from '../features/prepared/OwnedStatementLifecycle';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { MySqlParameter, MySqlParameterType } from '../model/MySqlParameter';
+import {
+  MySqlParameter, MySqlParameterType
+} from '../features/prepared/MySqlParameter';
 import {
   MySqlProcedureArgument, MySqlParameterDirection, MySqlProcedureResult
 } from '../model/MySqlProcedure';
@@ -19,7 +24,7 @@ import {
 } from '../protocol/Constants';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../value/BinaryParameterEncoder';
+} from '../features/prepared/BinaryParameterEncoder';
 import {
   mysqlPlaceholders, quoteMySqlIdentifier
 } from '../value/MySqlSqlHelpers';
@@ -28,10 +33,12 @@ import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
 export class MySqlPreparedProcedureCaller implements MySqlProcedureCaller {
   private host: MySqlPreparedExecutorHost;
   private session: MySqlPreparedSession;
+  private lifecycle: OwnedStatementLifecycle;
 
   constructor(host: MySqlPreparedExecutorHost) {
     this.host = host;
     this.session = new MySqlPreparedSession(host);
+    this.lifecycle = new OwnedStatementLifecycle(this.session);
   }
 
   async call(procedure: string[], procedureArguments: MySqlProcedureArgument[],
@@ -45,49 +52,37 @@ export class MySqlPreparedProcedureCaller implements MySqlProcedureCaller {
 
   private async callOwned(scope: MySqlCommandScope,
     input: ProcedureInput): Promise<MySqlProcedureResult> {
-    let statement: MySqlPreparedStatement | null = null;
-    let value: MySqlProcedureResult | undefined;
-    let primary: Object | null = null;
-    const cleanup: ArkDbError[] = [];
     try {
       if ((this.host.capabilities & Capabilities.PS_MULTI_RESULTS) === 0) {
         throw ArkDbError.unsupported(
           'Binary procedure calls require server support for CLIENT_PS_MULTI_RESULTS.');
       }
-      statement = await this.session.prepareOwned(scope, input.sql);
-      if (statement.parameterCount !== input.parameters.length) {
-        throw ArkDbError.protocol(
-          'Prepared CALL parameter metadata does not match the generated placeholders.');
-      }
-      this.host.commandGate.assertDeadlineActive(scope);
-      const observations: MySqlResultTerminatorObservation[] = [];
-      const result: MySqlQueryResult = await this.session.executeOwned(
-        scope, statement, input.encoded,
-        (command: Uint8Array): Promise<MySqlQueryResult> =>
-          this.host.executePrepared(scope, command, input.options, undefined, observations));
-      try {
-        value = procedureResult(result, observations, input.parameters);
-      } catch (error) {
-        throw preparedFailure(error as Object, [], MySqlExecutionOutcome.Completed);
-      }
     } catch (error) {
-      primary = error as Object;
-    }
-    if (statement !== null) {
-      try {
-        await this.session.closeOwned(scope, statement);
-      } catch (error) {
-        if (primary === null) {
-          throw preparedFailure(error as Object, [], MySqlExecutionOutcome.Completed);
-        }
-        cleanup.push(preparedCleanup(error as Object));
-      }
-    }
-    if (primary !== null) {
-      throw preparedFailure(primary, cleanup, primary instanceof MySqlOperationError ?
+      const primary = error as Object;
+      throw preparedFailure(
+        primary, [], primary instanceof MySqlOperationError ?
         primary.outcome : MySqlExecutionOutcome.NotDispatched);
     }
-    return value!;
+    return this.lifecycle.withOwnedStatement<MySqlProcedureResult>(
+      scope, input.sql,
+      async (statement: MySqlPreparedStatement):
+        Promise<MySqlProcedureResult> => {
+        if (statement.parameterCount !== input.parameters.length) {
+          throw ArkDbError.protocol(
+            'Prepared CALL parameter metadata does not match the generated placeholders.');
+        }
+        this.host.commandGate.assertDeadlineActive(scope);
+        const observations: MySqlResultTerminatorObservation[] = [];
+        const result: MySqlQueryResult = await this.session.executeOwned(
+          scope, statement, input.encoded,
+          (command: Uint8Array): Promise<MySqlQueryResult> =>
+            this.host.executePrepared(scope, command, input.options, undefined, observations));
+        try {
+          return procedureResult(result, observations, input.parameters);
+        } catch (error) {
+          throw preparedFailure(error as Object, [], MySqlExecutionOutcome.Completed);
+        }
+      });
   }
 }
 

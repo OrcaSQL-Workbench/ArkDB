@@ -72,8 +72,10 @@ export { MySqlCursorOptions } from './src/main/ets/mysql/model/MySqlCursorOption
 export { MySqlExecutionOutcome, MySqlOperationError } from
   './src/main/ets/mysql/model/MySqlOperationError';
 export { MySqlInsertRowsOptions } from './src/main/ets/mysql/model/MySqlInsertRows';
-export { MySqlParameter, MySqlParameterType } from './src/main/ets/mysql/model/MySqlParameter';
-export type { MySqlParameterValue } from './src/main/ets/mysql/model/MySqlParameter';
+export { MySqlParameter, MySqlParameterType } from
+  './src/main/ets/mysql/features/prepared/MySqlParameter';
+export type { MySqlParameterValue } from
+  './src/main/ets/mysql/features/prepared/MySqlParameter';
 export { MySqlNamedParameter } from './src/main/ets/mysql/model/MySqlNamedParameter';
 export {
   MySqlProcedureArgument, MySqlParameterDirection, MySqlProcedureResult

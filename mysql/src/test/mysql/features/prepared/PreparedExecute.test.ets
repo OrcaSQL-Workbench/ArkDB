@@ -2,25 +2,35 @@ import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind, ConnectionState, QueryOptions } from '@arkdb/core';
 import {
   MySqlParameter, MySqlParameterType, MySqlParameterValue
-} from '../../../main/ets/mysql/model/MySqlParameter';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperationError';
-import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
+} from '../../../../main/ets/mysql/features/prepared/MySqlParameter';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
+import { Capabilities } from '../../../../main/ets/mysql/protocol/Constants';
 import {
   MySqlPreparedSession, MySqlPreparedSessionHost
-} from '../../../main/ets/mysql/command/PreparedStatement';
-import { parseBufferedResultStream } from '../../../main/ets/mysql/command/ResultStream';
+} from '../../../../main/ets/mysql/features/prepared/PreparedStatement';
+import {
+  parseBufferedResultStream
+} from '../../../../main/ets/mysql/command/ResultStream';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
-} from '../../../main/ets/mysql/execution/MySqlCommandGate';
-import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
-import { PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
-import { BinaryRowDecoder } from '../../../main/ets/mysql/value/BinaryRowDecoder';
-import { encodeBinaryParameters } from '../../../main/ets/mysql/value/BinaryParameterEncoder';
-import { PacketTransportFixture } from '../protocol/PacketTransportFixture';
+} from '../../../../main/ets/mysql/execution/MySqlCommandGate';
+import {
+  MySqlQueryResult
+} from '../../../../main/ets/mysql/model/MySqlQueryResult';
+import { PacketChannel } from '../../../../main/ets/mysql/protocol/PacketChannel';
+import {
+  BinaryRowDecoder
+} from '../../../../main/ets/mysql/features/prepared/BinaryRowDecoder';
+import {
+  encodeBinaryParameters
+} from '../../../../main/ets/mysql/features/prepared/BinaryParameterEncoder';
+import { PacketTransportFixture } from '../../protocol/PacketTransportFixture';
 import {
   PreparedExecutionFixture, PreparedGate, binaryIntResult, errorPayload, flushPrepared, framedResponse, hex, okPayload,
   preparedFailureOf, prepareResponse
-} from './PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 class MutableBinaryParameter extends MySqlParameter {
   private bytes: Uint8Array;

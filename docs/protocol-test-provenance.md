@@ -170,7 +170,7 @@ cursor, long-data, caching, pooling or public capability support.
 
 ## Internal prepared execution and cleanup
 
-`command/PreparedExecutor.ets` implements the internal buffered and native-stream
+`features/prepared/PreparedExecutor.ets` implements the internal buffered and native-stream
 contracts. The connection's protected accessor supplies its real physical
 channel, generation, existing command gate, cancellation lifetime and shared
 result pipeline. That accessor remains protected; the public feature resolves it

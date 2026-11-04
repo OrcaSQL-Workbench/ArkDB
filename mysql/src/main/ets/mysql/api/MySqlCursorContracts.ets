@@ -1,4 +1,4 @@
-import { MySqlParameter } from '../model/MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import { MySqlColumnDef, MySqlValue } from '../model/MySqlQueryResult';
 import { MySqlCursorOptions } from '../model/MySqlCursorOptions';
 

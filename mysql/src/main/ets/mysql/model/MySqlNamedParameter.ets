@@ -1,5 +1,5 @@
 import { ArkDbError } from '@arkdb/core';
-import { MySqlParameter } from './MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 
 export class MySqlNamedParameter {
   readonly name: string;

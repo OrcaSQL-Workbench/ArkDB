@@ -1,11 +1,11 @@
 import { ArkDbError } from '@arkdb/core';
-import { MySqlRowDecoder } from '../command/ResultStream';
+import { MySqlRowDecoder } from '../../command/ResultStream';
 import {
   MySqlColumnDef, MySqlValue, mysqlColumnDecodesAsBytes
-} from '../model/MySqlQueryResult';
-import { utf8Decode } from '../protocol/Charsets';
-import { ColumnType, FieldFlag } from '../protocol/Constants';
-import { PacketReader } from '../protocol/PacketReader';
+} from '../../model/MySqlQueryResult';
+import { utf8Decode } from '../../protocol/Charsets';
+import { ColumnType, FieldFlag } from '../../protocol/Constants';
+import { PacketReader } from '../../protocol/PacketReader';
 
 export class BinaryRowDecoder implements MySqlRowDecoder {
   decode(payload: Uint8Array, columns: MySqlColumnDef[]): MySqlValue[] {

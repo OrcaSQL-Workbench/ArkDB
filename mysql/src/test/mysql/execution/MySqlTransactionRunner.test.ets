@@ -11,7 +11,7 @@ import {
   MySqlInsertRowsOptions
 } from '../../../main/ets/mysql/model/MySqlInsertRows';
 import { MySqlParameter, MySqlParameterType } from
-  '../../../main/ets/mysql/model/MySqlParameter';
+  '../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../../../main/ets/mysql/model/MySqlOperationError';

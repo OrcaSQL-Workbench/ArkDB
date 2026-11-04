@@ -1,14 +1,20 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind, ConnectionState, QueryOptions, QueryTruncation } from '@arkdb/core';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperationError';
-import { MySqlValue } from '../../../main/ets/mysql/model/MySqlQueryResult';
-import { MySqlQueryResultSummary, MySqlQueryRowChunk } from '../../../main/ets/mysql/model/MySqlQueryStream';
-import { Capabilities, ColumnType, FieldFlag } from '../../../main/ets/mysql/protocol/Constants';
-import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
+import { MySqlValue } from '../../../../main/ets/mysql/model/MySqlQueryResult';
+import {
+  MySqlQueryResultSummary, MySqlQueryRowChunk
+} from '../../../../main/ets/mysql/model/MySqlQueryStream';
+import {
+  Capabilities, ColumnType, FieldFlag
+} from '../../../../main/ets/mysql/protocol/Constants';
+import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
 import {
   PreparedExecutionFixture, PreparedGate, PreparedRecordingSink, binaryIntResult, columnPayload,
   eofPayload, flushPrepared, hex, okPayload, preparedFailureOf, prepareResponse
-} from './PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 class FinalAcknowledgementSink extends PreparedRecordingSink {
   private acknowledge: (() => void) | null = null;

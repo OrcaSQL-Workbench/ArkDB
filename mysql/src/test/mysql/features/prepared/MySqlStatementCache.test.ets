@@ -2,38 +2,54 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionState, DbConnection, QueryOptions, QueryTruncation
 } from '@arkdb/core';
-import { MySqlConnection } from '../../../main/ets/mysql/MySqlConnection';
+import { MySqlConnection } from '../../../../main/ets/mysql/MySqlConnection';
 import {
   MySqlPreparedExecutor, MySqlPreparedStatement
-} from '../../../main/ets/mysql/api/MySqlPreparedContracts';
+} from '../../../../main/ets/mysql/api/MySqlPreparedContracts';
 import {
   MySqlPreparedSession, MySqlPreparedSessionHost
-} from '../../../main/ets/mysql/command/PreparedStatement';
-import { parseBufferedResultStream } from '../../../main/ets/mysql/command/ResultStream';
+} from '../../../../main/ets/mysql/features/prepared/PreparedStatement';
+import {
+  parseBufferedResultStream
+} from '../../../../main/ets/mysql/command/ResultStream';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
-} from '../../../main/ets/mysql/execution/MySqlCommandGate';
-import { MySqlSessionFingerprint } from '../../../main/ets/mysql/execution/MySqlSessionInitialization';
+} from '../../../../main/ets/mysql/execution/MySqlCommandGate';
+import {
+  MySqlSessionFingerprint
+} from '../../../../main/ets/mysql/execution/MySqlSessionInitialization';
 import {
   MySqlStatementCache, MySqlStatementCacheBorrow
-} from '../../../main/ets/mysql/execution/MySqlStatementCache';
-import { ConnectionConfig, SslMode } from '../../../main/ets/mysql/model/ConnectionConfig';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperationError';
-import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
-import { MySqlQueryResultSummary, MySqlResultSinkAdapter } from '../../../main/ets/mysql/model/MySqlQueryStream';
-import { Capabilities, Collation, ColumnType } from '../../../main/ets/mysql/protocol/Constants';
-import { PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
-import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
-import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
-import { TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
-import { encodeBinaryParameters } from '../../../main/ets/mysql/value/BinaryParameterEncoder';
-import { BinaryRowDecoder } from '../../../main/ets/mysql/value/BinaryRowDecoder';
-import { socket } from '../../../mock/NetworkKit.mock';
-import { PacketTransportFixture } from '../protocol/PacketTransportFixture';
+} from '../../../../main/ets/mysql/features/prepared/MySqlStatementCache';
+import {
+  ConnectionConfig, SslMode
+} from '../../../../main/ets/mysql/model/ConnectionConfig';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
+import { MySqlQueryResult } from '../../../../main/ets/mysql/model/MySqlQueryResult';
+import {
+  MySqlQueryResultSummary, MySqlResultSinkAdapter
+} from '../../../../main/ets/mysql/model/MySqlQueryStream';
+import {
+  Capabilities, Collation, ColumnType
+} from '../../../../main/ets/mysql/protocol/Constants';
+import { PacketChannel } from '../../../../main/ets/mysql/protocol/PacketChannel';
+import { PacketReader } from '../../../../main/ets/mysql/protocol/PacketReader';
+import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
+import { TcpTransport } from '../../../../main/ets/mysql/transport/TcpTransport';
+import {
+  encodeBinaryParameters
+} from '../../../../main/ets/mysql/features/prepared/BinaryParameterEncoder';
+import {
+  BinaryRowDecoder
+} from '../../../../main/ets/mysql/features/prepared/BinaryRowDecoder';
+import { socket } from '../../../../mock/NetworkKit.mock';
+import { PacketTransportFixture } from '../../protocol/PacketTransportFixture';
 import {
   PreparedGate, PreparedRecordingSink, PreparedSocket, binaryIntResult, columnPayload, eofPayload,
   errorPayload, flushPrepared, framePacket, framedResponse, handshake, okPayload, preparedFailureOf, prepareResponse
-} from '../command/PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 interface CacheSentPacket {
   data: ArrayBuffer;

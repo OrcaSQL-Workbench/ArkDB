@@ -1,5 +1,4 @@
-import { ArkDbError, QueryOptions } from '@arkdb/core';
-import { validateQueryOptions } from '../command/ResultStream';
+import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
 
 export class MySqlDeadlineOptions {
   timeoutMs: number = 0;

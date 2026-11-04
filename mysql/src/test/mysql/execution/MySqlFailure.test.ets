@@ -7,7 +7,7 @@ import {
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../../../main/ets/mysql/model/MySqlOperationError';
-import { MySqlUploadFailure } from '../../../main/ets/mysql/transport/MySqlUploadPump';
+import { MySqlUploadFailure } from '../../../main/ets/mysql/features/longdata/MySqlUploadPump';
 import {
   preparedCleanup, preparedFailure
 } from '../../../main/ets/mysql/features/prepared/PreparedStatement';

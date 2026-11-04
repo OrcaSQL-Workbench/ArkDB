@@ -1,11 +1,11 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind, ConnectionTimerPort } from '@arkdb/core';
-import { MySqlByteSource } from '../../../main/ets/mysql/model/MySqlByteSource';
-import { MySqlOperationError } from '../../../main/ets/mysql/model/MySqlOperationError';
+import { MySqlByteSource } from '../../../../main/ets/mysql/features/longdata/MySqlByteSource';
+import { MySqlOperationError } from '../../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlPromiseUploadAbortSignal, MySqlUploadAbortSignal,
   MySqlUploadChunkWriter, MySqlUploadFailure, MySqlUploadPump
-} from '../../../main/ets/mysql/transport/MySqlUploadPump';
+} from '../../../../main/ets/mysql/features/longdata/MySqlUploadPump';
 
 class UploadTimers implements ConnectionTimerPort {
   private nextId: number = 0;

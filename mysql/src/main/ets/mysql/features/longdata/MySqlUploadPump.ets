@@ -1,6 +1,6 @@
 import { ArkDbError, ConnectionTimerPort } from '@arkdb/core';
-import { mergeCleanupEvidence } from '../execution/MySqlFailure';
-import { MySqlByteSource } from '../model/MySqlByteSource';
+import { mergeCleanupEvidence } from '../../execution/MySqlFailure';
+import { MySqlByteSource } from './MySqlByteSource';
 
 export interface MySqlUploadChunkWriter {
   write(sourceIndex: number, chunk: Uint8Array, timeoutMs: number): Promise<void>;

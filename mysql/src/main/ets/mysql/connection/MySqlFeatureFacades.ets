@@ -22,11 +22,11 @@ import {
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
 } from '../model/MySqlBatch';
-import { MySqlCursorOptions } from '../model/MySqlCursorOptions';
+import { MySqlCursorOptions } from '../features/cursor/MySqlCursorOptions';
 import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
 import {
   MySqlLongDataOptions, MySqlLongParameter
-} from '../model/MySqlLongDataOptions';
+} from '../features/longdata/MySqlLongDataOptions';
 import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
 import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {

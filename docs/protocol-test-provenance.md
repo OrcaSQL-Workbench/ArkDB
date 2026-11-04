@@ -297,7 +297,7 @@ live server, device, throughput or large-LOB interoperability.
 
 ## Read-only prepared server cursors
 
-`command/MySqlCursor.ets` owns the cursor lifetime behind the public
+`features/cursor/MySqlCursor.ets` owns the cursor lifetime behind the public
 `mysqlFeatures.cursors.open(...)` interface. One command scope covers PREPARE,
 read-only COM_STMT_EXECUTE, every caller-requested COM_STMT_FETCH, RESET when
 closed early, response-free CLOSE and final owner release. The cursor does not

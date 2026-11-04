@@ -6,27 +6,27 @@ import {
 import {
   MySqlCommandKind, MySqlCursorExecutor, MySqlExecutionEvent,
   MySqlExecutionEventType, MySqlExecutionObserver, requireMySqlFeatures
-} from '../../../../Index';
+} from '../../../../../Index';
 import {
   initializeMySqlExecutionObserverInternal
-} from '../../../main/ets/mysql/MySqlConnection';
-import { MySqlLongDataExecutor } from '../../../main/ets/mysql/api/MySqlFeatureContracts';
-import { MySqlByteSource } from '../../../main/ets/mysql/model/MySqlByteSource';
+} from '../../../../main/ets/mysql/MySqlConnection';
+import { MySqlLongDataExecutor } from '../../../../main/ets/mysql/api/MySqlFeatureContracts';
+import { MySqlByteSource } from '../../../../main/ets/mysql/features/longdata/MySqlByteSource';
 import {
   MySqlLongDataOptions, MySqlLongParameter, MySqlLongParameterKind
-} from '../../../main/ets/mysql/model/MySqlLongDataOptions';
+} from '../../../../main/ets/mysql/features/longdata/MySqlLongDataOptions';
 import {
   MySqlParameter, MySqlParameterType
-} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
+} from '../../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {
   MySqlExecutionOutcome, MySqlOperationError
-} from '../../../main/ets/mysql/model/MySqlOperationError';
-import { Capabilities, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
-import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
+import { Capabilities, StatusFlags } from '../../../../main/ets/mysql/protocol/Constants';
+import { PacketReader } from '../../../../main/ets/mysql/protocol/PacketReader';
 import {
   PreparedExecutionFixture, PreparedGate, PreparedSocket, cursorOpenResult,
   errorPayload, flushPrepared, okPayload, hex, preparedFailureOf, prepareResponse
-} from './PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 class LongDataExecutionObserver implements MySqlExecutionObserver {
   readonly events: MySqlExecutionEvent[] = [];

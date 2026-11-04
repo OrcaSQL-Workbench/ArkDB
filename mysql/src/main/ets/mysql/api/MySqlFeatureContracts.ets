@@ -5,7 +5,7 @@ import { MySqlDeadlineOptions } from '../model/MySqlDeadlineOptions';
 import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
 import {
   MySqlLongDataOptions, MySqlLongParameter
-} from '../model/MySqlLongDataOptions';
+} from '../features/longdata/MySqlLongDataOptions';
 import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
 import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {

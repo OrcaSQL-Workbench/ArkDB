@@ -25,7 +25,7 @@ import {
 } from './PreparedStatement';
 import {
   MySqlLongDataHost, MySqlPreparedLongDataExecutor
-} from '../../command/LongData';
+} from '../longdata/LongData';
 
 export interface MySqlPreparedExecutorHost extends MySqlLongDataHost {
   readonly preparedCacheSize: number;

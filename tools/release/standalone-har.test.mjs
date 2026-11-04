@@ -3,15 +3,15 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { verifiedArtifactSet } from './package-har.mjs';
-import { prepareHarRelease, readReleaseBundle } from './prepare-har-release.mjs';
-import { requireConsumerEvidence } from './check-release.mjs';
-import { sourceFingerprint } from './package-har.mjs';
-import { sampleFingerprint } from './test-consumer.mjs';
-import { verifyHarConsumer } from './test-consumer.mjs';
-import { publishHarRelease } from './publish-har.mjs';
-import { fakeGitHub } from './test-fixtures/github-release.mjs';
-import { standaloneReleaseFixture, LOCAL_STEM, STEM } from './test-fixtures/har-release.mjs';
+import { verifiedArtifactSet } from '../package-har.mjs';
+import { prepareHarRelease, readReleaseBundle } from '../prepare-har-release.mjs';
+import { requireConsumerEvidence } from '../check-release.mjs';
+import { sourceFingerprint } from '../package-har.mjs';
+import { sampleFingerprint } from '../test-consumer.mjs';
+import { verifyHarConsumer } from '../test-consumer.mjs';
+import { publishHarRelease } from '../publish-har.mjs';
+import { fakeGitHub } from '../test-fixtures/github-release.mjs';
+import { standaloneReleaseFixture, LOCAL_STEM, STEM } from '../test-fixtures/har-release.mjs';
 
 test('a self-contained driver uses one archive while source identity still includes the shared core', async (t) => {
   const fixture = await standaloneReleaseFixture(t);

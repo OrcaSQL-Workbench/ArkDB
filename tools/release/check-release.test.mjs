@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { requireCleanSource, requireConsumerEvidence } from './check-release.mjs';
+import { requireCleanSource, requireConsumerEvidence } from '../check-release.mjs';
 
 const identity = { sha256: 'artifact', sourceFingerprint: 'source' };
 const consumer = {

@@ -3,9 +3,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { verifyHarConsumer } from './test-consumer.mjs';
-import { verifiedArtifact } from './package-har.mjs';
-import { releaseFixture, LOCAL_STEM, STEM } from './test-fixtures/har-release.mjs';
+import { verifyHarConsumer } from '../test-consumer.mjs';
+import { verifiedArtifact } from '../package-har.mjs';
+import { releaseFixture, LOCAL_STEM, STEM } from '../test-fixtures/har-release.mjs';
 
 function fakeCompiler() {
   let copiedHar;

@@ -4,21 +4,9 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runHvigor } from './run-hvigor.mjs';
 import { driverVerification, resolvePackage } from './driver-packages.mjs';
+import { parseHypiumResults } from './lib/hypium-results.mjs';
 
-export function parseHypiumResults(text) {
-  const normalized = text.replace(/\r\n?/g, '\n');
-  const summary = normalized.match(
-    /^Tests run: (\d+), Failure: (\d+), Error: (\d+), Pass: (\d+), Ignore: (\d+)\s*$/m);
-  if (!summary) throw new Error('Native Hypium result summary is missing.');
-  const [total, failures, errors, passed, ignored] = summary.slice(1).map(Number);
-  // SDK start/end name markers can repeat or be interleaved; result records are completed verdicts.
-  const results = [...normalized.matchAll(/^result=(.+)$/gm)].map((match) => match[1]);
-  if (total <= 0 || failures !== 0 || errors !== 0 || ignored !== 0 || passed !== total ||
-    results.length !== total || results.some((result) => result !== 'Success')) {
-    throw new Error(`Native Hypium verdict is unsuccessful or inconsistent: ${summary[0].trim()}`);
-  }
-  return { total, passed };
-}
+export { parseHypiumResults };
 
 function main() {
   const modules = process.argv.slice(2);

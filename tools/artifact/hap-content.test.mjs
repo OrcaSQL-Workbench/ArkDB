@@ -80,7 +80,8 @@ test('duplicate byte names and unsupported data descriptors are rejected', () =>
 });
 
 test('a real Hvigor HAP CRC field tamper is rejected', () => {
-  const fixture = readFileSync(join(import.meta.dirname, 'test-fixtures', 'mysql-client-real.hap'));
+  const fixture = readFileSync(
+    join(import.meta.dirname, '..', 'test-fixtures', 'mysql-client-real.hap'));
   assert.match(hapContentFingerprint(fixture), /^[0-9a-f]{64}$/);
   const tampered = Buffer.from(fixture);
   const central = tampered.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));

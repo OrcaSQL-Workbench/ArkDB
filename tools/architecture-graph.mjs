@@ -198,11 +198,30 @@ function sourceSyntax(file) {
   return syntax;
 }
 
+function unwrapParentheses(node) {
+  let current = node;
+  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  return current;
+}
+
+function processExpression(node) {
+  const expression = unwrapParentheses(node);
+  return (ts.isIdentifier(expression) && expression.text === 'process') ||
+    (ts.isPropertyAccessExpression(expression) &&
+      ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === 'globalThis' &&
+      expression.name.text === 'process');
+}
+
 function staticSpecifiers(file) {
   const specifiers = [];
+  const syntax = sourceSyntax(file);
   function visit(node) {
     if (NODE_SOURCE.test(file) && ts.isIdentifier(node) && node.text === 'getBuiltinModule') {
       throw new Error(`Node getBuiltinModule access is not supported: ${file}`);
+    } else if (NODE_SOURCE.test(file) && ts.isElementAccessExpression(node) &&
+      processExpression(node.expression)) {
+      throw new Error(`Node computed process access is not supported: ${file}`);
     } else if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
       if (NODE_SOURCE.test(file) && ['module', 'node:module'].includes(node.moduleSpecifier.text)) {
@@ -220,8 +239,18 @@ function staticSpecifiers(file) {
     }
     ts.forEachChild(node, visit);
   }
-  visit(sourceSyntax(file));
+  visit(syntax);
   return specifiers;
+}
+
+function generatedBuildProfileImport(file, base, packages) {
+  const owner = packages.find((entry) => {
+    const path = relative(entry.directory, file);
+    return path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+  });
+  if (!owner) return false;
+  const profile = join(owner.directory, 'BuildProfile');
+  return pathKey(base) === pathKey(profile) || pathKey(base) === pathKey(`${profile}.ets`);
 }
 
 function canonicalNodeRelativePath(specifier) {
@@ -255,6 +284,7 @@ function hasNoncanonicalNodeDotSegment(specifier) {
 function resolveSource(file, specifier, sources, packages, toolingPackage) {
   let base;
   let required = false;
+  let arkTsRequired = false;
   const nodeSource = NODE_SOURCE.test(file);
   if (nodeSource && /[\u0000-\u0020]/.test(specifier)) {
     throw new Error(`Node tooling imports must use canonical URL encoding: ${specifier}`);
@@ -306,6 +336,7 @@ function resolveSource(file, specifier, sources, packages, toolingPackage) {
     base = resolve(dirname(file), ...path.split('/'));
   } else if (specifier.startsWith('.')) {
     base = resolve(dirname(file), specifier);
+    arkTsRequired = true;
   } else {
     if (nodeSource) {
       if (toolingPackage !== null &&
@@ -319,6 +350,7 @@ function resolveSource(file, specifier, sources, packages, toolingPackage) {
     if (!entry) return null;
     const suffix = specifier === entry.name ? 'Index' : specifier.slice(entry.name.length + 1);
     base = resolve(entry.directory, suffix);
+    arkTsRequired = true;
   }
   const candidates = nodeLocal ? [base] : [
     base, `${base}.ets`, `${base}.d.ets`, join(base, 'Index.ets')
@@ -336,6 +368,10 @@ function resolveSource(file, specifier, sources, packages, toolingPackage) {
   }
   if (required) {
     throw new Error(`Cannot resolve local architecture import ${specifier} from ${file}`);
+  }
+  if (arkTsRequired) {
+    if (generatedBuildProfileImport(file, base, packages)) return null;
+    throw new Error(`Cannot resolve ArkTS architecture import ${specifier} from ${file}`);
   }
   return null;
 }

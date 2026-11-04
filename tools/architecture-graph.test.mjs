@@ -270,6 +270,31 @@ require('./b.mjs');
   assert.throws(() => readArkTsGraph(root), /getBuiltinModule.*not supported.*a\.mjs/i);
 });
 
+test('rejects every computed process access without binding ambiguity', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': `
+const key = 'safe';
+(process)[key];
+`,
+    'tools/b.mjs': "import './a.mjs';"
+  });
+  const source = join(root, 'tools', 'a.mjs');
+  assert.throws(() => readArkTsGraph(root), /computed process access.*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+const key = 'safe';
+(globalThis.process)[key];
+`);
+  assert.throws(() => readArkTsGraph(root), /computed process access.*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+const process = { safe: true };
+const key = 'safe';
+process[key];
+`);
+  assert.throws(() => readArkTsGraph(root), /computed process access.*not supported.*a\.mjs/i);
+});
+
 test('rejects nested tooling package scopes that can create self-references', async (t) => {
   const root = await fixture(t, {
     'tools/local/Package.json': '{"name":"local-pkg","type":"module","exports":"./b.mjs"}',
@@ -393,6 +418,36 @@ test('keeps Node tooling dependencies separate from ArkTS sources', async (t) =>
 
   await writeFile(join(root, 'tools', 'a.mjs'), "import '@arkdb/core';");
   assert.deepEqual(readArkTsGraph(root).dependencies['tools/a.mjs'], []);
+});
+
+test('rejects unresolved ArkTS imports except generated BuildProfile', async (t) => {
+  const root = await fixture(t, {
+    'build-profile.json5': "{modules:[{name:'core',srcPath:'./core'}]}",
+    'core/arkdb-package.json': '{"kind":"shared"}',
+    'core/oh-package.json5': "{name:'@arkdb/core'}",
+    'core/Index.ets': 'export class Root {}',
+    'core/src/main/ets/Runtime.ets': "import { Missing } from './Missing';"
+  });
+  assert.throws(() => readArkTsGraph(root), /Cannot resolve ArkTS architecture import.*\.\/Missing/);
+
+  await writeFile(join(root, 'core', 'src', 'main', 'ets', 'Runtime.ets'),
+    "import { Missing } from '@arkdb/core/Missing';");
+  assert.throws(() => readArkTsGraph(root),
+    /Cannot resolve ArkTS architecture import.*@arkdb\/core\/Missing/);
+
+  await mkdir(join(root, 'core', 'src', 'main', 'ets', 'diagnostics'), { recursive: true });
+  await writeFile(join(root, 'core', 'src', 'main', 'ets', 'Runtime.ets'),
+    'export class Runtime {}');
+  await writeFile(join(root, 'core', 'src', 'main', 'ets', 'diagnostics', 'Logger.ets'),
+    "import Missing from '../../../../BuildProfile/Missing';");
+  assert.throws(() => readArkTsGraph(root),
+    /Cannot resolve ArkTS architecture import.*BuildProfile\/Missing/);
+
+  await writeFile(join(root, 'core', 'src', 'main', 'ets', 'diagnostics', 'Logger.ets'),
+    "import BuildProfile from '../../../../BuildProfile';");
+  assert.deepEqual(readArkTsGraph(root).dependencies[
+    'core/src/main/ets/diagnostics/Logger.ets'
+  ], []);
 });
 
 test('rejects root package self-references that can resolve to tooling files', async (t) => {

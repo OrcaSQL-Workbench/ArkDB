@@ -1,5 +1,4 @@
-import { ArkDbError, QueryOptions } from '@arkdb/core';
-import { validateQueryOptions } from '../command/ResultStream';
+import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
 import { MySqlByteSource } from './MySqlByteSource';
 
 const MAX_LONG_DATA_CHUNK_BYTES = 1024 * 1024;

@@ -9,7 +9,7 @@ import { PacketWriter } from '../protocol/PacketWriter';
 import { mapTextValue } from '../value/TypeMapper';
 import { MySqlRowDecoder, parseBufferedResultStream, parseResultStream } from './ResultStream';
 
-export { validateQueryOptions } from './ResultStream';
+export { validateQueryOptions } from '@arkdb/core';
 
 export class TextRowDecoder implements MySqlRowDecoder {
   decode(payload: Uint8Array, columns: MySqlColumnDef[]): MySqlValue[] {

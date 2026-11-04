@@ -5,8 +5,8 @@ export { DbValueKind, ColumnDef, QueryResult } from './src/main/ets/model/QueryR
 export type { SqlValue } from './src/main/ets/model/QueryResult';
 export { DatabaseSessionStatus, MAX_QUERY_DRAIN_TIME_MS, MAX_STATEMENT_TIMEOUT_MS,
   QueryOptions, QueryResultMeta, QueryRowChunk, QueryTruncation, QueryResultSummary,
-  QueryExecutionSummary, estimateSqlValueBytes, estimateSqlRowBytes, estimateSqlRowsBytes } from
-  './src/main/ets/model/QueryStream';
+  QueryExecutionSummary, estimateSqlValueBytes, estimateSqlRowBytes, estimateSqlRowsBytes,
+  validateQueryOptions } from './src/main/ets/model/QueryStream';
 export type { QueryResultSink } from './src/main/ets/model/QueryStream';
 export { DbConnectionFeatures } from './src/main/ets/connection/DbConnection';
 export type { DbConnection, DbStreamingConnection, DbConnectionHealth, DbContextController,

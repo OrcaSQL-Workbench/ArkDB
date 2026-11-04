@@ -598,6 +598,12 @@ Open `examples\mysql-client` as a project in DevEco Studio. Select a compatible 
 
 The sample always verifies TLS identity. Use the certificate's DNS hostname. An optional CA path must already refer to a PEM file readable in the application's sandbox; the sample does not grant arbitrary filesystem access or provide a certificate picker. Device installation and server interoperability have not been exercised by the repository's local checks.
 
+Release-bound device acceptance is not part of this ordinary sample. Its
+dedicated UI, Worker path, fixed-case runner, challenge binding, signer,
+clipboard exporter and tests live under
+[`examples/mysql-device-acceptance`](../examples/mysql-device-acceptance/README.md),
+with an independent tooling fingerprint.
+
 For an existing Stage application, declare its Worker in the module's `build-profile.json5`:
 
 ```json5

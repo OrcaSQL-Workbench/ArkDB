@@ -170,6 +170,10 @@ export function driverVerification(root = ROOT, id = 'mysql') {
   const closure = dependencyClosure(root, id);
   if (typeof verification?.consumer !== 'string' ||
     !/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(verification.consumer) ||
+    (verification.deviceConsumer !== undefined &&
+      (typeof verification.deviceConsumer !== 'string' ||
+        !/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(verification.deviceConsumer) ||
+        verification.deviceConsumer === verification.consumer)) ||
     !Array.isArray(verification.nativeModules) ||
     verification.nativeModules.length !== closure.length ||
     new Set(verification.nativeModules).size !== closure.length ||
@@ -177,14 +181,23 @@ export function driverVerification(root = ROOT, id = 'mysql') {
     typeof verification.requiresInternet !== 'boolean') {
     throw new Error(`Driver ${id} must declare its own consumer and native verification modules.`);
   }
-  const consumerDirectory = join(root, ...verification.consumer.split('/'));
-  let current = resolve(root);
-  for (const part of verification.consumer.split('/')) {
-    current = join(current, part);
-    const info = lstatSync(current);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Consumer must use real in-repository directories.');
+  function verificationDirectory(value) {
+    const directory = join(root, ...value.split('/'));
+    let current = resolve(root);
+    for (const part of value.split('/')) {
+      current = join(current, part);
+      const info = lstatSync(current);
+      if (!info.isDirectory() || info.isSymbolicLink()) {
+        throw new Error('Consumer must use real in-repository directories.');
+      }
+    }
+    return directory;
   }
-  return { ...verification, consumerDirectory, driver };
+  const consumerDirectory = verificationDirectory(verification.consumer);
+  const deviceConsumerDirectory = verification.deviceConsumer === undefined
+    ? undefined
+    : verificationDirectory(verification.deviceConsumer);
+  return { ...verification, consumerDirectory, deviceConsumerDirectory, driver };
 }
 
 export function packageStem(manifest) {

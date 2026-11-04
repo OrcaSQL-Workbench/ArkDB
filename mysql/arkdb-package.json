@@ -2,6 +2,7 @@
   "kind": "driver",
   "verification": {
     "consumer": "examples/mysql-client",
+    "deviceConsumer": "examples/mysql-device-acceptance",
     "nativeModules": ["core", "mysql"],
     "requiresInternet": true
   }

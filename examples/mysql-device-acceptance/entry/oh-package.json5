@@ -1,0 +1,9 @@
+{
+  "name": "arkdb-mysql-device-acceptance",
+  "version": "1.0.0",
+  "description": "Bound MySQL device acceptance application",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@arkdb/mysql": "file:../dependency/mysql.har"
+  }
+}

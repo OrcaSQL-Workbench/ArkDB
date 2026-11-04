@@ -1,0 +1,11 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    "sourceOption": {
+      "workers": ["./src/main/ets/workers/device.worker.ets"]
+    }
+  },
+  "targets": [
+    { "name": "default" }
+  ]
+}

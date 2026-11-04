@@ -17,10 +17,10 @@ import { gitReader, jsonBytes, plainPath, releaseFile } from './har-release.mjs'
 import { sha256, sourceFingerprint } from './package-har.mjs';
 import { readReleaseBundle } from './prepare-har-release.mjs';
 import { runHvigor, runOhpm } from './run-hvigor.mjs';
-import { sampleFingerprint } from './test-consumer.mjs';
+import { deviceSampleFingerprint, sampleFingerprint } from './test-consumer.mjs';
 import { hapSigningContentFingerprint } from './hap-content.mjs';
 
-const CASE_MANIFEST = join('examples', 'mysql-client', 'device-acceptance-cases.json');
+const CASE_MANIFEST = join('examples', 'mysql-device-acceptance', 'device-acceptance-cases.json');
 const CHALLENGE_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const CANONICAL_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
@@ -565,7 +565,8 @@ export function currentDeviceEvidenceBinding(): DeviceEvidenceIdentity {
   binding.sourceCommit = ${stringLiteral(binding.sourceCommit)};
   binding.artifactSha256 = ${stringLiteral(binding.artifactSha256)};
   binding.artifactByteLength = ${binding.artifactByteLength};
-  binding.sampleFingerprint = ${stringLiteral(binding.sampleFingerprint)};
+  binding.consumerFingerprint = ${stringLiteral(binding.consumerFingerprint)};
+  binding.acceptanceFingerprint = ${stringLiteral(binding.acceptanceFingerprint)};
   binding.publicKeySpkiBase64 = ${stringLiteral(binding.publicKeySpkiBase64)};
   binding.publicKeySpkiSha256 = ${stringLiteral(binding.publicKeySpkiSha256)};
   binding.privateKeyPkcs8Base64 = ${stringLiteral(binding.privateKeyPkcs8Base64)};
@@ -579,12 +580,14 @@ export function currentDeviceEvidenceBinding(): DeviceEvidenceIdentity {
 `;
 }
 
-function assertCleanReleaseSource(root, driver, set, git) {
+function assertCleanReleaseSource(root, driver, set, acceptanceFingerprint, git) {
   if (git(['status', '--porcelain', '--untracked-files=all']).trim() !== '' ||
     git(['rev-parse', '--verify', 'HEAD']).trim() !== set.sourceCommit ||
     sourceFingerprint(root, driver) !== set.sourceFingerprint ||
-    sampleFingerprint(root, driver) !== set.verification.sampleFingerprint) {
-    throw new Error('Device harness preparation requires the exact clean sealed-release source and sample.');
+    sampleFingerprint(root, driver) !== set.verification.sampleFingerprint ||
+    deviceSampleFingerprint(root, driver) !== acceptanceFingerprint) {
+    throw new Error(
+      'Device harness preparation requires the exact clean sealed-release source and consumers.');
   }
 }
 
@@ -634,7 +637,8 @@ export async function prepareDeviceEvidence({
   const set = bundle.releaseSet;
   if (set.driver !== driver) throw new Error('The sealed release is not for the selected driver.');
   const git = dependencies.git ?? gitReader(root);
-  assertCleanReleaseSource(root, driver, set, git);
+  const acceptanceFingerprint = deviceSampleFingerprint(root, driver);
+  assertCleanReleaseSource(root, driver, set, acceptanceFingerprint, git);
   const stem = packageStem({ name: set.packageName, version: set.version });
   const artifact = set.assets.find((entry) => entry.name === `${stem}.har`);
   const artifactBytes = bundle.assets.get(`${stem}.har`);
@@ -676,7 +680,8 @@ export async function prepareDeviceEvidence({
     repository: set.repository, driver: set.driver, packageName: set.packageName,
     version: set.version, sourceCommit: set.sourceCommit,
     artifactSha256: artifact.sha256, artifactByteLength: artifact.byteLength,
-    sampleFingerprint: set.verification.sampleFingerprint,
+    consumerFingerprint: set.verification.sampleFingerprint,
+    acceptanceFingerprint,
     releaseSetSha256: sha256(bundle.releaseSetBytes),
     suiteId: cases.suiteId, caseManifestSha256: sha256(caseBytes),
     publicKeySpkiBase64, publicKeySpkiSha256,
@@ -718,7 +723,7 @@ export async function prepareDeviceEvidence({
       bindingSource: renderDeviceEvidenceBinding(binding), hapPath
     }, {
       ...dependencies,
-      sampleSource: driverVerification(root, driver).consumerDirectory
+      sampleSource: driverVerification(root, driver).deviceConsumerDirectory
     });
     const hapBytes = releaseFile(stagingDirectory, basename(hapPath), 128 * 1024 * 1024);
     const preparedUnsignedHapSha256 = sha256(hapBytes);
@@ -746,7 +751,7 @@ export async function prepareDeviceEvidence({
       expiresAt
     }, null, 2)}\n`, { flag: 'wx' });
     const challenge = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: 'arkdb-device-evidence-challenge',
       state: 'issued',
       repository: set.repository,
@@ -757,7 +762,8 @@ export async function prepareDeviceEvidence({
       sourceCommit: set.sourceCommit,
       artifactSha256: artifact.sha256,
       artifactByteLength: artifact.byteLength,
-      sampleFingerprint: set.verification.sampleFingerprint,
+      consumerFingerprint: set.verification.sampleFingerprint,
+      acceptanceFingerprint,
       releaseSetSha256: sha256(bundle.releaseSetBytes),
       suiteId: cases.suiteId,
       caseManifestSha256: sha256(caseBytes),
@@ -776,7 +782,7 @@ export async function prepareDeviceEvidence({
       preparedUnsignedHapContentSha256
     };
     challengeBytes = recordBytes(challenge);
-    assertCleanReleaseSource(root, driver, set, git);
+    assertCleanReleaseSource(root, driver, set, acceptanceFingerprint, git);
     const currentBundle = await readReleaseBundle(bundleDirectory);
     if (sha256(currentBundle.releaseSetBytes) !== challenge.releaseSetSha256) {
       throw new Error('The sealed release changed while the device harness was built.');
@@ -832,25 +838,36 @@ function supportedDeviceSelection(profile, features, authPlugin) {
     (authPlugin === undefined || authPlugin === 'caching_sha2_password');
 }
 
-function validateChallenge(challenge, set, bundle, cases, caseBytes) {
+function validateChallenge(challenge, set, bundle, cases, caseBytes, root) {
   const stem = packageStem({ name: set.packageName, version: set.version });
   const artifact = set.assets.find((entry) => entry.name === `${stem}.har`);
+  const fingerprintKeys = challenge.schemaVersion === 1
+    ? ['sampleFingerprint']
+    : challenge.schemaVersion === 2
+      ? ['consumerFingerprint', 'acceptanceFingerprint']
+      : [];
   exactKeys(challenge, [
     'schemaVersion', 'kind', 'state', 'repository', 'driver', 'packageName', 'version', 'tag',
-    'sourceCommit', 'artifactSha256', 'artifactByteLength', 'sampleFingerprint',
+    'sourceCommit', 'artifactSha256', 'artifactByteLength', ...fingerprintKeys,
     'releaseSetSha256', 'suiteId', 'caseManifestSha256', 'caseIds', 'runtime', 'platform',
     'challengeId', 'receiptNonce', 'schemaChallenge', 'createdAt', 'expiresAt',
     'publicKeySpkiBase64', 'publicKeySpkiSha256', 'preparedUnsignedHapSha256',
     'preparedUnsignedHapByteLength', 'preparedUnsignedHapContentSha256'
   ], 'Device evidence challenge');
   const publicKey = strictBase64(challenge.publicKeySpkiBase64, 'Device challenge public key', 1024);
-  if (challenge.schemaVersion !== 1 || challenge.kind !== 'arkdb-device-evidence-challenge' ||
+  const fingerprintsMatch = challenge.schemaVersion === 1
+    ? challenge.sampleFingerprint === set.verification.sampleFingerprint
+    : challenge.schemaVersion === 2 &&
+      challenge.consumerFingerprint === set.verification.sampleFingerprint &&
+      challenge.acceptanceFingerprint === deviceSampleFingerprint(root, set.driver);
+  if (![1, 2].includes(challenge.schemaVersion) ||
+    challenge.kind !== 'arkdb-device-evidence-challenge' ||
     challenge.state !== 'issued' || challenge.repository !== set.repository ||
     challenge.driver !== set.driver || challenge.packageName !== set.packageName ||
     challenge.version !== set.version || challenge.tag !== set.tag ||
     challenge.sourceCommit !== set.sourceCommit || challenge.artifactSha256 !== artifact?.sha256 ||
     challenge.artifactByteLength !== artifact?.byteLength ||
-    challenge.sampleFingerprint !== set.verification.sampleFingerprint ||
+    !fingerprintsMatch ||
     challenge.releaseSetSha256 !== sha256(bundle.releaseSetBytes) ||
     challenge.suiteId !== cases.suiteId ||
     challenge.caseManifestSha256 !== sha256(caseBytes) ||
@@ -925,13 +942,25 @@ function validateReceipt(envelope, receipt, challenge, cases, now) {
   if (sha256(publicKeyBytes) !== challenge.publicKeySpkiSha256) {
     throw new Error('Device receipt signing identity differs from the prepared harness.');
   }
+  const fingerprintKeys = receipt.schemaVersion === 1
+    ? ['sampleFingerprint']
+    : receipt.schemaVersion === 2
+      ? ['consumerFingerprint', 'acceptanceFingerprint']
+      : [];
   exactKeys(receipt, [
     'schemaVersion', 'profile', 'features', 'runId', 'sourceCommit', 'sourceClean',
-    'harSha256', 'sampleFingerprint', 'hapSha256', 'apiVersion', 'deviceClass',
+    'harSha256', ...fingerprintKeys, 'hapSha256', 'apiVersion', 'deviceClass',
     'serverVersion', 'tlsMode', 'authPlugin', 'challengeIssuedAt', 'challengeExpiresAt',
     'startedAt', 'completedAt', 'operatorEvidenceId', 'cases'
   ], 'Device acceptance receipt');
-  if (receipt.schemaVersion !== 1 || !DEVICE_PROFILES.includes(receipt.profile) ||
+  const fingerprintsMatch = receipt.schemaVersion === 1
+    ? challenge.schemaVersion === 1 &&
+      receipt.sampleFingerprint === challenge.sampleFingerprint
+    : receipt.schemaVersion === 2 && challenge.schemaVersion === 2 &&
+      receipt.consumerFingerprint === challenge.consumerFingerprint &&
+      receipt.acceptanceFingerprint === challenge.acceptanceFingerprint;
+  if (![1, 2].includes(receipt.schemaVersion) || !fingerprintsMatch ||
+    !DEVICE_PROFILES.includes(receipt.profile) ||
     !Array.isArray(receipt.features) ||
     receipt.features.some((feature) => !DEVICE_FEATURES.includes(feature)) ||
     new Set(receipt.features).size !== receipt.features.length ||
@@ -940,7 +969,6 @@ function validateReceipt(envelope, receipt, challenge, cases, now) {
     receipt.runId !== challenge.challengeId ||
     receipt.sourceCommit !== challenge.sourceCommit || receipt.sourceClean !== true ||
     receipt.harSha256 !== challenge.artifactSha256 ||
-    receipt.sampleFingerprint !== challenge.sampleFingerprint ||
     !/^[0-9a-f]{64}$/.test(receipt.hapSha256 ?? '') ||
     !Number.isSafeInteger(receipt.apiVersion) ||
     receipt.apiVersion < cases.runtime.minimumSdkApiVersion ||
@@ -1054,8 +1082,14 @@ function rejectionCode(error) {
 }
 
 function acceptedRecord(parsed, challenge, receiptBytes, now, acceptanceContext = null) {
+  const fingerprints = challenge.schemaVersion === 1
+    ? { sampleFingerprint: parsed.payload.sampleFingerprint }
+    : {
+        consumerFingerprint: parsed.payload.consumerFingerprint,
+        acceptanceFingerprint: parsed.payload.acceptanceFingerprint
+      };
   const record = {
-    schemaVersion: 1,
+    schemaVersion: challenge.schemaVersion,
     kind: 'arkdb-device-receipt-verification',
     verifiedAt: now.toISOString(),
     receiptSha256: sha256(receiptBytes),
@@ -1066,7 +1100,7 @@ function acceptedRecord(parsed, challenge, receiptBytes, now, acceptanceContext 
     sourceCommit: parsed.payload.sourceCommit,
     sourceClean: parsed.payload.sourceClean,
     harSha256: parsed.payload.harSha256,
-    sampleFingerprint: parsed.payload.sampleFingerprint,
+    ...fingerprints,
     preparedUnsignedHapContentSha256: challenge.preparedUnsignedHapContentSha256,
     hapSha256: parsed.payload.hapSha256,
     apiVersion: parsed.payload.apiVersion,
@@ -1109,13 +1143,20 @@ function acceptedRecord(parsed, challenge, receiptBytes, now, acceptanceContext 
 }
 
 function rejectedRecord(parsed, challenge, receiptBytes, now, error) {
+  const fingerprints = challenge.schemaVersion === 2
+    ? {
+        consumerFingerprint: challenge.consumerFingerprint,
+        acceptanceFingerprint: challenge.acceptanceFingerprint
+      }
+    : {};
   return {
-    schemaVersion: 1,
+    schemaVersion: challenge.schemaVersion,
     kind: 'arkdb-device-rejection',
     rejectedAt: now.toISOString(),
     challengeId: challenge.challengeId,
     receiptSha256: sha256(receiptBytes),
     payloadSha256: sha256(Buffer.from(parsed.envelope.payload, 'utf8')),
+    ...fingerprints,
     reason: rejectionCode(error)
   };
 }
@@ -1123,7 +1164,7 @@ function rejectedRecord(parsed, challenge, receiptBytes, now, error) {
 function claimRecord(challenge, receiptBytes, parsed, decision, recordPath, record, outputPath) {
   const bytes = recordBytes(record);
   return {
-    schemaVersion: 1,
+    schemaVersion: challenge.schemaVersion,
     kind: 'arkdb-device-verification-claim',
     challenge,
     receiptSha256: sha256(receiptBytes),
@@ -1134,6 +1175,20 @@ function claimRecord(challenge, receiptBytes, parsed, decision, recordPath, reco
     outputPath,
     record
   };
+}
+
+function validateClaimFingerprints(claim) {
+  const challenge = claim.challenge;
+  const record = claim.record;
+  if (challenge?.schemaVersion === 1) {
+    if (claim.schemaVersion !== 1 || record?.schemaVersion !== 1) return false;
+    return record.kind === 'arkdb-device-rejection' ||
+      record.sampleFingerprint === challenge.sampleFingerprint;
+  }
+  return challenge?.schemaVersion === 2 && claim.schemaVersion === 2 &&
+    record?.schemaVersion === 2 &&
+    record.consumerFingerprint === challenge.consumerFingerprint &&
+    record.acceptanceFingerprint === challenge.acceptanceFingerprint;
 }
 
 function validateClaim(claim, receiptBytes, parsed, decision, recordPath, outputPath) {
@@ -1148,7 +1203,9 @@ function validateClaim(claim, receiptBytes, parsed, decision, recordPath, output
     claim.record?.kind === 'arkdb-device-receipt-verification' && claim.outputPath === null;
   const rejectionClaim = decision === 'rejected' &&
     claim.record?.kind === 'arkdb-device-rejection' && claim.outputPath === null;
-  if (claim.schemaVersion !== 1 || claim.kind !== 'arkdb-device-verification-claim' ||
+  if (![1, 2].includes(claim.schemaVersion) ||
+    claim.kind !== 'arkdb-device-verification-claim' ||
+    !validateClaimFingerprints(claim) ||
     claim.receiptSha256 !== sha256(receiptBytes) ||
     claim.payloadSha256 !== sha256(Buffer.from(parsed.envelope.payload, 'utf8')) ||
     claim.decision !== decision || claim.recordName !== basename(recordPath) ||
@@ -1519,7 +1576,7 @@ async function verifyBoundDeviceEvidence({
   const caseBytes = await readFile(join(root, CASE_MANIFEST));
   const cases = readCaseManifest(caseBytes);
   const observedChallenge = await readChallengeWithoutRecovery(states, parsed.payload.runId);
-  validateChallenge(observedChallenge, set, bundle, cases, caseBytes);
+  validateChallenge(observedChallenge, set, bundle, cases, caseBytes, root);
   verifyEnvelopeSignature(parsed, observedChallenge.publicKeySpkiBase64);
   const buildRoot = join(root, 'build');
   const canonicalBuildRoot = await realpath(buildRoot);
@@ -1600,9 +1657,9 @@ async function verifyBoundDeviceEvidence({
     } else if (lockExists) {
       claim = null;
       pendingRawWithLock = true;
-      validateChallenge(pending, set, bundle, cases, caseBytes);
+      validateChallenge(pending, set, bundle, cases, caseBytes, root);
     } else {
-      validateChallenge(pending, set, bundle, cases, caseBytes);
+      validateChallenge(pending, set, bundle, cases, caseBytes, root);
       const now = dependencies.now ? dependencies.now() : new Date();
       if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
         throw new Error('Invalid device verification time.');
@@ -1666,7 +1723,7 @@ async function verifyBoundDeviceEvidence({
     await releaseClaimLock(states.lock, claim);
     throw new Error('Device challenge state changed before claim-lock acquisition.');
   }
-  validateChallenge(claim.challenge, set, bundle, cases, caseBytes);
+  validateChallenge(claim.challenge, set, bundle, cases, caseBytes, root);
   const decision = claim.decision;
   const recordPath = decision === 'accepted' ? states.acceptedRecord : states.rejectedRecord;
   claim = validateClaim(claim, receiptBytes, parsed, decision, recordPath,
@@ -1780,11 +1837,16 @@ export async function verifyDeviceEvidenceArtifacts({
   const parsed = parseReceiptEnvelope(receiptBytes);
   const challenge = await recoverableChallenge(root, set, parsed.payload.runId);
   verifyEnvelopeSignature(parsed, challenge.publicKeySpkiBase64);
+  const receiptConsumerFingerprint = parsed.payload.schemaVersion === 1
+    ? parsed.payload.sampleFingerprint
+    : parsed.payload.schemaVersion === 2
+      ? parsed.payload.consumerFingerprint
+      : undefined;
   if (manifest.sourceClean !== true || manifest.sourceCommit !== set.sourceCommit ||
     manifest.sha256 !== parsed.payload.harSha256 ||
     consumer.schemaVersion !== 3 || consumer.consumerProfile !== 'current' ||
     consumer.artifactSha256 !== manifest.sha256 ||
-    consumer.sampleFingerprint !== parsed.payload.sampleFingerprint ||
+    consumer.sampleFingerprint !== receiptConsumerFingerprint ||
     parsed.payload.profile !== profile ||
     JSON.stringify(parsed.payload.features) !== JSON.stringify(features) ||
     !supportedDeviceSelection(profile, features, parsed.payload.authPlugin) ||

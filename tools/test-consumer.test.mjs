@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import { consumerMode, REGISTRY, registryIdentity } from './test-consumer.mjs';
+import { releaseFixture } from './test-fixtures/har-release.mjs';
 
 const integrity = `sha512-${Buffer.alloc(64, 1).toString('base64')}`;
 
@@ -33,4 +36,17 @@ test('compile-only hosted checks are explicit and cannot be mixed with registry/
   assert.equal(consumerMode(['--compile-only']), '--compile-only');
   assert.throws(() => consumerMode(['--compile-only', '--registry']), /Usage/);
   assert.throws(() => consumerMode(['--no-tests']), /Usage/);
+});
+
+test('device acceptance UI changes do not change the ordinary consumer fingerprint', async (t) => {
+  const consumerTools = await import('./test-consumer.mjs');
+  assert.equal(typeof consumerTools.deviceSampleFingerprint, 'function');
+  const fixture = await releaseFixture(t);
+  const ordinaryBefore = consumerTools.sampleFingerprint(fixture.root, 'mysql');
+  const acceptanceBefore = consumerTools.deviceSampleFingerprint(fixture.root, 'mysql');
+  const page = join(fixture.root, 'examples', 'mysql-device-acceptance', 'entry', 'src',
+    'main', 'ets', 'pages', 'Index.ets');
+  await writeFile(page, `${await readFile(page, 'utf8')}\n// Synthetic acceptance-only UI change.\n`);
+  assert.equal(consumerTools.sampleFingerprint(fixture.root, 'mysql'), ordinaryBefore);
+  assert.notEqual(consumerTools.deviceSampleFingerprint(fixture.root, 'mysql'), acceptanceBefore);
 });

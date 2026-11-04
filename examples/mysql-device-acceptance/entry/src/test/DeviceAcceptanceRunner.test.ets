@@ -65,8 +65,11 @@ export default function deviceAcceptanceRunnerTest(): void {
       expect(factory.positive.preparedQueries[0]).assertEqual(
         'SELECT CAST(? AS UNSIGNED) AS exact_bigint, CAST(? AS DECIMAL(4,2)) AS exact_decimal, ' +
         'CAST(? AS BINARY(3)) AS exact_binary');
+      expect(signer.payload.indexOf('"schemaVersion":2') >= 0).assertTrue();
       expect(signer.payload.indexOf(binding.sourceCommit) >= 0).assertTrue();
       expect(signer.payload.indexOf(binding.artifactSha256) >= 0).assertTrue();
+      expect(signer.payload.indexOf(binding.consumerFingerprint) >= 0).assertTrue();
+      expect(signer.payload.indexOf(binding.acceptanceFingerprint) >= 0).assertTrue();
       expect(signer.payload.indexOf(request.signedHapSha256) >= 0).assertTrue();
       expect(signer.payload.indexOf(request.operatorEvidenceId) >= 0).assertTrue();
       expect(signer.payload.indexOf('"profile":"M1"') >= 0).assertTrue();
@@ -258,7 +261,8 @@ function validBinding(): DeviceEvidenceIdentity {
   binding.sourceCommit = '66'.repeat(20);
   binding.artifactSha256 = '77'.repeat(32);
   binding.artifactByteLength = 230327;
-  binding.sampleFingerprint = '88'.repeat(32);
+  binding.consumerFingerprint = '88'.repeat(32);
+  binding.acceptanceFingerprint = '99'.repeat(32);
   binding.publicKeySpkiBase64 =
     'MCowBQYDK2VwAyEADb/Cqqww74MVIcezIun9Mh1lbnx3cw9Qy9vYztWx2NA=';
   binding.publicKeySpkiSha256 = 'aa'.repeat(32);

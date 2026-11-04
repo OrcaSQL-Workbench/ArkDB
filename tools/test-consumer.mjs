@@ -22,11 +22,10 @@ export { verifiedArtifact } from './package-har.mjs';
 const CURRENT_CONSUMER_PROFILE = 'current';
 const LEGACY_SCHEMA_1_CONSUMER_PROFILE = 'legacy-schema-1';
 
-export function sampleFingerprint(root = ROOT, driver = 'mysql') {
-  const sample = driverVerification(root, driver).consumerDirectory;
+function exampleFingerprint(sample, extraRootFiles = []) {
   const files = [
     ...['README.md', 'build-profile.json5', 'hvigorfile.ts', 'oh-package.json5',
-      'device-acceptance-cases.json'].map((name) => join(sample, name)),
+      ...extraRootFiles].map((name) => join(sample, name)),
     ...['build-profile.json5', 'hvigorfile.ts', 'oh-package.json5'].map((name) => join(sample, 'entry', name)),
     ...listFiles(join(sample, 'AppScope')), ...listFiles(join(sample, 'hvigor')),
     ...listFiles(join(sample, 'entry', 'src'))
@@ -35,6 +34,16 @@ export function sampleFingerprint(root = ROOT, driver = 'mysql') {
   for (const file of files.sort()) hash.update(file.slice(sample.length).replaceAll('\\', '/'))
     .update('\0').update(readFileSync(file)).update('\0');
   return hash.digest('hex');
+}
+
+export function sampleFingerprint(root = ROOT, driver = 'mysql') {
+  return exampleFingerprint(driverVerification(root, driver).consumerDirectory);
+}
+
+export function deviceSampleFingerprint(root = ROOT, driver = 'mysql') {
+  const sample = driverVerification(root, driver).deviceConsumerDirectory;
+  if (sample === undefined) throw new Error(`Driver ${driver} has no device acceptance consumer.`);
+  return exampleFingerprint(sample, ['device-acceptance-cases.json']);
 }
 
 export function registryIdentity(lock, name, version) {
@@ -123,7 +132,6 @@ async function prepareConsumerProfile(workspace, profile) {
   if (profile !== LEGACY_SCHEMA_1_CONSUMER_PROFILE) {
     throw new Error('Unsupported HAR consumer profile.');
   }
-  await rm(join(workspace, 'device-acceptance-cases.json'), { force: true });
   await rm(join(workspace, 'entry', 'src', 'main', 'ets', 'sample'),
     { recursive: true, force: true });
   await rm(join(workspace, 'entry', 'src', 'main', 'ets', 'workers'),

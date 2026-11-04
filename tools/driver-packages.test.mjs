@@ -27,6 +27,10 @@ test('future registered HARs are selected by their actual source path, not MySQL
   assert.deepEqual(affectedDrivers(drivers, ['tools/package-har.mjs']), drivers);
   assert.deepEqual(affectedDrivers(drivers, ['AppScope/app.json5']), drivers);
   assert.deepEqual(affectedDrivers(drivers, ['examples/mysql-client/entry/oh-package.json5']), drivers);
+  assert.deepEqual(
+    affectedDrivers(drivers, ['examples/mysql-device-acceptance/entry/oh-package.json5']),
+    drivers
+  );
   assert.deepEqual(affectedDrivers(drivers, ['drivers/pgsql-other/source.ets']), []);
 });
 

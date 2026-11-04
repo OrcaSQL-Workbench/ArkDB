@@ -15,7 +15,8 @@ export class DeviceEvidenceIdentity {
   sourceCommit: string = '';
   artifactSha256: string = '';
   artifactByteLength: number = 0;
-  sampleFingerprint: string = '';
+  consumerFingerprint: string = '';
+  acceptanceFingerprint: string = '';
   publicKeySpkiBase64: string = '';
   publicKeySpkiSha256: string = '';
   privateKeyPkcs8Base64: string = '';

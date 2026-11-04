@@ -8,12 +8,15 @@ import test from 'node:test';
 import { prepareHarRelease, readReleaseBundle } from './prepare-har-release.mjs';
 import { releaseFixture } from './test-fixtures/har-release.mjs';
 import { sha256 } from './package-har.mjs';
-import { sampleFingerprint } from './test-consumer.mjs';
+import { deviceSampleFingerprint, sampleFingerprint } from './test-consumer.mjs';
 import { hapSigningContentFingerprint } from './hap-content.mjs';
 import {
   deviceEvidenceArguments, prepareDeviceEvidence, verifyDeviceEvidence, verifyDeviceReceiptEnvelope
 } from './verify-device-evidence.mjs';
 import * as deviceEvidence from './verify-device-evidence.mjs';
+
+const LEGACY_CASE_MANIFEST_SHA256 =
+  '11d13bcd0c5677228342da2e95b894122627bda7fcc8e1dab16a26b6acf3705b';
 
 async function deviceFixture(t, overrides = {}) {
   const fixture = await releaseFixture(t);
@@ -42,6 +45,8 @@ async function deviceFixture(t, overrides = {}) {
       assert.equal(options.artifactBytes.length, fixture.identity.byteLength);
       assert.equal(options.bindingSource.includes(privateKeyPkcs8.toString('base64')), true);
       assert.match(options.bindingSource, /privateKeyPkcs8Base64/);
+      assert.match(options.bindingSource, /consumerFingerprint/);
+      assert.match(options.bindingSource, /acceptanceFingerprint/);
       await writeFile(options.hapPath, hapBytes, { flag: 'wx' });
     },
     ...overrides.dependencies
@@ -105,7 +110,10 @@ test('prepares exact isolated HAP outputs before committing the pending challeng
   assert.equal(challenge.sourceCommit, f.bundle.releaseSet.sourceCommit);
   assert.equal(challenge.artifactSha256, f.fixture.identity.sha256);
   assert.equal(challenge.artifactByteLength, f.fixture.identity.byteLength);
-  assert.equal(challenge.sampleFingerprint, f.bundle.releaseSet.verification.sampleFingerprint);
+  assert.equal(challenge.schemaVersion, 2);
+  assert.equal(challenge.consumerFingerprint, f.bundle.releaseSet.verification.sampleFingerprint);
+  assert.equal(challenge.acceptanceFingerprint,
+    deviceSampleFingerprint(f.fixture.root, 'mysql'));
   assert.deepEqual(challenge.platform, f.bundle.releaseSet.platform);
   assert.equal(challenge.publicKeySpkiSha256, sha256(f.publicKeySpki));
   assert.equal(challenge.preparedUnsignedHapSha256, sha256(f.hapBytes));
@@ -125,6 +133,157 @@ test('prepares exact isolated HAP outputs before committing the pending challeng
   for (const path of [f.prepared.challengePath, f.prepared.contextPath, f.prepared.provisioningPath]) {
     assert.equal((await readFile(path, 'utf8')).includes(f.privateKeyPkcs8.toString('base64')), false);
   }
+});
+
+test('preserves the historical schema-1 case manifest bytes after moving the harness', async () => {
+  const bytes = await readFile(join(process.cwd(), 'examples', 'mysql-device-acceptance',
+    'device-acceptance-cases.json'));
+  assert.equal(sha256(bytes), LEGACY_CASE_MANIFEST_SHA256);
+});
+
+test('reads schema-1 pending state without reinterpreting its sample fingerprint', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x51 });
+  assert.equal(f.prepared.challenge.schemaVersion, 2);
+  const legacy = schema1Challenge(f.prepared.challenge);
+  await writeFile(f.prepared.challengePath, `${JSON.stringify(legacy, null, 2)}\n`);
+  await changeAcceptancePage(f.fixture.root);
+  const receiptPath = join(f.fixture.root, 'schema-1-pending.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(legacy, f.keyPair.privateKey))}\n`);
+  const accepted = await verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+  assert.equal(accepted.record.schemaVersion, 1);
+  assert.equal(accepted.record.sampleFingerprint, legacy.sampleFingerprint);
+  assert.equal('consumerFingerprint' in accepted.record, false);
+  assert.equal('acceptanceFingerprint' in accepted.record, false);
+});
+
+test('recovers schema-1 verifying state without rewriting its fingerprint contract', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x52 });
+  assert.equal(f.prepared.challenge.schemaVersion, 2);
+  const legacy = schema1Challenge(f.prepared.challenge);
+  await writeFile(f.prepared.challengePath, `${JSON.stringify(legacy, null, 2)}\n`);
+  const receiptPath = join(f.fixture.root, 'schema-1-verifying.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(legacy, f.keyPair.privateKey))}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async removeWork() { throw new Error('Synthetic schema-1 cleanup failure.'); }
+  }), /cleanup.*recoverable/i);
+  const verifyingPath = join(dirname(f.prepared.challengePath),
+    `${legacy.challengeId}.verifying.json`);
+  const verifying = JSON.parse(await readFile(verifyingPath, 'utf8'));
+  assert.equal(verifying.schemaVersion, 1);
+  assert.equal(verifying.challenge.sampleFingerprint, legacy.sampleFingerprint);
+  await changeAcceptancePage(f.fixture.root);
+  const recovered = await verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  });
+  assert.equal(recovered.record.schemaVersion, 1);
+  assert.equal(recovered.record.sampleFingerprint, legacy.sampleFingerprint);
+});
+
+test('reads schema-1 accepted and rejected terminal states without rewriting them', async (t) => {
+  for (const [index, decision] of ['accepted', 'rejected'].entries()) {
+    const f = await deviceFixture(t, { challengeFill: 0x53 + index });
+    assert.equal(f.prepared.challenge.schemaVersion, 2);
+    const legacy = schema1Challenge(f.prepared.challenge);
+    await writeFile(f.prepared.challengePath, `${JSON.stringify(legacy, null, 2)}\n`);
+    const envelope = passingEnvelope(legacy, f.keyPair.privateKey);
+    if (decision === 'rejected') {
+      const payload = JSON.parse(envelope.payload);
+      payload.cases[0].status = 'fail';
+      resign(envelope, payload, f.keyPair.privateKey);
+    }
+    const receiptPath = join(f.fixture.root, `schema-1-${decision}.json`);
+    await writeFile(receiptPath, `${JSON.stringify(envelope)}\n`);
+    const options = {
+      root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+      receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+    };
+    if (decision === 'accepted') {
+      await verifyDeviceEvidence(options, { now: () => new Date('2026-11-01T01:00:00.000Z') });
+    } else {
+      await assert.rejects(
+        verifyDeviceEvidence(options, { now: () => new Date('2026-11-01T01:00:00.000Z') }),
+        /every mandatory case/i
+      );
+    }
+    await changeAcceptancePage(f.fixture.root);
+    await assert.rejects(verifyDeviceEvidence(options),
+      new RegExp(`${decision}.*consumed`, 'i'));
+    const terminalPath = join(dirname(f.prepared.challengePath),
+      `${legacy.challengeId}.${decision}.json`);
+    const terminal = JSON.parse(await readFile(terminalPath, 'utf8'));
+    assert.equal(terminal.schemaVersion, 1);
+    assert.equal(terminal.challenge.sampleFingerprint, legacy.sampleFingerprint);
+  }
+});
+
+test('writes schema-2 pending, verifying, and terminal records with both fingerprints', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x55 });
+  const challenge = f.prepared.challenge;
+  assert.equal(challenge.schemaVersion, 2);
+  assert.equal(challenge.consumerFingerprint, f.bundle.releaseSet.verification.sampleFingerprint);
+  assert.equal(challenge.acceptanceFingerprint,
+    deviceSampleFingerprint(f.fixture.root, 'mysql'));
+  assert.equal('sampleFingerprint' in challenge, false);
+  const receiptPath = join(f.fixture.root, 'schema-2-dual.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(challenge, f.keyPair.privateKey))}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async removeWork() { throw new Error('Synthetic schema-2 cleanup failure.'); }
+  }), /cleanup.*recoverable/i);
+  const stateDirectory = dirname(f.prepared.challengePath);
+  const verifyingPath = join(stateDirectory, `${challenge.challengeId}.verifying.json`);
+  const verifying = JSON.parse(await readFile(verifyingPath, 'utf8'));
+  assert.equal(verifying.schemaVersion, 2);
+  assert.equal(verifying.challenge.consumerFingerprint, challenge.consumerFingerprint);
+  assert.equal(verifying.challenge.acceptanceFingerprint, challenge.acceptanceFingerprint);
+  assert.equal(verifying.record.consumerFingerprint, challenge.consumerFingerprint);
+  assert.equal(verifying.record.acceptanceFingerprint, challenge.acceptanceFingerprint);
+  const accepted = await verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }, {
+    now: () => new Date('2026-11-03T00:00:00.000Z'),
+    isProcessAlive: () => false
+  });
+  assert.equal(accepted.record.schemaVersion, 2);
+  assert.equal(accepted.record.consumerFingerprint, challenge.consumerFingerprint);
+  assert.equal(accepted.record.acceptanceFingerprint, challenge.acceptanceFingerprint);
+  const terminal = JSON.parse(await readFile(join(stateDirectory,
+    `${challenge.challengeId}.accepted.json`), 'utf8'));
+  assert.equal(terminal.schemaVersion, 2);
+  assert.equal(terminal.record.consumerFingerprint, challenge.consumerFingerprint);
+  assert.equal(terminal.record.acceptanceFingerprint, challenge.acceptanceFingerprint);
+});
+
+test('rejects schema-2 evidence after the acceptance harness fingerprint changes', async (t) => {
+  const f = await deviceFixture(t, { challengeFill: 0x56 });
+  const receiptPath = join(f.fixture.root, 'schema-2-changed-acceptance.json');
+  await writeFile(receiptPath,
+    `${JSON.stringify(passingEnvelope(f.prepared.challenge, f.keyPair.privateKey))}\n`);
+  await changeAcceptancePage(f.fixture.root);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }), /challenge differs|sealed release binding/i);
+  assert.equal(existsSync(f.prepared.challengePath), true);
+  assert.equal(existsSync(f.prepared.workDirectory), true);
 });
 
 test('restricts the one-time signing workspace to the preparing account', async (t) => {
@@ -1219,14 +1378,17 @@ test('rejects a conflicting atomic state temp instead of trusting file existence
   }), /ambiguous|conflicting temporary/i);
 });
 
-test('binds the case manifest into the sample fingerprint', async (t) => {
+test('binds the case manifest only into the device acceptance fingerprint', async (t) => {
   const fixture = await releaseFixture(t);
-  const before = sampleFingerprint(fixture.root, 'mysql');
-  const manifestPath = join(fixture.root, 'examples', 'mysql-client', 'device-acceptance-cases.json');
+  const ordinary = sampleFingerprint(fixture.root, 'mysql');
+  const before = deviceSampleFingerprint(fixture.root, 'mysql');
+  const manifestPath = join(fixture.root, 'examples', 'mysql-device-acceptance',
+    'device-acceptance-cases.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   manifest.caseIds = [...manifest.caseIds, 'synthetic_changed_case'];
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  assert.notEqual(sampleFingerprint(fixture.root, 'mysql'), before);
+  assert.equal(sampleFingerprint(fixture.root, 'mysql'), ordinary);
+  assert.notEqual(deviceSampleFingerprint(fixture.root, 'mysql'), before);
 });
 
 test('parses only explicit preparation and artifact-validation commands', () => {
@@ -2236,8 +2398,8 @@ test('binds the implemented M4 sha256 selection to caching SHA-2 evidence', asyn
 
 test('keeps the ArkTS fixed-case runner synchronized with the case manifest', async () => {
   const manifest = JSON.parse(await readFile(
-    join(process.cwd(), 'examples', 'mysql-client', 'device-acceptance-cases.json'), 'utf8'));
-  const source = await readFile(join(process.cwd(), 'examples', 'mysql-client', 'entry', 'src',
+    join(process.cwd(), 'examples', 'mysql-device-acceptance', 'device-acceptance-cases.json'), 'utf8'));
+  const source = await readFile(join(process.cwd(), 'examples', 'mysql-device-acceptance', 'entry', 'src',
     'main', 'ets', 'sample', 'DeviceAcceptanceManifest.ets'), 'utf8');
   assert.match(source, new RegExp(`DEVICE_ACCEPTANCE_SUITE_ID: string = '${manifest.suiteId}'`));
   for (const id of manifest.caseIds) {
@@ -2259,15 +2421,21 @@ test('verifies the exact real-ArkTS pooled-offset signer vector', () => {
 });
 
 function passingPayload(challenge, hapSha256 = challenge.preparedUnsignedHapSha256) {
+  const fingerprints = challenge.schemaVersion === 1
+    ? { sampleFingerprint: challenge.sampleFingerprint }
+    : {
+        consumerFingerprint: challenge.consumerFingerprint,
+        acceptanceFingerprint: challenge.acceptanceFingerprint
+      };
   return {
-    schemaVersion: 1,
+    schemaVersion: challenge.schemaVersion,
     profile: 'M1',
     features: [],
     runId: challenge.challengeId,
     sourceCommit: challenge.sourceCommit,
     sourceClean: true,
     harSha256: challenge.artifactSha256,
-    sampleFingerprint: challenge.sampleFingerprint,
+    ...fingerprints,
     hapSha256,
     apiVersion: 24,
     deviceClass: 'tablet',
@@ -2281,6 +2449,27 @@ function passingPayload(challenge, hapSha256 = challenge.preparedUnsignedHapSha2
     operatorEvidenceId: 'operator-evidence-001',
     cases: challenge.caseIds.map((id) => ({ id, status: 'pass', durationMs: 1 }))
   };
+}
+
+function schema1Challenge(challenge) {
+  const {
+    consumerFingerprint,
+    acceptanceFingerprint,
+    sampleFingerprint,
+    ...identity
+  } = challenge;
+  return {
+    ...identity,
+    schemaVersion: 1,
+    sampleFingerprint: sampleFingerprint ?? consumerFingerprint,
+    caseManifestSha256: LEGACY_CASE_MANIFEST_SHA256
+  };
+}
+
+async function changeAcceptancePage(root) {
+  const page = join(root, 'examples', 'mysql-device-acceptance', 'entry', 'src',
+    'main', 'ets', 'pages', 'Index.ets');
+  await writeFile(page, `${await readFile(page, 'utf8')}\n// Synthetic post-challenge UI change.\n`);
 }
 
 function passingEnvelope(challenge, privateKey) {

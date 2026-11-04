@@ -5,15 +5,15 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { link, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
-import { prepareHarRelease, readReleaseBundle } from './prepare-har-release.mjs';
-import { releaseFixture } from './test-fixtures/har-release.mjs';
-import { sha256 } from './package-har.mjs';
-import { deviceSampleFingerprint, sampleFingerprint } from './test-consumer.mjs';
-import { hapSigningContentFingerprint } from './hap-content.mjs';
+import { prepareHarRelease, readReleaseBundle } from '../prepare-har-release.mjs';
+import { releaseFixture } from '../test-fixtures/har-release.mjs';
+import { sha256 } from '../package-har.mjs';
+import { deviceSampleFingerprint, sampleFingerprint } from '../test-consumer.mjs';
+import { hapSigningContentFingerprint } from '../hap-content.mjs';
 import {
   deviceEvidenceArguments, prepareDeviceEvidence, verifyDeviceEvidence, verifyDeviceReceiptEnvelope
-} from './verify-device-evidence.mjs';
-import * as deviceEvidence from './verify-device-evidence.mjs';
+} from '../verify-device-evidence.mjs';
+import * as deviceEvidence from '../verify-device-evidence.mjs';
 
 const LEGACY_CASE_MANIFEST_SHA256 =
   '11d13bcd0c5677228342da2e95b894122627bda7fcc8e1dab16a26b6acf3705b';
@@ -30,7 +30,7 @@ async function deviceFixture(t, overrides = {}) {
     Buffer.alloc(32, overrides.schemaFill ?? 0x33)
   ];
   const hapBytes = overrides.hapBytes ?? await readFile(
-    join(import.meta.dirname, 'test-fixtures', 'mysql-client-real.hap'));
+    join(import.meta.dirname, '..', 'test-fixtures', 'mysql-client-real.hap'));
   const dependencies = {
     git: fixture.git,
     now: () => new Date('2026-11-01T00:00:00.000Z'),
@@ -314,7 +314,7 @@ test('removes staged outputs when pending challenge publication fails', async (t
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
   const keyPair = generateKeyPairSync('ed25519');
   const hapBytes = await readFile(join(import.meta.dirname,
-    'test-fixtures', 'mysql-client-real.hap'));
+    '..', 'test-fixtures', 'mysql-client-real.hap'));
   const challengeId = '41'.repeat(16);
   const paths = join(fixture.root, 'build', 'mysql-v1.0.0');
   await assert.rejects(prepareDeviceEvidence({
@@ -345,7 +345,7 @@ test('does not publish a challenge when retained preparation file sync fails', a
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
   const keyPair = generateKeyPairSync('ed25519');
   const hapBytes = await readFile(join(import.meta.dirname,
-    'test-fixtures', 'mysql-client-real.hap'));
+    '..', 'test-fixtures', 'mysql-client-real.hap'));
   const challengeId = '42'.repeat(16);
   const base = join(fixture.root, 'build', 'mysql-v1.0.0');
   await assert.rejects(prepareDeviceEvidence({
@@ -371,7 +371,7 @@ test('preserves a linked pending publication when post-link cleanup fails', asyn
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
   const keyPair = generateKeyPairSync('ed25519');
   const hapBytes = await readFile(join(import.meta.dirname,
-    'test-fixtures', 'mysql-client-real.hap'));
+    '..', 'test-fixtures', 'mysql-client-real.hap'));
   const challengeId = '44'.repeat(16);
   const paths = join(fixture.root, 'build', 'mysql-v1.0.0');
   let challenge;
@@ -450,7 +450,7 @@ test('does not recover a journal owned by an active preparation', async (t) => {
   const fixture = await releaseFixture(t);
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
   const hapBytes = await readFile(join(import.meta.dirname,
-    'test-fixtures', 'mysql-client-real.hap'));
+    '..', 'test-fixtures', 'mysql-client-real.hap'));
   const firstKey = generateKeyPairSync('ed25519');
   let releaseFirst;
   const holdFirst = new Promise((resolve) => { releaseFirst = resolve; });

@@ -13,6 +13,8 @@ import ts from 'typescript';
  *
  * @typedef {{
  *   allowedCycles?: string[][],
+ *   allowedRootToolFiles?: string[],
+ *   ownedToolDirectories?: string[],
  *   prohibitedDependencies?: Array<{
  *     from: ArchitecturePathPattern,
  *     to: ArchitecturePathPattern,
@@ -70,7 +72,7 @@ function exactEntry(parent, name, kind, { optional = false } = {}) {
   return file;
 }
 
-function walk(directory, visitFile) {
+function walk(directory, visitFile, shouldIgnore = (_parent, name) => ignoredDirectory(name)) {
   const info = lstatSync(directory);
   if (info.isSymbolicLink()) {
     throw new Error(`Architecture sources must not use symbolic links: ${directory}`);
@@ -79,12 +81,12 @@ function walk(directory, visitFile) {
   for (const entry of readdirSync(directory, { withFileTypes: true })
     .sort((left, right) => compareText(left.name, right.name))) {
     const file = join(directory, entry.name);
-    if (ignoredDirectory(entry.name)) continue;
+    if (shouldIgnore(directory, entry.name)) continue;
     if (entry.isSymbolicLink()) {
       throw new Error(`Architecture sources must not use symbolic links: ${file}`);
     }
     if (entry.isDirectory()) {
-      walk(file, visitFile);
+      walk(file, visitFile, shouldIgnore);
     } else if (entry.isFile()) {
       visitFile(file);
     }
@@ -154,7 +156,7 @@ function toolingSources(root) {
       throw new Error(`Node tooling source ${file} must use the exact lowercase .mjs suffix.`);
     }
     if (NODE_SOURCE.test(file)) files.push(file);
-  });
+  }, (parent, name) => parent === directory && name === 'build' ? false : ignoredDirectory(name));
   return files;
 }
 
@@ -222,6 +224,9 @@ function staticSpecifiers(file) {
     } else if (NODE_SOURCE.test(file) && ts.isElementAccessExpression(node) &&
       processExpression(node.expression)) {
       throw new Error(`Node computed process access is not supported: ${file}`);
+    } else if (NODE_SOURCE.test(file) && ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      throw new Error(`Dynamic Node imports are not supported: ${file}`);
     } else if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
       if (NODE_SOURCE.test(file) && ['module', 'node:module'].includes(node.moduleSpecifier.text)) {
@@ -513,6 +518,24 @@ function cycleKey(cycle) {
   return ordered.join('\0');
 }
 
+function dependencyPaths(source, dependencies) {
+  const paths = new Map();
+  const visited = new Set([source]);
+  const pending = dependencies.get(source)
+    .map((dependency) => [source, dependency]);
+  while (pending.length > 0) {
+    const path = pending.shift();
+    const target = path.at(-1);
+    if (visited.has(target)) continue;
+    visited.add(target);
+    paths.set(target, path);
+    for (const dependency of dependencies.get(target)) {
+      pending.push([...path, dependency]);
+    }
+  }
+  return paths;
+}
+
 /**
  * Enforces exact known cycle findings and prohibited dependency rules.
  *
@@ -523,6 +546,35 @@ function cycleKey(cycle) {
 export function assertImportPolicy(graph, policy) {
   if (!policy || typeof policy !== 'object') throw new Error('Architecture policy is required.');
   const { files, dependencies } = checkedGraph(graph);
+  if (policy.allowedRootToolFiles !== undefined ||
+    policy.ownedToolDirectories !== undefined) {
+    const allowedRootToolFiles = policy.allowedRootToolFiles ?? [];
+    const ownedToolDirectories = policy.ownedToolDirectories ?? [];
+    if (!Array.isArray(allowedRootToolFiles) ||
+      allowedRootToolFiles.some((file) =>
+        typeof file !== 'string' || !/^tools\/[^/]+\.mjs$/.test(file)) ||
+      new Set(allowedRootToolFiles).size !== allowedRootToolFiles.length) {
+      throw new Error('Allowed root tooling sources must be unique root-level .mjs paths.');
+    }
+    if (!Array.isArray(ownedToolDirectories) ||
+      ownedToolDirectories.some((directory) =>
+        typeof directory !== 'string' || !/^[a-z][a-z0-9-]*$/.test(directory)) ||
+      new Set(ownedToolDirectories).size !== ownedToolDirectories.length) {
+      throw new Error('Owned tooling directories must be unique directory names.');
+    }
+    const allowed = new Set(allowedRootToolFiles);
+    const owned = new Set(ownedToolDirectories);
+    for (const file of files.filter((candidate) => candidate.startsWith('tools/'))) {
+      const path = file.slice('tools/'.length);
+      if (!path.includes('/')) {
+        if (!allowed.has(file)) throw new Error(`Unowned root tooling source: ${file}`);
+        continue;
+      }
+      if (!owned.has(path.split('/', 1)[0])) {
+        throw new Error(`Unowned tooling source: ${file}`);
+      }
+    }
+  }
   const rules = policy.prohibitedDependencies ?? [];
   if (!Array.isArray(rules)) throw new Error('Prohibited dependencies must be a list.');
   for (const rule of rules) {
@@ -531,10 +583,10 @@ export function assertImportPolicy(graph, policy) {
     }
     for (const file of files) {
       if (!matchesPath(file, rule.from)) continue;
-      for (const dependency of dependencies.get(file)) {
+      for (const [dependency, path] of dependencyPaths(file, dependencies)) {
         if (!matchesPath(dependency, rule.to)) continue;
         const message = rule.message ?? 'Prohibited dependency';
-        throw new Error(`${message}: ${file} -> ${dependency}`);
+        throw new Error(`${message}: ${path.join(' -> ')}`);
       }
     }
   }

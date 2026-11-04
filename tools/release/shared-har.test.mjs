@@ -3,14 +3,14 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { verifiedArtifactSet } from './package-har.mjs';
-import { releaseAssetNames, releaseDependencyReferences, validateReleaseSet } from './har-release.mjs';
-import { prepareHarRelease, readReleaseBundle, verifyLocally } from './prepare-har-release.mjs';
-import { verifyHarConsumer } from './test-consumer.mjs';
-import { publishHarRelease } from './publish-har.mjs';
-import { verifyDownloadedHar } from './verify-download.mjs';
-import { sharedReleaseFixture, LOCAL_STEM, TAG } from './test-fixtures/har-release.mjs';
-import { fakeGitHub } from './test-fixtures/github-release.mjs';
+import { verifiedArtifactSet } from '../package-har.mjs';
+import { releaseAssetNames, releaseDependencyReferences, validateReleaseSet } from '../har-release.mjs';
+import { prepareHarRelease, readReleaseBundle, verifyLocally } from '../prepare-har-release.mjs';
+import { verifyHarConsumer } from '../test-consumer.mjs';
+import { publishHarRelease } from '../publish-har.mjs';
+import { verifyDownloadedHar } from '../verify-download.mjs';
+import { sharedReleaseFixture, LOCAL_STEM, TAG } from '../test-fixtures/har-release.mjs';
+import { fakeGitHub } from '../test-fixtures/github-release.mjs';
 
 test('the exact shared-plus-driver set verifies without embedding or treating core as a driver', async (t) => {
   const f = await sharedReleaseFixture(t);

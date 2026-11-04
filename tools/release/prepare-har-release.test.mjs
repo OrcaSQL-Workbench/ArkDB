@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, readdir, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { prepareHarRelease, readReleaseBundle, verifyLocally } from './prepare-har-release.mjs';
-import { releaseFixture, LOCAL_STEM, STEM, TAG, COMMIT, TAG_OBJECT } from './test-fixtures/har-release.mjs';
+import { prepareHarRelease, readReleaseBundle, verifyLocally } from '../prepare-har-release.mjs';
+import { releaseFixture, LOCAL_STEM, STEM, TAG, COMMIT, TAG_OBJECT } from '../test-fixtures/har-release.mjs';
 
 test('prepares only exact verified assets and binds them to the clean annotated tag', async (t) => {
   const fixture = await releaseFixture(t);

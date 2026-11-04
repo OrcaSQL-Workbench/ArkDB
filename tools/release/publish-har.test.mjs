@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { prepareHarRelease } from './prepare-har-release.mjs';
-import { publishHarRelease, saveReleaseReceipt } from './publish-har.mjs';
-import { fakeGitHub } from './test-fixtures/github-release.mjs';
-import { COMMIT, REPO, releaseFixture, STEM, TAG } from './test-fixtures/har-release.mjs';
+import { prepareHarRelease } from '../prepare-har-release.mjs';
+import { publishHarRelease, saveReleaseReceipt } from '../publish-har.mjs';
+import { fakeGitHub } from '../test-fixtures/github-release.mjs';
+import { COMMIT, REPO, releaseFixture, STEM, TAG } from '../test-fixtures/har-release.mjs';
 
 async function fixture(t) {
   const source = await releaseFixture(t);

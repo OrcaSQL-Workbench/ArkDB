@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { inspectHar, verifiedArtifact } from './package-har.mjs';
-import { prepareHarRelease, readReleaseBundle } from './prepare-har-release.mjs';
-import { validateEvidence } from './har-release.mjs';
-import { releaseFixture, sharedReleaseFixture, STEM } from './test-fixtures/har-release.mjs';
+import { inspectHar, verifiedArtifact } from '../package-har.mjs';
+import { prepareHarRelease, readReleaseBundle } from '../prepare-har-release.mjs';
+import { validateEvidence } from '../har-release.mjs';
+import { releaseFixture, sharedReleaseFixture, STEM } from '../test-fixtures/har-release.mjs';
 
 test('local build labels change filenames but not the numeric package version', async (t) => {
   const fixture = await releaseFixture(t);

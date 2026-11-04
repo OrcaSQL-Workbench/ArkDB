@@ -10,7 +10,7 @@
     "restore": "node tools/run-ohpm.mjs install --all",
     "drivers": "node tools/plan-har-builds.mjs",
     "check": "npm run test:tools && node tools/check-package.mjs && node tools/driver-contracts.mjs",
-    "test:tools": "node --test --test-concurrency=1 tools/*.test.mjs",
+    "test:tools": "node --test --test-concurrency=1 \"tools/**/*.test.mjs\"",
     "test:contracts": "node --test tools/driver-contracts.test.mjs",
     "build": "node tools/package-har.mjs",
     "build:release": "node tools/package-har.mjs",

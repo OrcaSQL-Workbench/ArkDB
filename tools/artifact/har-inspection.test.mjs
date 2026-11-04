@@ -6,7 +6,7 @@ import test from 'node:test';
 import { create, Header, Parser } from 'tar';
 import { gzipSync } from 'node:zlib';
 import { randomFillSync } from 'node:crypto';
-import { inspectHar, sha256, sourceFingerprint } from './package-har.mjs';
+import { inspectHar, sha256, sourceFingerprint } from '../package-har.mjs';
 
 const expected = { name: '@arkdb/mysql', version: '1.0.0', license: 'Apache-2.0', dependencies: {} };
 const fixtureExports = ['SyntheticDeclaration'];

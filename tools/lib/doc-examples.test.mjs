@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ROOT } from './check-package.mjs';
+import { ROOT } from '../check-package.mjs';
 import { extractExamples } from './doc-examples.mjs';
 
 test('extracts self-contained ArkTS examples without modifying their code', () => {

@@ -15,21 +15,98 @@ const KNOWN_CYCLES = [
     'mysql/src/main/ets/mysql/driver/MySqlContracts.ets',
     'mysql/src/main/ets/mysql/driver/MySqlSession.ets',
     'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets'
-  ],
-  [
-    'tools/delivery-workspace.mjs',
-    'tools/har-release.mjs',
-    'tools/package-har.mjs'
   ]
+];
+const TOOL_LAYER_RULES = [
+  {
+    from: /^tools\/lib\//,
+    to: /^tools\/(?:workspace|artifact|build|consumer|release|device)\//,
+    message: 'Tool lib must not depend on workflow layers.'
+  },
+  {
+    from: /^tools\/workspace\//,
+    to: /^tools\/(?:artifact|build|consumer|release|device)\//,
+    message: 'Tool workspace ownership must not depend on higher workflow layers.'
+  },
+  {
+    from: /^tools\/artifact\//,
+    to: /^tools\/(?:build|consumer|release|device)\//,
+    message: 'Tool artifact primitives must not depend on workflow orchestration.'
+  },
+  {
+    from: /^tools\/build\//,
+    to: /^tools\/(?:consumer|release|device)\//,
+    message: 'Tool build ownership must not depend on downstream workflows.'
+  },
+  {
+    from: /^tools\/consumer\//,
+    to: /^tools\/(?:build|release|device)\//,
+    message: 'Tool consumer ownership must not depend on build, release, or device workflows.'
+  },
+  {
+    from: /^tools\/release\//,
+    to: /^tools\/(?:build|device)\//,
+    message: 'Tool release ownership must not depend on build or device workflows.'
+  },
+  {
+    from: /^tools\/device\//,
+    to: /^tools\/build\//,
+    message: 'Tool device ownership must not depend on build orchestration.'
+  },
+  {
+    from: /^tools\/device\//,
+    to: /^tools\/release\/(?!(?:contracts|bundle)\.mjs$)/,
+    message: 'Tool device ownership may depend only on sealed release contracts.'
+  },
+  {
+    from: /^tools\/device\//,
+    to: /^tools\/consumer\/(?!evidence\.mjs$)/,
+    message: 'Tool device ownership may depend only on sealed consumer evidence contracts.'
+  }
+];
+const ALLOWED_ROOT_TOOL_FILES = [
+  'tools/architecture-graph.mjs',
+  'tools/check-package.mjs',
+  'tools/check-release.mjs',
+  'tools/delivery-workspace.mjs',
+  'tools/doc-examples.mjs',
+  'tools/driver-contracts.mjs',
+  'tools/driver-packages.mjs',
+  'tools/github-release.mjs',
+  'tools/hap-content.mjs',
+  'tools/har-release.mjs',
+  'tools/package-har.mjs',
+  'tools/plan-har-builds.mjs',
+  'tools/prepare-har-release.mjs',
+  'tools/publish-har.mjs',
+  'tools/run-hvigor.mjs',
+  'tools/run-ohos-tests.mjs',
+  'tools/run-ohpm.mjs',
+  'tools/test-consumer.mjs',
+  'tools/verify-device-evidence.mjs',
+  'tools/verify-download.mjs',
+  'tools/verify-driver.mjs'
+];
+const OWNED_TOOL_DIRECTORIES = [
+  'artifact',
+  'build',
+  'consumer',
+  'device',
+  'lib',
+  'release',
+  'workspace'
 ];
 const ARCHITECTURE_POLICY = {
   allowedCycles: KNOWN_CYCLES,
+  allowedRootToolFiles: ALLOWED_ROOT_TOOL_FILES,
+  ownedToolDirectories: OWNED_TOOL_DIRECTORIES,
   prohibitedDependencies: [
     {
       from: /^core\//,
       to: /^mysql\//,
       message: 'Shared core must not depend on the MySQL driver.'
-    }
+    },
+    ...TOOL_LAYER_RULES
   ]
 };
 
@@ -70,7 +147,6 @@ export class RuntimeA {
     'tools/a.mjs': `
 import './b.mjs';
 export { value } from './c.mjs';
-void import('./dynamic.mjs');
 throw new Error('scanned source was executed');
 `,
     'tools/b.mjs': "export const sideEffect = 'static';",
@@ -115,6 +191,26 @@ throw new Error('scanned source was executed');
       message: 'Static import types must reach policy enforcement.'
     }]
   }), /Static import types must reach policy enforcement/);
+});
+
+test('reads the owned tools build layer but ignores nested generated build output', async (t) => {
+  const root = await fixture(t, {
+    'tools/build/package-har.mjs': "import '../lib/hash.mjs';",
+    'tools/build/generated/ignored.mjs': 'export const generated = true;',
+    'tools/lib/hash.mjs': 'export const sha256 = () => "hash";',
+    'tools/workspace/build/ignored.mjs': 'export const generated = true;'
+  });
+
+  const graph = readArkTsGraph(root);
+
+  assert.deepEqual(graph.files, [
+    'tools/build/generated/ignored.mjs',
+    'tools/build/package-har.mjs',
+    'tools/lib/hash.mjs'
+  ]);
+  assert.deepEqual(graph.dependencies['tools/build/package-har.mjs'], [
+    'tools/lib/hash.mjs'
+  ]);
 });
 
 test('orders graph and cycle output independently of host locale collation', async (t) => {
@@ -500,4 +596,114 @@ test('rejects prohibited dependencies even when the graph is acyclic', () => {
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
     /Shared core must not depend on the MySQL driver.*core\/Index\.ets -> mysql\/Index\.ets/
   );
+});
+
+test('rejects reverse tooling ownership imports', () => {
+  for (const rule of TOOL_LAYER_RULES) {
+    const from = {
+      'Tool lib must not depend on workflow layers.': 'tools/lib/hash.mjs',
+      'Tool workspace ownership must not depend on higher workflow layers.':
+        'tools/workspace/delivery-workspace.mjs',
+      'Tool artifact primitives must not depend on workflow orchestration.':
+        'tools/artifact/har-inspection.mjs',
+      'Tool build ownership must not depend on downstream workflows.':
+        'tools/build/package-har.mjs',
+      'Tool consumer ownership must not depend on build, release, or device workflows.':
+        'tools/consumer/test-consumer.mjs',
+      'Tool release ownership must not depend on build or device workflows.':
+        'tools/release/prepare-har-release.mjs',
+      'Tool device ownership must not depend on build orchestration.':
+        'tools/device/verifier.mjs',
+      'Tool device ownership may depend only on sealed release contracts.':
+        'tools/device/challenge.mjs',
+      'Tool device ownership may depend only on sealed consumer evidence contracts.':
+        'tools/device/harness.mjs'
+    }[rule.message];
+    const to = {
+      'Tool lib must not depend on workflow layers.': 'tools/build/package-har.mjs',
+      'Tool workspace ownership must not depend on higher workflow layers.':
+        'tools/artifact/har-inspection.mjs',
+      'Tool artifact primitives must not depend on workflow orchestration.':
+        'tools/consumer/test-consumer.mjs',
+      'Tool build ownership must not depend on downstream workflows.':
+        'tools/release/prepare-har-release.mjs',
+      'Tool consumer ownership must not depend on build, release, or device workflows.':
+        'tools/build/package-har.mjs',
+      'Tool release ownership must not depend on build or device workflows.':
+        'tools/device/verifier.mjs',
+      'Tool device ownership must not depend on build orchestration.':
+        'tools/build/package-har.mjs',
+      'Tool device ownership may depend only on sealed release contracts.':
+        'tools/release/prepare-har-release.mjs',
+      'Tool device ownership may depend only on sealed consumer evidence contracts.':
+        'tools/consumer/test-consumer.mjs'
+    }[rule.message];
+    const graph = {
+      files: [from, to],
+      dependencies: { [from]: [to], [to]: [] }
+    };
+
+    assert.throws(() => assertImportPolicy(graph, {
+      prohibitedDependencies: [rule]
+    }), new RegExp(rule.message.replaceAll('.', '\\.')));
+  }
+});
+
+test('rejects reverse tooling ownership imports through compatibility wrappers', () => {
+  const graph = {
+    files: [
+      'tools/consumer/test-consumer.mjs',
+      'tools/package-har.mjs',
+      'tools/build/package-har.mjs'
+    ],
+    dependencies: {
+      'tools/consumer/test-consumer.mjs': ['tools/package-har.mjs'],
+      'tools/package-har.mjs': ['tools/build/package-har.mjs'],
+      'tools/build/package-har.mjs': []
+    }
+  };
+  const rule = TOOL_LAYER_RULES.find((candidate) =>
+    candidate.message ===
+    'Tool consumer ownership must not depend on build, release, or device workflows.');
+
+  assert.throws(() => assertImportPolicy(graph, {
+    prohibitedDependencies: [rule]
+  }), /consumer\/test-consumer\.mjs -> tools\/package-har\.mjs -> tools\/build\/package-har\.mjs/);
+});
+
+test('rejects dynamic tooling imports instead of hiding ownership edges', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': "void import('./b.mjs');",
+    'tools/b.mjs': 'export const value = true;'
+  });
+
+  assert.throws(() => readArkTsGraph(root),
+    /Dynamic Node imports are not supported.*tools.*a\.mjs/i);
+});
+
+test('rejects production tooling outside an ownership layer or explicit root allowlist', () => {
+  const graph = {
+    files: ['tools/architecture-graph.mjs', 'tools/release-helper.mjs'],
+    dependencies: {
+      'tools/architecture-graph.mjs': [],
+      'tools/release-helper.mjs': []
+    }
+  };
+
+  assert.throws(() => assertImportPolicy(graph, {
+    allowedRootToolFiles: ['tools/architecture-graph.mjs'],
+    ownedToolDirectories: OWNED_TOOL_DIRECTORIES
+  }), /Unowned root tooling source: tools\/release-helper\.mjs/);
+});
+
+test('rejects production tooling in unowned nested directories', () => {
+  const graph = {
+    files: ['tools/misc/helper.mjs'],
+    dependencies: { 'tools/misc/helper.mjs': [] }
+  };
+
+  assert.throws(() => assertImportPolicy(graph, {
+    allowedRootToolFiles: [],
+    ownedToolDirectories: OWNED_TOOL_DIRECTORIES
+  }), /Unowned tooling source: tools\/misc\/helper\.mjs/);
 });

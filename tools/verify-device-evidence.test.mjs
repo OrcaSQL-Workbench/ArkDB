@@ -141,6 +141,15 @@ test('preserves the historical schema-1 case manifest bytes after moving the har
   assert.equal(sha256(bytes), LEGACY_CASE_MANIFEST_SHA256);
 });
 
+test('documents the retained acceptance HAP as private-key-sensitive until cleanup', async () => {
+  const readme = await readFile(join(process.cwd(), 'examples', 'mysql-device-acceptance',
+    'README.md'), 'utf8');
+  assert.match(readme,
+    /retained unsigned HAP still contains the one-time\s+Ed25519 private key/i);
+  assert.match(readme,
+    /remains sensitive until challenge consumption and\s+verification cleanup/i);
+});
+
 test('reads schema-1 pending state without reinterpreting its sample fingerprint', async (t) => {
   const f = await deviceFixture(t, { challengeFill: 0x51 });
   assert.equal(f.prepared.challenge.schemaVersion, 2);

@@ -18,11 +18,13 @@ this acceptance harness fingerprint, generates a one-time Ed25519 key pair,
 injects both fingerprints and the challenge identity into an isolated copy,
 installs the exact sealed HAR, and compiles `entry-default-unsigned.hap`.
 
-The private key exists only in the generated source used for that build.
-Preparation records the exact HAP SHA-256/size, removes the generated source and
-private key, then publishes the pending challenge last. The retained work
-directory contains only the unsigned HAP, schema provisioning JSON, and
-receipt-context JSON.
+The private key exists only in the generated source and the HAP compiled from
+that source. Preparation records the exact HAP SHA-256/size, removes the
+generated source copy, then publishes the pending challenge last. The retained
+work directory contains only the unsigned HAP, schema provisioning JSON, and
+receipt-context JSON. The retained unsigned HAP still contains the one-time
+Ed25519 private key and remains sensitive until challenge consumption and
+verification cleanup.
 
 ## Fixed acceptance suite
 

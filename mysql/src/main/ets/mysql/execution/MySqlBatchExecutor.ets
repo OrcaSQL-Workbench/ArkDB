@@ -1,19 +1,22 @@
 import { ArkDbError, DatabaseSessionStatus, QueryOptions } from '@arkdb/core';
-import { MySqlPreparedExecutorHost } from '../command/PreparedExecutor';
+import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor';
 import {
-  MySqlPreparedSession, preparedCleanup, preparedFailure
-} from '../command/PreparedStatement';
+  MySqlPreparedSession, preparedFailure
+} from '../features/prepared/PreparedStatement';
 import { MySqlBatchExecutor } from '../api/MySqlFeatureContracts';
 import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+import {
+  OwnedStatementLifecycle
+} from '../features/prepared/OwnedStatementLifecycle';
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
 } from '../model/MySqlBatch';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { MySqlParameter } from '../model/MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../value/BinaryParameterEncoder';
+} from '../features/prepared/BinaryParameterEncoder';
 import {
   mySqlBatchItemOptions, mySqlBatchResultBytes
 } from './MySqlBatchSupport';
@@ -22,11 +25,13 @@ import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
 export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
   private host: MySqlPreparedExecutorHost;
   private session: MySqlPreparedSession;
+  private lifecycle: OwnedStatementLifecycle;
   private readSessionStatus: () => DatabaseSessionStatus;
 
   constructor(host: MySqlPreparedExecutorHost, readSessionStatus: () => DatabaseSessionStatus) {
     this.host = host;
     this.session = new MySqlPreparedSession(host);
+    this.lifecycle = new OwnedStatementLifecycle(this.session);
     this.readSessionStatus = readSessionStatus;
   }
 
@@ -56,65 +61,44 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
       return await this.host.runCommand(MySqlCommandKind.Query,
         async (scope: MySqlCommandScope): Promise<MySqlBatchResult> => {
           scopeEntered = true;
-          let statement: MySqlPreparedStatement | null = null;
-          let primary: Object | null = null;
-          const cleanup: ArkDbError[] = [];
-          try {
-            statement = await this.session.prepareOwned(scope, sql);
-            for (let index = 0; index < encodedRows.length; index += 1) {
-              failedIndex = index;
-              if (encodedRows[index].types.length / 2 !== statement.parameterCount) {
-                throw ArkDbError.validation('Parameter count must match the prepared statement');
-              }
-            }
-            let remainingBytes = snapshot.maxBufferedBytes;
-            for (let index = 0; index < encodedRows.length; index += 1) {
-              failedIndex = index;
-              if (remainingBytes === 0) {
-                throw ArkDbError.validation('Prepared batch buffered result budget is exhausted.');
-              }
-              let capturedResult: MySqlQueryResult | null = null;
-              let result: MySqlQueryResult;
-              try {
-                result = await this.executeItem(scope, statement, encodedRows[index],
-                  mySqlBatchItemOptions(snapshot.queryOptions, remainingBytes),
-                  (decoded: MySqlQueryResult): void => { capturedResult = decoded; });
-              } catch (error) {
-                if (error instanceof MySqlOperationError &&
-                  error.outcome === MySqlExecutionOutcome.Completed && capturedResult !== null) {
-                  completed.push(capturedResult);
+          return this.lifecycle.withOwnedStatement<MySqlBatchResult>(
+            scope, sql,
+            async (statement: MySqlPreparedStatement):
+              Promise<MySqlBatchResult> => {
+              for (let index = 0; index < encodedRows.length; index += 1) {
+                failedIndex = index;
+                if (encodedRows[index].types.length / 2 !== statement.parameterCount) {
+                  throw ArkDbError.validation('Parameter count must match the prepared statement');
                 }
-                throw error as Error;
               }
-              completed.push(result);
-              const loadedBytes = mySqlBatchResultBytes(result);
-              remainingBytes = loadedBytes >= remainingBytes ? 0 : remainingBytes - loadedBytes;
-            }
-          } catch (error) {
-            primary = error as Object;
-          }
-          if (statement !== null) {
-            try {
-              await this.session.closeOwned(scope, statement);
-            } catch (error) {
-              if (primary === null) {
-                throw preparedFailure(
-                  error as Object, [], MySqlExecutionOutcome.Completed);
+              let remainingBytes = snapshot.maxBufferedBytes;
+              for (let index = 0; index < encodedRows.length; index += 1) {
+                failedIndex = index;
+                if (remainingBytes === 0) {
+                  throw ArkDbError.validation(
+                    'Prepared batch buffered result budget is exhausted.');
+                }
+                let capturedResult: MySqlQueryResult | null = null;
+                let result: MySqlQueryResult;
+                try {
+                  result = await this.executeItem(scope, statement, encodedRows[index],
+                    mySqlBatchItemOptions(snapshot.queryOptions, remainingBytes),
+                    (decoded: MySqlQueryResult): void => { capturedResult = decoded; });
+                } catch (error) {
+                  if (error instanceof MySqlOperationError &&
+                    error.outcome === MySqlExecutionOutcome.Completed &&
+                    capturedResult !== null) {
+                    completed.push(capturedResult);
+                  }
+                  throw error as Error;
+                }
+                completed.push(result);
+                const loadedBytes = mySqlBatchResultBytes(result);
+                remainingBytes = loadedBytes >= remainingBytes ?
+                  0 : remainingBytes - loadedBytes;
               }
-              cleanup.push(preparedCleanup(error as Object));
-            }
-          }
-          if (primary !== null) {
-            throw preparedFailure(primary, cleanup,
-              primary instanceof MySqlOperationError ?
-              primary.outcome : MySqlExecutionOutcome.NotDispatched);
-          }
-          if (cleanup.length > 0) {
-            throw preparedFailure(
-              cleanup[0], cleanup.slice(1),
-              MySqlExecutionOutcome.Completed);
-          }
-          return new MySqlBatchResult(completed);
+              return new MySqlBatchResult(completed);
+            });
         });
     } catch (error) {
       const failure = preparedFailure(error as Object, [],

@@ -10,7 +10,7 @@ import { MySqlExecutionOutcome, MySqlOperationError } from
   '../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlParameter, MySqlParameterType, MySqlParameterValue
-} from '../../../main/ets/mysql/model/MySqlParameter';
+} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
 import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
 import { Capabilities, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
 import {

@@ -71,15 +71,17 @@ import {
   MySqlBatchResult
 } from './model/MySqlBatch';
 import { MySqlDeadlineOptions } from './model/MySqlDeadlineOptions';
-import { MySqlParameter } from './model/MySqlParameter';
-import { MySqlPreparedExecutor as InternalPreparedExecutor } from './command/PreparedExecutor';
+import { MySqlParameter } from './features/prepared/MySqlParameter';
+import {
+  MySqlPreparedExecutor as InternalPreparedExecutor
+} from './features/prepared/PreparedExecutor';
 import {
   MySqlReadOnlyCursorExecutor
 } from './command/MySqlCursor';
 import {
   MySqlResultTerminatorObservation, parseBufferedResultStream, parseResultStream
 } from './command/ResultStream';
-import { BinaryRowDecoder } from './value/BinaryRowDecoder';
+import { BinaryRowDecoder } from './features/prepared/BinaryRowDecoder';
 import {
   MySqlConnectionBatchExecutor, MySqlConnectionCursorExecutor,
   MySqlConnectionInsertRowsExecutor, MySqlConnectionLongDataExecutor,

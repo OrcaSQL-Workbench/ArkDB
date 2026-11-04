@@ -13,7 +13,7 @@ import {
 } from '../../../main/ets/mysql/model/MySqlInsertRows';
 import {
   MySqlParameter, MySqlParameterType, MySqlParameterValue
-} from '../../../main/ets/mysql/model/MySqlParameter';
+} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {
   MySqlBatchError, MySqlBatchResult
 } from '../../../main/ets/mysql/model/MySqlBatch';

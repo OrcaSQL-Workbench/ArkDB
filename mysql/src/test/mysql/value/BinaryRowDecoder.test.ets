@@ -3,7 +3,9 @@ import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import { MySqlColumnDef, MySqlValue } from '../../../main/ets/mysql/model/MySqlQueryResult';
 import { ColumnType, FieldFlag } from '../../../main/ets/mysql/protocol/Constants';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
-import { BinaryRowDecoder } from '../../../main/ets/mysql/value/BinaryRowDecoder';
+import {
+  BinaryRowDecoder
+} from '../../../main/ets/mysql/features/prepared/BinaryRowDecoder';
 
 export default function binaryRowDecoderTest(): void {
   describe('BinaryRowDecoder', () => {

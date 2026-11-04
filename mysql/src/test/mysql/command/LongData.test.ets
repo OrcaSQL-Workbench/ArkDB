@@ -15,7 +15,9 @@ import { MySqlByteSource } from '../../../main/ets/mysql/model/MySqlByteSource';
 import {
   MySqlLongDataOptions, MySqlLongParameter, MySqlLongParameterKind
 } from '../../../main/ets/mysql/model/MySqlLongDataOptions';
-import { MySqlParameter, MySqlParameterType } from '../../../main/ets/mysql/model/MySqlParameter';
+import {
+  MySqlParameter, MySqlParameterType
+} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../../../main/ets/mysql/model/MySqlOperationError';

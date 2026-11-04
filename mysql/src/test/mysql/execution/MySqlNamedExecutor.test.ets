@@ -8,7 +8,7 @@ import { MySqlExecutionOutcome, MySqlOperationError } from
   '../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlParameter, MySqlParameterType, MySqlParameterValue
-} from '../../../main/ets/mysql/model/MySqlParameter';
+} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
 import { MySqlQueryResultSummary } from '../../../main/ets/mysql/model/MySqlQueryStream';
 import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';

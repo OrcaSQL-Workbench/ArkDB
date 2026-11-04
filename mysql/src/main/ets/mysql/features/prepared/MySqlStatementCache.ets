@@ -1,7 +1,9 @@
 import { ArkDbError } from '@arkdb/core';
-import { MySqlPreparedSession } from '../command/PreparedStatement';
-import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
-import { MySqlCommandGate, MySqlCommandScope } from './MySqlCommandGate';
+import { MySqlPreparedSession } from './PreparedStatement';
+import { MySqlPreparedStatement } from '../../api/MySqlPreparedContracts';
+import {
+  MySqlCommandGate, MySqlCommandScope
+} from '../../execution/MySqlCommandGate';
 
 export interface MySqlStatementCacheBorrow {
   readonly statement: MySqlPreparedStatement;

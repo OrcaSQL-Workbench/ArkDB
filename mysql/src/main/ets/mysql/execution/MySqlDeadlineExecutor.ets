@@ -1,5 +1,5 @@
 import { MySqlDeadlineExecutor } from '../api/MySqlFeatureContracts';
-import { MySqlParameter } from '../model/MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import { MySqlDeadlineOptions } from '../model/MySqlDeadlineOptions';
 

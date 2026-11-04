@@ -11,7 +11,7 @@ import {
   MySqlBatchResult
 } from '../model/MySqlBatch';
 import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
-import { MySqlParameter } from '../model/MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import { MySqlServerInfo } from '../model/MySqlServerInfo';
 import {
   MySqlExecutionOutcome, MySqlOperationError

@@ -9,7 +9,9 @@ import {
 import {
   MySqlProcedureArgument, MySqlParameterDirection
 } from '../../../main/ets/mysql/model/MySqlProcedure';
-import { MySqlParameter, MySqlParameterType } from '../../../main/ets/mysql/model/MySqlParameter';
+import {
+  MySqlParameter, MySqlParameterType
+} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
 import { MySqlValue } from '../../../main/ets/mysql/model/MySqlQueryResult';
 import {
   Capabilities, ColumnType, FieldFlag, StatusFlags

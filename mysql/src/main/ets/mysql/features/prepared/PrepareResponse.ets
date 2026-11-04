@@ -1,12 +1,14 @@
 import { ArkDbError } from '@arkdb/core';
-import { MySqlColumnDef } from '../model/MySqlQueryResult';
-import { Capabilities, ColumnType, Command, PacketType } from '../protocol/Constants';
-import { MysqlPacketSource } from '../protocol/PacketChannel';
-import { PacketReader } from '../protocol/PacketReader';
-import { PacketWriter } from '../protocol/PacketWriter';
-import { EncodedBinaryParameters } from '../value/BinaryParameterEncoder';
-import { parseColumnDef } from './ColumnDefinition';
-import { parseErr } from './ResultPackets';
+import { MySqlColumnDef } from '../../model/MySqlQueryResult';
+import {
+  Capabilities, ColumnType, Command, PacketType
+} from '../../protocol/Constants';
+import { MysqlPacketSource } from '../../protocol/PacketChannel';
+import { PacketReader } from '../../protocol/PacketReader';
+import { PacketWriter } from '../../protocol/PacketWriter';
+import { EncodedBinaryParameters } from './BinaryParameterEncoder';
+import { parseColumnDef } from '../../command/ColumnDefinition';
+import { parseErr } from '../../command/ResultPackets';
 
 const PREPARED_METADATA_TYPES: number[] = [
   ColumnType.DECIMAL, ColumnType.TINY, ColumnType.SHORT, ColumnType.LONG,

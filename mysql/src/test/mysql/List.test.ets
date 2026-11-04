@@ -12,7 +12,8 @@ import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
 import mySqlDeadlineExecutorTest from './execution/MySqlDeadlineExecutor.test';
 import mySqlFailureTest from './execution/MySqlFailure.test';
 import mySqlInsertRowsExecutorTest from './execution/MySqlInsertRowsExecutor.test';
-import mySqlStatementCacheTest from './execution/MySqlStatementCache.test';
+import mySqlStatementCacheTest from
+  './features/prepared/MySqlStatementCache.test';
 import mySqlNamedExecutorTest from './execution/MySqlNamedExecutor.test';
 import mySqlProcedureCallerTest from './execution/MySqlProcedureCaller.test';
 import mySqlTransactionRunnerTest from './execution/MySqlTransactionRunner.test';
@@ -21,9 +22,9 @@ import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
 import queryStreamTest from './command/QueryStream.test';
 import longDataTest from './command/LongData.test';
 import multiStatementsTest from './command/MultiStatements.test';
-import preparedStatementTest from './command/PreparedStatement.test';
-import preparedExecuteTest from './command/PreparedExecute.test';
-import preparedStreamTest from './command/PreparedStream.test';
+import preparedStatementTest from './features/prepared/PreparedStatement.test';
+import preparedExecuteTest from './features/prepared/PreparedExecute.test';
+import preparedStreamTest from './features/prepared/PreparedStream.test';
 import mySqlCursorTest from './command/MySqlCursor.test';
 import packetChannelTest from './protocol/PacketChannel.test';
 import packetCodecTest from './protocol/PacketCodec.test';
@@ -34,6 +35,8 @@ import mySqlRowMapperTest from './value/MySqlRowMapper.test';
 import typeMapperTest from './value/TypeMapper.test';
 import binaryParameterEncoderTest from './value/BinaryParameterEncoder.test';
 import binaryRowDecoderTest from './value/BinaryRowDecoder.test';
+import ownedStatementLifecycleTest from
+  './features/prepared/OwnedStatementLifecycle.test';
 
 export default function testsuite(): void {
   authenticationTest();
@@ -72,4 +75,5 @@ export default function testsuite(): void {
   typeMapperTest();
   binaryParameterEncoderTest();
   binaryRowDecoderTest();
+  ownedStatementLifecycleTest();
 }

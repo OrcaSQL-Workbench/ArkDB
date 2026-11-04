@@ -92,7 +92,7 @@ test('shared contracts describe the privacy-safe execution observer', async () =
   const gate = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'execution', 'MySqlCommandGate.ets'), 'utf8');
   const preparedStatement = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
-    'command', 'PreparedStatement.ets'), 'utf8');
+    'features', 'prepared', 'PreparedStatement.ets'), 'utf8');
   const observer = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'diagnostics', 'MySqlExecutionObserver.ets'), 'utf8');
   assert.match(contracts, /\bMySqlConnectionExtensions\b/);

@@ -1,20 +1,23 @@
 import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
-import { MySqlPreparedExecutorHost } from '../command/PreparedExecutor';
+import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor';
 import {
-  MySqlPreparedSession, preparedCleanup, preparedFailure
-} from '../command/PreparedStatement';
+  MySqlPreparedSession, preparedFailure
+} from '../features/prepared/PreparedStatement';
 import { MySqlNamedExecutor } from '../api/MySqlFeatureContracts';
 import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+import {
+  OwnedStatementLifecycle
+} from '../features/prepared/OwnedStatementLifecycle';
 import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
 import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { MySqlParameter } from '../model/MySqlParameter';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import {
   MySqlQueryExecutionSummary, MySqlQueryResultSink
 } from '../model/MySqlQueryStream';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../value/BinaryParameterEncoder';
+} from '../features/prepared/BinaryParameterEncoder';
 import {
   CompiledSqlTemplate, SqlTemplateScanner
 } from '../value/SqlTemplateScanner';
@@ -27,11 +30,13 @@ export interface MySqlNamedExecutorHost extends MySqlPreparedExecutorHost {
 export class MySqlPreparedNamedExecutor implements MySqlNamedExecutor {
   private host: MySqlNamedExecutorHost;
   private session: MySqlPreparedSession;
+  private lifecycle: OwnedStatementLifecycle;
   private scanner: SqlTemplateScanner = new SqlTemplateScanner();
 
   constructor(host: MySqlNamedExecutorHost) {
     this.host = host;
     this.session = new MySqlPreparedSession(host);
+    this.lifecycle = new OwnedStatementLifecycle(this.session);
   }
 
   execute(sql: string, parameters: MySqlNamedParameter[],
@@ -70,37 +75,32 @@ export class MySqlPreparedNamedExecutor implements MySqlNamedExecutor {
 
   private async withStatement<T>(scope: MySqlCommandScope, sql: string, input: NamedInput,
     execute: (statement: MySqlNamedStatement) => Promise<T>): Promise<T> {
-    let owned: MySqlNamedStatement | null = null;
-    let value: T | undefined;
-    let primary: Object | null = null;
-    const cleanup: ArkDbError[] = [];
+    const prepared: NamedStatementInput =
+      await this.statementInput(scope, sql, input);
+    return this.lifecycle.withOwnedStatement<T>(
+      scope, prepared.sql,
+      (statement: MySqlPreparedStatement): Promise<T> => {
+        const owned =
+          new MySqlNamedStatement(statement, prepared.encoded);
+        this.host.commandGate.assertDeadlineActive(scope);
+        return execute(owned);
+      });
+  }
+
+  private async statementInput(scope: MySqlCommandScope, sql: string,
+    input: NamedInput): Promise<NamedStatementInput> {
     try {
       const sqlMode: string = await this.host.readSessionSqlMode(scope);
       this.host.commandGate.assertDeadlineActive(scope);
       const compiled: CompiledSqlTemplate = this.scanner.compile(sql, sqlMode);
       const encoded: EncodedBinaryParameters = bindNamedParameters(compiled, input.parameters);
-      const statement = await this.session.prepareOwned(scope, compiled.sql);
-      owned = new MySqlNamedStatement(statement, encoded);
-      this.host.commandGate.assertDeadlineActive(scope);
-      value = await execute(owned);
+      return new NamedStatementInput(compiled.sql, encoded);
     } catch (error) {
-      primary = error as Object;
-    }
-    if (owned !== null) {
-      try {
-        await this.session.closeOwned(scope, owned.statement);
-      } catch (error) {
-        if (primary === null) {
-          throw preparedFailure(error as Object, [], MySqlExecutionOutcome.Completed);
-        }
-        cleanup.push(preparedCleanup(error as Object));
-      }
-    }
-    if (primary !== null) {
-      throw preparedFailure(primary, cleanup, primary instanceof MySqlOperationError ?
+      const primary = error as Object;
+      throw preparedFailure(
+        primary, [], primary instanceof MySqlOperationError ?
         primary.outcome : MySqlExecutionOutcome.NotDispatched);
     }
-    return value!;
   }
 }
 
@@ -120,6 +120,16 @@ class MySqlNamedStatement {
 
   constructor(statement: MySqlPreparedStatement, encoded: EncodedBinaryParameters) {
     this.statement = statement;
+    this.encoded = encoded;
+  }
+}
+
+class NamedStatementInput {
+  readonly sql: string;
+  readonly encoded: EncodedBinaryParameters;
+
+  constructor(sql: string, encoded: EncodedBinaryParameters) {
+    this.sql = sql;
     this.encoded = encoded;
   }
 }

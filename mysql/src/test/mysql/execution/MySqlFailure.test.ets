@@ -10,7 +10,7 @@ import {
 import { MySqlUploadFailure } from '../../../main/ets/mysql/transport/MySqlUploadPump';
 import {
   preparedCleanup, preparedFailure
-} from '../../../main/ets/mysql/command/PreparedStatement';
+} from '../../../main/ets/mysql/features/prepared/PreparedStatement';
 
 export default function mySqlFailureTest(): void {
   describe('MySQL failure composition', () => {

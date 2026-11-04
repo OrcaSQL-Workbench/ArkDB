@@ -6,7 +6,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { resolveHvigor, resolveOhpm, runHvigor, runOhpm } from './run-hvigor.mjs';
 
-const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const runtimeRoot = join(repoRoot, 'tools', '.tmp-run-hvigor');
 const wrapperPath = join(repoRoot, 'tools', 'run-hvigor.mjs');
 

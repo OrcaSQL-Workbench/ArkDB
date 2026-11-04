@@ -5,6 +5,8 @@ oh_modules/
 .preview/
 **/.test/
 **/build/
+!tools/build/
+!tools/build/**/*.mjs
 **/BuildProfile.ets
 **/oh-package-lock.json5
 dist/

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { consumerMode, REGISTRY, registryIdentity } from './test-consumer.mjs';
-import { releaseFixture } from './test-fixtures/har-release.mjs';
+import { consumerMode, REGISTRY, registryIdentity } from '../test-consumer.mjs';
+import { releaseFixture } from '../test-fixtures/har-release.mjs';
 
 const integrity = `sha512-${Buffer.alloc(64, 1).toString('base64')}`;
 

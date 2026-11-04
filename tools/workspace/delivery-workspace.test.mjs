@@ -3,10 +3,10 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import JSON5 from 'json5';
-import { createDeliveryWorkspace, deliveryPlan } from './delivery-workspace.mjs';
-import { listFiles } from './check-package.mjs';
-import { sourceFingerprint } from './package-har.mjs';
-import { sharedReleaseFixture } from './test-fixtures/har-release.mjs';
+import { createDeliveryWorkspace, deliveryPlan } from '../delivery-workspace.mjs';
+import { listFiles } from '../check-package.mjs';
+import { sourceFingerprint } from '../package-har.mjs';
+import { sharedReleaseFixture } from '../test-fixtures/har-release.mjs';
 
 test('stages one SDK module without changing shared sources or retaining a core dependency', async (t) => {
   const fixture = await sharedReleaseFixture(t);

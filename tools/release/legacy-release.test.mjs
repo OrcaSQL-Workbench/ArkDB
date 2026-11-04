@@ -6,15 +6,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { extract } from 'tar';
-import { readReleaseBundle } from './prepare-har-release.mjs';
-import { verifyHarConsumer } from './test-consumer.mjs';
+import { readReleaseBundle } from '../prepare-har-release.mjs';
+import { verifyHarConsumer } from '../test-consumer.mjs';
 
 test('reads the immutable mysql-v1.0.1 bundle without schema-3 HAP evidence', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'arkdb-legacy-release-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await extract({
     cwd: directory,
-    file: join(import.meta.dirname, 'test-fixtures', 'mysql-v1.0.1-release.tar.gz'),
+    file: join(import.meta.dirname, '..', 'test-fixtures', 'mysql-v1.0.1-release.tar.gz'),
     strict: true
   });
   const bundle = await readReleaseBundle(directory);
@@ -32,7 +32,7 @@ test('verifies the immutable schema-1 HAR with only its published API surface', 
   t.after(() => rm(directory, { recursive: true, force: true }));
   await extract({
     cwd: directory,
-    file: join(import.meta.dirname, 'test-fixtures', 'mysql-v1.0.1-release.tar.gz'),
+    file: join(import.meta.dirname, '..', 'test-fixtures', 'mysql-v1.0.1-release.tar.gz'),
     strict: true
   });
   const bundle = await readReleaseBundle(directory);

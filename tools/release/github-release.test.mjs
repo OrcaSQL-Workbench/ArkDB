@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createGitHubClient } from './github-release.mjs';
+import { createGitHubClient } from '../github-release.mjs';
 
 test('GitHub transport sends JSON and original upload bytes through argv/stdin without a shell', async () => {
   const calls = [];

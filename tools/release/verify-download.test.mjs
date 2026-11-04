@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { extract } from 'tar';
-import { prepareHarRelease } from './prepare-har-release.mjs';
-import { readReleaseBundle } from './prepare-har-release.mjs';
-import { publishHarRelease } from './publish-har.mjs';
-import { releaseMarker } from './publish-har.mjs';
-import { downloadBytes, verifyDownloadedHar } from './verify-download.mjs';
-import { fakeGitHub } from './test-fixtures/github-release.mjs';
-import { REPO, releaseFixture, LOCAL_STEM, STEM, TAG } from './test-fixtures/har-release.mjs';
+import { prepareHarRelease } from '../prepare-har-release.mjs';
+import { readReleaseBundle } from '../prepare-har-release.mjs';
+import { publishHarRelease } from '../publish-har.mjs';
+import { releaseMarker } from '../publish-har.mjs';
+import { downloadBytes, verifyDownloadedHar } from '../verify-download.mjs';
+import { fakeGitHub } from '../test-fixtures/github-release.mjs';
+import { REPO, releaseFixture, LOCAL_STEM, STEM, TAG } from '../test-fixtures/har-release.mjs';
 
 async function remoteFixture(t) {
   const source = await releaseFixture(t);
@@ -60,7 +60,7 @@ async function legacyRemoteFixture(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   await extract({
     cwd: directory,
-    file: join(import.meta.dirname, 'test-fixtures', 'mysql-v1.0.1-release.tar.gz'),
+    file: join(import.meta.dirname, '..', 'test-fixtures', 'mysql-v1.0.1-release.tar.gz'),
     strict: true
   });
   const bundle = await readReleaseBundle(directory);

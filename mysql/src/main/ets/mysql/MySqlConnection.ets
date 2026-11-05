@@ -56,7 +56,7 @@ import {
 } from './features/named/MySqlNamedExecutor';
 import {
   MySqlPreparedInsertRowsExecutor, snapshotMySqlInsertRowsInput
-} from './execution/MySqlInsertRowsExecutor';
+} from './features/insert/MySqlInsertRowsExecutor';
 import {
   MySqlPreparedProcedureCaller
 } from './features/procedure/MySqlProcedureCaller';
@@ -78,7 +78,9 @@ import {
   MySqlBatchResult
 } from './features/batch/MySqlBatch';
 import { MySqlDeadlineOptions } from './model/MySqlDeadlineOptions';
-import { MySqlInsertRowsOptions } from './model/MySqlInsertRows';
+import {
+  MySqlInsertRowsOptions
+} from './features/insert/MySqlInsertRows';
 import { MySqlParameter } from './features/prepared/MySqlParameter';
 import {
   MySqlPreparedExecutor as InternalPreparedExecutor

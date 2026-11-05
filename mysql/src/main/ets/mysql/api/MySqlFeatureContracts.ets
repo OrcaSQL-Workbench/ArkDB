@@ -4,7 +4,9 @@ import {
   MySqlBatchOptions, MySqlBatchResult
 } from '../features/batch/MySqlBatch';
 import { MySqlDeadlineOptions } from '../model/MySqlDeadlineOptions';
-import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
+import {
+  MySqlInsertRowsOptions
+} from '../features/insert/MySqlInsertRows';
 import {
   MySqlLongDataOptions, MySqlLongParameter
 } from '../features/longdata/MySqlLongDataOptions';

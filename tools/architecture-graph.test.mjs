@@ -453,6 +453,26 @@ test('R08 batch feature owns its vertical production and test files', () => {
   ]);
 });
 
+test('R08 insert feature owns its vertical production and test files', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  assertFeatureOwnership(graph, 'insert', [
+    [
+      'mysql/src/main/ets/mysql/model/MySqlInsertRows.ets',
+      'mysql/src/main/ets/mysql/features/insert/MySqlInsertRows.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/execution/MySqlInsertRowsExecutor.ets',
+      'mysql/src/main/ets/mysql/features/insert/MySqlInsertRowsExecutor.ets'
+    ]
+  ], [
+    [
+      'mysql/src/test/mysql/execution/MySqlInsertRowsExecutor.test.ets',
+      'mysql/src/test/mysql/features/insert/MySqlInsertRowsExecutor.test.ets'
+    ]
+  ]);
+});
+
 test('rejects stale cursor ownership paths', () => {
   const stalePaths = FORBIDDEN_MYSQL_CURSOR_PATHS.filter((path) =>
     existsSync(join(ROOT, ...path.split('/'))));

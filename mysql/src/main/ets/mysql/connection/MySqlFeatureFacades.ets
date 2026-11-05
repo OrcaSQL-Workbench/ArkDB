@@ -12,7 +12,7 @@ import {
 import {
   MySqlInsertRowsInput,
   MySqlPreparedInsertRowsExecutor, snapshotMySqlInsertRowsInput
-} from '../execution/MySqlInsertRowsExecutor';
+} from '../features/insert/MySqlInsertRowsExecutor';
 import {
   mysqlOperationFailure as operationFailure
 } from '../execution/MySqlFailure';
@@ -23,7 +23,9 @@ import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
 } from '../features/batch/MySqlBatch';
 import { MySqlCursorOptions } from '../features/cursor/MySqlCursorOptions';
-import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
+import {
+  MySqlInsertRowsOptions
+} from '../features/insert/MySqlInsertRows';
 import {
   MySqlLongDataOptions, MySqlLongParameter
 } from '../features/longdata/MySqlLongDataOptions';

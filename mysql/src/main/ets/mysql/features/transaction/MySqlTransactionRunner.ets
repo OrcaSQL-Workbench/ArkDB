@@ -8,7 +8,7 @@ import {
 import {
   MySqlBatchResult
 } from '../batch/MySqlBatch';
-import { MySqlInsertRowsOptions } from '../../model/MySqlInsertRows';
+import { MySqlInsertRowsOptions } from '../insert/MySqlInsertRows';
 import { MySqlParameter } from '../prepared/MySqlParameter';
 import { MySqlServerInfo } from '../../model/MySqlServerInfo';
 import {

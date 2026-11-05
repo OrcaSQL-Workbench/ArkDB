@@ -71,7 +71,9 @@ export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
 export { MySqlCursorOptions } from './src/main/ets/mysql/features/cursor/MySqlCursorOptions';
 export { MySqlExecutionOutcome, MySqlOperationError } from
   './src/main/ets/mysql/model/MySqlOperationError';
-export { MySqlInsertRowsOptions } from './src/main/ets/mysql/model/MySqlInsertRows';
+export {
+  MySqlInsertRowsOptions
+} from './src/main/ets/mysql/features/insert/MySqlInsertRows';
 export { MySqlParameter, MySqlParameterType } from
   './src/main/ets/mysql/features/prepared/MySqlParameter';
 export type { MySqlParameterValue } from

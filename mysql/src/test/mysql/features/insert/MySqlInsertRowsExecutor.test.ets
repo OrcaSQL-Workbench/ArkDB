@@ -4,27 +4,27 @@ import {
 } from '@arkdb/core';
 import {
   MySqlInsertRowsExecutor
-} from '../../../main/ets/mysql/api/MySqlFeatureContracts';
+} from '../../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   snapshotMySqlInsertRowsInput
-} from '../../../main/ets/mysql/execution/MySqlInsertRowsExecutor';
+} from '../../../../main/ets/mysql/features/insert/MySqlInsertRowsExecutor';
 import {
   MySqlInsertRowsOptions
-} from '../../../main/ets/mysql/model/MySqlInsertRows';
+} from '../../../../main/ets/mysql/features/insert/MySqlInsertRows';
 import {
   MySqlParameter, MySqlParameterType, MySqlParameterValue
-} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
+} from '../../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {
   MySqlBatchError, MySqlBatchResult
-} from '../../../main/ets/mysql/features/batch/MySqlBatch';
+} from '../../../../main/ets/mysql/features/batch/MySqlBatch';
 import {
   MySqlExecutionOutcome
-} from '../../../main/ets/mysql/model/MySqlOperationError';
-import { utf8Decode } from '../../../main/ets/mysql/protocol/Charsets';
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
+import { utf8Decode } from '../../../../main/ets/mysql/protocol/Charsets';
 import {
   PreparedExecutionFixture, PreparedGate, binaryIntResult, errorPayload,
   hex, okPayload, prepareResponse
-} from '../command/PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 export default function mySqlInsertRowsExecutorTest(): void {
   describe('MySQL restricted INSERT rows', () => {

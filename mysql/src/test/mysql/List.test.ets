@@ -13,7 +13,8 @@ import mySqlBatchExecutorTest from
 import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
 import mySqlDeadlineExecutorTest from './execution/MySqlDeadlineExecutor.test';
 import mySqlFailureTest from './execution/MySqlFailure.test';
-import mySqlInsertRowsExecutorTest from './execution/MySqlInsertRowsExecutor.test';
+import mySqlInsertRowsExecutorTest from
+  './features/insert/MySqlInsertRowsExecutor.test';
 import mySqlStatementCacheTest from
   './features/prepared/MySqlStatementCache.test';
 import mySqlNamedExecutorTest from

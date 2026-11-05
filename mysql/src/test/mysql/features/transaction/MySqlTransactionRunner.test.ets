@@ -9,7 +9,7 @@ import {
 } from '../../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   MySqlInsertRowsOptions
-} from '../../../../main/ets/mysql/model/MySqlInsertRows';
+} from '../../../../main/ets/mysql/features/insert/MySqlInsertRows';
 import { MySqlParameter, MySqlParameterType } from
   '../../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {

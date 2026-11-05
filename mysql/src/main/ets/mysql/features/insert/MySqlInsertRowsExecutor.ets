@@ -1,35 +1,37 @@
 import { ArkDbError } from '@arkdb/core';
-import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor';
+import { MySqlPreparedExecutorHost } from '../prepared/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
-} from '../features/prepared/PreparedStatement';
+} from '../prepared/PreparedStatement';
 import {
   MySqlBatchSupportContract, MySqlInsertRowsExecutor,
   MySqlInsertRowsGroupSnapshot, MySqlInsertRowsSnapshot
-} from '../api/MySqlFeatureContracts';
-import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+} from '../../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../../api/MySqlPreparedContracts';
 import {
   OwnedStatementLifecycle
-} from '../features/prepared/OwnedStatementLifecycle';
-import { MySqlParameter } from '../features/prepared/MySqlParameter';
+} from '../prepared/OwnedStatementLifecycle';
+import { MySqlParameter } from '../prepared/MySqlParameter';
 import {
   MySqlInsertRowsOptions, validateMySqlInsertRowsOptions
-} from '../model/MySqlInsertRows';
+} from './MySqlInsertRows';
 import {
   MySqlBatchError, MySqlBatchResult
-} from '../features/batch/MySqlBatch';
+} from '../batch/MySqlBatch';
 import {
   MySqlExecutionOutcome, MySqlOperationError
-} from '../model/MySqlOperationError';
-import { MySqlQueryResult } from '../model/MySqlQueryResult';
-import { utf8Encode } from '../protocol/Charsets';
+} from '../../model/MySqlOperationError';
+import { MySqlQueryResult } from '../../model/MySqlQueryResult';
+import { utf8Encode } from '../../protocol/Charsets';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../features/prepared/BinaryParameterEncoder';
+} from '../prepared/BinaryParameterEncoder';
 import {
   mysqlPlaceholders, quoteMySqlIdentifier
-} from '../value/MySqlSqlHelpers';
-import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
+} from '../../value/MySqlSqlHelpers';
+import {
+  MySqlCommandKind, MySqlCommandScope
+} from '../../execution/MySqlCommandGate';
 
 export class MySqlInsertRowsInput implements MySqlInsertRowsSnapshot {
   readonly tableParts: string[];

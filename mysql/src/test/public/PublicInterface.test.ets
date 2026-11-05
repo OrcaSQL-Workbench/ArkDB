@@ -205,9 +205,9 @@ export default function publicInterfaceTest(): void {
     });
 
     it('absentMysqlFeaturesThrowsUnsupported', 0, () => {
-      const legacy: DbConnection = new LegacyCustomConnection();
       let failure: Object | null = null;
-      try { requireMySqlFeatures(legacy); } catch (error) { failure = error as Object; }
+      try { requireMySqlFeatures(new LegacyCustomConnection()); }
+      catch (error) { failure = error as Object; }
       expect(failure instanceof ArkDbError).assertTrue();
       if (!(failure instanceof ArkDbError)) throw new Error('Expected the public ArkDbError identity.');
       expect(failure.kind).assertEqual(ArkDbErrorKind.Unsupported);

@@ -20,7 +20,9 @@ export { DatabaseSessionStatus as CoreDatabaseSessionStatus, QueryResultMeta as 
   QueryRowChunk as CoreQueryRowChunk, QueryResultSummary as CoreQueryResultSummary,
   QueryExecutionSummary as CoreQueryExecutionSummary, DriverCapabilities as CoreDriverCapabilities } from '@arkdb/core';
 
-export { MySqlDriverCapabilities as DriverCapabilities } from './src/main/ets/mysql/api/MySqlContracts';
+export {
+  MySqlDriverCapabilities as DriverCapabilities, requireMySqlFeatures
+} from './src/main/ets/mysql/api/MySqlContracts';
 export type { MySqlDbConnection as DbConnection, MySqlDbDriverFactory as DbDriverFactory,
   MySqlDbExecutionController as DbExecutionController, MySqlMetadataProviderContract as MetadataProvider } from
   './src/main/ets/mysql/api/MySqlContracts';
@@ -46,8 +48,7 @@ export { MySqlColumnDef, MySqlColumnDef as ColumnDef, MySqlQueryResult, MySqlQue
   './src/main/ets/mysql/model/MySqlQueryResult';
 export { MySqlConnectionOptions } from './src/main/ets/mysql/driver/MySqlConnectionOptions';
 export { MySqlConnectionExtensions } from './src/main/ets/mysql/driver/MySqlConnectionExtensions';
-export { MySqlConnectionFeatures, requireMySqlFeatures } from
-  './src/main/ets/mysql/api/MySqlConnectionFeatures';
+export { MySqlConnectionFeatures } from './src/main/ets/mysql/api/MySqlConnectionFeatures';
 export {
   MySqlExecutionEvent, MySqlExecutionEventType
 } from './src/main/ets/mysql/diagnostics/MySqlExecutionObserver';

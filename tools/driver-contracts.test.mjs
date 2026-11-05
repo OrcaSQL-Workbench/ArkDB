@@ -93,11 +93,20 @@ test('approved internal surface candidates stay representation-free', async () =
     /const mysqlExecutionObserverCapability: Object = new Object\(\)/);
 });
 
-test('legacy custom connections remain valid feature-helper inputs', async () => {
-  const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+test('legacy custom connections and sessions remain valid feature-helper inputs', async () => {
+  const features = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'api', 'MySqlConnectionFeatures.ets'), 'utf8');
-  const heritage = /export interface MySqlFeatureConnection extends CoreDbConnection/.test(source)
-    ? ' extends CoreDbConnection' : '';
+  const contracts = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'api', 'MySqlContracts.ets'), 'utf8');
+  assert.match(features,
+    /export interface MySqlFeatureConnection \{[\s\S]{0,100}readonly mysqlFeatures\?: MySqlConnectionFeatures/);
+  assert.match(features, /export interface MySqlSession extends MySqlFeatureConnection/);
+  assert.doesNotMatch(features, /\bfunction requireMySqlFeatures\b/);
+  assert.match(contracts,
+    /export function requireMySqlFeatures\(connection: MySqlFeatureConnection\): MySqlConnectionFeatures;/);
+  assert.match(contracts,
+    /export function requireMySqlFeatures\(connection: MySqlDbConnection\): MySqlConnectionFeatures;/);
+
   const fixture = `
 interface CoreDbConnection {
   connect(): Promise<void>;
@@ -107,13 +116,22 @@ interface CoreDbConnection {
   readonly serverInfo: Object;
 }
 class MySqlConnectionFeatures {}
-interface MySqlFeatureConnection${heritage} {
+interface MySqlFeatureConnection {
   readonly mysqlFeatures?: MySqlConnectionFeatures;
 }
-declare function requireMySqlFeatures(
-  connection: MySqlFeatureConnection
-): MySqlConnectionFeatures;
-class LegacyCustomConnection implements CoreDbConnection {
+interface MySqlSession extends MySqlFeatureConnection {
+  readonly mysqlFeatures: MySqlConnectionFeatures;
+}
+interface MySqlDbConnection extends CoreDbConnection, MySqlFeatureConnection {}
+function requireMySqlFeatures(connection: MySqlFeatureConnection): MySqlConnectionFeatures;
+function requireMySqlFeatures(connection: MySqlDbConnection): MySqlConnectionFeatures;
+function requireMySqlFeatures(
+  connection: MySqlFeatureConnection | MySqlDbConnection
+): MySqlConnectionFeatures {
+  if (connection.mysqlFeatures === undefined) throw new Error();
+  return connection.mysqlFeatures;
+}
+class LegacyCustomConnection implements MySqlDbConnection {
   readonly state: string = '';
   readonly serverInfo: Object = new Object();
   async connect(): Promise<void> {}
@@ -121,10 +139,10 @@ class LegacyCustomConnection implements CoreDbConnection {
   async close(): Promise<void> {}
 }
 requireMySqlFeatures(new LegacyCustomConnection());
+declare const session: MySqlSession;
+requireMySqlFeatures(session);
 `;
   assert.deepEqual(typeScriptDiagnostics(fixture), []);
-  assert.match(source,
-    /requireMySqlFeatures\(connection: MySqlFeatureConnection\): MySqlConnectionFeatures/);
 });
 
 function assertObserverOnlyConnectionExtensions(source) {

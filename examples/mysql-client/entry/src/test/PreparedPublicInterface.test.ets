@@ -42,6 +42,7 @@ export default function preparedPublicInterfaceTest(): void {
       expect(sessionController !== undefined).assertTrue();
       expect(longData !== undefined).assertTrue();
       expect(session.mysqlFeatures === features).assertTrue();
+      expect(requireMySqlFeatures(session) === features).assertTrue();
       expect(session.serverInfo === connection.serverInfo).assertTrue();
       expect(factory.capabilities.supportsPreparedStatements).assertTrue();
       expect(quoteMySqlIdentifier(['s', 'a`b'])).assertEqual('`s`.`a``b`');

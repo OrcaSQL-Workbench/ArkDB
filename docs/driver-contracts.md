@@ -161,8 +161,9 @@ parameterization, escaping, identifier-quoting, or SQL-parsing facility.
 MySQL-specific prepared statements use the separate optional
 `mysqlFeatures.prepared` interface. `requireMySqlFeatures` reports a missing
 container with the canonical `Unsupported` error; callers still check the
-individual feature. The built-in factory advertises prepared support, but old
-custom connections and capability literals need no new required members.
+individual feature. It accepts both feature-bearing sessions and actual core
+connections. The built-in factory advertises prepared support, but old custom
+connections and capability literals need no new required members.
 Typed input parameters, prepared interfaces and identifier/placeholder helpers
 are exported by `@arkdb/mysql`, not core. The public facade resolves the existing
 ready-only executor for each call instead of constructing or retaining a

@@ -37,6 +37,17 @@ export interface MySqlDbConnection extends CoreDbConnection, MySqlFeatureConnect
   readonly mysqlFeatures?: MySqlConnectionFeatures;
 }
 
+export function requireMySqlFeatures(connection: MySqlFeatureConnection): MySqlConnectionFeatures;
+export function requireMySqlFeatures(connection: MySqlDbConnection): MySqlConnectionFeatures;
+export function requireMySqlFeatures(
+  connection: MySqlFeatureConnection | MySqlDbConnection): MySqlConnectionFeatures {
+  const features = connection.mysqlFeatures;
+  if (features === undefined) {
+    throw ArkDbError.unsupported('This connection does not provide MySQL features.');
+  }
+  return features;
+}
+
 /**
  * @deprecated Retained for source compatibility. Prefer connection-bound cancellation.
  */

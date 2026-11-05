@@ -1,12 +1,8 @@
 import { resolve } from 'node:path';
 import { ROOT } from '../workspace/check-package.mjs';
 import { prepareDeviceEvidence } from './challenge.mjs';
-import { CASE_MANIFEST, DEVICE_FEATURES, DEVICE_PROFILES } from './contracts.mjs';
+import { DEVICE_FEATURES, DEVICE_PROFILES } from './contracts.mjs';
 import { verifyDeviceEvidenceArtifacts } from './verifier.mjs';
-
-export function deviceEvidenceCaseManifestPath(root = ROOT) {
-  return resolve(root, CASE_MANIFEST);
-}
 
 export function deviceEvidenceArguments(argv) {
   if (argv[0] === 'prepare') {

@@ -24,6 +24,7 @@ export default function legacyPublicInterfaceTest(): void {
       const concreteCancellation: DbExecutionController = concrete.createExecutionController(connection);
       const concreteMetrics: ServerMetricsProvider = concrete.createServerMetricsProvider(connection);
       expect(factory.driverId).assertEqual('mysql');
+      expect(factory.capabilities.supportsExplain).assertTrue();
       expect(connection.sessionStatus.autocommit).assertTrue();
       expect(metadata !== null && cancellation !== null && metrics !== null).assertTrue();
       expect(concreteMetadata !== null && concreteCancellation !== null && concreteMetrics !== null).assertTrue();

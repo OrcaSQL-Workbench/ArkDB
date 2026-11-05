@@ -37,6 +37,20 @@ export interface MySqlDbConnection extends CoreDbConnection, MySqlFeatureConnect
   readonly mysqlFeatures?: MySqlConnectionFeatures;
 }
 
+export function requireMySqlFeatures(connection: MySqlFeatureConnection): MySqlConnectionFeatures;
+export function requireMySqlFeatures(connection: MySqlDbConnection): MySqlConnectionFeatures;
+export function requireMySqlFeatures(
+  connection: MySqlFeatureConnection | MySqlDbConnection): MySqlConnectionFeatures {
+  const features = connection.mysqlFeatures;
+  if (features === undefined) {
+    throw ArkDbError.unsupported('This connection does not provide MySQL features.');
+  }
+  return features;
+}
+
+/**
+ * @deprecated Retained for source compatibility. Prefer connection-bound cancellation.
+ */
 export interface MySqlDbExecutionController {
   cancel(connectionHandle: string): Promise<void>;
   isInterruptionError(error: ArkDbError): boolean;
@@ -56,6 +70,7 @@ export interface MySqlDbDriverFactory {
   readonly capabilities: MySqlDriverCapabilities;
   createConnection(config: ConnectionConfig, password: string): MySqlDbConnection;
   createMetadataProvider(connection: MySqlDbConnection): MySqlMetadataProviderContract;
+  /** @deprecated Prefer connection-bound cancellation from the connection feature surface. */
   createExecutionController(controlConnection: MySqlDbConnection): MySqlDbExecutionController;
   createServerMetricsProvider(connection: MySqlDbConnection): MySqlMetricsProvider;
 }

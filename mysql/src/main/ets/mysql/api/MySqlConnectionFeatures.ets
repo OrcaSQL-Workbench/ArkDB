@@ -1,4 +1,4 @@
-import { ArkDbError, QueryOptions } from '@arkdb/core';
+import { QueryOptions } from '@arkdb/core';
 import {
   MySqlPreparedExecutor
 } from './MySqlPreparedContracts';
@@ -17,7 +17,11 @@ import {
   MySqlTransactionOptions
 } from '../features/transaction/MySqlTransactionOptions';
 
-export interface MySqlSession {
+export interface MySqlFeatureConnection {
+  readonly mysqlFeatures?: MySqlConnectionFeatures;
+}
+
+export interface MySqlSession extends MySqlFeatureConnection {
   readonly mysqlFeatures: MySqlConnectionFeatures;
   readonly serverInfo: MySqlServerInfo;
   readonly sessionStatus: MySqlDatabaseSessionStatus;
@@ -45,16 +49,4 @@ export class MySqlConnectionFeatures {
   procedures?: MySqlProcedureCaller;
   session?: MySqlSessionController;
   transactions?: MySqlTransactionRunner;
-}
-
-export interface MySqlFeatureConnection {
-  readonly mysqlFeatures?: MySqlConnectionFeatures;
-}
-
-export function requireMySqlFeatures(connection: MySqlFeatureConnection): MySqlConnectionFeatures {
-  const features = connection.mysqlFeatures;
-  if (features === undefined) {
-    throw ArkDbError.unsupported('This connection does not provide MySQL features.');
-  }
-  return features;
 }

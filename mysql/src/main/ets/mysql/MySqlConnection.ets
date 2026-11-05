@@ -118,10 +118,7 @@ export {
   mysqlTlsRequested
 } from './connection/MySqlConnectionLifecycle';
 
-class MySqlExecutionObserverCapability {}
-
-const mysqlExecutionObserverCapability: Object =
-  new MySqlExecutionObserverCapability();
+const mysqlExecutionObserverCapability: Object = new Object();
 
 type MySqlExecutionObserverBinding =
   (capability: Object, observer: MySqlExecutionObserver,

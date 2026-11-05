@@ -3,7 +3,7 @@ import { ServerInfo } from '@arkdb/core';
 export enum ServerFamily {
   MySQL = 'MySQL',
   MariaDB = 'MariaDB',
-  /** Reserved for source compatibility, not a supported database implementation. */
+  /** @deprecated Reserved for source compatibility, not a supported database implementation. */
   PostgreSQL = 'PostgreSQL',
   Unknown = 'Unknown'
 }

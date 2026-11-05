@@ -41,13 +41,11 @@ export interface MySqlCommandLifecycleObserver {
   onTerminal(scope: MySqlCommandScope): void;
 }
 
-class CommandOwnerToken {}
-
 class CommandScope implements MySqlCommandScope {
   readonly serial: number;
   readonly generation: number;
   readonly kind: MySqlCommandKind;
-  readonly ownerToken: Object = new CommandOwnerToken();
+  readonly ownerToken: Object = new Object();
   phase: MySqlCommandPhase = MySqlCommandPhase.Reserved;
   deadlineExpired: boolean = false;
   advanceGeneration: boolean = false;

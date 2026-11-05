@@ -55,7 +55,10 @@ configuration type to offer unsafe arbitrary-engine construction.
 
 MySQL retains `createConnection(config, password)` and
 `createMySqlConnection(config, password)` as native convenience interfaces.
-Its native provider and handle-based cancellation helpers remain available.
+Its native provider and handle-based cancellation helpers remain available for
+source compatibility. Prefer connection-bound cancellation through the
+connection feature surface so command ownership, deadlines and cleanup stay
+bound to the physical execution.
 The established `@arkdb/mysql` names `DbConnection`, `DbDriverFactory`,
 `DbExecutionController` and `MetadataProvider` are adapter-owned interfaces
 compatible with 1.0.1, not replacements by their minimal/generic core counterparts.
@@ -63,7 +66,9 @@ Portable consumers use the distinct `CoreDbConnection`, `CoreDbDriverFactory`,
 `CoreDbExecutionController` and `CoreMetadataProvider` exports from the same HAR.
 
 `MySqlConnectionOptions` has an optional third `MySqlConnectionExtensions`
-argument. Its `executionObserver` is invoked synchronously through
+argument. `MySqlConnectionExtensions` is an observer-only compatibility wrapper;
+its exact field set is contract-tested and must not grow into an option bag. Its
+`executionObserver` is invoked synchronously through
 `MySqlExecutionObserver.onEvent(event)` for connections created by the generic
 `factory.create(options)` path. The native
 `createConnection(config, password)` and `createMySqlConnection(config, password)`
@@ -156,8 +161,9 @@ parameterization, escaping, identifier-quoting, or SQL-parsing facility.
 MySQL-specific prepared statements use the separate optional
 `mysqlFeatures.prepared` interface. `requireMySqlFeatures` reports a missing
 container with the canonical `Unsupported` error; callers still check the
-individual feature. The built-in factory advertises prepared support, but old
-custom connections and capability literals need no new required members.
+individual feature. It accepts both feature-bearing sessions and legacy MySQL
+connections. The built-in factory advertises prepared support, but old custom
+connections and capability literals need no new required members.
 Typed input parameters, prepared interfaces and identifier/placeholder helpers
 are exported by `@arkdb/mysql`, not core. The public facade resolves the existing
 ready-only executor for each call instead of constructing or retaining a

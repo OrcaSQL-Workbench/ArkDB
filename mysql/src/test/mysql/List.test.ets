@@ -24,7 +24,8 @@ import mySqlProcedureCallerTest from
 import mySqlTransactionRunnerTest from
   './features/transaction/MySqlTransactionRunner.test';
 import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';
-import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
+import mySqlMetadataProviderTest from
+  './features/metadata/MySqlMetadataProvider.test';
 import queryStreamTest from './command/QueryStream.test';
 import longDataTest from './features/longdata/LongData.test';
 import multiStatementsTest from './command/MultiStatements.test';

@@ -41,7 +41,9 @@ import {
 import {
   mysqlContextPolicy, mysqlDatabaseForContext
 } from './features/session/MySqlContext';
-import { MySqlMetadataProvider } from './metadata/MySqlMetadataProvider';
+import {
+  MySqlMetadataProvider
+} from './features/metadata/MySqlMetadataProvider';
 import { MySqlServerMetricsProvider } from './metrics/MySqlServerMetricsProvider';
 import {
   mysqlCleanupError as toCleanupError,

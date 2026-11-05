@@ -2,9 +2,11 @@ import {
   DbConnection, DatabaseContext, CatalogInfo, SchemaInfo, DbObjectKind, DbObjectInfo, ColumnInfo,
   ForeignKeyColumnInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, MetadataProvider, ArkDbError, SqlValue
 } from '@arkdb/core';
-import { utf8Decode } from '../protocol/Charsets';
+import { utf8Decode } from '../../protocol/Charsets';
 import { mysqlMetadataLiteral } from './MySqlMetadataSql';
-import { MySqlMetadataProviderContract } from '../api/MySqlContracts';
+import {
+  MySqlMetadataProviderContract
+} from '../../api/MySqlContracts';
 
 const SYSTEM_SCHEMAS: string[] = ['information_schema', 'mysql', 'performance_schema', 'sys'];
 

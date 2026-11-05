@@ -3,11 +3,19 @@ import {
   DbConnection, DatabaseContext, ArkDbError, ArkDbErrorKind, DatabaseSessionStatus, QueryExecutionSummary,
   QueryOptions, QueryResultSink, ConnectionState, DbObjectKind
 } from '@arkdb/core';
-import { MySqlQueryResult as QueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
-import { MySqlServerInfo as ServerInfo } from '../../../main/ets/mysql/model/MySqlServerInfo';
-import { MySqlMetadataProvider } from '../../../main/ets/mysql/metadata/MySqlMetadataProvider';
-import { mysqlMetadataLiteral } from '../../../main/ets/mysql/metadata/MySqlMetadataSql';
-import { utf8Encode } from '../../../main/ets/mysql/protocol/Charsets';
+import {
+  MySqlQueryResult as QueryResult
+} from '../../../../main/ets/mysql/model/MySqlQueryResult';
+import {
+  MySqlServerInfo as ServerInfo
+} from '../../../../main/ets/mysql/model/MySqlServerInfo';
+import {
+  MySqlMetadataProvider
+} from '../../../../main/ets/mysql/features/metadata/MySqlMetadataProvider';
+import {
+  mysqlMetadataLiteral
+} from '../../../../main/ets/mysql/features/metadata/MySqlMetadataSql';
+import { utf8Encode } from '../../../../main/ets/mysql/protocol/Charsets';
 
 class MetadataConnection implements DbConnection {
   readonly serverInfo: ServerInfo = new ServerInfo();

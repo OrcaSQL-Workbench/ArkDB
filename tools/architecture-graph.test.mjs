@@ -473,6 +473,26 @@ test('R08 insert feature owns its vertical production and test files', () => {
   ]);
 });
 
+test('R08 metadata feature owns its vertical production and test files', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  assertFeatureOwnership(graph, 'metadata', [
+    [
+      'mysql/src/main/ets/mysql/metadata/MySqlMetadataSql.ets',
+      'mysql/src/main/ets/mysql/features/metadata/MySqlMetadataSql.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/metadata/MySqlMetadataProvider.ets',
+      'mysql/src/main/ets/mysql/features/metadata/MySqlMetadataProvider.ets'
+    ]
+  ], [
+    [
+      'mysql/src/test/mysql/metadata/MySqlMetadataProvider.test.ets',
+      'mysql/src/test/mysql/features/metadata/MySqlMetadataProvider.test.ets'
+    ]
+  ]);
+});
+
 test('rejects stale cursor ownership paths', () => {
   const stalePaths = FORBIDDEN_MYSQL_CURSOR_PATHS.filter((path) =>
     existsSync(join(ROOT, ...path.split('/'))));

@@ -89,7 +89,9 @@ export { quoteMySqlIdentifier, mysqlPlaceholders } from './src/main/ets/mysql/va
 export { MySqlConnection, createMySqlConnection } from './src/main/ets/mysql/MySqlConnection';
 export { MySqlDriverFactory } from './src/main/ets/mysql/driver/MySqlDriverFactory';
 export { MySqlExecutionController } from './src/main/ets/mysql/execution/MySqlExecutionController';
-export { MySqlMetadataProvider } from './src/main/ets/mysql/metadata/MySqlMetadataProvider';
+export {
+  MySqlMetadataProvider
+} from './src/main/ets/mysql/features/metadata/MySqlMetadataProvider';
 export { MySqlServerMetricsProvider } from './src/main/ets/mysql/metrics/MySqlServerMetricsProvider';
 export { MetricGauge, MetricCounter, ServerMetricsAvailability, ServerMetricsErrorKind,
   ReplicationIoRunning, ReplicationSqlRunning, ServerMetricsCategory,

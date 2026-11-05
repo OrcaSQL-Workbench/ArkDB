@@ -1,6 +1,6 @@
 import { ArkDbError } from '@arkdb/core';
-import { utf8Encode } from '../protocol/Charsets';
-import { mysqlUtf8BytesExpression } from '../value/MySqlSqlHelpers';
+import { utf8Encode } from '../../protocol/Charsets';
+import { mysqlUtf8BytesExpression } from '../../value/MySqlSqlHelpers';
 
 const MAX_METADATA_IDENTIFIER_BYTES: number = 512;
 

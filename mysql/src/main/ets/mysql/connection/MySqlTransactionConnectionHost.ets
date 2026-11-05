@@ -11,7 +11,7 @@ import {
   MySqlTransactionRunnerHost
 } from '../features/transaction/MySqlTransactionRunner';
 import { MySqlCommandScope } from '../execution/MySqlCommandGate';
-import { MySqlBatchResult } from '../model/MySqlBatch';
+import { MySqlBatchResult } from '../features/batch/MySqlBatch';
 import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
 import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';

@@ -21,7 +21,7 @@ import {
 } from '../model/MySqlOperationError';
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
-} from '../model/MySqlBatch';
+} from '../features/batch/MySqlBatch';
 import { MySqlCursorOptions } from '../features/cursor/MySqlCursorOptions';
 import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
 import {

@@ -2,21 +2,27 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryResult, ServerInfo
 } from '@arkdb/core';
-import { MySqlBatchExecutor } from '../../../main/ets/mysql/api/MySqlFeatureContracts';
+import {
+  MySqlBatchExecutor
+} from '../../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult
-} from '../../../main/ets/mysql/model/MySqlBatch';
+} from '../../../../main/ets/mysql/features/batch/MySqlBatch';
 import { MySqlExecutionOutcome, MySqlOperationError } from
-  '../../../main/ets/mysql/model/MySqlOperationError';
+  '../../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlParameter, MySqlParameterType, MySqlParameterValue
-} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
-import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
-import { Capabilities, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
+} from '../../../../main/ets/mysql/features/prepared/MySqlParameter';
+import {
+  MySqlQueryResult
+} from '../../../../main/ets/mysql/model/MySqlQueryResult';
+import {
+  Capabilities, StatusFlags
+} from '../../../../main/ets/mysql/protocol/Constants';
 import {
   PreparedExecutionFixture, PreparedGate, binaryIntResult, errorPayload, flushPrepared, hex, okPayload,
   preparedFailureOf, prepareResponse
-} from '../command/PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 class InvalidatedBatchParameter extends MySqlParameter {
   constructor() {

@@ -1,32 +1,35 @@
 import { ArkDbError, DatabaseSessionStatus, QueryOptions } from '@arkdb/core';
-import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor';
+import { MySqlPreparedExecutorHost } from '../prepared/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedFailure
-} from '../features/prepared/PreparedStatement';
-import { MySqlBatchExecutor } from '../api/MySqlFeatureContracts';
-import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+} from '../prepared/PreparedStatement';
+import { MySqlBatchExecutor } from '../../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../../api/MySqlPreparedContracts';
 import {
   OwnedStatementLifecycle
-} from '../features/prepared/OwnedStatementLifecycle';
+} from '../prepared/OwnedStatementLifecycle';
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
-} from '../model/MySqlBatch';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { MySqlParameter } from '../features/prepared/MySqlParameter';
-import { MySqlQueryResult } from '../model/MySqlQueryResult';
+} from './MySqlBatch';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../model/MySqlOperationError';
+import { MySqlParameter } from '../prepared/MySqlParameter';
+import { MySqlQueryResult } from '../../model/MySqlQueryResult';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../features/prepared/BinaryParameterEncoder';
+} from '../prepared/BinaryParameterEncoder';
+import { MySqlBatchSupport } from './MySqlBatchSupport';
 import {
-  mySqlBatchItemOptions, mySqlBatchResultBytes
-} from './MySqlBatchSupport';
-import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
+  MySqlCommandKind, MySqlCommandScope
+} from '../../execution/MySqlCommandGate';
 
 export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
   private host: MySqlPreparedExecutorHost;
   private session: MySqlPreparedSession;
   private lifecycle: OwnedStatementLifecycle;
   private readSessionStatus: () => DatabaseSessionStatus;
+  private support: MySqlBatchSupport = new MySqlBatchSupport();
 
   constructor(host: MySqlPreparedExecutorHost, readSessionStatus: () => DatabaseSessionStatus) {
     this.host = host;
@@ -82,7 +85,7 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
                 let result: MySqlQueryResult;
                 try {
                   result = await this.executeItem(scope, statement, encodedRows[index],
-                    mySqlBatchItemOptions(snapshot.queryOptions, remainingBytes),
+                    this.support.itemOptions(snapshot.queryOptions, remainingBytes),
                     (decoded: MySqlQueryResult): void => { capturedResult = decoded; });
                 } catch (error) {
                   if (error instanceof MySqlOperationError &&
@@ -93,7 +96,7 @@ export class MySqlPreparedBatchExecutor implements MySqlBatchExecutor {
                   throw error as Error;
                 }
                 completed.push(result);
-                const loadedBytes = mySqlBatchResultBytes(result);
+                const loadedBytes = this.support.resultBytes(result);
                 remainingBytes = loadedBytes >= remainingBytes ?
                   0 : remainingBytes - loadedBytes;
               }

@@ -429,6 +429,30 @@ test('R08 procedure feature owns its vertical production and test files', () => 
   ]);
 });
 
+test('R08 batch feature owns its vertical production and test files', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  assertFeatureOwnership(graph, 'batch', [
+    [
+      'mysql/src/main/ets/mysql/model/MySqlBatch.ets',
+      'mysql/src/main/ets/mysql/features/batch/MySqlBatch.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/execution/MySqlBatchSupport.ets',
+      'mysql/src/main/ets/mysql/features/batch/MySqlBatchSupport.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/execution/MySqlBatchExecutor.ets',
+      'mysql/src/main/ets/mysql/features/batch/MySqlBatchExecutor.ets'
+    ]
+  ], [
+    [
+      'mysql/src/test/mysql/execution/MySqlBatchExecutor.test.ets',
+      'mysql/src/test/mysql/features/batch/MySqlBatchExecutor.test.ets'
+    ]
+  ]);
+});
+
 test('rejects stale cursor ownership paths', () => {
   const stalePaths = FORBIDDEN_MYSQL_CURSOR_PATHS.filter((path) =>
     existsSync(join(ROOT, ...path.split('/'))));

@@ -4,6 +4,10 @@ import {
 import {
   MySqlCursorExecutorHost
 } from '../features/cursor/MySqlCursor';
+import {
+  MySqlBatchSupportContract
+} from '../api/MySqlFeatureContracts';
+import { MySqlBatchSupport } from '../features/batch/MySqlBatchSupport';
 import { prepareServerError } from '../features/prepared/PrepareResponse';
 import {
   MySqlResultTerminatorObservation
@@ -46,7 +50,7 @@ type CursorCommandFinisher = (scope: MySqlCommandScope,
   validate?: () => void, complete?: () => void) => Promise<void>;
 
 export class MySqlPreparedConnectionHost implements MySqlNamedExecutorHost,
-  MySqlCursorExecutorHost {
+  MySqlCursorExecutorHost, MySqlBatchSupportContract {
   readonly commandGate: MySqlCommandGate;
   readonly timers: ConnectionTimerPort;
   readonly preparedCacheSize: number;
@@ -70,6 +74,7 @@ export class MySqlPreparedConnectionHost implements MySqlNamedExecutorHost,
   private validateCursorContinuation: CursorContinuationValidator;
   private applyOwnedCursorStatus: CursorStatusApplier;
   private finishOwnedCursor: CursorCommandFinisher;
+  private batchSupport: MySqlBatchSupport = new MySqlBatchSupport();
 
   constructor(gate: MySqlCommandGate, timers: ConnectionTimerPort,
     readChannel: () => PacketChannel | null,
@@ -144,6 +149,15 @@ export class MySqlPreparedConnectionHost implements MySqlNamedExecutorHost,
 
   readSessionSqlMode(scope: MySqlCommandScope): Promise<string> {
     return this.readSqlMode(scope);
+  }
+
+  itemOptions(options: QueryOptions,
+    remainingBytes: number): QueryOptions {
+    return this.batchSupport.itemOptions(options, remainingBytes);
+  }
+
+  resultBytes(result: MySqlQueryResult): number {
+    return this.batchSupport.resultBytes(result);
   }
 
   startCursor<T>(

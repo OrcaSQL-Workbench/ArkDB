@@ -16,7 +16,7 @@ import {
 } from '../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {
   MySqlBatchError, MySqlBatchResult
-} from '../../../main/ets/mysql/model/MySqlBatch';
+} from '../../../main/ets/mysql/features/batch/MySqlBatch';
 import {
   MySqlExecutionOutcome
 } from '../../../main/ets/mysql/model/MySqlOperationError';

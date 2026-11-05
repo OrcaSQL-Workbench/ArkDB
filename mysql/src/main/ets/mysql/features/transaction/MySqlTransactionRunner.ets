@@ -7,7 +7,7 @@ import {
 } from '../../api/MySqlConnectionFeatures';
 import {
   MySqlBatchResult
-} from '../../model/MySqlBatch';
+} from '../batch/MySqlBatch';
 import { MySqlInsertRowsOptions } from '../../model/MySqlInsertRows';
 import { MySqlParameter } from '../prepared/MySqlParameter';
 import { MySqlServerInfo } from '../../model/MySqlServerInfo';

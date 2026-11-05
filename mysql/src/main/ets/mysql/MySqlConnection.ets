@@ -48,7 +48,9 @@ import {
   mysqlOperationContains as operationContainsFailure,
   mysqlOperationFailure as operationFailure
 } from './execution/MySqlFailure';
-import { MySqlPreparedBatchExecutor } from './execution/MySqlBatchExecutor';
+import {
+  MySqlPreparedBatchExecutor
+} from './features/batch/MySqlBatchExecutor';
 import {
   MySqlPreparedNamedExecutor
 } from './features/named/MySqlNamedExecutor';
@@ -74,7 +76,7 @@ import {
 } from './model/MySqlOperationError';
 import {
   MySqlBatchResult
-} from './model/MySqlBatch';
+} from './features/batch/MySqlBatch';
 import { MySqlDeadlineOptions } from './model/MySqlDeadlineOptions';
 import { MySqlInsertRowsOptions } from './model/MySqlInsertRows';
 import { MySqlParameter } from './features/prepared/MySqlParameter';
@@ -326,7 +328,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     if (this.insertRows !== null) return this.insertRows;
     this.requireReady();
     this.requireExecutorCreationAllowed();
-    this.insertRows = new MySqlPreparedInsertRowsExecutor(this.preparedHost());
+    const host = this.preparedHost();
+    this.insertRows = new MySqlPreparedInsertRowsExecutor(
+      host, host);
     return this.insertRows;
   }
 
@@ -686,8 +690,10 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
 
   private transactionInsertRowsOwned(scope: MySqlCommandScope,
     input: MySqlInsertRowsSnapshot): Promise<MySqlBatchResult> {
+    const host = this.preparedHost();
     return new MySqlPreparedInsertRowsExecutor(
-      this.preparedHost(),
+      host,
+      host,
       (owned: MySqlCommandScope): Promise<void> =>
         this.settleTransactionPreparedExecution(owned))
       .executeInputOwned(scope, input);

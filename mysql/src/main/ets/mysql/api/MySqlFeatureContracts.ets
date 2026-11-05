@@ -1,6 +1,8 @@
 import { QueryOptions } from '@arkdb/core';
 import { MySqlPreparedStatement } from './MySqlPreparedContracts';
-import { MySqlBatchOptions, MySqlBatchResult } from '../model/MySqlBatch';
+import {
+  MySqlBatchOptions, MySqlBatchResult
+} from '../features/batch/MySqlBatch';
 import { MySqlDeadlineOptions } from '../model/MySqlDeadlineOptions';
 import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
 import {
@@ -21,6 +23,11 @@ import {
 export interface MySqlBatchExecutor {
   execute(sql: string, rows: MySqlParameter[][],
     options?: MySqlBatchOptions): Promise<MySqlBatchResult>;
+}
+
+export interface MySqlBatchSupportContract {
+  itemOptions(options: QueryOptions, remainingBytes: number): QueryOptions;
+  resultBytes(result: MySqlQueryResult): number;
 }
 
 export interface MySqlDeadlineExecutor {

@@ -1,7 +1,7 @@
 import { ArkDbError } from '@arkdb/core';
 import {
   MySqlBatchOptions, validateMySqlBatchOptions
-} from './MySqlBatch';
+} from '../features/batch/MySqlBatch';
 
 const MAX_INSERT_PACKET_BYTES: number = 16 * 1024 * 1024;
 

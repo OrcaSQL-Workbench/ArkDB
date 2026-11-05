@@ -8,7 +8,8 @@ import mySqlSessionInitializationTest from
 import mySqlSessionResetTest from './features/session/MySqlSessionReset.test';
 import mySqlExecutionControllerTest from './execution/MySqlExecutionController.test';
 import mySqlCancellationTest from './execution/MySqlCancellation.test';
-import mySqlBatchExecutorTest from './execution/MySqlBatchExecutor.test';
+import mySqlBatchExecutorTest from
+  './features/batch/MySqlBatchExecutor.test';
 import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
 import mySqlDeadlineExecutorTest from './execution/MySqlDeadlineExecutor.test';
 import mySqlFailureTest from './execution/MySqlFailure.test';

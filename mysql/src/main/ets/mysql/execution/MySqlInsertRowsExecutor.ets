@@ -4,8 +4,8 @@ import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
 } from '../features/prepared/PreparedStatement';
 import {
-  MySqlInsertRowsExecutor, MySqlInsertRowsGroupSnapshot,
-  MySqlInsertRowsSnapshot
+  MySqlBatchSupportContract, MySqlInsertRowsExecutor,
+  MySqlInsertRowsGroupSnapshot, MySqlInsertRowsSnapshot
 } from '../api/MySqlFeatureContracts';
 import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import {
@@ -17,7 +17,7 @@ import {
 } from '../model/MySqlInsertRows';
 import {
   MySqlBatchError, MySqlBatchResult
-} from '../model/MySqlBatch';
+} from '../features/batch/MySqlBatch';
 import {
   MySqlExecutionOutcome, MySqlOperationError
 } from '../model/MySqlOperationError';
@@ -29,9 +29,6 @@ import {
 import {
   mysqlPlaceholders, quoteMySqlIdentifier
 } from '../value/MySqlSqlHelpers';
-import {
-  mySqlBatchItemOptions, mySqlBatchResultBytes
-} from './MySqlBatchSupport';
 import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
 
 export class MySqlInsertRowsInput implements MySqlInsertRowsSnapshot {
@@ -64,15 +61,18 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
   private host: MySqlPreparedExecutorHost;
   private session: MySqlPreparedSession;
   private lifecycle: OwnedStatementLifecycle;
+  private support: MySqlBatchSupportContract;
   private executionBarrier: ((
     scope: MySqlCommandScope) => Promise<void>) | null;
 
   constructor(host: MySqlPreparedExecutorHost,
+    support: MySqlBatchSupportContract,
     executionBarrier?: (
       scope: MySqlCommandScope) => Promise<void>) {
     this.host = host;
     this.session = new MySqlPreparedSession(host);
     this.lifecycle = new OwnedStatementLifecycle(this.session);
+    this.support = support;
     this.executionBarrier =
       executionBarrier === undefined ? null : executionBarrier;
   }
@@ -141,7 +141,7 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
               (command: Uint8Array): Promise<MySqlQueryResult> =>
                 this.host.executePrepared(
                   scope, command,
-                  mySqlBatchItemOptions(
+                  this.support.itemOptions(
                     input.options.queryOptions, remainingBytes),
                   (decoded: MySqlQueryResult): void => {
                     capturedResult = decoded;
@@ -154,7 +154,7 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
             capturedResult === null ? result : capturedResult;
           if (decodedResult !== null) {
             progress.completed.push(decodedResult);
-            const loadedBytes = mySqlBatchResultBytes(decodedResult);
+            const loadedBytes = this.support.resultBytes(decodedResult);
             remainingBytes = loadedBytes >= remainingBytes ?
               0 : remainingBytes - loadedBytes;
           }

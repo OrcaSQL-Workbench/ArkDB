@@ -67,7 +67,7 @@ export type {
 export type { MySqlTransactionRunner } from
   './src/main/ets/mysql/api/MySqlConnectionFeatures';
 export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
-  './src/main/ets/mysql/model/MySqlBatch';
+  './src/main/ets/mysql/features/batch/MySqlBatch';
 export { MySqlCursorOptions } from './src/main/ets/mysql/features/cursor/MySqlCursorOptions';
 export { MySqlExecutionOutcome, MySqlOperationError } from
   './src/main/ets/mysql/model/MySqlOperationError';

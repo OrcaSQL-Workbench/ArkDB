@@ -1,6 +1,8 @@
 import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
-import { MySqlExecutionOutcome, MySqlOperationError } from './MySqlOperationError';
-import { MySqlQueryResult } from './MySqlQueryResult';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../model/MySqlOperationError';
+import { MySqlQueryResult } from '../../model/MySqlQueryResult';
 
 const MAX_BATCH_ITEMS = 1000;
 const MAX_BATCH_BUFFERED_BYTES = 32 * 1024 * 1024;

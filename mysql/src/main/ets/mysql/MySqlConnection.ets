@@ -44,7 +44,9 @@ import {
 import {
   MySqlMetadataProvider
 } from './features/metadata/MySqlMetadataProvider';
-import { MySqlServerMetricsProvider } from './metrics/MySqlServerMetricsProvider';
+import {
+  MySqlServerMetricsProvider
+} from './features/metrics/MySqlServerMetricsProvider';
 import {
   mysqlCleanupError as toCleanupError,
   mysqlOperationContains as operationContainsFailure,

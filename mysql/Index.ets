@@ -92,14 +92,18 @@ export { MySqlExecutionController } from './src/main/ets/mysql/execution/MySqlEx
 export {
   MySqlMetadataProvider
 } from './src/main/ets/mysql/features/metadata/MySqlMetadataProvider';
-export { MySqlServerMetricsProvider } from './src/main/ets/mysql/metrics/MySqlServerMetricsProvider';
+export {
+  MySqlServerMetricsProvider
+} from './src/main/ets/mysql/features/metrics/MySqlServerMetricsProvider';
 export { MetricGauge, MetricCounter, ServerMetricsAvailability, ServerMetricsErrorKind,
   ReplicationIoRunning, ReplicationSqlRunning, ServerMetricsCategory,
   ServerOverviewSnapshot, ServerProcessInfo, ServerProcessSnapshot, InnoDbSnapshot,
   QueryActivitySnapshot, ReplicationChannelInfo, ReplicationSnapshot,
   MAX_METRICS_PROCESS_ROWS, MAX_METRICS_REPLICATION_CHANNELS, MAX_METRICS_UNSIGNED_64,
   MAX_PROCESS_COMMAND_UTF8_BYTES, MAX_PROCESS_STATE_UTF8_BYTES,
-  MAX_REPLICATION_CHANNEL_NAME_UTF8_BYTES } from './src/main/ets/mysql/metrics/MySqlServerMetrics';
-export type { ServerMetricsModel } from './src/main/ets/mysql/metrics/MySqlServerMetrics';
+  MAX_REPLICATION_CHANNEL_NAME_UTF8_BYTES } from
+  './src/main/ets/mysql/features/metrics/MySqlServerMetrics';
+export type { ServerMetricsModel } from
+  './src/main/ets/mysql/features/metrics/MySqlServerMetrics';
 export type { MySqlMetricsProvider, MySqlMetricsProvider as ServerMetricsProvider } from
-  './src/main/ets/mysql/metrics/MySqlMetricsProvider';
+  './src/main/ets/mysql/features/metrics/MySqlMetricsProvider';

@@ -23,7 +23,8 @@ import mySqlProcedureCallerTest from
   './features/procedure/MySqlProcedureCaller.test';
 import mySqlTransactionRunnerTest from
   './features/transaction/MySqlTransactionRunner.test';
-import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';
+import mySqlServerMetricsProviderTest from
+  './features/metrics/MySqlServerMetricsProvider.test';
 import mySqlMetadataProviderTest from
   './features/metadata/MySqlMetadataProvider.test';
 import queryStreamTest from './command/QueryStream.test';

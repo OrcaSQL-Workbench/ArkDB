@@ -493,6 +493,34 @@ test('R08 metadata feature owns its vertical production and test files', () => {
   ]);
 });
 
+test('R08 metrics feature owns its vertical production and test files', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  assertFeatureOwnership(graph, 'metrics', [
+    [
+      'mysql/src/main/ets/mysql/metrics/MySqlMetricsProvider.ets',
+      'mysql/src/main/ets/mysql/features/metrics/MySqlMetricsProvider.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/metrics/MySqlServerMetrics.ets',
+      'mysql/src/main/ets/mysql/features/metrics/MySqlServerMetrics.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/metrics/MySqlMetricsSql.ets',
+      'mysql/src/main/ets/mysql/features/metrics/MySqlMetricsSql.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/metrics/MySqlServerMetricsProvider.ets',
+      'mysql/src/main/ets/mysql/features/metrics/MySqlServerMetricsProvider.ets'
+    ]
+  ], [
+    [
+      'mysql/src/test/mysql/metrics/MySqlServerMetricsProvider.test.ets',
+      'mysql/src/test/mysql/features/metrics/MySqlServerMetricsProvider.test.ets'
+    ]
+  ]);
+});
+
 test('rejects stale cursor ownership paths', () => {
   const stalePaths = FORBIDDEN_MYSQL_CURSOR_PATHS.filter((path) =>
     existsSync(join(ROOT, ...path.split('/'))));

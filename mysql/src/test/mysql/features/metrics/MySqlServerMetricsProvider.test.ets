@@ -6,17 +6,21 @@ import {
 } from '@arkdb/core';
 import {
   MySqlColumnDef as ColumnDef, MySqlQueryResult as QueryResult
-} from '../../../main/ets/mysql/model/MySqlQueryResult';
-import { ServerFamily, MySqlServerInfo as ServerInfo } from '../../../main/ets/mysql/model/MySqlServerInfo';
+} from '../../../../main/ets/mysql/model/MySqlQueryResult';
+import {
+  ServerFamily, MySqlServerInfo as ServerInfo
+} from '../../../../main/ets/mysql/model/MySqlServerInfo';
 import {
   ServerMetricsAvailability, ServerMetricsErrorKind, ReplicationIoRunning, ReplicationSqlRunning
-} from '../../../main/ets/mysql/metrics/MySqlServerMetrics';
-import { MySqlServerMetricsProvider } from '../../../main/ets/mysql/metrics/MySqlServerMetricsProvider';
+} from '../../../../main/ets/mysql/features/metrics/MySqlServerMetrics';
+import {
+  MySqlServerMetricsProvider
+} from '../../../../main/ets/mysql/features/metrics/MySqlServerMetricsProvider';
 import {
   MYSQL_METRICS_INNODB_SQL, MYSQL_METRICS_OVERVIEW_SQL, MYSQL_METRICS_PERFORMANCE_SCHEMA_SQL,
   MYSQL_METRICS_PROCESS_SQL, MYSQL_METRICS_QUERY_ACTIVITY_SQL, MYSQL_METRICS_REPLICATION_REPLICA_SQL,
   MYSQL_METRICS_REPLICATION_SLAVE_SQL, mysqlMetricsProductSupported, mysqlReplicationSqlForServer
-} from '../../../main/ets/mysql/metrics/MySqlMetricsSql';
+} from '../../../../main/ets/mysql/features/metrics/MySqlMetricsSql';
 
 export default function mySqlServerMetricsProviderTest() {
   describe('MySqlServerMetricsProvider', () => {

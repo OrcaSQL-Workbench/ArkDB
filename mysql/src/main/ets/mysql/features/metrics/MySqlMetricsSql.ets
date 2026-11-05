@@ -1,5 +1,7 @@
 import { ServerInfo } from '@arkdb/core';
-import { ServerFamily, MySqlServerInfo } from '../model/MySqlServerInfo';
+import {
+  ServerFamily, MySqlServerInfo
+} from '../../model/MySqlServerInfo';
 
 export const MYSQL_METRICS_PERFORMANCE_SCHEMA_SQL: string =
   "SHOW VARIABLES LIKE 'performance_schema'";

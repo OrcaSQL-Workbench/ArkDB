@@ -10,9 +10,11 @@ import {
   ServerMetricsModel, ServerOverviewSnapshot, ServerProcessInfo, ServerProcessSnapshot
 } from './MySqlServerMetrics';
 import { MySqlMetricsProvider } from './MySqlMetricsProvider';
-import { MySqlDbConnection } from '../api/MySqlContracts';
-import { MySqlQueryResultSink } from '../model/MySqlQueryStream';
-import { utf8Decode, utf8Encode } from '../protocol/Charsets';
+import { MySqlDbConnection } from '../../api/MySqlContracts';
+import {
+  MySqlQueryResultSink
+} from '../../model/MySqlQueryStream';
+import { utf8Decode, utf8Encode } from '../../protocol/Charsets';
 import {
   MYSQL_METRICS_INNODB_SQL, MYSQL_METRICS_OVERVIEW_SQL, MYSQL_METRICS_PERFORMANCE_SCHEMA_SQL,
   MYSQL_METRICS_PROCESS_SQL, MYSQL_METRICS_QUERY_ACTIVITY_SQL, MYSQL_METRICS_REPLICATION_REPLICA_SQL,

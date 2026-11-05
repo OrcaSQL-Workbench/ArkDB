@@ -14,7 +14,9 @@ import { MySqlExecutionController } from '../execution/MySqlExecutionController'
 import {
   MySqlMetadataProvider
 } from '../features/metadata/MySqlMetadataProvider';
-import { MySqlServerMetricsProvider } from '../metrics/MySqlServerMetricsProvider';
+import {
+  MySqlServerMetricsProvider
+} from '../features/metrics/MySqlServerMetricsProvider';
 
 export class MySqlDriverFactory implements DbDriverFactory<MySqlConnectionOptions, MySqlConnection>,
   MySqlDbDriverFactory {

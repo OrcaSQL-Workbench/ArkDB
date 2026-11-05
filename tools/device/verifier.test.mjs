@@ -141,6 +141,21 @@ test('preserves the historical schema-1 case manifest bytes after moving the har
   assert.equal(sha256(bytes), LEGACY_CASE_MANIFEST_SHA256);
 });
 
+test('keeps device selection contracts while removing duplicate helper surface', async () => {
+  const manifestSource = await readFile(join(process.cwd(), 'examples',
+    'mysql-device-acceptance', 'entry', 'src', 'main', 'ets', 'sample',
+    'DeviceAcceptanceManifest.ets'), 'utf8');
+  const cli = await readFile(join(process.cwd(), 'tools', 'device', 'cli.mjs'), 'utf8');
+  const contracts = await readFile(join(process.cwd(), 'tools', 'device', 'contracts.mjs'), 'utf8');
+
+  assert.doesNotMatch(manifestSource, /\bDEVICE_ACCEPTANCE_SERVER_FAMILIES\b/);
+  assert.doesNotMatch(cli, /\bdeviceEvidenceCaseManifestPath\b/);
+  assert.doesNotMatch(cli, /\bCASE_MANIFEST\b/);
+  assert.match(contracts, /export const DEVICE_PROFILES = \['M1', 'M2', 'M3', 'M4'\]/);
+  assert.match(contracts, /\bserverFamilies\b/);
+  assert.match(contracts, /\['MySQL'\]/);
+});
+
 test('documents the retained acceptance HAP as private-key-sensitive until cleanup', async () => {
   const readme = await readFile(join(process.cwd(), 'examples', 'mysql-device-acceptance',
     'README.md'), 'utf8');

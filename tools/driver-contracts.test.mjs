@@ -5,6 +5,7 @@ import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 import JSON5 from 'json5';
+import ts from 'typescript';
 import { ROOT } from './check-package.mjs';
 import { checkDriverContracts } from './driver-contracts.mjs';
 import { affectedDrivers, dependencyClosure, discoverDrivers, discoverPackages,
@@ -25,6 +26,87 @@ test('core is a real independent shared HAR, not an extra database driver', () =
   assert.equal(verification.deviceConsumerDirectory,
     join(ROOT, 'examples', 'mysql-device-acceptance'));
 });
+
+test('compatibility-only MySQL surface stays exported and explicitly deprecated', async () => {
+  const index = await readFile(join(ROOT, 'mysql', 'Index.ets'), 'utf8');
+  const capabilities = await readFile(join(ROOT, 'core', 'src', 'main', 'ets', 'driver',
+    'DriverCapabilities.ets'), 'utf8');
+  const serverInfo = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'model', 'MySqlServerInfo.ets'), 'utf8');
+  const mysqlContracts = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'api', 'MySqlContracts.ets'), 'utf8');
+  const extensions = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'driver', 'MySqlConnectionExtensions.ets'), 'utf8');
+  const readme = await readFile(join(ROOT, 'mysql', 'README.md'), 'utf8');
+  const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
+
+  assert.match(index, /\bServerFamily\b/);
+  assert.match(index, /\bDriverCapabilities\b/);
+  assert.match(index, /\bDbExecutionController\b/);
+  assert.match(index, /\bMySqlConnectionExtensions\b/);
+  assert.match(index, /\bMySqlCommandKind\b/);
+  assert.match(serverInfo,
+    /\/\*\*[\s\S]{0,180}@deprecated[\s\S]{0,180}\*\/\s*PostgreSQL = 'PostgreSQL'/);
+  assert.match(capabilities,
+    /\/\*\*[\s\S]{0,180}@deprecated[\s\S]{0,180}\*\/\s*supportsExplain: boolean = false/);
+  assert.match(mysqlContracts,
+    /\/\*\*[\s\S]{0,240}@deprecated[\s\S]{0,240}\*\/\s*export interface MySqlDbExecutionController/);
+  assert.match(mysqlContracts,
+    /\/\*\*[\s\S]{0,240}@deprecated[\s\S]{0,240}\*\/\s*createExecutionController\(/);
+  assert.match(readme, /\bsupportsExplain\b[\s\S]{0,180}\bdeprecated\b[\s\S]{0,180}\bfeature discovery\b/i);
+  assert.match(readme,
+    /\bcreateExecutionController\b[\s\S]{0,220}\bconnection-bound cancellation\b/i);
+  assert.match(contracts,
+    /\bMySqlConnectionExtensions\b[\s\S]{0,220}\bobserver-only\b[\s\S]{0,180}\boption bag\b/i);
+
+  assertObserverOnlyConnectionExtensions(extensions);
+  assert.throws(() => assertObserverOnlyConnectionExtensions(extensions.replace(
+    '  constructor(executionObserver?: MySqlExecutionObserver) {',
+    '  futureOption?: string;\n\n  constructor(executionObserver?: MySqlExecutionObserver) {'
+  )), /futureOption/);
+  assert.throws(() => assertObserverOnlyConnectionExtensions(extensions.replace(
+    '  constructor(executionObserver?: MySqlExecutionObserver) {',
+    "  get futureOption(): string { return ''; }\n\n" +
+    '  constructor(executionObserver?: MySqlExecutionObserver) {'
+  )), /futureOption/);
+  assert.match(extensions,
+    /constructor\(executionObserver\?: MySqlExecutionObserver\)/);
+});
+
+test('approved internal surface candidates stay representation-free', async () => {
+  const metrics = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'features', 'metrics', 'MySqlServerMetricsProvider.ets'), 'utf8');
+  const gate = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'execution', 'MySqlCommandGate.ets'), 'utf8');
+  const connection = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'MySqlConnection.ets'), 'utf8');
+
+  assert.doesNotMatch(metrics, /\bclass StatusValues\b/);
+  assert.match(metrics,
+    /function statusValues\(rows: SqlValue\[\]\[\], names: string\[\]\): bigint\[\] \| null/);
+  assert.match(metrics, /const result: bigint\[\] = \[\]/);
+  assert.doesNotMatch(metrics, /\.valueAt\(/);
+  assert.doesNotMatch(gate, /\bclass CommandOwnerToken\b/);
+  assert.match(gate, /readonly ownerToken: Object = new Object\(\)/);
+  assert.doesNotMatch(connection, /\bclass MySqlExecutionObserverCapability\b/);
+  assert.match(connection,
+    /const mysqlExecutionObserverCapability: Object = new Object\(\)/);
+});
+
+function assertObserverOnlyConnectionExtensions(source) {
+  const parsed = ts.createSourceFile('MySqlConnectionExtensions.ets', source,
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  assert.deepEqual(parsed.parseDiagnostics, []);
+  const declaration = parsed.statements.find((statement) =>
+    ts.isClassDeclaration(statement) &&
+    statement.name?.text === 'MySqlConnectionExtensions');
+  assert.notEqual(declaration, undefined);
+  const fields = declaration.members.filter((member) =>
+    ts.isPropertyDeclaration(member) ||
+    ts.isGetAccessorDeclaration(member) ||
+    ts.isSetAccessorDeclaration(member)).map((member) => member.name.getText(parsed));
+  assert.deepEqual(fields, ['executionObserver']);
+}
 
 test('shared contracts describe callback-scoped transaction sessions', async () => {
   const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
@@ -133,8 +215,8 @@ test('shared contracts describe the privacy-safe execution observer', async () =
   assert.notEqual(constructor, null);
   assert.doesNotMatch(constructor[0], /\b(?:extensions|executionClock)\b/);
   assert.doesNotMatch(connection, /\bprotected initializeExecutionObserver\b/);
-  assert.match(connection, /class MySqlExecutionObserverCapability/);
-  assert.match(connection, /const mysqlExecutionObserverCapability/);
+  assert.doesNotMatch(connection, /class MySqlExecutionObserverCapability/);
+  assert.match(connection, /const mysqlExecutionObserverCapability: Object = new Object\(\)/);
   assert.match(connection, /export function initializeMySqlExecutionObserverInternal\(/);
   assert.match(connection, /export function initializeMySqlExecutionObserverWithCapabilityInternal\(/);
   assert.match(factory,

@@ -92,11 +92,11 @@ export class MySqlServerMetricsProvider implements ServerMetricsProvider, MySqlM
       ]);
       if (values === null) return unsupportedSource<ServerOverviewSnapshot>();
       const data = new ServerOverviewSnapshot();
-      data.threadsConnected.value = values.valueAt(0);
-      data.threadsRunning.value = values.valueAt(1);
-      data.connectionAttempts.value = values.valueAt(2);
-      data.abortedConnectionAttempts.value = values.valueAt(3);
-      data.maxUsedConnections.value = values.valueAt(4);
+      data.threadsConnected.value = values[0];
+      data.threadsRunning.value = values[1];
+      data.connectionAttempts.value = values[2];
+      data.abortedConnectionAttempts.value = values[3];
+      data.maxUsedConnections.value = values[4];
       return available(data);
     } catch (error) {
       return mappedOrThrow<ServerOverviewSnapshot>(error as Error);
@@ -155,18 +155,18 @@ export class MySqlServerMetricsProvider implements ServerMetricsProvider, MySqlM
       ]);
       if (values === null) return unsupportedSource<InnoDbSnapshot>();
       const data = new InnoDbSnapshot();
-      data.bufferPoolPagesTotal.value = values.valueAt(0);
-      data.bufferPoolPagesFree.value = values.valueAt(1);
-      data.bufferPoolPagesData.value = values.valueAt(2);
-      data.bufferPoolPagesDirty.value = values.valueAt(3);
-      data.bufferPoolReadRequests.value = values.valueAt(4);
-      data.bufferPoolReads.value = values.valueAt(5);
-      data.bufferPoolWriteRequests.value = values.valueAt(6);
-      data.bufferPoolPagesFlushed.value = values.valueAt(7);
-      data.rowsRead.value = values.valueAt(8);
-      data.rowsInserted.value = values.valueAt(9);
-      data.rowsUpdated.value = values.valueAt(10);
-      data.rowsDeleted.value = values.valueAt(11);
+      data.bufferPoolPagesTotal.value = values[0];
+      data.bufferPoolPagesFree.value = values[1];
+      data.bufferPoolPagesData.value = values[2];
+      data.bufferPoolPagesDirty.value = values[3];
+      data.bufferPoolReadRequests.value = values[4];
+      data.bufferPoolReads.value = values[5];
+      data.bufferPoolWriteRequests.value = values[6];
+      data.bufferPoolPagesFlushed.value = values[7];
+      data.rowsRead.value = values[8];
+      data.rowsInserted.value = values[9];
+      data.rowsUpdated.value = values[10];
+      data.rowsDeleted.value = values[11];
       return available(data);
     } catch (error) {
       return mappedOrThrow<InnoDbSnapshot>(error as Error);
@@ -185,9 +185,9 @@ export class MySqlServerMetricsProvider implements ServerMetricsProvider, MySqlM
       const values = statusValues(rows, ['Questions', 'Queries', 'Slow_queries']);
       if (values === null) return unsupportedSource<QueryActivitySnapshot>();
       const data = new QueryActivitySnapshot();
-      data.questions.value = values.valueAt(0);
-      data.queries.value = values.valueAt(1);
-      data.slowQueries.value = values.valueAt(2);
+      data.questions.value = values[0];
+      data.queries.value = values[1];
+      data.slowQueries.value = values[2];
       return available(data);
     } catch (error) {
       return mappedOrThrow<QueryActivitySnapshot>(error as Error);
@@ -299,16 +299,8 @@ class MetricsQuerySink implements QueryResultSink, MySqlQueryResultSink {
   }
 }
 
-class StatusValues {
-  values: bigint[] = [];
-
-  valueAt(index: number): bigint {
-    return this.values[index];
-  }
-}
-
-function statusValues(rows: SqlValue[][], names: string[]): StatusValues | null {
-  const result = new StatusValues();
+function statusValues(rows: SqlValue[][], names: string[]): bigint[] | null {
+  const result: bigint[] = [];
   for (const name of names) {
     let found = false;
     let value = 0n;
@@ -322,7 +314,7 @@ function statusValues(rows: SqlValue[][], names: string[]): StatusValues | null 
       }
     }
     if (!found) return null;
-    result.values.push(value);
+    result.push(value);
   }
   return result;
 }

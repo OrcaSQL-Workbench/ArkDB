@@ -38,6 +38,7 @@ export default function publicInterfaceTest(): void {
       expect(factory.driverId).assertEqual('mysql');
       expect(factory.capabilities.supportsStreamingResults).assertTrue();
       expect(factory.capabilities.supportsTransactions).assertTrue();
+      expect(factory.capabilities.supportsExplain).assertTrue();
       expect(factory.capabilities.supportsPreparedStatements).assertTrue();
     });
 

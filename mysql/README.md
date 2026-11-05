@@ -53,7 +53,10 @@ The distribution is an API-24 **bytecode HAR** with normalized OHM URLs. Import 
 `DbConnection` retains `ping`, `queryStream`, context changes, autocommit,
 commit/rollback and native session/server information. The non-generic
 `DbDriverFactory` retains `createConnection(config, password)` and provider
-creation; `DbExecutionController` retains handle-based `cancel(handle)`.
+creation; `DbExecutionController` retains handle-based `cancel(handle)`. The
+legacy `createExecutionController(controlConnection).cancel(connectionHandle)`
+helper remains source-compatible, but prefer connection-bound cancellation
+through `connection.features.cancellation` for execution lifetime ownership.
 Existing provider implementations do not acquire new required methods.
 
 `SqlValue`, column metadata, buffered results and streaming callbacks retain
@@ -72,6 +75,8 @@ Use `CoreDbConnection`, `CoreDbDriverFactory`, `CoreQueryResultSink` and the oth
 `Core...` exports when writing portable integrations. Core remains engine-neutral.
 The reserved `ServerFamily.PostgreSQL` value is retained only for source
 compatibility; it does not mean a PostgreSQL driver exists.
+`DriverCapabilities.supportsExplain` is deprecated as a feature discovery
+signal; its field and current values remain source-compatible.
 
 ## Privacy-safe execution observation
 

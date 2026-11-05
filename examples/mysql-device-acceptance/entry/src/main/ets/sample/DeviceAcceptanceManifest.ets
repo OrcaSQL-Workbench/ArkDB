@@ -10,5 +10,4 @@ export const DEVICE_ACCEPTANCE_CASE_IDS: string[] = [
   'cleanup'
 ];
 export const DEVICE_ACCEPTANCE_DEVICE_TYPES: string[] = ['tablet', '2in1'];
-export const DEVICE_ACCEPTANCE_SERVER_FAMILIES: string[] = ['MySQL'];
 export const DEVICE_ACCEPTANCE_MINIMUM_SDK: number = 24;

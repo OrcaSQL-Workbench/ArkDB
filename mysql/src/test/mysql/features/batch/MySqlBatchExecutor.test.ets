@@ -22,7 +22,7 @@ import {
 import {
   PreparedExecutionFixture, PreparedGate, binaryIntResult, errorPayload, flushPrepared, hex, okPayload,
   preparedFailureOf, prepareResponse
-} from '../../command/PreparedExecutionFixture';
+} from '../prepared/fixtures/PreparedExecutionFixture';
 
 class InvalidatedBatchParameter extends MySqlParameter {
   constructor() {

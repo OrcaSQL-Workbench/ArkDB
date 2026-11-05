@@ -1,5 +1,6 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import ts from 'typescript';
 import { dependencyClosure, discoverPackages, driverArgument, readJson5, resolvePackage, ROOT } from './driver-packages.mjs';
 
 export { readJson5, ROOT } from './driver-packages.mjs';
@@ -35,6 +36,199 @@ export function importSpecifiers(source) {
 function within(parent, path) {
   const child = relative(parent, path);
   return child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+}
+
+function testSyntax(file, source) {
+  const syntax = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  if (syntax.parseDiagnostics.length > 0) {
+    throw new Error(`Cannot parse ArkTS test source: ${file}`);
+  }
+  return syntax;
+}
+
+function exportedFixtureStatement(statement) {
+  if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)) return true;
+  const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) ?? [] : [];
+  const exported = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+  const defaulted = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword);
+  return exported && !defaulted;
+}
+
+function suiteCalls(syntax, bindings) {
+  const calls = new Map([...bindings].map((binding) => [binding, 0]));
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+      calls.has(node.expression.text)) {
+      calls.set(node.expression.text, calls.get(node.expression.text) + 1);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(syntax);
+  return calls;
+}
+
+function listSuiteImports(file, source) {
+  const syntax = testSyntax(file, source);
+  const imports = [];
+  for (const statement of syntax.statements) {
+    if (!ts.isImportDeclaration(statement) || !statement.importClause?.name ||
+      !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    imports.push({
+      binding: statement.importClause.name.text,
+      specifier: statement.moduleSpecifier.text
+    });
+  }
+  const calls = suiteCalls(syntax, new Set(imports.map((entry) => entry.binding)));
+  return imports.map((entry) => ({ ...entry, calls: calls.get(entry.binding) }));
+}
+
+function testCaseNames(syntax) {
+  const names = [];
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+      node.expression.text === 'it') {
+      const name = node.arguments[0];
+      if (!name || !ts.isStringLiteral(name)) {
+        throw new Error(`ArkTS test cases must use literal names: ${syntax.fileName}`);
+      }
+      names.push(name.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(syntax);
+  return names;
+}
+
+function testOwner(testRoot, file) {
+  const parts = relative(testRoot, file).split(sep);
+  if (parts[0] !== 'mysql') return parts.length > 1 ? parts[0] : '.';
+  if (parts[1] === 'features') return `features/${parts[2]}`;
+  return parts[1];
+}
+
+const MYSQL_TEST_OWNERS = [
+  'auth',
+  'command',
+  'connection',
+  'diagnostics',
+  'execution',
+  'features/batch',
+  'features/cursor',
+  'features/insert',
+  'features/longdata',
+  'features/metadata',
+  'features/metrics',
+  'features/named',
+  'features/prepared',
+  'features/procedure',
+  'features/session',
+  'features/transaction',
+  'model',
+  'protocol',
+  'public',
+  'transport',
+  'value'
+];
+
+function checkTestSources(root, id, testRoot) {
+  const sources = listFiles(testRoot).filter((file) => file.endsWith('.ets'));
+  const testFiles = sources.filter((file) =>
+    file.endsWith('.test.ets') && !file.endsWith(`${sep}List.test.ets`));
+  const supportFiles = sources.filter((file) => !file.endsWith('.test.ets'));
+  const testCases = [];
+  for (const file of sources) {
+    for (const specifier of importSpecifiers(readFileSync(file, 'utf8'))) {
+      if (!specifier.startsWith('.')) continue;
+      const base = resolve(dirname(file), specifier);
+      const candidates = [base, `${base}.ets`, join(base, 'Index.ets')];
+      if (!candidates.some((candidate) => existsSync(candidate))) {
+        throw new Error(`Unresolved ArkTS test import in ${relative(root, file)}: ${specifier}`);
+      }
+    }
+  }
+  for (const file of supportFiles) {
+    const parts = relative(testRoot, file).split(sep);
+    if (!parts.includes('fixtures')) {
+      throw new Error(`Test support source must live under a fixtures directory: ${relative(root, file)}`);
+    }
+  }
+  for (const file of testFiles) {
+    const source = readFileSync(file, 'utf8');
+    const syntax = testSyntax(file, source);
+    testCases.push(...testCaseNames(syntax));
+    if (syntax.statements.some(exportedFixtureStatement)) {
+      throw new Error(`Executable ArkTS suite must not export shared fixtures: ${relative(root, file)}`);
+    }
+    for (const specifier of importSpecifiers(source)) {
+      if (specifier.startsWith('.') && /\.test(?:\.ets)?$/.test(specifier)) {
+        throw new Error(`Executable ArkTS suites must not import fixtures from another suite: ` +
+          `${relative(root, file)} -> ${specifier}`);
+      }
+    }
+  }
+
+  const registrations = new Map();
+  const reachedLists = new Set();
+  const pending = [join(testRoot, 'List.test.ets')];
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (reachedLists.has(file)) continue;
+    reachedLists.add(file);
+    const source = readFileSync(file, 'utf8');
+    for (const entry of listSuiteImports(file, source)) {
+      if (entry.calls !== 1) {
+        throw new Error(`Imported test suite must be called exactly once in ${relative(root, file)}: ` +
+          `${entry.binding} is called ${entry.calls} times.`);
+      }
+      const target = resolve(file, '..', `${entry.specifier}.ets`);
+      if (!within(testRoot, target)) {
+        throw new Error(`Registered ArkTS suite must stay inside its test package: ${entry.specifier}`);
+      }
+      const targetSource = sources.includes(target);
+      if (!targetSource) {
+        throw new Error(`Registered ArkTS suite does not exist: ${relative(root, target)}`);
+      }
+      const count = (registrations.get(target) ?? 0) + 1;
+      registrations.set(target, count);
+      if (count > 1) {
+        throw new Error(`ArkTS suite is registered more than once: ${relative(root, target)}`);
+      }
+      if (target.endsWith(`${sep}List.test.ets`)) pending.push(target);
+      else if (!target.endsWith('.test.ets')) {
+        throw new Error(`Registered ArkTS suite must use the .test.ets suffix: ${relative(root, target)}`);
+      }
+    }
+  }
+  const unregistered = testFiles.filter((file) => registrations.get(file) !== 1);
+  if (unregistered.length > 0 || testFiles.length === 0) {
+    throw new Error(`Unregistered or missing ArkTS suites: ${unregistered
+      .map((file) => relative(root, file)).join(', ')}`);
+  }
+  const duplicateCases = [...new Set(testCases.filter((name, index) =>
+    testCases.indexOf(name) !== index))].sort();
+  if (duplicateCases.length > 0) {
+    throw new Error(`Duplicate ArkTS test case names: ${duplicateCases.join(', ')}`);
+  }
+
+  const testOwners = [...new Set(testFiles.map((file) => testOwner(testRoot, file)))].sort();
+  if (id === 'mysql' && resolve(root) === resolve(ROOT)) {
+    const missingOwners = MYSQL_TEST_OWNERS.filter((owner) => !testOwners.includes(owner));
+    if (testOwners.includes('core') || missingOwners.length > 0) {
+      throw new Error(`MySQL tests must mirror production ownership; ` +
+        `misleading owners: ${testOwners.includes('core') ? 'core' : 'none'}; ` +
+        `missing owners: ${missingOwners.join(', ') || 'none'}.`);
+    }
+  }
+  return { testFiles, testOwners, testCases };
+}
+
+export function checkArkTsTests(root, testRoot, id = 'tests') {
+  const result = checkTestSources(root, id, resolve(root, testRoot));
+  return {
+    testSuites: result.testFiles.length,
+    testCases: result.testCases.length,
+    testOwners: result.testOwners
+  };
 }
 
 export function checkPackage(root = ROOT, id = 'mysql') {
@@ -94,29 +288,16 @@ export function checkPackage(root = ROOT, id = 'mysql') {
   if (exports.length === 0) throw new Error('Public entry must expose named exports.');
 
   const testRoot = join(moduleRoot, 'src', 'test');
-  const testFiles = listFiles(testRoot).filter((file) =>
-    file.endsWith('.test.ets') && !file.endsWith(`${sep}List.test.ets`));
-  const reached = new Set();
-  const pending = [join(testRoot, 'List.test.ets')];
-  while (pending.length > 0) {
-    const file = pending.pop();
-    if (reached.has(file)) continue;
-    reached.add(file);
-    const source = readFileSync(file, 'utf8');
-    for (const match of source.matchAll(/\bimport\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g)) {
-      if (!new RegExp(`\\b${match[1]}\\s*\\(`).test(source)) {
-        throw new Error(`Imported test suite is not called in ${relative(root, file)}.`);
-      }
-      const target = resolve(file, '..', `${match[2]}.ets`);
-      if (target.endsWith(`${sep}List.test.ets`)) pending.push(target);
-      else reached.add(target);
-    }
-  }
-  const unregistered = testFiles.filter((file) => !reached.has(file));
-  if (unregistered.length > 0 || testFiles.length === 0) {
-    throw new Error(`Unregistered or missing ArkTS suites: ${unregistered.map((file) => relative(root, file)).join(', ')}`);
-  }
-  return { manifest, exports, driver, sourceFiles: files.length, testSuites: testFiles.length };
+  const { testFiles, testOwners, testCases } = checkTestSources(root, id, testRoot);
+  return {
+    manifest,
+    exports,
+    driver,
+    sourceFiles: files.length,
+    testSuites: testFiles.length,
+    testCases: testCases.length,
+    testOwners
+  };
 }
 
 export function runCheckPackageCli(args = process.argv.slice(2)) {
@@ -126,6 +307,7 @@ export function runCheckPackageCli(args = process.argv.slice(2)) {
   for (const id of drivers) {
     const result = checkPackage(ROOT, id);
     console.log(`Checked ${result.manifest.name}@${result.manifest.version}: ` +
-      `${result.sourceFiles} source files, ${result.exports.length} exports, ${result.testSuites} ArkTS suites.`);
+      `${result.sourceFiles} source files, ${result.exports.length} exports, ` +
+      `${result.testSuites} ArkTS suites, ${result.testCases} ArkTS cases.`);
   }
 }

@@ -22,7 +22,7 @@ import { PacketReader } from '../../../../main/ets/mysql/protocol/PacketReader';
 import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
 import {
   PreparedExecutionFixture, columnPayload, hex, okPayload, preparedFailureOf, prepareResponse
-} from '../../command/PreparedExecutionFixture';
+} from '../prepared/fixtures/PreparedExecutionFixture';
 
 export default function mySqlProcedureCallerTest(): void {
   describe('MySQL binary procedure caller', () => {

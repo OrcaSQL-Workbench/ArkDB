@@ -49,9 +49,9 @@ requests graceful Worker shutdown before bounded forced termination.
 | `entry/src/main/ets/workers/mysql.worker.ets` | Ordinary read request dispatch and shutdown |
 | `entry/src/main/ets/sample/Messages.ets` | Small `@Sendable` request/response DTOs |
 | `entry/src/main/ets/sample/SampleRunner.ets` | Validate, connect, execute the bounded stream, report typed errors, and close |
-| `entry/src/test/SampleRunner.test.ets` | Offline lifecycle, overlap, cleanup, redaction, and exact-value behavior |
-| `entry/src/test/LegacyPublicInterface.test.ets` | R00A-compatible published interface consumption |
-| `entry/src/test/PreparedPublicInterface.test.ets` | Current additive MySQL public interface consumption |
+| `entry/src/test/sample/SampleRunner.test.ets` | Offline lifecycle, overlap, cleanup, redaction, and exact-value behavior |
+| `entry/src/test/consumer/LegacyPublicInterface.test.ets` | R00A-compatible published interface consumption |
+| `entry/src/test/consumer/PreparedPublicInterface.test.ets` | Current additive MySQL public interface consumption |
 
 ## Repository verification
 

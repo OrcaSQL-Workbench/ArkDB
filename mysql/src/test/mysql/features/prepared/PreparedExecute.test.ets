@@ -26,11 +26,11 @@ import {
 import {
   encodeBinaryParameters
 } from '../../../../main/ets/mysql/features/prepared/BinaryParameterEncoder';
-import { PacketTransportFixture } from '../../protocol/PacketTransportFixture';
+import { PacketTransportFixture } from '../../protocol/fixtures/PacketTransportFixture';
 import {
   PreparedExecutionFixture, PreparedGate, binaryIntResult, errorPayload, flushPrepared, framedResponse, hex, okPayload,
   preparedFailureOf, prepareResponse
-} from '../../command/PreparedExecutionFixture';
+} from './fixtures/PreparedExecutionFixture';
 
 class MutableBinaryParameter extends MySqlParameter {
   private bytes: Uint8Array;

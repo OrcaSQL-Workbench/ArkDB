@@ -23,7 +23,7 @@ import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
 import { socket } from '../../../mock/NetworkKit.mock';
 import {
   PreparedSocket, framePacket, handshake, okPayload, prepareResponse
-} from '../command/PreparedExecutionFixture';
+} from '../features/prepared/fixtures/PreparedExecutionFixture';
 
 class Gate {
   readonly promise: Promise<void>;

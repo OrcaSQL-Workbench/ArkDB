@@ -22,7 +22,7 @@ import { Capabilities } from '../../../../main/ets/mysql/protocol/Constants';
 import {
   PreparedExecutionFixture, PreparedGate, PreparedRecordingSink, binaryIntResult, columnPayload,
   eofPayload, flushPrepared, hex, okPayload, prepareResponse, preparedFailureOf
-} from '../../command/PreparedExecutionFixture';
+} from '../prepared/fixtures/PreparedExecutionFixture';
 
 class HoldingEndSink extends PreparedRecordingSink {
   readonly entered: PreparedGate = new PreparedGate();

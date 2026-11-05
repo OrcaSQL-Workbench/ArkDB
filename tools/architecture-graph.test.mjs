@@ -376,7 +376,7 @@ test('R08 transaction feature owns its vertical production and test files', () =
   ], [
     [
       'mysql/src/test/mysql/execution/MySqlTransactionRunner.test.ets',
-      'mysql/src/test/mysql/features/transaction/MySqlTransactionRunner.test.ets'
+      'mysql/src/test/mysql/features/transaction/MySqlTransactionLifecycle.test.ets'
     ]
   ]);
 });
@@ -532,6 +532,81 @@ test('rejects stale long-data ownership paths', () => {
   const stalePaths = FORBIDDEN_MYSQL_LONG_DATA_PATHS.filter((path) =>
     existsSync(join(ROOT, ...path.split('/'))));
   assert.deepEqual(stalePaths, []);
+});
+
+test('R12 tests use explicit production, fixture, consumer and acceptance ownership', () => {
+  const required = [
+    'core/src/test/fixtures/ReferenceAdapter.ets',
+    'mysql/src/test/mysql/diagnostics/LoggerPrivacy.test.ets',
+    'mysql/src/test/mysql/diagnostics/MySqlExecutionObserver.test.ets',
+    'mysql/src/test/mysql/execution/cancellation/MySqlCancellationControl.test.ets',
+    'mysql/src/test/mysql/execution/cancellation/MySqlCancellationCursor.test.ets',
+    'mysql/src/test/mysql/execution/cancellation/MySqlCancellationPrepared.test.ets',
+    'mysql/src/test/mysql/execution/cancellation/MySqlCancellationText.test.ets',
+    'mysql/src/test/mysql/execution/cancellation/fixtures/MySqlCancellationFixture.ets',
+    'mysql/src/test/mysql/features/cursor/MySqlCursorFetch.test.ets',
+    'mysql/src/test/mysql/features/cursor/MySqlCursorLifecycle.test.ets',
+    'mysql/src/test/mysql/features/cursor/MySqlCursorOpen.test.ets',
+    'mysql/src/test/mysql/features/cursor/fixtures/MySqlCursorFixture.ets',
+    'mysql/src/test/mysql/features/longdata/LongDataCancellation.test.ets',
+    'mysql/src/test/mysql/features/longdata/LongDataEncoding.test.ets',
+    'mysql/src/test/mysql/features/longdata/LongDataFailure.test.ets',
+    'mysql/src/test/mysql/features/longdata/LongDataOwnership.test.ets',
+    'mysql/src/test/mysql/features/longdata/fixtures/LongDataFixture.ets',
+    'mysql/src/test/mysql/features/metrics/ServerMetrics.test.ets',
+    'mysql/src/test/mysql/features/prepared/BinaryParameterEncoder.test.ets',
+    'mysql/src/test/mysql/features/prepared/BinaryRowDecoder.test.ets',
+    'mysql/src/test/mysql/features/prepared/fixtures/PreparedExecutionFixture.ets',
+    'mysql/src/test/mysql/features/prepared/fixtures/PreparedStatementFixture.ets',
+    'mysql/src/test/mysql/features/prepared/fixtures/StatementCacheFixture.ets',
+    'mysql/src/test/mysql/features/prepared/PreparedStatementClose.test.ets',
+    'mysql/src/test/mysql/features/prepared/PreparedStatementMetadata.test.ets',
+    'mysql/src/test/mysql/features/prepared/PreparedStatementOwnership.test.ets',
+    'mysql/src/test/mysql/features/prepared/PreparedStatementValidation.test.ets',
+    'mysql/src/test/mysql/features/prepared/StatementCacheCancellation.test.ets',
+    'mysql/src/test/mysql/features/prepared/StatementCacheFailure.test.ets',
+    'mysql/src/test/mysql/features/prepared/StatementCacheReuse.test.ets',
+    'mysql/src/test/mysql/features/prepared/StatementCacheState.test.ets',
+    'mysql/src/test/mysql/features/transaction/fixtures/MySqlTransactionFixture.ets',
+    'mysql/src/test/mysql/features/transaction/MySqlTransactionCompletion.test.ets',
+    'mysql/src/test/mysql/features/transaction/MySqlTransactionInsertRows.test.ets',
+    'mysql/src/test/mysql/features/transaction/MySqlTransactionLifecycle.test.ets',
+    'mysql/src/test/mysql/model/ConnectionConfig.test.ets',
+    'mysql/src/test/mysql/protocol/fixtures/PacketTransportFixture.ets',
+    'mysql/src/test/mysql/transport/TcpTransport.test.ets',
+    'examples/mysql-client/entry/src/test/consumer/LegacyPublicInterface.test.ets',
+    'examples/mysql-client/entry/src/test/consumer/PreparedPublicInterface.test.ets',
+    'examples/mysql-client/entry/src/test/fixtures/public/LegacyCustomConnection.ets',
+    'examples/mysql-client/entry/src/test/sample/SampleRunner.test.ets',
+    'examples/mysql-device-acceptance/entry/src/test/acceptance/DeviceAcceptanceRunner.test.ets',
+    'examples/mysql-device-acceptance/entry/src/test/evidence/DeviceReceiptClipboard.test.ets',
+    'examples/mysql-device-acceptance/entry/src/test/evidence/DeviceReceiptSigner.test.ets'
+  ];
+  const forbidden = [
+    'mysql/src/test/core',
+    'mysql/src/test/mysql/command/PreparedExecutionFixture.ets',
+    'mysql/src/test/mysql/connection/MySqlExecutionObserver.test.ets',
+    'mysql/src/test/mysql/execution/MySqlCancellation.test.ets',
+    'mysql/src/test/mysql/features/cursor/MySqlCursor.test.ets',
+    'mysql/src/test/mysql/features/longdata/LongData.test.ets',
+    'mysql/src/test/mysql/features/prepared/MySqlStatementCache.test.ets',
+    'mysql/src/test/mysql/features/prepared/PreparedStatement.test.ets',
+    'mysql/src/test/mysql/features/transaction/MySqlTransactionRunner.test.ets',
+    'mysql/src/test/mysql/protocol/PacketTransportFixture.ets',
+    'mysql/src/test/mysql/value/BinaryParameterEncoder.test.ets',
+    'mysql/src/test/mysql/value/BinaryRowDecoder.test.ets',
+    'examples/mysql-client/entry/src/test/LegacyPublicInterface.test.ets',
+    'examples/mysql-client/entry/src/test/PreparedPublicInterface.test.ets',
+    'examples/mysql-client/entry/src/test/SampleRunner.test.ets',
+    'examples/mysql-device-acceptance/entry/src/test/DeviceAcceptanceRunner.test.ets',
+    'examples/mysql-device-acceptance/entry/src/test/DeviceReceiptClipboard.test.ets',
+    'examples/mysql-device-acceptance/entry/src/test/DeviceReceiptSigner.test.ets'
+  ];
+
+  assert.deepEqual(required.filter((path) =>
+    !existsSync(join(ROOT, ...path.split('/')))), []);
+  assert.deepEqual(forbidden.filter((path) =>
+    existsSync(join(ROOT, ...path.split('/')))), []);
 });
 
 test('reads static runtime and tooling imports without executing scanned source', async (t) => {

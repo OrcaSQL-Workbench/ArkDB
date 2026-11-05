@@ -6,7 +6,7 @@ import {
   MetricMeasurement, QueryOptions, ServerMetricsAvailability, ServerMetricsSnapshot,
   validateQueryOptions
 } from '../../Index';
-import { ProbeFactory, ProbeOptions } from './ReferenceAdapter';
+import { ProbeFactory, ProbeOptions } from './fixtures/ReferenceAdapter';
 
 export default function sharedContractsTest(): void {
   describe('Independent shared contracts', () => {

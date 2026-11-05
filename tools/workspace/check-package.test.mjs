@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { copyFile, cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
 import JSON5 from 'json5';
 import {
-  checkArkTsTests, checkPackage, exportedNames, importSpecifiers, ROOT
+  checkArkTsTests, checkPackage, exportedNames, importSpecifiers,
+  requiresCanonicalTestOwners, ROOT
 } from './check-package.mjs';
 
 test('discovers the current standalone interface and registered suites', () => {
@@ -42,6 +43,17 @@ test('discovers the current standalone interface and registered suites', () => {
   assert.ok(result.exports.includes('ArkDbError'));
   assert.ok(result.exports.includes('ArkDbErrorKind'));
   assert.ok(!result.exports.some((name) => name.startsWith('OrcaSql')));
+});
+
+test('canonical packages cannot disable test ownership enforcement', async (t) => {
+  assert.throws(() => requiresCanonicalTestOwners(ROOT, {
+    testOwnership: 'fixture'
+  }), /Canonical packages cannot disable test ownership enforcement/);
+
+  const root = await workspaceFixture(t);
+  assert.equal(requiresCanonicalTestOwners(root, {
+    testOwnership: 'fixture'
+  }), false);
 });
 
 test('preserves exact core, consumer and acceptance suite registrations', () => {
@@ -86,6 +98,17 @@ test('rejects shared fixture exports from executable suites', async (t) => {
     'export default function suite(): void {}\n');
 
   assert.throws(() => checkPackage(root), /Executable ArkTS suite must not export shared fixtures/i);
+});
+
+test('rejects linked package test roots', async (t) => {
+  const root = await workspaceFixture(t);
+  const testRoot = join(root, 'mysql', 'src', 'test');
+  await rm(testRoot, { recursive: true, force: true });
+  await symlink(join(root, 'core', 'src', 'test'), testRoot,
+    process.platform === 'win32' ? 'junction' : 'dir');
+
+  assert.throws(() => checkPackage(root),
+    /Source links are not supported/);
 });
 
 test('allows an executable suite exported through a default assignment', async (t) => {
@@ -139,6 +162,107 @@ test('rejects a directory as a resolved ArkTS test import', async (t) => {
     "\nimport { MissingFixture } from '../fixtures';\n");
 
   assert.throws(() => checkPackage(root), /Unresolved ArkTS test import.*fixtures/i);
+});
+
+test('resolves explicitly suffixed production declaration references', async (t) => {
+  const root = await workspaceFixture(t);
+  const directory = join(root, 'mysql', 'src', 'main', 'ets', 'mysql',
+  'model');
+  await writeFile(join(directory, 'Types.d.ets'),
+  'export interface FixtureTypes {}\n');
+  const source = join(directory, 'MySqlServerInfo.ets');
+  await writeFile(source,
+  "/// <reference path='./Types.d.ets' />\n" +
+  readFileSync(source, 'utf8'));
+
+  assert.doesNotThrow(() => checkPackage(root, 'mysql'));
+});
+
+test('rejects unowned MySQL test directories', async (t) => {
+  const root = await workspaceFixture(t);
+  const suite = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+  'rogue', 'Rogue.test.ets');
+  await mkdir(join(suite, '..'), { recursive: true });
+  await writeFile(suite, 'export default function rogueTest(): void {}\n');
+  const list = join(root, 'mysql', 'src', 'test', 'List.test.ets');
+  await writeFile(list, readFileSync(list, 'utf8')
+  .replace(
+    "import publicInterfaceTest from './public/PublicInterface.test';",
+    "import publicInterfaceTest from './public/PublicInterface.test';\n" +
+    "import rogueTest from './mysql/features/rogue/Rogue.test';")
+  .replace('  publicInterfaceTest();', '  publicInterfaceTest();\n  rogueTest();'));
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+  /MySQL tests must mirror production ownership.*unexpected owners: features\/rogue/);
+});
+
+test('rejects fixtures under unowned MySQL test directories', async (t) => {
+  const root = await workspaceFixture(t);
+  const fixture = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+  'rogue', 'fixtures', 'Helper.ets');
+  await mkdir(join(fixture, '..'), { recursive: true });
+  await writeFile(fixture, 'export class Helper {}\n');
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+  /MySQL tests must mirror production ownership.*unexpected owners: features\/rogue/);
+});
+
+test('rejects non-ArkTS package test support sources', async (t) => {
+  const root = await workspaceFixture(t);
+  const fixture = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+    'cursor', 'fixtures', 'Helper.ts');
+  await writeFile(fixture, 'export class Helper {}\n');
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+    /ArkDB package test source.*Helper\.ts.*lowercase \.ets/);
+});
+
+test('requires an executable suite for every canonical MySQL owner', async (t) => {
+  const root = await workspaceFixture(t);
+  const cursor = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+    'cursor');
+  for (const name of [
+    'MySqlCursorFetch.test.ets',
+    'MySqlCursorLifecycle.test.ets',
+    'MySqlCursorOpen.test.ets'
+  ]) {
+    await rm(join(cursor, name));
+  }
+  const list = join(root, 'mysql', 'src', 'test', 'mysql', 'List.test.ets');
+  await writeFile(list, readFileSync(list, 'utf8')
+    .replace("import mySqlCursorFetchTest from './features/cursor/MySqlCursorFetch.test';\n", '')
+    .replace(
+      "import mySqlCursorLifecycleTest from\n  './features/cursor/MySqlCursorLifecycle.test';\n",
+      '')
+    .replace("import mySqlCursorOpenTest from './features/cursor/MySqlCursorOpen.test';\n", '')
+    .replace('  mySqlCursorFetchTest();\n', '')
+    .replace('  mySqlCursorLifecycleTest();\n', '')
+    .replace('  mySqlCursorOpenTest();\n', ''));
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+    /MySQL tests must mirror production ownership.*missing owners: features\/cursor/);
+});
+
+test('rejects executable cases hidden inside nested suite registries', async (t) => {
+  const root = await workspaceFixture(t);
+  const nested = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+    'cursor', 'List.test.ets');
+  await writeFile(nested,
+    "import { it } from '@ohos/hypium';\n" +
+    "export default function hiddenRegistry(): void {\n" +
+    "  it('hiddenNestedRegistryCase', 0, () => {});\n" +
+    "}\n");
+  const list = join(root, 'mysql', 'src', 'test', 'mysql', 'List.test.ets');
+  await writeFile(list, readFileSync(list, 'utf8')
+    .replace(
+      "import mySqlCursorFetchTest from './features/cursor/MySqlCursorFetch.test';",
+      "import hiddenRegistry from './features/cursor/List.test';\n" +
+      "import mySqlCursorFetchTest from './features/cursor/MySqlCursorFetch.test';")
+    .replace('  mySqlCursorFetchTest();',
+      '  hiddenRegistry();\n  mySqlCursorFetchTest();'));
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+    /ArkTS suite registries must not declare test cases|Unexpected ArkTS suite registry/);
 });
 
 test('allows additional registered modules without freezing the workspace layout', async (t) => {
@@ -228,8 +352,18 @@ async function independentModule(root, directory, id, name) {
 
 test('import scanning covers both concrete and type-only seams', () => {
   assert.deepEqual(importSpecifiers(`
+    import './side-effect';
     import BuildProfile from '../../BuildProfile';
     import { socket } from '@kit.NetworkKit';
     export type { Connection } from './Connection';
-  `), ['../../BuildProfile', '@kit.NetworkKit', './Connection']);
+    type Runtime = import('./Runtime').Runtime;
+    void import('./dynamic');
+  `), [
+    './side-effect',
+    '../../BuildProfile',
+    '@kit.NetworkKit',
+    './Connection',
+    './Runtime',
+    './dynamic'
+  ]);
 });

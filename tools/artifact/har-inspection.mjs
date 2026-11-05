@@ -72,15 +72,19 @@ export async function inspectHar(file, expected, expectedExports, moduleDefiniti
       }
       unpackedBytes += entry.size;
       if (unpackedBytes > MAX_UNPACKED_BYTES) return fail('HAR exceeds the unpacked size bound.');
-      if (!/^package\/(?:[^/]+|ets\/(?:modules\.abc|sourceMaps\.map)|src\/main\/module\.json|src\/main\/ets\/.+\.d\.ets)$/.test(path) ||
+      if (!/^package\/(?:[^/]+|ets\/(?:modules\.abc|sourceMaps\.map)|src\/main\/module\.json|src\/main\/ets\/.+\.d\.(?:ets|ts))$/.test(path) ||
         /(?:^|\/)(?:\.ohpmrc|\.npmrc|local\.properties|src\/test|src\/mock)(?:\/|$)/.test(path) ||
         /\.(?:p12|pfx|p7b|jks|keystore|cer)$/i.test(path)) {
         return fail(`Unexpected file in the release HAR: ${path}`);
       }
       const hash = createSha256();
       const chunks = [];
-      const collectText = TEXT_FILES.has(path) && entry.size <= 1024 * 1024;
-      if (TEXT_FILES.has(path) && !collectText) return fail(`Oversized package metadata: ${path}`);
+      const declarationText = /\.d\.(?:ets|ts)$/.test(path);
+      const collectText = (TEXT_FILES.has(path) || declarationText) &&
+        entry.size <= 1024 * 1024;
+      if ((TEXT_FILES.has(path) || declarationText) && !collectText) {
+        return fail(`Oversized package metadata: ${path}`);
+      }
       entry.on('error', stop);
       entry.on('data', (chunk) => {
         hash.update(chunk);
@@ -120,11 +124,38 @@ export async function inspectHar(file, expected, expectedExports, moduleDefiniti
     JSON.stringify(actualExports) !== JSON.stringify([...expectedExports].sort()))) {
     throw new Error('Packaged public exports differ from the source entry.');
   }
-  for (const specifier of importSpecifiers(barrel)) {
-    if (Object.hasOwn(manifest.dependencies ?? {}, specifier)) continue;
-    const target = posix.join('package', `${specifier}.d.ets`);
-    if (!specifier.startsWith('.') || !entries.has(target)) {
-      throw new Error(`Unresolved packaged public declaration: ${specifier}`);
+  const pendingDeclarations = ['package/Index.d.ets'];
+  const visitedDeclarations = new Set();
+  while (pendingDeclarations.length > 0) {
+    const declaration = pendingDeclarations.shift();
+    if (visitedDeclarations.has(declaration)) continue;
+    visitedDeclarations.add(declaration);
+    for (const specifier of importSpecifiers(text(declaration))) {
+      if (Object.hasOwn(manifest.dependencies ?? {}, specifier)) continue;
+      if (!specifier.startsWith('.')) {
+        throw new Error(`Unresolved packaged public declaration: ${specifier}`);
+      }
+      const base = posix.normalize(posix.join(posix.dirname(declaration), specifier));
+      const exactDeclaration = /\.(?:d\.ets|d\.ts)$/.test(base);
+      const runtimeDeclaration = base.match(/\.(?:cjs|mjs|js)$/);
+      const candidates = exactDeclaration ? [base] :
+        runtimeDeclaration ? [
+          base.replace(runtimeDeclaration[0], '.d.ts'),
+          base.replace(runtimeDeclaration[0], '.d.ets')
+        ] : [
+          `${base}.d.ets`,
+          `${base}.d.ts`,
+          posix.join(base, 'Index.d.ets'),
+          posix.join(base, 'Index.d.ts')
+        ];
+      const target = candidates.find((candidate) =>
+        candidate.startsWith('package/') && entries.has(candidate));
+      if (target === undefined) {
+        throw new Error(`Unresolved packaged public declaration: ${specifier}`);
+      }
+      if (!visitedDeclarations.has(target)) {
+        pendingDeclarations.push(target);
+      }
     }
   }
   for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE', 'README.OpenSource']) text(`package/${name}`);

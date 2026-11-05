@@ -1,11 +1,16 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync
+} from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
 import { dependencyClosure, discoverPackages, driverArgument, readJson5, resolvePackage, ROOT } from './driver-packages.mjs';
 
 export { readJson5, ROOT } from './driver-packages.mjs';
 
 export function listFiles(directory) {
+  const info = lstatSync(directory);
+  if (info.isSymbolicLink()) throw new Error(`Source links are not supported: ${directory}`);
+  if (!info.isDirectory()) throw new Error(`Expected a source directory: ${directory}`);
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     if (entry.isSymbolicLink()) throw new Error(`Source links are not supported: ${path}`);
@@ -28,14 +33,248 @@ export function exportedNames(source) {
   return names.sort();
 }
 
-export function importSpecifiers(source) {
-  return [...source.matchAll(/\b(?:import|export)\s+(?:type\s+)?[^;]*?\bfrom\s+['"]([^'"]+)['"]/g)]
-    .map((match) => match[1]);
+function unwrapImportExpression(node) {
+  let current = node;
+  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  return current;
+}
+
+function isolatedProcessExpression(node) {
+  const expression = unwrapImportExpression(node);
+  return (ts.isIdentifier(expression) && expression.text === 'process') ||
+    (ts.isPropertyAccessExpression(expression) &&
+      ts.isIdentifier(unwrapImportExpression(expression.expression)) &&
+      unwrapImportExpression(expression.expression).text === 'globalThis' &&
+      expression.name.text === 'process') ||
+    (ts.isElementAccessExpression(expression) &&
+      ts.isIdentifier(unwrapImportExpression(expression.expression)) &&
+      unwrapImportExpression(expression.expression).text === 'globalThis' &&
+      expression.argumentExpression !== undefined &&
+      ts.isStringLiteralLike(unwrapImportExpression(expression.argumentExpression)) &&
+      unwrapImportExpression(expression.argumentExpression).text === 'process');
+}
+
+function isolatedRootedAtGlobalThis(node) {
+  let expression = unwrapImportExpression(node);
+  while (ts.isPropertyAccessExpression(expression) ||
+    ts.isElementAccessExpression(expression)) {
+    expression = unwrapImportExpression(expression.expression);
+  }
+  return ts.isIdentifier(expression) && expression.text === 'globalThis';
+}
+
+const HVIGOR_DEPENDENCY_APIS = new Set([
+  'getDependenciesOpt',
+  'setDependenciesOpt',
+  'getDevDependenciesOpt',
+  'setDevDependenciesOpt',
+  'getDynamicDependenciesOpt',
+  'setDynamicDependenciesOpt'
+]);
+const NODE_LOADER_IDENTIFIERS = new Set([
+  'constructor', 'createRequire', 'eval', 'Function', 'getBuiltinModule',
+  'globalThis', 'module', 'process', 'Reflect', 'require'
+]);
+
+function constantString(node) {
+  const expression = unwrapImportExpression(node);
+  if (ts.isStringLiteralLike(expression)) return expression.text;
+  if (ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = constantString(expression.left);
+    const right = constantString(expression.right);
+    if (left !== null && right !== null) return `${left}${right}`;
+  }
+  return null;
+}
+
+function memberOwnedBy(node, owner) {
+  const expression = unwrapImportExpression(node);
+  if (!ts.isPropertyAccessExpression(expression) &&
+    !ts.isElementAccessExpression(expression)) {
+    return false;
+  }
+  const target = unwrapImportExpression(expression.expression);
+  return ts.isIdentifier(target) && target.text === owner;
+}
+
+function sourceImportCandidates(base) {
+  const runtimeSuffix = base.match(/\.(?:cjs|mjs|js)$/);
+  return [
+    base,
+    ...(runtimeSuffix ? [
+      base.replace(runtimeSuffix[0], '.d.ts'),
+      base.replace(runtimeSuffix[0], '.d.ets')
+    ] : []),
+    `${base}.ets`,
+    `${base}.ts`,
+    `${base}.d.ets`,
+    `${base}.d.ts`,
+    `${base}.js`,
+    `${base}.mjs`,
+    join(base, 'Index.ets'),
+    join(base, 'Index.ts'),
+    join(base, 'Index.d.ets'),
+    join(base, 'Index.d.ts'),
+    join(base, 'Index.js'),
+    join(base, 'Index.mjs')
+  ];
+}
+
+export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
+  const syntax = ts.createSourceFile(
+    'ArkTsImports.ets', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const specifiers = [
+    ...syntax.referencedFiles.map((reference) => reference.fileName),
+    ...syntax.typeReferenceDirectives.map((reference) => reference.fileName)
+  ];
+  function visit(node) {
+    const computedName = ts.isElementAccessExpression(node) &&
+      node.argumentExpression !== undefined
+      ? constantString(node.argumentExpression)
+      : null;
+    if (strictNodeLoaders && ts.isIdentifier(node) &&
+      HVIGOR_DEPENDENCY_APIS.has(node.text)) {
+      throw new Error('Dependency-mutating Hvigor APIs are not supported.');
+    } else if (strictNodeLoaders && computedName !== null &&
+      HVIGOR_DEPENDENCY_APIS.has(computedName)) {
+      throw new Error('Dependency-mutating Hvigor APIs are not supported.');
+    } else if (strictNodeLoaders && ts.isIdentifier(node) &&
+      NODE_LOADER_IDENTIFIERS.has(node.text)) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && computedName !== null &&
+      NODE_LOADER_IDENTIFIERS.has(computedName)) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === 'require') {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && ts.isCallExpression(node) &&
+      memberOwnedBy(node.expression, 'module')) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      (isolatedProcessExpression(node.initializer) ||
+        memberOwnedBy(node.initializer, 'module') ||
+        memberOwnedBy(node.initializer, 'Reflect'))) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isolatedProcessExpression(node.right)) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && ts.isElementAccessExpression(node) &&
+      (isolatedProcessExpression(node.expression) ||
+        isolatedRootedAtGlobalThis(node))) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && ts.isIdentifier(node) &&
+      node.text === 'getBuiltinModule') {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && ts.isCallExpression(node) &&
+      memberOwnedBy(node.expression, 'Reflect')) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      specifiers.push(node.moduleSpecifier.text);
+    } else if (ts.isImportEqualsDeclaration(node) &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      node.moduleReference.expression &&
+      ts.isStringLiteral(node.moduleReference.expression)) {
+      specifiers.push(node.moduleReference.expression.text);
+    } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) &&
+      ts.isStringLiteral(node.argument.literal)) {
+      specifiers.push(node.argument.literal.text);
+    } else if (ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const specifier = node.arguments[0];
+      if (!specifier || !ts.isStringLiteral(specifier)) {
+        throw new Error('ArkTS dynamic imports must use literal module specifiers.');
+      }
+      specifiers.push(specifier.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(syntax);
+  return specifiers;
 }
 
 function within(parent, path) {
   const child = relative(parent, path);
   return child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+}
+
+function exactRepositoryPath(root, target, kind, { optional = false } = {}) {
+  const repository = resolve(root);
+  const path = resolve(target);
+  if (!within(repository, path)) {
+    if (optional) return null;
+    throw new Error(`ArkTS project path must remain inside the repository: ${target}`);
+  }
+  let current = repository;
+  for (const part of relative(repository, path).split(sep)) {
+    const entries = readdirSync(current, { withFileTypes: true });
+    const entry = entries.find((candidate) => candidate.name === part);
+    if (!entry) {
+      const folded = entries.find((candidate) =>
+        candidate.name.toLowerCase() === part.toLowerCase());
+      if (folded) {
+        throw new Error(`ArkTS project imports require exact path case: ` +
+          `${relative(repository, path)}; found ${folded.name}`);
+      }
+      if (optional) return null;
+      throw new Error(`ArkTS project path does not exist: ${relative(repository, path)}`);
+    }
+    current = join(current, part);
+    const info = lstatSync(current);
+    if (info.isSymbolicLink()) {
+      throw new Error(`ArkTS project sources must not use symbolic links: ` +
+        `${relative(repository, current)}`);
+    }
+  }
+  const info = lstatSync(current);
+  const valid = kind === 'directory' ? info.isDirectory() : info.isFile();
+  if (!valid) {
+    if (optional) return null;
+    throw new Error(`ArkTS project path must be a ${kind}: ${relative(repository, path)}`);
+  }
+  return current;
+}
+
+function configuredWorkerPaths(value, result = []) {
+  if (value === null || typeof value !== 'object') return result;
+  if (Array.isArray(value)) {
+    for (const entry of value) configuredWorkerPaths(entry, result);
+    return result;
+  }
+  for (const [name, entry] of Object.entries(value)) {
+    if (name !== 'workers') {
+      configuredWorkerPaths(entry, result);
+      continue;
+    }
+    if (!Array.isArray(entry) ||
+      entry.some((path) => typeof path !== 'string' || path.length === 0)) {
+      throw new Error('ArkTS project worker paths must be nonempty strings.');
+    }
+    result.push(...entry);
+  }
+  return result;
+}
+
+export function requiresCanonicalTestOwners(root, declaration,
+  canonicalRoot = ROOT) {
+  const mode = declaration?.testOwnership;
+  if (mode === undefined) return true;
+  if (mode !== 'fixture') {
+    throw new Error(`Unsupported test ownership policy: ${String(mode)}`);
+  }
+  const actual = realpathSync.native(resolve(root));
+  const canonical = realpathSync.native(resolve(canonicalRoot));
+  const same = process.platform === 'win32'
+    ? actual.toLowerCase() === canonical.toLowerCase()
+    : actual === canonical;
+  if (same) {
+    throw new Error('Canonical packages cannot disable test ownership enforcement.');
+  }
+  return false;
 }
 
 function testSyntax(file, source) {
@@ -131,11 +370,34 @@ const MYSQL_TEST_OWNERS = [
   'value'
 ];
 
-function checkTestSources(root, id, testRoot) {
-  const sources = listFiles(testRoot).filter((file) => file.endsWith('.ets'));
+function checkTestSources(root, id, testRoot, enforceCanonicalOwners = false) {
+  const files = listFiles(testRoot);
+  const invalidSource = files.find((file) =>
+    /\.(?:ets|[cm]?js|[cm]?ts)$/i.test(file) && !file.endsWith('.ets'));
+  if (invalidSource !== undefined) {
+    throw new Error(`ArkDB package test source ${invalidSource} must use the exact ` +
+      'lowercase .ets suffix.');
+  }
+  const sources = files.filter((file) => file.endsWith('.ets'));
   const testFiles = sources.filter((file) =>
     file.endsWith('.test.ets') && !file.endsWith(`${sep}List.test.ets`));
   const supportFiles = sources.filter((file) => !file.endsWith('.test.ets'));
+  const registryFiles = sources.filter((file) =>
+    file.endsWith(`${sep}List.test.ets`));
+  const allowedRegistries = new Set([
+    join(testRoot, 'List.test.ets'),
+    ...(id === 'mysql' ? [join(testRoot, 'mysql', 'List.test.ets')] : [])
+  ]);
+  for (const file of registryFiles) {
+    if (!allowedRegistries.has(file)) {
+      throw new Error(`Unexpected ArkTS suite registry: ${relative(root, file)}`);
+    }
+    const cases = testCaseNames(testSyntax(file, readFileSync(file, 'utf8')));
+    if (cases.length > 0) {
+      throw new Error(`ArkTS suite registries must not declare test cases: ` +
+        `${relative(root, file)}`);
+    }
+  }
   const testCases = [];
   for (const file of sources) {
     for (const specifier of importSpecifiers(readFileSync(file, 'utf8'))) {
@@ -212,12 +474,19 @@ function checkTestSources(root, id, testRoot) {
     throw new Error(`Duplicate ArkTS test case names: ${duplicateCases.join(', ')}`);
   }
 
-  const testOwners = [...new Set(testFiles.map((file) => testOwner(testRoot, file)))].sort();
-  if (id === 'mysql' && resolve(root) === resolve(ROOT)) {
+  const ownedSources = sources.filter((file) =>
+    !file.endsWith(`${sep}List.test.ets`));
+  const sourceOwners = [...new Set(ownedSources.map((file) =>
+    testOwner(testRoot, file)))].sort();
+  const testOwners = [...new Set(testFiles.map((file) =>
+    testOwner(testRoot, file)))].sort();
+  if (id === 'mysql' && enforceCanonicalOwners) {
     const missingOwners = MYSQL_TEST_OWNERS.filter((owner) => !testOwners.includes(owner));
-    if (testOwners.includes('core') || missingOwners.length > 0) {
+    const unexpectedOwners = sourceOwners.filter((owner) =>
+      !MYSQL_TEST_OWNERS.includes(owner));
+    if (unexpectedOwners.length > 0 || missingOwners.length > 0) {
       throw new Error(`MySQL tests must mirror production ownership; ` +
-        `misleading owners: ${testOwners.includes('core') ? 'core' : 'none'}; ` +
+        `unexpected owners: ${unexpectedOwners.join(', ') || 'none'}; ` +
         `missing owners: ${missingOwners.join(', ') || 'none'}.`);
     }
   }
@@ -233,8 +502,239 @@ export function checkArkTsTests(root, testRoot, id = 'tests') {
   };
 }
 
+export function checkIsolatedArkTsProject(root, projectRoot) {
+  const repository = resolve(root);
+  const requestedProject = isAbsolute(projectRoot)
+    ? resolve(projectRoot)
+    : resolve(repository, projectRoot);
+  if (!within(repository, requestedProject)) {
+    throw new Error(`ArkTS project must remain inside the repository: ${projectRoot}`);
+  }
+  const project = exactRepositoryPath(repository, requestedProject, 'directory');
+  const profileFile = exactRepositoryPath(
+    repository, join(project, 'build-profile.json5'), 'file');
+  const profile = readJson5(profileFile);
+  if (!Array.isArray(profile.modules) || profile.modules.length === 0) {
+    throw new Error('ArkTS project build profile must register modules.');
+  }
+  const moduleRoots = profile.modules.map((registration) => {
+    if (typeof registration?.srcPath !== 'string' ||
+      registration.srcPath.length === 0 || isAbsolute(registration.srcPath)) {
+      throw new Error('ArkTS project module source paths must be nonempty and relative.');
+    }
+    const moduleRoot = resolve(project, registration.srcPath);
+    if (!within(project, moduleRoot)) {
+      throw new Error(`ArkTS project modules must remain inside the project: ` +
+        `${registration.srcPath}`);
+    }
+    return exactRepositoryPath(repository, moduleRoot, 'directory');
+  });
+  if (new Set(moduleRoots).size !== moduleRoots.length) {
+    throw new Error('ArkTS project modules must use unique source paths.');
+  }
+  const identities = new Set([basename(project)]);
+  for (const product of profile.app?.products ?? []) {
+    if (typeof product?.bundleName === 'string' && product.bundleName.length > 0) {
+      identities.add(product.bundleName);
+    }
+  }
+  const dependencies = [];
+  const declaredEntries = [];
+  const strictEntries = [];
+  const sourcePattern = /\.(?:ets|ts|js|mjs)$/;
+  for (const script of [
+    join(project, 'hvigorfile.ts'),
+    ...moduleRoots.map((moduleRoot) => join(moduleRoot, 'hvigorfile.ts'))
+  ]) {
+    const exactScript = exactRepositoryPath(
+      repository, script, 'file', { optional: true });
+    if (exactScript !== null) strictEntries.push(exactScript);
+  }
+  const appManifestFile = exactRepositoryPath(
+    repository, join(project, 'AppScope', 'app.json5'), 'file', { optional: true });
+  if (appManifestFile !== null) {
+    const app = readJson5(appManifestFile);
+    if (typeof app.app?.bundleName === 'string' && app.app.bundleName.length > 0) {
+      identities.add(app.app.bundleName);
+    }
+  }
+  for (const moduleRoot of moduleRoots) {
+    const moduleProfileFile = exactRepositoryPath(
+      repository, join(moduleRoot, 'build-profile.json5'), 'file', { optional: true });
+    if (moduleProfileFile === null) continue;
+    for (const worker of configuredWorkerPaths(readJson5(moduleProfileFile))) {
+      const entry = resolve(moduleRoot, worker);
+      if (!within(project, entry)) {
+        throw new Error(`ArkTS project build source paths must remain inside the project: ` +
+          `${worker}`);
+      }
+      if (!within(moduleRoot, entry)) {
+        throw new Error(`ArkTS project build source paths must remain inside the module: ` +
+          `${worker}`);
+      }
+      const exactEntry = exactRepositoryPath(repository, entry, 'file');
+      if (!sourcePattern.test(exactEntry)) {
+        throw new Error(`ArkTS project build source paths must use a supported source suffix: ` +
+          `${worker}`);
+      }
+      declaredEntries.push(exactEntry);
+    }
+  }
+  const moduleManifests = new Map(moduleRoots.map((moduleRoot) => [
+    join(moduleRoot, 'oh-package.json5'),
+    moduleRoot
+  ]));
+  const manifestFiles = [
+    join(project, 'oh-package.json5'),
+    ...moduleManifests.keys()
+  ].map((file) => exactRepositoryPath(
+    repository, file, 'file', { optional: true }))
+    .filter((file) => file !== null);
+  for (const manifestFile of manifestFiles) {
+    const manifest = readJson5(manifestFile);
+    if (Object.hasOwn(manifest, 'parameterFile') ||
+      Object.hasOwn(manifest, 'overrideDependencyMap')) {
+      throw new Error('Parameterized dependency rewriting is not supported in isolated projects.');
+    }
+    if (typeof manifest.name === 'string' && manifest.name.length > 0) {
+      identities.add(manifest.name);
+    }
+    const moduleRoot = moduleManifests.get(manifestFile);
+    if (moduleRoot !== undefined) {
+      for (const field of ['main', 'types']) {
+        const declared = manifest[field];
+        if (typeof declared !== 'string' || declared.length === 0) continue;
+        const entry = resolve(moduleRoot, declared);
+        if (!within(moduleRoot, entry)) {
+          throw new Error(`ArkTS project module entries must remain inside the module: ` +
+            `${declared}`);
+        }
+        const exactEntry = exactRepositoryPath(repository, entry, 'file');
+        if (!sourcePattern.test(exactEntry)) {
+          throw new Error(`ArkTS project module entries must use a supported source suffix: ` +
+            `${declared}`);
+        }
+        declaredEntries.push(exactEntry);
+      }
+    }
+    for (const section of [
+      'dependencies', 'devDependencies', 'dynamicDependencies', 'overrides'
+    ]) {
+      const entries = manifest[section] ?? {};
+      if (typeof entries !== 'object' || entries === null || Array.isArray(entries)) continue;
+      for (const [name, value] of Object.entries(entries)) {
+        dependencies.push({
+          manifest: relative(repository, manifestFile),
+          name,
+          value
+        });
+        if (typeof value !== 'string' || !value.startsWith('file:')) continue;
+        const target = resolve(dirname(manifestFile), value.slice('file:'.length));
+        if (!within(project, target)) {
+          throw new Error(`ArkTS project dependencies must not reference a sibling project: ` +
+            `${relative(repository, manifestFile)} -> ${relative(repository, target)}`);
+        }
+        if (!/\.har$/.test(target)) {
+          throw new Error(
+            'Local source-package dependencies are not supported in isolated projects.');
+        }
+        exactRepositoryPath(repository, target, 'file', { optional: true });
+      }
+    }
+  }
+  const sourceDirectories = moduleRoots.map((moduleRoot) =>
+    exactRepositoryPath(
+      repository, join(moduleRoot, 'src'), 'directory', { optional: true }))
+    .filter((directory) => directory !== null);
+  const initialSources = [...new Set([
+    ...sourceDirectories.flatMap((directory) =>
+      listFiles(directory).filter((file) => sourcePattern.test(file))),
+    ...declaredEntries
+  ])];
+  const strictSourceSet = new Set(strictEntries);
+  const pendingSources = [
+    ...initialSources.map((file) => ({ file, strict: false })),
+    ...strictEntries.map((file) => ({ file, strict: true }))
+  ];
+  const visitedSources = new Map();
+  const externalImports = [];
+  while (pendingSources.length > 0) {
+    const pending = pendingSources.shift();
+    const file = pending.file;
+    const strict = pending.strict;
+    const visitedStrict = visitedSources.get(file);
+    if (visitedStrict === true || (visitedStrict === false && !strict)) continue;
+    visitedSources.set(file, visitedStrict === true || strict);
+    let specifiers;
+    try {
+      specifiers = importSpecifiers(readFileSync(file, 'utf8'), {
+        strictNodeLoaders: strict
+      });
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}: ` +
+        `${relative(repository, file)}`, { cause: error });
+    }
+    for (const specifier of specifiers) {
+      if (!specifier.startsWith('.')) {
+        if (strict &&
+          ['module', 'node:module', 'process', 'node:process'].includes(specifier)) {
+          throw new Error('Node loader imports are not supported in isolated projects.');
+        }
+        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(specifier)) {
+          throw new Error('Absolute module URLs are not supported in isolated projects.');
+        }
+        externalImports.push({
+          file: relative(repository, file),
+          specifier
+        });
+        continue;
+      }
+      const base = resolve(dirname(file), specifier);
+      let target = null;
+      const candidates = sourceImportCandidates(base);
+      for (const candidate of candidates) {
+        if (!within(repository, candidate)) {
+          target = candidate;
+          break;
+        }
+        const exact = exactRepositoryPath(
+          repository, candidate, 'file', { optional: true });
+        if (exact !== null) {
+          target = exact;
+          break;
+        }
+      }
+      if (target === null) {
+        throw new Error(`Unresolved ArkTS project import in ${relative(repository, file)}: ${specifier}`);
+      }
+      if (!within(project, target)) {
+        throw new Error(`ArkTS project sources must not import a sibling project: ` +
+          `${relative(repository, file)} -> ${relative(repository, target)}`);
+      }
+      if (/\.(?:[cm]?js|[cm]?ts|ets)$/i.test(target) &&
+        !sourcePattern.test(target)) {
+        throw new Error(`Unsupported isolated project source suffix: ` +
+          `${relative(repository, target)}`);
+      }
+      if (sourcePattern.test(target)) {
+        pendingSources.push({
+          file: target,
+          strict: strict || strictSourceSet.has(target)
+        });
+      }
+    }
+  }
+  return {
+    sourceFiles: visitedSources.size,
+    identities: [...identities],
+    dependencies,
+    externalImports
+  };
+}
+
 export function checkPackage(root = ROOT, id = 'mysql') {
   const driver = resolvePackage(root, id);
+  const enforceTestOwners = requiresCanonicalTestOwners(root, driver.declaration);
   const moduleRoot = driver.directory;
   const manifest = readJson5(join(moduleRoot, 'oh-package.json5'));
   if (!/^@arkdb\/[a-z][a-z0-9-]*$/.test(manifest.name ?? '') || manifest.main !== 'Index.ets' ||
@@ -264,16 +764,23 @@ export function checkPackage(root = ROOT, id = 'mysql') {
     }
   }
   const files = [join(moduleRoot, 'Index.ets'),
-    ...listFiles(join(moduleRoot, 'src', 'main', 'ets')).filter((file) => file.endsWith('.ets'))];
+    ...listFiles(join(moduleRoot, 'src', 'main', 'ets')).filter((file) =>
+      /\.(?:ets|ts|js)$/.test(file))];
   const available = new Set(files.map((file) => resolve(file)));
   let usesNetwork = false;
   for (const file of files) {
     for (const specifier of importSpecifiers(readFileSync(file, 'utf8'))) {
       usesNetwork ||= specifier === '@kit.NetworkKit' || specifier === '@ohos.net.socket';
       if (specifier.startsWith('.')) {
-        const target = resolve(file, '..', `${specifier}.ets`);
-        const generatedProfile = target === join(moduleRoot, 'BuildProfile.ets');
-        if (!within(moduleRoot, target) || (!available.has(target) && !generatedProfile)) {
+        const base = resolve(file, '..', specifier);
+        const candidates = sourceImportCandidates(base);
+        const target = candidates.find((candidate) => available.has(candidate));
+        const generatedProfile = candidates.some((candidate) =>
+          candidate === join(moduleRoot, 'BuildProfile.ets'));
+        if (target === undefined && !generatedProfile) {
+          throw new Error(`Unresolved or non-package import in ${relative(root, file)}: ${specifier}`);
+        }
+        if (target !== undefined && !within(moduleRoot, target)) {
           throw new Error(`Unresolved or non-package import in ${relative(root, file)}: ${specifier}`);
         }
       } else if (!specifier.startsWith('@kit.') && !specifier.startsWith('@ohos.')) {
@@ -290,7 +797,8 @@ export function checkPackage(root = ROOT, id = 'mysql') {
   if (exports.length === 0) throw new Error('Public entry must expose named exports.');
 
   const testRoot = join(moduleRoot, 'src', 'test');
-  const { testFiles, testOwners, testCases } = checkTestSources(root, id, testRoot);
+  const { testFiles, testOwners, testCases } = checkTestSources(
+    root, id, testRoot, enforceTestOwners);
   return {
     manifest,
     exports,

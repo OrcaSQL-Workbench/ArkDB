@@ -43,6 +43,59 @@ test('rejects missing public symbols and unresolved declarations', async (t) => 
   await assert.rejects(inspectHar(unresolved, expected, fixtureExports), /Unresolved packaged/);
 });
 
+test('resolves explicitly suffixed packaged declaration references', async (t) => {
+  const file = await fixture(
+    t,
+    {},
+    undefined,
+    'types.d.ets',
+    undefined,
+    "/// <reference path='./types.d.ets' />\n" +
+    `export { ${fixtureExports.join(', ')} } from './public';\n`);
+
+  await assert.doesNotReject(inspectHar(file, expected, fixtureExports));
+});
+
+test('rejects non-declaration public export targets', async (t) => {
+  const file = await fixture(
+    t,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    `export { ${fixtureExports.join(', ')} } from './README.md';\n`);
+
+  await assert.rejects(inspectHar(file, expected, fixtureExports),
+    /Unresolved packaged public declaration/);
+});
+
+test('rejects unresolved transitive declaration references', async (t) => {
+  const file = await fixture(
+    t,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    "/// <reference path='./missing.d.ets' />\n" +
+    'export declare class SyntheticDeclaration {}\n');
+
+  await assert.rejects(inspectHar(file, expected, fixtureExports),
+    /Unresolved packaged public declaration/);
+});
+
+test('resolves JavaScript declaration specifiers to d.ts files', async (t) => {
+  const file = await fixture(
+    t,
+    {},
+    'public.d.ets',
+    'public.d.ts',
+    undefined,
+    `export { ${fixtureExports.join(', ')} } from './public.js';\n`);
+
+  await assert.doesNotReject(inspectHar(file, expected, fixtureExports));
+});
+
 test('rejects test fixtures accidentally included in a release', async (t) => {
   const file = await fixture(t, {}, undefined, 'src/test/Private.test.ets');
   await assert.rejects(inspectHar(file, expected, fixtureExports), /Unexpected file/);
@@ -119,7 +172,7 @@ async function rawArchive(t, bytes) {
 
 async function fixture(t, overrides = {}, missing, extra, definition = {
   name: 'mysql', type: 'har', requestPermissions: [{ name: 'ohos.permission.INTERNET' }]
-}) {
+}, indexDeclaration, publicDeclaration) {
   const root = await mkdtemp(join(tmpdir(), 'arkdb-har-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const files = {
@@ -127,8 +180,10 @@ async function fixture(t, overrides = {}, missing, extra, definition = {
       ...expected, types: 'Index.d.ets', compatibleSdkVersion: 24, compatibleSdkType: 'HarmonyOS',
       metadata: { byteCodeHar: true, debug: false, useNormalizedOHMUrl: true }, ...overrides
     }),
-    'Index.d.ets': `export { ${fixtureExports.join(', ')} } from './public';\n`,
-    'public.d.ets': 'export declare class SyntheticDeclaration {}\n',
+    'Index.d.ets': indexDeclaration ??
+      `export { ${fixtureExports.join(', ')} } from './public';\n`,
+    'public.d.ets': publicDeclaration ??
+      'export declare class SyntheticDeclaration {}\n',
     'src/main/module.json': JSON.stringify({ module: definition }),
     'ets/modules.abc': 'Synthetic bytecode fixture, not an executable module.',
     'README.md': 'Synthetic readme', 'CHANGELOG.md': 'Synthetic changelog',

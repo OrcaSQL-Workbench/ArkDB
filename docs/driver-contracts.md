@@ -20,6 +20,60 @@ source. Core is maintained once, not copied into each driver's source tree.
 Delivery stages core plus the selected driver as one temporary SDK module and
 compiles one HAR; consumers do not install the development core package.
 
+## Final source boundaries
+
+The architecture graph requires zero strongly connected runtime or tooling file
+sets. There is no cycle exception list. Every scanned source must also belong to
+an explicit owner; a new top-level source directory, feature directory, tooling
+layer or registered driver fails until its ownership is reviewed and added.
+Package runtime sources use the exact lowercase `.ets` suffix; other
+JavaScript/TypeScript suffixes are rejected rather than omitted from the graph.
+
+Core runtime ownership is limited to `connection`, `diagnostics`, `driver`,
+`execution`, `metadata`, `metrics`, `model` and `time`. MySQL keeps one root
+`MySqlConnection` facade and owns `api`, `auth`, `command`, `connection`,
+`diagnostics`, `driver`, `execution`, `features`, `model`, `protocol`,
+`transport` and `value`. The final feature owners are `batch`, `cursor`,
+`insert`, `longdata`, `metadata`, `metrics`, `named`, `prepared`, `procedure`,
+`session` and `transaction`.
+
+The allowed runtime seams are deliberately narrow:
+
+- core imports no registered driver;
+- `mysql/api` imports only other API contracts, `model` files and the explicit
+  contract/model leaves owned by features;
+- those contract/model leaves may depend on core, other leaves and the
+  non-executable wire constants, but not command, parser or lifecycle
+  implementations;
+- `protocol` and byte `transport` do not import feature code;
+- vertical features may share another feature's explicit contract/model leaf,
+  but not its implementation;
+- prepared, cursor and long-data form the reviewed protocol-feature cluster
+  used by statement execution; that cluster cannot depend on a vertical feature
+  implementation.
+
+Tooling uses explicit `lib`, `workspace`, `artifact`, `build`, `consumer`,
+`release` and `device` ownership. Low-level `lib`, `workspace` and `artifact`
+sources cannot reach workflow or root CLI modules, including through a
+compatibility wrapper. Static `.mjs` imports are the only local tooling import
+form accepted by the graph; dynamic imports, CommonJS escape hatches, hidden
+package scopes and unowned sources are rejected.
+
+The ordinary `examples/mysql-client` project and
+`examples/mysql-device-acceptance` are isolated source roots. Neither may use a
+relative or package import, nor a project/entry manifest dependency, into the
+other. Every module registered by each project's `build-profile.json5` is
+validated; its ArkTS, TypeScript and JavaScript source sets and declared entry
+and types entry are scanned through their complete reachable source/declaration
+closure, including triple-slash references, bundle identities, worker paths and
+project/module Hvigor scripts. Normal, development and dynamic dependency
+sections are checked; parameterized dependency rewriting and local source-package
+indirection are rejected. Hvigor and reachable Node helpers cannot use hidden
+loaders or dependency-mutation APIs. Package test sources use exact lowercase
+`.ets`, support remains under explicit `fixtures` owners, and only the canonical
+suite registries may aggregate executable suites. Removed production, test and
+sample paths remain forbidden.
+
 ## Connection and creation interface
 
 Core's `DbConnection` requires connect/query/close, lifecycle state and portable server
@@ -452,9 +506,12 @@ engine does not implement dummy InnoDB methods.
 2. Register the build module in root `build-profile.json5` and add its own
    `arkdb-package.json`. Declare `kind: "driver"` and, for full verification, its
    consumer path, native module dependency closure and Internet requirement.
-3. Register its typed factory in the consuming application's registry. No core
+3. Add that driver's directory and layers to the fail-closed architecture
+   ownership policy. Its runtime imports core only; it does not import MySQL or
+   require any MySQL source change.
+4. Register its typed factory in the consuming application's registry. No core
    engine enum or MySQL implementation change is needed.
-4. Supply independent behavior tests for its supported optional features and its
+5. Supply independent behavior tests for its supported optional features and its
    own consumer. A missing verification declaration fails explicitly before a
    release build; the MySQL sample is not evidence for another driver.
 

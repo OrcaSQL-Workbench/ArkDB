@@ -10,8 +10,13 @@ import {
 } from './architecture-graph.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const APPROVED_CYCLES = [];
 const TOOL_LAYER_RULES = [
+  {
+    from: /^tools\/(?:lib|workspace|artifact)\//,
+    to: /^tools\/[^/]+\.mjs$/,
+    transitive: true,
+    message: 'Low-level tooling must not depend on root workflow or CLI modules.'
+  },
   {
     from: /^tools\/lib\//,
     to: /^tools\/(?:workspace|artifact|build|consumer|release|device)\//,
@@ -67,7 +72,7 @@ const TOOL_LAYER_RULES = [
     message: 'Tool device ownership may depend only on sealed consumer evidence contracts.'
   }
 ];
-const ALLOWED_ROOT_TOOL_FILES = [
+const ROOT_TOOL_FILES = [
   'tools/architecture-graph.mjs',
   'tools/check-package.mjs',
   'tools/check-release.mjs',
@@ -99,6 +104,80 @@ const OWNED_TOOL_DIRECTORIES = [
   'release',
   'workspace'
 ];
+const MYSQL_FEATURE_DIRECTORIES = [
+  'batch',
+  'cursor',
+  'insert',
+  'longdata',
+  'metadata',
+  'metrics',
+  'named',
+  'prepared',
+  'procedure',
+  'session',
+  'transaction'
+];
+const OWNED_SOURCE_ROOTS = [
+  {
+    root: '',
+    files: ['hvigorfile.ts'],
+    directories: []
+  },
+  {
+    root: 'core',
+    files: ['Index.ets', 'hvigorfile.ts'],
+    directories: ['src']
+  },
+  {
+    root: 'core/src/main/ets',
+    directories: [
+      'connection',
+      'diagnostics',
+      'driver',
+      'execution',
+      'metadata',
+      'metrics',
+      'model',
+      'time'
+    ]
+  },
+  {
+    root: 'mysql',
+    files: ['Index.ets', 'hvigorfile.ts'],
+    directories: ['src']
+  },
+  {
+    root: 'mysql/src/main/ets',
+    directories: ['mysql']
+  },
+  {
+    root: 'mysql/src/main/ets/mysql',
+    files: ['MySqlConnection.ets'],
+    directories: [
+      'api',
+      'auth',
+      'command',
+      'connection',
+      'diagnostics',
+      'driver',
+      'execution',
+      'features',
+      'model',
+      'protocol',
+      'transport',
+      'value'
+    ]
+  },
+  {
+    root: 'mysql/src/main/ets/mysql/features',
+    directories: MYSQL_FEATURE_DIRECTORIES
+  },
+  {
+    root: 'tools',
+    files: ROOT_TOOL_FILES.map((file) => file.slice('tools/'.length)),
+    directories: OWNED_TOOL_DIRECTORIES
+  }
+];
 const MYSQL_VERTICAL_FEATURES = [
   'session',
   'transaction',
@@ -118,71 +197,49 @@ const MYSQL_VERTICAL_CONTRACTS = [
   'insert/MySqlInsertRows\\.ets',
   'metrics/(?:MySqlMetricsProvider|MySqlServerMetrics)\\.ets'
 ].join('|');
+const MYSQL_FEATURE_CONTRACT_MODELS = [
+  'batch/MySqlBatch\\.ets',
+  'cursor/MySqlCursorOptions\\.ets',
+  'insert/MySqlInsertRows\\.ets',
+  'longdata/(?:MySqlByteSource|MySqlLongDataOptions)\\.ets',
+  'metrics/(?:MySqlMetricsProvider|MySqlServerMetrics)\\.ets',
+  'named/MySqlNamedParameter\\.ets',
+  'prepared/MySqlParameter\\.ets',
+  'procedure/MySqlProcedure\\.ets',
+  'session/MySqlSessionOptions\\.ets',
+  'transaction/MySqlTransactionOptions\\.ets'
+].join('|');
+const MYSQL_CONTRACT_MODEL_PATH = new RegExp(
+  '^mysql/src/main/ets/mysql/' +
+  '(?:model/[^/]+\\.ets|features/(?:' + MYSQL_FEATURE_CONTRACT_MODELS +
+  ')|protocol/Constants\\.ets)$'
+);
+const MYSQL_NON_LEAF_IMPLEMENTATION_PATH = new RegExp(
+  '^mysql/src/main/ets/mysql/' +
+  '(?!(?:model/[^/]+\\.ets|features/(?:' + MYSQL_FEATURE_CONTRACT_MODELS +
+  ')|protocol/Constants\\.ets)$).+'
+);
 const MYSQL_VERTICAL_FEATURE_PATTERN = MYSQL_VERTICAL_FEATURES.join('|');
-const MYSQL_LEGACY_VERTICAL_OWNERS = [
-  [
-    'transaction',
-    /^mysql\/src\/main\/ets\/mysql\/(?:model\/MySqlTransactionOptions|execution\/MySqlTransactionRunner)\.ets$/
-  ],
-  [
-    'named',
-    /^mysql\/src\/main\/ets\/mysql\/(?:model\/MySqlNamedParameter|execution\/MySqlNamedExecutor|value\/SqlTemplateScanner)\.ets$/
-  ],
-  [
-    'procedure',
-    /^mysql\/src\/main\/ets\/mysql\/(?:model\/MySqlProcedure|execution\/MySqlProcedureCaller)\.ets$/
-  ],
-  [
-    'batch',
-    /^mysql\/src\/main\/ets\/mysql\/(?:model\/MySqlBatch|execution\/(?:MySqlBatchExecutor|MySqlBatchSupport))\.ets$/
-  ],
-  [
-    'insert',
-    /^mysql\/src\/main\/ets\/mysql\/(?:model\/MySqlInsertRows|execution\/MySqlInsertRowsExecutor)\.ets$/
-  ],
-  [
-    'metadata',
-    /^mysql\/src\/main\/ets\/mysql\/metadata\//
-  ],
-  [
-    'metrics',
-    /^mysql\/src\/main\/ets\/mysql\/metrics\//
-  ]
+const MYSQL_VERTICAL_IMPLEMENTATION_PATH = new RegExp(
+  '^mysql/src/main/ets/mysql/features/' +
+  '(?!(?:' + MYSQL_VERTICAL_CONTRACTS + ')$)' +
+  '(?:' + MYSQL_VERTICAL_FEATURE_PATTERN + ')/'
+);
+const FORBIDDEN_MYSQL_LEGACY_PRODUCTION_PATHS = [
+  'mysql/src/main/ets/mysql/driver/MySqlConnectionFeatures.ets',
+  'mysql/src/main/ets/mysql/driver/MySqlContracts.ets',
+  'mysql/src/main/ets/mysql/driver/MySqlCursorContracts.ets',
+  'mysql/src/main/ets/mysql/driver/MySqlPreparedContracts.ets',
+  'mysql/src/main/ets/mysql/driver/MySqlSession.ets',
+  'mysql/src/main/ets/mysql/execution/MySqlBatchSupport.ets',
+  'mysql/src/main/ets/mysql/command/PrepareResponse.ets',
+  'mysql/src/main/ets/mysql/command/PreparedExecutor.ets',
+  'mysql/src/main/ets/mysql/command/PreparedStatement.ets',
+  'mysql/src/main/ets/mysql/execution/MySqlStatementCache.ets',
+  'mysql/src/main/ets/mysql/model/MySqlParameter.ets',
+  'mysql/src/main/ets/mysql/value/BinaryParameterEncoder.ets',
+  'mysql/src/main/ets/mysql/value/BinaryRowDecoder.ets'
 ];
-const MYSQL_LEGACY_VERTICAL_IMPLEMENTATIONS = [
-  [
-    'transaction',
-    /^mysql\/src\/main\/ets\/mysql\/execution\/MySqlTransactionRunner\.ets$/
-  ],
-  [
-    'named',
-    /^mysql\/src\/main\/ets\/mysql\/(?:execution\/MySqlNamedExecutor|value\/SqlTemplateScanner)\.ets$/
-  ],
-  [
-    'procedure',
-    /^mysql\/src\/main\/ets\/mysql\/execution\/MySqlProcedureCaller\.ets$/
-  ],
-  [
-    'batch',
-    /^mysql\/src\/main\/ets\/mysql\/execution\/(?:MySqlBatchExecutor|MySqlBatchSupport)\.ets$/
-  ],
-  [
-    'insert',
-    /^mysql\/src\/main\/ets\/mysql\/execution\/MySqlInsertRowsExecutor\.ets$/
-  ],
-  [
-    'metadata',
-    /^mysql\/src\/main\/ets\/mysql\/metadata\/(?:MySqlMetadataProvider|MySqlMetadataSql)\.ets$/
-  ],
-  [
-    'metrics',
-    /^mysql\/src\/main\/ets\/mysql\/metrics\/(?:MySqlMetricsSql|MySqlServerMetricsProvider)\.ets$/
-  ]
-];
-const MYSQL_VERTICAL_IMPLEMENTATION_PATH =
-  new RegExp('^mysql/src/main/ets/mysql/features/' +
-    '(?!(?:' + MYSQL_VERTICAL_CONTRACTS + ')$)' +
-    '(?:' + MYSQL_VERTICAL_FEATURE_PATTERN + ')/');
 
 function mysqlSiblingImplementationPath(owner) {
   return new RegExp(
@@ -195,33 +252,6 @@ function mysqlSiblingImplementationRule(owner) {
   return {
     from: new RegExp(
       '^mysql/src/main/ets/mysql/features/' + owner + '/'),
-    to: mysqlSiblingImplementationPath(owner),
-    transitive: true,
-    message: 'MySQL feature ownership must not depend on sibling implementations.'
-  };
-}
-
-function mysqlLegacySiblingImplementationPath(owner) {
-  const siblings = MYSQL_LEGACY_VERTICAL_IMPLEMENTATIONS
-    .filter(([candidate]) => candidate !== owner)
-    .map(([_candidate, pattern]) => pattern.source)
-    .join('|');
-  return new RegExp('(?:' + siblings + ')');
-}
-
-function mysqlMigratedToLegacySiblingRule(owner) {
-  return {
-    from: new RegExp(
-      '^mysql/src/main/ets/mysql/features/' + owner + '/'),
-    to: mysqlLegacySiblingImplementationPath(owner),
-    transitive: true,
-    message: 'MySQL feature ownership must not depend on sibling implementations.'
-  };
-}
-
-function mysqlLegacySiblingImplementationRule([owner, from]) {
-  return {
-    from,
     to: mysqlSiblingImplementationPath(owner),
     transitive: true,
     message: 'MySQL feature ownership must not depend on sibling implementations.'
@@ -257,9 +287,8 @@ const FORBIDDEN_MYSQL_LONG_DATA_PATHS = [
   'mysql/src/test/mysql/transport/MySqlUploadPump.test.ets'
 ];
 const ARCHITECTURE_POLICY = {
-  allowedCycles: APPROVED_CYCLES,
-  allowedRootToolFiles: ALLOWED_ROOT_TOOL_FILES,
-  ownedToolDirectories: OWNED_TOOL_DIRECTORIES,
+  forbiddenSources: FORBIDDEN_MYSQL_LEGACY_PRODUCTION_PATHS,
+  ownedSourceRoots: OWNED_SOURCE_ROOTS,
   prohibitedDependencies: [
     {
       from: /^core\//,
@@ -268,28 +297,29 @@ const ARCHITECTURE_POLICY = {
     },
     {
       from: /^mysql\/src\/main\/ets\/mysql\/api\//,
-      to: /^mysql\/src\/main\/ets\/mysql\/(?:MySqlConnection\.ets|command\/|driver\/|execution\/|features\/(?:cursor\/MySqlCursor\.ets$|longdata\/(?:LongData|MySqlUploadPump)\.ets$|prepared\/(?!MySqlParameter\.ets$))|protocol\/|transport\/)/,
-      message: 'MySQL public contracts must not depend on implementation ownership.'
+      to: new RegExp(
+        '^mysql/src/main/ets/mysql/' +
+        '(?!(?:api/|model/|features/(?:' + MYSQL_FEATURE_CONTRACT_MODELS + ')$)).+'
+      ),
+      message: 'MySQL api may import only contract and model leaves.'
     },
     {
-      from: /^mysql\/src\/main\/ets\/mysql\/api\//,
-      to: /^mysql\/src\/main\/ets\/mysql\/features\/prepared\/(?!MySqlParameter\.ets$)/,
+      from: MYSQL_CONTRACT_MODEL_PATH,
+      to: MYSQL_NON_LEAF_IMPLEMENTATION_PATH,
       transitive: true,
-      message: 'MySQL public contracts must not depend on implementation ownership.'
+      message: 'MySQL contract and model leaves must not depend on implementations.'
     },
     {
-      from: /^mysql\/src\/main\/ets\/mysql\/api\//,
+      from: /^mysql\/src\/main\/ets\/mysql\/features\/(?:prepared|cursor|longdata)\//,
       to: MYSQL_VERTICAL_IMPLEMENTATION_PATH,
       transitive: true,
-      message: 'MySQL public contracts must not depend on feature implementation ownership.'
+      message: 'MySQL protocol feature cluster must not depend on vertical feature implementations.'
     },
     ...MYSQL_VERTICAL_FEATURES.map(mysqlSiblingImplementationRule),
-    ...MYSQL_VERTICAL_FEATURES.map(mysqlMigratedToLegacySiblingRule),
-    ...MYSQL_LEGACY_VERTICAL_OWNERS.map(mysqlLegacySiblingImplementationRule),
     {
       from: /^mysql\/src\/main\/ets\/mysql\/(?:protocol|transport)\//,
-      to: /^mysql\/src\/main\/ets\/mysql\/features\/(?:cursor|longdata)\//,
-      message: 'MySQL wire transport must not depend on cursor or long-data feature ownership.'
+      to: /^mysql\/src\/main\/ets\/mysql\/features\//,
+      message: 'MySQL protocol and byte transport must not depend on feature ownership.'
     },
     ...TOOL_LAYER_RULES
   ]
@@ -307,11 +337,52 @@ async function fixture(t, files) {
   return root;
 }
 
+function testOwnedSourceRoots(files) {
+  const roots = new Map();
+  for (const file of files) {
+    const parts = file.split('/');
+    const root = parts.length === 1 ? '' : parts[0];
+    const path = parts.length === 1 ? parts : parts.slice(1);
+    const ownership = roots.get(root) ?? {
+      root,
+      files: new Set(),
+      directories: new Set()
+    };
+    roots.set(root, ownership);
+    if (path.length === 1) ownership.files.add(path[0]);
+    else ownership.directories.add(path[0]);
+  }
+  return [...roots.values()].map((entry) => ({
+    root: entry.root,
+    files: [...entry.files].sort(),
+    directories: [...entry.directories].sort()
+  }));
+}
+
+function assertTestPolicy(graph, policy = {}) {
+  assertImportPolicy(graph, {
+    ownedSourceRoots: testOwnedSourceRoots(graph.files),
+    ...policy
+  });
+}
+
 test('reports the current architecture with no import cycles', () => {
   const graph = readArkTsGraph(ROOT);
 
-  assert.deepEqual(stronglyConnectedFiles(graph), APPROVED_CYCLES);
+  assert.deepEqual(stronglyConnectedFiles(graph), []);
   assert.doesNotThrow(() => assertImportPolicy(graph, ARCHITECTURE_POLICY));
+});
+
+test('includes workspace and package Hvigor entry points in the tooling graph', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  for (const file of [
+    'hvigorfile.ts',
+    'core/hvigorfile.ts',
+    'mysql/hvigorfile.ts'
+  ]) {
+    assert.equal(graph.files.includes(file), true, `Missing build tooling source: ${file}`);
+  }
 });
 
 test('R08 session feature owns its vertical production and test files', () => {
@@ -583,10 +654,16 @@ test('R12 tests use explicit production, fixture, consumer and acceptance owners
     'examples/mysql-device-acceptance/entry/src/test/evidence/DeviceReceiptSigner.test.ets'
   ];
   const forbidden = [
+    'core/src/test/ReferenceAdapter.ets',
     'mysql/src/test/core',
+    'mysql/src/test/core/List.test.ets',
     'mysql/src/test/mysql/command/PreparedExecutionFixture.ets',
+    'mysql/src/test/mysql/command/PreparedExecute.test.ets',
+    'mysql/src/test/mysql/command/PreparedStatement.test.ets',
+    'mysql/src/test/mysql/command/PreparedStream.test.ets',
     'mysql/src/test/mysql/connection/MySqlExecutionObserver.test.ets',
     'mysql/src/test/mysql/execution/MySqlCancellation.test.ets',
+    'mysql/src/test/mysql/execution/MySqlStatementCache.test.ets',
     'mysql/src/test/mysql/features/cursor/MySqlCursor.test.ets',
     'mysql/src/test/mysql/features/longdata/LongData.test.ets',
     'mysql/src/test/mysql/features/prepared/MySqlStatementCache.test.ets',
@@ -595,12 +672,41 @@ test('R12 tests use explicit production, fixture, consumer and acceptance owners
     'mysql/src/test/mysql/protocol/PacketTransportFixture.ets',
     'mysql/src/test/mysql/value/BinaryParameterEncoder.test.ets',
     'mysql/src/test/mysql/value/BinaryRowDecoder.test.ets',
+    'examples/mysql-client/device-acceptance-cases.json',
+    'examples/mysql-client/entry/src/main/ets/sample/DeviceAcceptanceManifest.ets',
+    'examples/mysql-client/entry/src/main/ets/sample/DeviceAcceptanceRunner.ets',
+    'examples/mysql-client/entry/src/main/ets/sample/DeviceEvidenceBinding.ets',
+    'examples/mysql-client/entry/src/main/ets/sample/DeviceEvidenceIdentity.ets',
+    'examples/mysql-client/entry/src/main/ets/sample/DeviceReceiptClipboard.ets',
+    'examples/mysql-client/entry/src/main/ets/sample/DeviceReceiptSigner.ets',
+    'examples/mysql-client/entry/src/test/DeviceAcceptanceRunner.test.ets',
+    'examples/mysql-client/entry/src/test/DeviceReceiptClipboard.test.ets',
+    'examples/mysql-client/entry/src/test/DeviceReceiptSigner.test.ets',
     'examples/mysql-client/entry/src/test/LegacyPublicInterface.test.ets',
     'examples/mysql-client/entry/src/test/PreparedPublicInterface.test.ets',
     'examples/mysql-client/entry/src/test/SampleRunner.test.ets',
     'examples/mysql-device-acceptance/entry/src/test/DeviceAcceptanceRunner.test.ets',
     'examples/mysql-device-acceptance/entry/src/test/DeviceReceiptClipboard.test.ets',
-    'examples/mysql-device-acceptance/entry/src/test/DeviceReceiptSigner.test.ets'
+    'examples/mysql-device-acceptance/entry/src/test/DeviceReceiptSigner.test.ets',
+    'tools/artifact-channel.test.mjs',
+    'tools/check-package.test.mjs',
+    'tools/check-release.test.mjs',
+    'tools/delivery-workspace.test.mjs',
+    'tools/doc-examples.test.mjs',
+    'tools/driver-packages.test.mjs',
+    'tools/github-release.test.mjs',
+    'tools/hap-content.test.mjs',
+    'tools/har-consumer.test.mjs',
+    'tools/legacy-release.test.mjs',
+    'tools/package-har.test.mjs',
+    'tools/prepare-har-release.test.mjs',
+    'tools/publish-har.test.mjs',
+    'tools/run-hvigor.test.mjs',
+    'tools/shared-har.test.mjs',
+    'tools/standalone-har.test.mjs',
+    'tools/test-consumer.test.mjs',
+    'tools/verify-device-evidence.test.mjs',
+    'tools/verify-download.test.mjs'
   ];
 
   assert.deepEqual(required.filter((path) =>
@@ -664,13 +770,31 @@ throw new Error('scanned source was executed');
     'tools/c.mjs': [],
     'tools/dynamic.mjs': []
   });
-  assert.throws(() => assertImportPolicy(graph, {
+  assert.throws(() => assertTestPolicy(graph, {
     prohibitedDependencies: [{
       from: 'core/src/main/ets/RuntimeType.ets',
       to: 'core/src/main/ets/RuntimeB.ets',
       message: 'Static import types must reach policy enforcement.'
     }]
   }), /Static import types must reach policy enforcement/);
+});
+
+test('reads triple-slash runtime references as dependency edges', async (t) => {
+  const root = await fixture(t, {
+    'build-profile.json5': "{modules:[{name:'core',srcPath:'./core'}]}",
+    'core/arkdb-package.json': '{"kind":"shared"}',
+    'core/oh-package.json5': "{name:'@arkdb/core'}",
+    'core/Index.ets': "export { RuntimeA } from './src/main/ets/RuntimeA';",
+    'core/src/main/ets/RuntimeA.ets':
+      "/// <reference path='./RuntimeB.ets' />\nexport class RuntimeA {}",
+    'core/src/main/ets/RuntimeB.ets': 'export class RuntimeB {}'
+  });
+
+  const graph = readArkTsGraph(root);
+
+  assert.deepEqual(graph.dependencies['core/src/main/ets/RuntimeA.ets'], [
+    'core/src/main/ets/RuntimeB.ets'
+  ]);
 });
 
 test('reads the owned tools build layer but ignores nested generated build output', async (t) => {
@@ -812,6 +936,32 @@ test('rejects native TypeScript tooling outside the supported mjs seam', async (
   assert.throws(() => readArkTsGraph(root), /Node tooling source.*a\.mts.*\.mjs/i);
 });
 
+test('rejects non-ArkTS package runtime source suffixes', async (t) => {
+  const root = await fixture(t, {
+    'build-profile.json5': "{modules:[{name:'core',srcPath:'./core'}]}",
+    'core/arkdb-package.json': '{"kind":"shared"}',
+    'core/oh-package.json5': "{name:'@arkdb/core'}",
+    'core/Index.ets': 'export class Root {}',
+    'core/src/main/ets/Runtime.ts': 'export class Runtime {}'
+  });
+
+  assert.throws(() => readArkTsGraph(root),
+    /ArkDB runtime source.*Runtime\.ts.*lowercase \.ets/i);
+});
+
+test('does not hide package runtime sources in generated-name directories', async (t) => {
+  const root = await fixture(t, {
+    'build-profile.json5': "{modules:[{name:'core',srcPath:'./core'}]}",
+    'core/arkdb-package.json': '{"kind":"shared"}',
+    'core/oh-package.json5': "{name:'@arkdb/core'}",
+    'core/Index.ets': 'export class Root {}',
+    'core/src/main/ets/build/Hidden.ts': 'export class Hidden {}'
+  });
+
+  assert.throws(() => readArkTsGraph(root),
+    /ArkDB runtime source.*build.*Hidden\.ts.*lowercase \.ets/i);
+});
+
 test('rejects case-drifted Node tooling source suffixes', async (t) => {
   const root = await fixture(t, {
     'tools/a.MJS': "import './b.mjs';",
@@ -861,7 +1011,8 @@ const key = 'safe';
 const key = 'safe';
 (globalThis.process)[key];
 `);
-  assert.throws(() => readArkTsGraph(root), /computed process access.*not supported.*a\.mjs/i);
+  assert.throws(() => readArkTsGraph(root),
+    /computed globalThis access.*not supported.*a\.mjs/i);
 
   await writeFile(source, `
 const process = { safe: true };
@@ -869,6 +1020,76 @@ const key = 'safe';
 process[key];
 `);
   assert.throws(() => readArkTsGraph(root), /computed process access.*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+const require = globalThis['process']['getBuiltinModule']('module')
+  .createRequire(import.meta.url);
+require('./b.mjs');
+`);
+  assert.throws(() => readArkTsGraph(root),
+    /(?:computed globalThis access|getBuiltinModule).*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+const require = globalThis['pro' + 'cess']['getBuiltin' + 'Module']('module')
+  .createRequire(import.meta.url);
+require('./b.mjs');
+`);
+  assert.throws(() => readArkTsGraph(root),
+    /(?:computed globalThis access|getBuiltinModule).*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+const processAlias = globalThis.process;
+const require = processAlias['getBuiltin' + 'Module']('module')
+  .createRequire(import.meta.url);
+require('./b.mjs');
+`);
+  assert.throws(() => readArkTsGraph(root),
+    /process aliases.*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+import processAlias from 'node:process';
+const require = processAlias['getBuiltin' + 'Module']('module')
+  .createRequire(import.meta.url);
+require('./b.mjs');
+`);
+  assert.throws(() => readArkTsGraph(root),
+    /process module imports.*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+Reflect.get(process, 'getBuiltin' + 'Module')('module')
+  .createRequire(import.meta.url)('./b.mjs');
+`);
+  assert.throws(() => readArkTsGraph(root),
+    /reflective access.*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+const ReflectAlias = Reflect;
+const processAlias = ReflectAlias.get(globalThis, 'process');
+const getBuiltin = ReflectAlias.get(processAlias, 'getBuiltinModule');
+const createRequire = ReflectAlias.get(getBuiltin('module'), 'createRequire');
+createRequire(import.meta.url)('./b.mjs');
+`);
+  assert.throws(() => readArkTsGraph(root),
+    /reflective aliases.*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+const ReflectAlias = globalThis.Reflect;
+const processAlias = ReflectAlias.get(globalThis, 'process');
+const getBuiltin = ReflectAlias.get(processAlias, 'getBuiltinModule');
+const createRequire = ReflectAlias.get(getBuiltin('module'), 'createRequire');
+createRequire(import.meta.url)('./b.mjs');
+`);
+  assert.throws(() => readArkTsGraph(root),
+    /reflective aliases.*not supported.*a\.mjs/i);
+
+  await writeFile(source, `
+const globalAlias = globalThis;
+const processAlias = globalAlias['pro' + 'cess'];
+const getBuiltin = processAlias['getBuiltin' + 'Module'];
+getBuiltin('module').createRequire(import.meta.url)('./b.mjs');
+`);
+  assert.throws(() => readArkTsGraph(root),
+    /globalThis aliases.*not supported.*a\.mjs/i);
 });
 
 test('rejects nested tooling package scopes that can create self-references', async (t) => {
@@ -1048,7 +1269,7 @@ test('rejects data modules that can hide local dependency edges', async (t) => {
   assert.throws(() => readArkTsGraph(root), /unsupported absolute Node module URL.*data:/i);
 });
 
-test('rejects every cycle that is not an exact known finding', () => {
+test('rejects every import cycle without an exception mechanism', () => {
   const graph = {
     files: ['tools/new-a.mjs', 'tools/new-b.mjs'],
     dependencies: {
@@ -1058,8 +1279,58 @@ test('rejects every cycle that is not an exact known finding', () => {
   };
 
   assert.throws(
-    () => assertImportPolicy(graph, { allowedCycles: APPROVED_CYCLES }),
+    () => assertTestPolicy(graph),
     /Unexpected import cycle: tools\/new-a\.mjs -> tools\/new-b\.mjs/
+  );
+});
+
+test('rejects obsolete cycle allowlist configuration', () => {
+  const graph = {
+    files: ['tools/only.mjs'],
+    dependencies: { 'tools/only.mjs': [] }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, { allowedCycles: [] }),
+    /Cycle allowlists are not supported/
+  );
+});
+
+test('rejects malformed and unknown architecture policy configuration', () => {
+  const graph = {
+    files: ['tools/only.mjs'],
+    dependencies: { 'tools/only.mjs': [] }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, []),
+    /Architecture policy must be a plain object/
+  );
+  assert.throws(
+    () => assertImportPolicy(graph, { ownedSourceRoot: [] }),
+    /Unknown architecture policy field: ownedSourceRoot/
+  );
+  assert.throws(
+    () => assertTestPolicy(graph, {
+      prohibitedDependencies: [{
+        from: 'tools/only.mjs',
+        to: 'tools/only.mjs',
+        transitive: 'true'
+      }]
+    }),
+    /Architecture dependency rule transitive must be boolean/
+  );
+});
+
+test('requires every architecture policy to define source ownership', () => {
+  const graph = {
+    files: ['tools/only.mjs'],
+    dependencies: { 'tools/only.mjs': [] }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, {}),
+    /Architecture policy must define nonempty owned source roots/
   );
 });
 
@@ -1081,6 +1352,8 @@ test('rejects prohibited dependencies even when the graph is acyclic', () => {
 test('rejects reverse tooling ownership imports', () => {
   for (const rule of TOOL_LAYER_RULES) {
     const from = {
+      'Low-level tooling must not depend on root workflow or CLI modules.':
+        'tools/lib/hash.mjs',
       'Tool lib must not depend on workflow layers.': 'tools/lib/hash.mjs',
       'Tool workspace ownership must not depend on higher workflow layers.':
         'tools/workspace/delivery-workspace.mjs',
@@ -1100,6 +1373,8 @@ test('rejects reverse tooling ownership imports', () => {
         'tools/device/harness.mjs'
     }[rule.message];
     const to = {
+      'Low-level tooling must not depend on root workflow or CLI modules.':
+        'tools/check-package.mjs',
       'Tool lib must not depend on workflow layers.': 'tools/build/package-har.mjs',
       'Tool workspace ownership must not depend on higher workflow layers.':
         'tools/artifact/har-inspection.mjs',
@@ -1123,7 +1398,7 @@ test('rejects reverse tooling ownership imports', () => {
       dependencies: { [from]: [to], [to]: [] }
     };
 
-    assert.throws(() => assertImportPolicy(graph, {
+    assert.throws(() => assertTestPolicy(graph, {
       prohibitedDependencies: [rule]
     }), new RegExp(rule.message.replaceAll('.', '\\.')));
   }
@@ -1146,7 +1421,7 @@ test('rejects reverse tooling ownership imports through compatibility wrappers',
     candidate.message ===
     'Tool consumer ownership must not depend on build, release, or device workflows.');
 
-  assert.throws(() => assertImportPolicy(graph, {
+  assert.throws(() => assertTestPolicy(graph, {
     prohibitedDependencies: [rule]
   }), /consumer\/test-consumer\.mjs -> tools\/package-har\.mjs -> tools\/build\/package-har\.mjs/);
 });
@@ -1159,6 +1434,67 @@ test('rejects dynamic tooling imports instead of hiding ownership edges', async 
 
   assert.throws(() => readArkTsGraph(root),
     /Dynamic Node imports are not supported.*tools.*a\.mjs/i);
+
+  const source = join(root, 'tools', 'a.mjs');
+  for (const hidden of [
+    "eval(\"import('./b.mjs')\");",
+    "new Function(\"return import('./b.mjs')\")();",
+    "Object.getPrototypeOf(async function () {}).constructor(" +
+      "\"return import('./b.mjs')\")();"
+  ]) {
+    await writeFile(source, hidden);
+    assert.throws(() => readArkTsGraph(root),
+      /Node code generation is not supported.*tools.*a\.mjs/i);
+  }
+});
+
+test('rejects dynamic ArkTS imports instead of hiding runtime edges', async (t) => {
+  const root = await fixture(t, {
+    'build-profile.json5': "{modules:[{name:'core',srcPath:'./core'}]}",
+    'core/arkdb-package.json': '{"kind":"shared"}',
+    'core/oh-package.json5': "{name:'@arkdb/core'}",
+    'core/Index.ets': "export { RuntimeA } from './src/main/ets/RuntimeA';",
+    'core/src/main/ets/RuntimeA.ets': "void import('./RuntimeB');\nexport class RuntimeA {}",
+    'core/src/main/ets/RuntimeB.ets': 'export class RuntimeB {}'
+  });
+
+  assert.throws(() => readArkTsGraph(root),
+    /Dynamic ArkTS imports are not supported.*RuntimeA\.ets/i);
+});
+
+test('rejects Hvigor CommonJS loader syntax', async (t) => {
+  const root = await fixture(t, {
+    'hvigorfile.ts': "import nodeModule = require('node:module');\n" +
+      "nodeModule.createRequire(import.meta.url)('./hidden.mjs');\n"
+  });
+
+  assert.throws(() => readArkTsGraph(root),
+    /CommonJS|createRequire-capable module imports are not supported/i);
+
+  await writeFile(join(root, 'hvigorfile.ts'),
+    "module.require('./hidden.mjs');\n");
+  assert.throws(() => readArkTsGraph(root),
+    /CommonJS loader access is not supported/i);
+});
+
+test('rejects unsupported Hvigor module specifiers', async (t) => {
+  const root = await fixture(t, {
+    'package.json': '{"name":"arkdb-tooling","type":"module"}',
+    'hvigorfile.ts': "import 'file:///tmp/hidden.mjs';\n"
+  });
+  const source = join(root, 'hvigorfile.ts');
+
+  assert.throws(() => readArkTsGraph(root),
+    /Unsupported absolute Node module URL.*file:/i);
+
+  await writeFile(source,
+    "import 'data:text/javascript,export%20default%201';\n");
+  assert.throws(() => readArkTsGraph(root),
+    /Unsupported absolute Node module URL.*data:/i);
+
+  await writeFile(source, "import 'arkdb-tooling/check-package';\n");
+  assert.throws(() => readArkTsGraph(root),
+    /Root Node package self-reference is not supported/i);
 });
 
 test('rejects production tooling outside an ownership layer or explicit root allowlist', () => {
@@ -1171,9 +1507,12 @@ test('rejects production tooling outside an ownership layer or explicit root all
   };
 
   assert.throws(() => assertImportPolicy(graph, {
-    allowedRootToolFiles: ['tools/architecture-graph.mjs'],
-    ownedToolDirectories: OWNED_TOOL_DIRECTORIES
-  }), /Unowned root tooling source: tools\/release-helper\.mjs/);
+    ownedSourceRoots: [{
+      root: 'tools',
+      files: ['architecture-graph.mjs'],
+      directories: OWNED_TOOL_DIRECTORIES
+    }]
+  }), /Unowned architecture source: tools\/release-helper\.mjs/);
 });
 
 test('rejects production tooling in unowned nested directories', () => {
@@ -1183,9 +1522,50 @@ test('rejects production tooling in unowned nested directories', () => {
   };
 
   assert.throws(() => assertImportPolicy(graph, {
-    allowedRootToolFiles: [],
-    ownedToolDirectories: OWNED_TOOL_DIRECTORIES
-  }), /Unowned tooling source: tools\/misc\/helper\.mjs/);
+    ownedSourceRoots: [{
+      root: 'tools',
+      files: [],
+      directories: OWNED_TOOL_DIRECTORIES
+    }]
+  }), /Unowned architecture source: tools\/misc\/helper\.mjs/);
+});
+
+test('rejects runtime sources outside final owned directories', () => {
+  const graph = {
+    files: ['mysql/src/main/ets/mysql/misc/Helper.ets'],
+    dependencies: { 'mysql/src/main/ets/mysql/misc/Helper.ets': [] }
+  };
+
+  assert.throws(() => assertImportPolicy(graph, {
+    ownedSourceRoots: [{
+      root: 'mysql/src/main/ets/mysql',
+      files: ['MySqlConnection.ets'],
+      directories: ['api']
+    }]
+  }), /Unowned architecture source: mysql\/src\/main\/ets\/mysql\/misc\/Helper\.ets/);
+});
+
+test('rejects runtime sources outside the MySQL namespace', () => {
+  const rogue = 'mysql/src/main/ets/rogue/Helper.ets';
+  const graph = {
+    files: [rogue],
+    dependencies: { [rogue]: [] }
+  };
+
+  assert.throws(() => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+    /Unowned architecture source: mysql\/src\/main\/ets\/rogue\/Helper\.ets/);
+});
+
+test('rejects stale legacy architecture sources explicitly', () => {
+  const legacy = 'mysql/src/main/ets/mysql/driver/MySqlSession.ets';
+  const graph = {
+    files: [legacy],
+    dependencies: { [legacy]: [] }
+  };
+
+  assert.throws(() => assertTestPolicy(graph, {
+    forbiddenSources: [legacy]
+  }), /Stale architecture source is forbidden: mysql\/src\/main\/ets\/mysql\/driver\/MySqlSession\.ets/);
 });
 
 test('rejects MySQL api dependencies on implementation ownership', () => {
@@ -1204,7 +1584,47 @@ test('rejects MySQL api dependencies on implementation ownership', () => {
 
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-    /MySQL public contracts must not depend on implementation ownership.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/execution\/MySqlTransactionRunner\.ets/
+    /MySQL api may import only contract and model leaves.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/execution\/MySqlTransactionRunner\.ets/
+  );
+});
+
+test('rejects MySQL api dependencies outside contract and model leaves', () => {
+  const graph = {
+    files: [
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets',
+      'mysql/src/main/ets/mysql/auth/Crypto.ets'
+    ],
+    dependencies: {
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets': [
+        'mysql/src/main/ets/mysql/auth/Crypto.ets'
+      ],
+      'mysql/src/main/ets/mysql/auth/Crypto.ets': []
+    }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+    /MySQL api may import only contract and model leaves.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/auth\/Crypto\.ets/
+  );
+});
+
+test('rejects contract and model leaves that reach command implementations', () => {
+  const graph = {
+    files: [
+      'mysql/src/main/ets/mysql/features/session/MySqlSessionOptions.ets',
+      'mysql/src/main/ets/mysql/command/Query.ets'
+    ],
+    dependencies: {
+      'mysql/src/main/ets/mysql/features/session/MySqlSessionOptions.ets': [
+        'mysql/src/main/ets/mysql/command/Query.ets'
+      ],
+      'mysql/src/main/ets/mysql/command/Query.ets': []
+    }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+    /MySQL contract and model leaves must not depend on implementations.*features\/session\/MySqlSessionOptions\.ets -> mysql\/src\/main\/ets\/mysql\/command\/Query\.ets/
   );
 });
 
@@ -1224,7 +1644,7 @@ test('rejects MySQL api dependencies on prepared implementation ownership', () =
 
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-    /MySQL public contracts must not depend on implementation ownership.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/features\/prepared\/PreparedExecutor\.ets/
+    /MySQL api may import only contract and model leaves.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/features\/prepared\/PreparedExecutor\.ets/
   );
 });
 
@@ -1248,7 +1668,7 @@ test('rejects MySQL api dependencies on prepared implementations through contrac
 
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-    /MySQL public contracts must not depend on implementation ownership.*api\/MySqlPreparedContracts\.ets -> mysql\/src\/main\/ets\/mysql\/features\/prepared\/MySqlParameter\.ets -> mysql\/src\/main\/ets\/mysql\/features\/prepared\/NewPreparedHelper\.ets/
+    /MySQL contract and model leaves must not depend on implementations.*features\/prepared\/MySqlParameter\.ets -> mysql\/src\/main\/ets\/mysql\/features\/prepared\/NewPreparedHelper\.ets/
   );
 });
 
@@ -1268,7 +1688,7 @@ test('rejects MySQL api dependencies on vertical feature implementation ownershi
 
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-    /MySQL public contracts must not depend on feature implementation ownership.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/features\/session\/NewSessionHelper\.ets/
+    /MySQL api may import only contract and model leaves.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/features\/session\/NewSessionHelper\.ets/
   );
 });
 
@@ -1292,7 +1712,7 @@ test('rejects MySQL api dependencies on vertical implementations through contrac
 
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-    /MySQL public contracts must not depend on feature implementation ownership.*api\/MySqlContracts\.ets -> mysql\/src\/main\/ets\/mysql\/features\/session\/MySqlSessionOptions\.ets -> mysql\/src\/main\/ets\/mysql\/features\/session\/NewSessionHelper\.ets/
+    /MySQL contract and model leaves must not depend on implementations.*features\/session\/MySqlSessionOptions\.ets -> mysql\/src\/main\/ets\/mysql\/features\/session\/NewSessionHelper\.ets/
   );
 });
 
@@ -1316,44 +1736,23 @@ test('rejects MySQL vertical feature dependencies on sibling implementations', (
   );
 });
 
-test('rejects MySQL vertical feature dependencies on legacy sibling implementations', () => {
-  const graph = {
-    files: [
-      'mysql/src/main/ets/mysql/features/transaction/MySqlTransactionRunner.ets',
-      'mysql/src/main/ets/mysql/execution/MySqlInsertRowsExecutor.ets'
-    ],
-    dependencies: {
-      'mysql/src/main/ets/mysql/features/transaction/MySqlTransactionRunner.ets': [
-        'mysql/src/main/ets/mysql/execution/MySqlInsertRowsExecutor.ets'
-      ],
-      'mysql/src/main/ets/mysql/execution/MySqlInsertRowsExecutor.ets': []
-    }
-  };
+test('rejects prepared, cursor, and long-data dependencies on vertical implementations', () => {
+  for (const source of [
+    'mysql/src/main/ets/mysql/features/prepared/PreparedExecutor.ets',
+    'mysql/src/main/ets/mysql/features/cursor/MySqlCursor.ets',
+    'mysql/src/main/ets/mysql/features/longdata/LongData.ets'
+  ]) {
+    const target = 'mysql/src/main/ets/mysql/features/insert/NewInsertHelper.ets';
+    const graph = {
+      files: [source, target],
+      dependencies: { [source]: [target], [target]: [] }
+    };
 
-  assert.throws(
-    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-    /MySQL feature ownership must not depend on sibling implementations.*features\/transaction\/MySqlTransactionRunner\.ets -> mysql\/src\/main\/ets\/mysql\/execution\/MySqlInsertRowsExecutor\.ets/
-  );
-});
-
-test('rejects legacy vertical owner dependencies on migrated sibling implementations', () => {
-  const graph = {
-    files: [
-      'mysql/src/main/ets/mysql/metadata/MySqlMetadataProvider.ets',
-      'mysql/src/main/ets/mysql/features/session/NewSessionHelper.ets'
-    ],
-    dependencies: {
-      'mysql/src/main/ets/mysql/metadata/MySqlMetadataProvider.ets': [
-        'mysql/src/main/ets/mysql/features/session/NewSessionHelper.ets'
-      ],
-      'mysql/src/main/ets/mysql/features/session/NewSessionHelper.ets': []
-    }
-  };
-
-  assert.throws(
-    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-    /MySQL feature ownership must not depend on sibling implementations.*metadata\/MySqlMetadataProvider\.ets -> mysql\/src\/main\/ets\/mysql\/features\/session\/NewSessionHelper\.ets/
-  );
+    assert.throws(
+      () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+      /MySQL protocol feature cluster must not depend on vertical feature implementations/
+    );
+  }
 });
 
 test('rejects MySQL api dependencies on cursor and long-data implementations', () => {
@@ -1370,19 +1769,20 @@ test('rejects MySQL api dependencies on cursor and long-data implementations', (
 
     assert.throws(
       () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-      /MySQL public contracts must not depend on implementation ownership/
+      /MySQL api may import only contract and model leaves/
     );
   }
 });
 
-test('rejects wire transport dependencies on cursor and long-data ownership', () => {
+test('rejects protocol and byte transport dependencies on every feature', () => {
   for (const source of [
     'mysql/src/main/ets/mysql/protocol/PacketChannel.ets',
     'mysql/src/main/ets/mysql/transport/TcpTransport.ets'
   ]) {
     for (const target of [
       'mysql/src/main/ets/mysql/features/cursor/MySqlCursor.ets',
-      'mysql/src/main/ets/mysql/features/longdata/MySqlUploadPump.ets'
+      'mysql/src/main/ets/mysql/features/longdata/MySqlUploadPump.ets',
+      'mysql/src/main/ets/mysql/features/session/MySqlSessionOptions.ets'
     ]) {
       const graph = {
         files: [source, target],
@@ -1391,7 +1791,7 @@ test('rejects wire transport dependencies on cursor and long-data ownership', ()
 
       assert.throws(
         () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
-        /MySQL wire transport must not depend on cursor or long-data feature ownership/
+        /MySQL protocol and byte transport must not depend on feature ownership/
       );
     }
   }

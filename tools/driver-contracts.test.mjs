@@ -93,6 +93,40 @@ test('approved internal surface candidates stay representation-free', async () =
     /const mysqlExecutionObserverCapability: Object = new Object\(\)/);
 });
 
+test('legacy custom connections remain valid feature-helper inputs', async () => {
+  const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
+    'api', 'MySqlConnectionFeatures.ets'), 'utf8');
+  const heritage = /export interface MySqlFeatureConnection extends CoreDbConnection/.test(source)
+    ? ' extends CoreDbConnection' : '';
+  const fixture = `
+interface CoreDbConnection {
+  connect(): Promise<void>;
+  query(sql: string): Promise<void>;
+  close(): Promise<void>;
+  readonly state: string;
+  readonly serverInfo: Object;
+}
+class MySqlConnectionFeatures {}
+interface MySqlFeatureConnection${heritage} {
+  readonly mysqlFeatures?: MySqlConnectionFeatures;
+}
+declare function requireMySqlFeatures(
+  connection: MySqlFeatureConnection
+): MySqlConnectionFeatures;
+class LegacyCustomConnection implements CoreDbConnection {
+  readonly state: string = '';
+  readonly serverInfo: Object = new Object();
+  async connect(): Promise<void> {}
+  async query(_sql: string): Promise<void> {}
+  async close(): Promise<void> {}
+}
+requireMySqlFeatures(new LegacyCustomConnection());
+`;
+  assert.deepEqual(typeScriptDiagnostics(fixture), []);
+  assert.match(source,
+    /requireMySqlFeatures\(connection: MySqlFeatureConnection\): MySqlConnectionFeatures/);
+});
+
 function assertObserverOnlyConnectionExtensions(source) {
   const parsed = ts.createSourceFile('MySqlConnectionExtensions.ets', source,
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -106,6 +140,27 @@ function assertObserverOnlyConnectionExtensions(source) {
     ts.isGetAccessorDeclaration(member) ||
     ts.isSetAccessorDeclaration(member)).map((member) => member.name.getText(parsed));
   assert.deepEqual(fields, ['executionObserver']);
+}
+
+function typeScriptDiagnostics(source) {
+  const fileName = 'legacy-feature-connection.ts';
+  const options = {
+    noEmit: true,
+    strict: true,
+    target: ts.ScriptTarget.ESNext
+  };
+  const host = ts.createCompilerHost(options);
+  const getSourceFile = host.getSourceFile.bind(host);
+  const fileExists = host.fileExists.bind(host);
+  const readFileFromHost = host.readFile.bind(host);
+  host.getSourceFile = (name, languageVersion, onError, shouldCreateNewSourceFile) =>
+    name === fileName
+      ? ts.createSourceFile(name, source, languageVersion, true, ts.ScriptKind.TS)
+      : getSourceFile(name, languageVersion, onError, shouldCreateNewSourceFile);
+  host.fileExists = (name) => name === fileName || fileExists(name);
+  host.readFile = (name) => name === fileName ? source : readFileFromHost(name);
+  return ts.getPreEmitDiagnostics(ts.createProgram([fileName], options, host))
+    .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
 }
 
 test('shared contracts describe callback-scoped transaction sessions', async () => {

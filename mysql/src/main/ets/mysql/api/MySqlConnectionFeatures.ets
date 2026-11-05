@@ -1,4 +1,4 @@
-import { ArkDbError, QueryOptions } from '@arkdb/core';
+import { ArkDbError, DbConnection as CoreDbConnection, QueryOptions } from '@arkdb/core';
 import {
   MySqlPreparedExecutor
 } from './MySqlPreparedContracts';
@@ -47,7 +47,7 @@ export class MySqlConnectionFeatures {
   transactions?: MySqlTransactionRunner;
 }
 
-export interface MySqlFeatureConnection {
+export interface MySqlFeatureConnection extends CoreDbConnection {
   readonly mysqlFeatures?: MySqlConnectionFeatures;
 }
 

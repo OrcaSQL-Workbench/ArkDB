@@ -4,18 +4,18 @@ import {
   MySqlCursorExecutor, MySqlCursorOptions, MySqlExecutionOutcome, MySqlOperationError,
   MySqlCommandKind, MySqlExecutionEvent, MySqlExecutionEventType,
   MySqlExecutionObserver, MySqlParameter, MySqlParameterType, requireMySqlFeatures
-} from '../../../../Index';
+} from '../../../../../Index';
 import {
   initializeMySqlExecutionObserverInternal
-} from '../../../main/ets/mysql/MySqlConnection';
+} from '../../../../main/ets/mysql/MySqlConnection';
 import {
   Capabilities, ColumnType, StatusFlags
-} from '../../../main/ets/mysql/protocol/Constants';
+} from '../../../../main/ets/mysql/protocol/Constants';
 import {
   PreparedExecutionFixture, columnPayload, cursorFetchEmptyStrings, cursorFetchResult,
   cursorOpenResult, prepareResponse,
   cursorBufferedFallback, errorPayload, flushPrepared, hex, okPayload, preparedFailureOf
-} from './PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 class CursorExecutionObserver implements MySqlExecutionObserver {
   readonly events: MySqlExecutionEvent[] = [];

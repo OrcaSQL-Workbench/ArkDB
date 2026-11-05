@@ -1,36 +1,36 @@
 import { ArkDbError, ConnectionTimerPort, QueryOptions } from '@arkdb/core';
-import { MySqlLongDataExecutor } from '../api/MySqlFeatureContracts';
-import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+import { MySqlLongDataExecutor } from '../../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../../api/MySqlPreparedContracts';
 import {
   MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
-} from '../execution/MySqlCommandGate';
+} from '../../execution/MySqlCommandGate';
 import {
   mysqlOperationFailure
-} from '../execution/MySqlFailure';
-import { MySqlByteSource } from '../model/MySqlByteSource';
+} from '../../execution/MySqlFailure';
+import { MySqlByteSource } from './MySqlByteSource';
 import {
   MySqlLongDataOptions, MySqlLongParameter, MySqlLongParameterKind,
   validateMySqlLongDataOptions
-} from '../model/MySqlLongDataOptions';
+} from './MySqlLongDataOptions';
 import {
   MySqlExecutionOutcome, MySqlOperationError
-} from '../model/MySqlOperationError';
+} from '../../model/MySqlOperationError';
 import {
   MySqlParameter, MySqlParameterType
-} from '../features/prepared/MySqlParameter';
-import { MySqlQueryResult } from '../model/MySqlQueryResult';
+} from '../prepared/MySqlParameter';
+import { MySqlQueryResult } from '../../model/MySqlQueryResult';
 import {
   encodeBinaryParameters
-} from '../features/prepared/BinaryParameterEncoder';
+} from '../prepared/BinaryParameterEncoder';
 import {
   MySqlPromiseUploadAbortSignal, MySqlUploadChunkWriter,
   MySqlUploadFailure, MySqlUploadPump
-} from '../transport/MySqlUploadPump';
+} from './MySqlUploadPump';
 import {
   MySqlPreparedSession, MySqlPreparedSessionHost,
   preparedCleanup, preparedFailure
-} from '../features/prepared/PreparedStatement';
-import { MySqlResultTerminatorObservation } from './ResultStream';
+} from '../prepared/PreparedStatement';
+import { MySqlResultTerminatorObservation } from '../../command/ResultStream';
 
 export interface MySqlLongDataHost extends MySqlPreparedSessionHost {
   readonly timers: ConnectionTimerPort;

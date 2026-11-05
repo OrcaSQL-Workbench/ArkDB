@@ -3,7 +3,7 @@ import {
 } from '@arkdb/core';
 import {
   MySqlCursorExecutorHost
-} from '../command/MySqlCursor';
+} from '../features/cursor/MySqlCursor';
 import { prepareServerError } from '../features/prepared/PrepareResponse';
 import {
   MySqlResultTerminatorObservation

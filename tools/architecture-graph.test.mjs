@@ -195,6 +195,19 @@ function assertFeatureOwnership(graph, owner, productionMoves, testMoves) {
   }
 }
 
+const FORBIDDEN_MYSQL_CURSOR_PATHS = [
+  'mysql/src/main/ets/mysql/command/MySqlCursor.ets',
+  'mysql/src/main/ets/mysql/model/MySqlCursorOptions.ets',
+  'mysql/src/test/mysql/command/MySqlCursor.test.ets'
+];
+const FORBIDDEN_MYSQL_LONG_DATA_PATHS = [
+  'mysql/src/main/ets/mysql/command/LongData.ets',
+  'mysql/src/main/ets/mysql/model/MySqlByteSource.ets',
+  'mysql/src/main/ets/mysql/model/MySqlLongDataOptions.ets',
+  'mysql/src/main/ets/mysql/transport/MySqlUploadPump.ets',
+  'mysql/src/test/mysql/command/LongData.test.ets',
+  'mysql/src/test/mysql/transport/MySqlUploadPump.test.ets'
+];
 const ARCHITECTURE_POLICY = {
   allowedCycles: APPROVED_CYCLES,
   allowedRootToolFiles: ALLOWED_ROOT_TOOL_FILES,
@@ -207,7 +220,7 @@ const ARCHITECTURE_POLICY = {
     },
     {
       from: /^mysql\/src\/main\/ets\/mysql\/api\//,
-      to: /^mysql\/src\/main\/ets\/mysql\/(?:MySqlConnection\.ets|command\/|driver\/|execution\/|features\/prepared\/(?!MySqlParameter\.ets$)|protocol\/|transport\/)/,
+      to: /^mysql\/src\/main\/ets\/mysql\/(?:MySqlConnection\.ets|command\/|driver\/|execution\/|features\/(?:cursor\/MySqlCursor\.ets$|longdata\/(?:LongData|MySqlUploadPump)\.ets$|prepared\/(?!MySqlParameter\.ets$))|protocol\/|transport\/)/,
       message: 'MySQL public contracts must not depend on implementation ownership.'
     },
     {
@@ -224,6 +237,11 @@ const ARCHITECTURE_POLICY = {
     },
     ...MYSQL_VERTICAL_FEATURES.map(mysqlSiblingImplementationRule),
     ...MYSQL_LEGACY_VERTICAL_OWNERS.map(mysqlLegacySiblingImplementationRule),
+    {
+      from: /^mysql\/src\/main\/ets\/mysql\/(?:protocol|transport)\//,
+      to: /^mysql\/src\/main\/ets\/mysql\/features\/(?:cursor|longdata)\//,
+      message: 'MySQL wire transport must not depend on cursor or long-data feature ownership.'
+    },
     ...TOOL_LAYER_RULES
   ]
 };
@@ -292,6 +310,19 @@ test('metadata context normalization does not import session implementation owne
     false,
     'Metadata must own its context normalization instead of importing session implementation.'
   );
+});
+
+test('rejects stale cursor ownership paths', () => {
+  const stalePaths = FORBIDDEN_MYSQL_CURSOR_PATHS.filter((path) =>
+    existsSync(join(ROOT, ...path.split('/'))));
+
+  assert.deepEqual(stalePaths, []);
+});
+
+test('rejects stale long-data ownership paths', () => {
+  const stalePaths = FORBIDDEN_MYSQL_LONG_DATA_PATHS.filter((path) =>
+    existsSync(join(ROOT, ...path.split('/'))));
+  assert.deepEqual(stalePaths, []);
 });
 
 test('reads static runtime and tooling imports without executing scanned source', async (t) => {
@@ -1019,4 +1050,45 @@ test('rejects legacy vertical owner dependencies on migrated sibling implementat
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
     /MySQL feature ownership must not depend on sibling implementations.*metadata\/MySqlMetadataProvider\.ets -> mysql\/src\/main\/ets\/mysql\/features\/session\/NewSessionHelper\.ets/
   );
+});
+
+test('rejects MySQL api dependencies on cursor and long-data implementations', () => {
+  for (const target of [
+    'mysql/src/main/ets/mysql/features/cursor/MySqlCursor.ets',
+    'mysql/src/main/ets/mysql/features/longdata/LongData.ets',
+    'mysql/src/main/ets/mysql/features/longdata/MySqlUploadPump.ets'
+  ]) {
+    const source = 'mysql/src/main/ets/mysql/api/MySqlFeatureContracts.ets';
+    const graph = {
+      files: [source, target],
+      dependencies: { [source]: [target], [target]: [] }
+    };
+
+    assert.throws(
+      () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+      /MySQL public contracts must not depend on implementation ownership/
+    );
+  }
+});
+
+test('rejects wire transport dependencies on cursor and long-data ownership', () => {
+  for (const source of [
+    'mysql/src/main/ets/mysql/protocol/PacketChannel.ets',
+    'mysql/src/main/ets/mysql/transport/TcpTransport.ets'
+  ]) {
+    for (const target of [
+      'mysql/src/main/ets/mysql/features/cursor/MySqlCursor.ets',
+      'mysql/src/main/ets/mysql/features/longdata/MySqlUploadPump.ets'
+    ]) {
+      const graph = {
+        files: [source, target],
+        dependencies: { [source]: [target], [target]: [] }
+      };
+
+      assert.throws(
+        () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+        /MySQL wire transport must not depend on cursor or long-data feature ownership/
+      );
+    }
+  }
 });

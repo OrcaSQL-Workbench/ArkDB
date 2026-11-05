@@ -81,7 +81,7 @@ import {
 } from './features/prepared/PreparedExecutor';
 import {
   MySqlReadOnlyCursorExecutor
-} from './command/MySqlCursor';
+} from './features/cursor/MySqlCursor';
 import {
   MySqlResultTerminatorObservation, parseBufferedResultStream, parseResultStream
 } from './command/ResultStream';

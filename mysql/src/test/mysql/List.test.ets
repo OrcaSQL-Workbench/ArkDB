@@ -3,8 +3,9 @@ import connectionDiagnosticsTest from './connection/ConnectionDiagnostics.test';
 import connectionOpeningTest from './connection/ConnectionOpening.test';
 import connectionStateTest from './connection/ConnectionState.test';
 import mySqlExecutionObserverTest from './connection/MySqlExecutionObserver.test';
-import mySqlSessionInitializationTest from './connection/MySqlSessionInitialization.test';
-import mySqlSessionResetTest from './connection/MySqlSessionReset.test';
+import mySqlSessionInitializationTest from
+  './features/session/MySqlSessionInitialization.test';
+import mySqlSessionResetTest from './features/session/MySqlSessionReset.test';
 import mySqlExecutionControllerTest from './execution/MySqlExecutionController.test';
 import mySqlCancellationTest from './execution/MySqlCancellation.test';
 import mySqlBatchExecutorTest from './execution/MySqlBatchExecutor.test';

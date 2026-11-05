@@ -32,7 +32,7 @@ export type { MySqlValue as SqlValue } from './src/main/ets/mysql/model/MySqlQue
 
 export { ConnectionConfigField, ConnectionValidationIssue, SslMode, SslConfig, ConnectionConfig } from
   './src/main/ets/mysql/model/ConnectionConfig';
-export { MySqlSessionOptions } from './src/main/ets/mysql/model/MySqlSessionOptions';
+export { MySqlSessionOptions } from './src/main/ets/mysql/features/session/MySqlSessionOptions';
 export { MySqlTransactionIsolation, MySqlTransactionOptions } from
   './src/main/ets/mysql/model/MySqlTransactionOptions';
 export { MySqlDeadlineOptions } from './src/main/ets/mysql/model/MySqlDeadlineOptions';

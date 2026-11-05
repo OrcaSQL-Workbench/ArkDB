@@ -32,7 +32,7 @@ import {
   MYSQL_SESSION_CHARACTER_SET_SQL, MYSQL_SESSION_FINGERPRINT_SQL,
   MySqlSessionFingerprint, MySqlSessionFingerprintRowDecoder,
   mysqlSessionFingerprint, mysqlSessionInitializationSql
-} from '../execution/MySqlSessionInitialization';
+} from '../features/session/MySqlSessionInitialization';
 import {
   CommandCloseSettlement, DeadlineCancellationSettlement, DeadlineObservation,
   MySqlDeadlineTimer, OrdinaryCommandSettlement, PreparedCommandSettlement
@@ -59,7 +59,7 @@ import {
 
 export {
   MySqlSessionFingerprint
-} from '../execution/MySqlSessionInitialization';
+} from '../features/session/MySqlSessionInitialization';
 
 export type MySqlPreparedOperationSettlement = PreparedCommandSettlement;
 

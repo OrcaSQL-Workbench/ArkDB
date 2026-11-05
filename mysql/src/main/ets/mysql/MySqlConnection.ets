@@ -38,7 +38,9 @@ import { Command } from './protocol/Constants';
 import {
   buildComQuery, parseQueryStream, parseResultSet, TextRowDecoder
 } from './command/Query';
-import { mysqlContextPolicy, mysqlDatabaseForContext } from './model/MySqlContext';
+import {
+  mysqlContextPolicy, mysqlDatabaseForContext
+} from './features/session/MySqlContext';
 import { MySqlMetadataProvider } from './metadata/MySqlMetadataProvider';
 import { MySqlServerMetricsProvider } from './metrics/MySqlServerMetricsProvider';
 import {
@@ -56,7 +58,9 @@ import {
 } from './execution/MySqlInsertRowsExecutor';
 import { MySqlPreparedProcedureCaller } from './execution/MySqlProcedureCaller';
 import { MySqlConnectionDeadlineExecutor } from './execution/MySqlDeadlineExecutor';
-import { MySqlConnectionSessionController } from './execution/MySqlSessionController';
+import {
+  MySqlConnectionSessionController
+} from './features/session/MySqlSessionController';
 import {
   MYSQL_COMMIT_NO_CHAIN_NO_RELEASE, MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE,
   MySqlConnectionTransactionRunner, MySqlTransactionRunnerHost

@@ -6,24 +6,24 @@ import {
   MySqlInsertRowsExecutor, MySqlOperationError, MySqlParameter, MySqlParameterType,
   MySqlPreparedExecutor, MySqlSessionController,
   MySqlSessionOptions, QueryResult, ServerInfo, SslMode, requireMySqlFeatures
-} from '../../../../Index';
-import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
-import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
-import { StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
+} from '../../../../../Index';
+import { PacketReader } from '../../../../main/ets/mysql/protocol/PacketReader';
+import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
+import { StatusFlags } from '../../../../main/ets/mysql/protocol/Constants';
 import {
   MAX_RECEIVE_BUFFER_BYTES, TcpTransport
-} from '../../../main/ets/mysql/transport/TcpTransport';
-import { socket } from '../../../mock/NetworkKit.mock';
+} from '../../../../main/ets/mysql/transport/TcpTransport';
+import { socket } from '../../../../mock/NetworkKit.mock';
 import {
   PreparedSocket, columnPayload, eofPayload, errorPayload, flushPrepared, framePacket,
   handshake, okPayload, prepareResponse, preparedFailureOf
-} from '../command/PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 import {
   MySqlCommandScope
-} from '../../../main/ets/mysql/execution/MySqlCommandGate';
+} from '../../../../main/ets/mysql/execution/MySqlCommandGate';
 import {
   MySqlSessionFingerprint
-} from '../../../main/ets/mysql/execution/MySqlSessionInitialization';
+} from '../../../../main/ets/mysql/features/session/MySqlSessionInitialization';
 
 const RESET_CHARACTER_SET_SQL = 'SET NAMES utf8mb4 COLLATE utf8mb4_general_ci';
 const SESSION_FINGERPRINT_SQL = 'SELECT DATABASE(), @@SESSION.sql_mode, ' +

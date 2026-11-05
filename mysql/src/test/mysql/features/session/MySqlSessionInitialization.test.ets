@@ -3,25 +3,29 @@ import { socket as platformSocket } from '@kit.NetworkKit';
 import {
   ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionConfig, ConnectionState, MySqlConnection,
   MySqlSessionOptions, QueryCancellationResult, SslMode
-} from '../../../../Index';
+} from '../../../../../Index';
 import {
   MySqlExecutionOutcome, MySqlOperationError
-} from '../../../main/ets/mysql/model/MySqlOperationError';
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandScope
-} from '../../../main/ets/mysql/execution/MySqlCommandGate';
+} from '../../../../main/ets/mysql/execution/MySqlCommandGate';
 import {
   MySqlSessionFingerprint, mysqlSessionFingerprint
-} from '../../../main/ets/mysql/execution/MySqlSessionInitialization';
-import { MySqlColumnDef, MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
-import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
-import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
-import { Capabilities, Collation, ColumnType, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
-import { MockSocket, socket } from '../../../mock/NetworkKit.mock';
+} from '../../../../main/ets/mysql/features/session/MySqlSessionInitialization';
+import {
+  MySqlColumnDef, MySqlQueryResult
+} from '../../../../main/ets/mysql/model/MySqlQueryResult';
+import { PacketReader } from '../../../../main/ets/mysql/protocol/PacketReader';
+import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
+import {
+  Capabilities, Collation, ColumnType, StatusFlags
+} from '../../../../main/ets/mysql/protocol/Constants';
+import { MockSocket, socket } from '../../../../mock/NetworkKit.mock';
 import {
   PreparedGate, PreparedSocket, columnPayload, eofPayload, errorPayload, framePacket, handshake,
   okPayload, preparedFailureOf
-} from '../command/PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 interface SessionSentPacket {
   data: ArrayBuffer;

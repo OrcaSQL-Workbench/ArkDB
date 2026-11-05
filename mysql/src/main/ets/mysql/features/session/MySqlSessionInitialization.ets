@@ -1,11 +1,13 @@
 import { ArkDbError } from '@arkdb/core';
-import { TextRowDecoder } from '../command/Query';
-import { MySqlColumnDef, MySqlQueryResult, MySqlValue } from '../model/MySqlQueryResult';
-import { MySqlSessionOptions } from '../model/MySqlSessionOptions';
-import { utf8Decode, utf8Encode } from '../protocol/Charsets';
-import { Collation, ColumnType } from '../protocol/Constants';
-import { PacketReader } from '../protocol/PacketReader';
-import { mysqlUtf8BytesExpression } from '../value/MySqlSqlHelpers';
+import { TextRowDecoder } from '../../command/Query';
+import {
+  MySqlColumnDef, MySqlQueryResult, MySqlValue
+} from '../../model/MySqlQueryResult';
+import { utf8Decode, utf8Encode } from '../../protocol/Charsets';
+import { Collation, ColumnType } from '../../protocol/Constants';
+import { PacketReader } from '../../protocol/PacketReader';
+import { mysqlUtf8BytesExpression } from '../../value/MySqlSqlHelpers';
+import { MySqlSessionOptions } from './MySqlSessionOptions';
 
 export const MYSQL_SESSION_CHARACTER_SET_SQL =
   'SET NAMES utf8mb4 COLLATE utf8mb4_general_ci';

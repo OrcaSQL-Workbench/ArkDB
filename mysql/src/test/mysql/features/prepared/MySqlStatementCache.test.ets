@@ -17,7 +17,7 @@ import {
 } from '../../../../main/ets/mysql/execution/MySqlCommandGate';
 import {
   MySqlSessionFingerprint
-} from '../../../../main/ets/mysql/execution/MySqlSessionInitialization';
+} from '../../../../main/ets/mysql/features/session/MySqlSessionInitialization';
 import {
   MySqlStatementCache, MySqlStatementCacheBorrow
 } from '../../../../main/ets/mysql/features/prepared/MySqlStatementCache';

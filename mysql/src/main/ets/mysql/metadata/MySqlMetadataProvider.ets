@@ -4,7 +4,6 @@ import {
 } from '@arkdb/core';
 import { utf8Decode } from '../protocol/Charsets';
 import { mysqlMetadataLiteral } from './MySqlMetadataSql';
-import { mysqlDatabaseForContext } from '../model/MySqlContext';
 import { MySqlMetadataProviderContract } from '../api/MySqlContracts';
 
 const SYSTEM_SCHEMAS: string[] = ['information_schema', 'mysql', 'performance_schema', 'sys'];
@@ -45,7 +44,7 @@ export class MySqlMetadataProvider implements MetadataProvider, MySqlMetadataPro
   }
 
   async listObjects(context: DatabaseContext, kind: DbObjectKind): Promise<DbObjectInfo[]> {
-    const result = await this.connection.query(objectQuery(kind, mysqlDatabaseForContext(context)));
+    const result = await this.connection.query(objectQuery(kind, metadataDatabaseForContext(context)));
     const objects: DbObjectInfo[] = [];
     for (const row of result.rows) {
       const object = new DbObjectInfo();
@@ -61,7 +60,7 @@ export class MySqlMetadataProvider implements MetadataProvider, MySqlMetadataPro
   }
 
   async listColumns(context: DatabaseContext, objectName: string): Promise<ColumnInfo[]> {
-    const schema = mysqlMetadataLiteral(mysqlDatabaseForContext(context));
+    const schema = mysqlMetadataLiteral(metadataDatabaseForContext(context));
     const table = mysqlMetadataLiteral(objectName);
     const sql = 'SELECT COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION, IS_NULLABLE ' +
       'FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ' + schema +
@@ -82,7 +81,7 @@ export class MySqlMetadataProvider implements MetadataProvider, MySqlMetadataPro
   }
 
   async listIndexes(context: DatabaseContext, objectName: string): Promise<IndexInfo[]> {
-    const schema = mysqlMetadataLiteral(mysqlDatabaseForContext(context));
+    const schema = mysqlMetadataLiteral(metadataDatabaseForContext(context));
     const table = mysqlMetadataLiteral(objectName);
     const sql = 'SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME ' +
       'FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ' + schema +
@@ -122,7 +121,7 @@ export class MySqlMetadataProvider implements MetadataProvider, MySqlMetadataPro
   }
 
   async listForeignKeys(context: DatabaseContext, objectName: string): Promise<ForeignKeyInfo[]> {
-    const schema = mysqlMetadataLiteral(mysqlDatabaseForContext(context));
+    const schema = mysqlMetadataLiteral(metadataDatabaseForContext(context));
     const table = mysqlMetadataLiteral(objectName);
     const sql = 'SELECT CONSTRAINT_NAME, ORDINAL_POSITION, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, ' +
       'REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE ' +
@@ -165,6 +164,17 @@ export class MySqlMetadataProvider implements MetadataProvider, MySqlMetadataPro
     }
     return foreignKeys;
   }
+}
+
+function metadataDatabaseForContext(context: DatabaseContext): string {
+  if (context.catalog.length > 0 && context.schema.length > 0 &&
+    context.catalog !== context.schema) {
+    throw ArkDbError.validation(
+      'MySQL catalog and schema identify the same database and must agree.');
+  }
+  const database = context.schema.length > 0 ? context.schema : context.catalog;
+  if (database.length === 0) throw ArkDbError.validation('A database name is required');
+  return database;
 }
 
 function objectQuery(kind: DbObjectKind, schema: string): string {

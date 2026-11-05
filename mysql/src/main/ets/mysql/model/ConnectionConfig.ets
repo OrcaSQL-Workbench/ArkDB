@@ -1,5 +1,5 @@
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
-import { MySqlSessionOptions } from './MySqlSessionOptions';
+import { MySqlSessionOptions } from '../features/session/MySqlSessionOptions';
 
 /** SSL/TLS posture for a connection. String values are the canonical wire-style ids. */
 export enum SslMode {

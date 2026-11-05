@@ -19,8 +19,8 @@ import {
   MySqlConnectionFeatures, MySqlSession
 } from './api/MySqlConnectionFeatures';
 import {
-  MySqlBatchExecutor, MySqlInsertRowsExecutor, MySqlLongDataExecutor,
-  MySqlNamedExecutor, MySqlProcedureCaller
+  MySqlBatchExecutor, MySqlInsertRowsExecutor, MySqlInsertRowsSnapshot,
+  MySqlLongDataExecutor, MySqlNamedExecutor, MySqlProcedureCaller
 } from './api/MySqlFeatureContracts';
 import {
   MySqlCursorExecutor
@@ -38,29 +38,40 @@ import { Command } from './protocol/Constants';
 import {
   buildComQuery, parseQueryStream, parseResultSet, TextRowDecoder
 } from './command/Query';
-import { mysqlContextPolicy, mysqlDatabaseForContext } from './model/MySqlContext';
-import { MySqlMetadataProvider } from './metadata/MySqlMetadataProvider';
-import { MySqlServerMetricsProvider } from './metrics/MySqlServerMetricsProvider';
+import {
+  mysqlContextPolicy, mysqlDatabaseForContext
+} from './features/session/MySqlContext';
+import {
+  MySqlMetadataProvider
+} from './features/metadata/MySqlMetadataProvider';
+import {
+  MySqlServerMetricsProvider
+} from './features/metrics/MySqlServerMetricsProvider';
 import {
   mysqlCleanupError as toCleanupError,
   mysqlOperationContains as operationContainsFailure,
   mysqlOperationFailure as operationFailure
 } from './execution/MySqlFailure';
-import { MySqlPreparedBatchExecutor } from './execution/MySqlBatchExecutor';
+import {
+  MySqlPreparedBatchExecutor
+} from './features/batch/MySqlBatchExecutor';
 import {
   MySqlPreparedNamedExecutor
-} from './execution/MySqlNamedExecutor';
+} from './features/named/MySqlNamedExecutor';
 import {
-  MySqlInsertRowsInput,
-  MySqlPreparedInsertRowsExecutor
-} from './execution/MySqlInsertRowsExecutor';
-import { MySqlPreparedProcedureCaller } from './execution/MySqlProcedureCaller';
+  MySqlPreparedInsertRowsExecutor, snapshotMySqlInsertRowsInput
+} from './features/insert/MySqlInsertRowsExecutor';
+import {
+  MySqlPreparedProcedureCaller
+} from './features/procedure/MySqlProcedureCaller';
 import { MySqlConnectionDeadlineExecutor } from './execution/MySqlDeadlineExecutor';
-import { MySqlConnectionSessionController } from './execution/MySqlSessionController';
+import {
+  MySqlConnectionSessionController
+} from './features/session/MySqlSessionController';
 import {
   MYSQL_COMMIT_NO_CHAIN_NO_RELEASE, MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE,
   MySqlConnectionTransactionRunner, MySqlTransactionRunnerHost
-} from './execution/MySqlTransactionRunner';
+} from './features/transaction/MySqlTransactionRunner';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from './execution/MySqlCommandGate';
@@ -69,8 +80,11 @@ import {
 } from './model/MySqlOperationError';
 import {
   MySqlBatchResult
-} from './model/MySqlBatch';
+} from './features/batch/MySqlBatch';
 import { MySqlDeadlineOptions } from './model/MySqlDeadlineOptions';
+import {
+  MySqlInsertRowsOptions
+} from './features/insert/MySqlInsertRows';
 import { MySqlParameter } from './features/prepared/MySqlParameter';
 import {
   MySqlPreparedExecutor as InternalPreparedExecutor
@@ -320,7 +334,9 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
     if (this.insertRows !== null) return this.insertRows;
     this.requireReady();
     this.requireExecutorCreationAllowed();
-    this.insertRows = new MySqlPreparedInsertRowsExecutor(this.preparedHost());
+    const host = this.preparedHost();
+    this.insertRows = new MySqlPreparedInsertRowsExecutor(
+      host, host);
     return this.insertRows;
   }
 
@@ -366,8 +382,13 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
       (scope: MySqlCommandScope, sql: string, options: QueryOptions,
         sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary> =>
         this.transactionQueryStreamOwned(scope, sql, options, sink),
+      (tableParts: string[], columns: string[],
+        rows: MySqlParameter[][],
+        options?: MySqlInsertRowsOptions): MySqlInsertRowsSnapshot =>
+        snapshotMySqlInsertRowsInput(
+          tableParts, columns, rows, options),
       (scope: MySqlCommandScope,
-        input: MySqlInsertRowsInput): Promise<MySqlBatchResult> =>
+        input: MySqlInsertRowsSnapshot): Promise<MySqlBatchResult> =>
         this.transactionInsertRowsOwned(scope, input));
   }
 
@@ -674,9 +695,11 @@ export class MySqlConnection implements MySqlDbConnection, DbConnectionHealth,
   }
 
   private transactionInsertRowsOwned(scope: MySqlCommandScope,
-    input: MySqlInsertRowsInput): Promise<MySqlBatchResult> {
+    input: MySqlInsertRowsSnapshot): Promise<MySqlBatchResult> {
+    const host = this.preparedHost();
     return new MySqlPreparedInsertRowsExecutor(
-      this.preparedHost(),
+      host,
+      host,
       (owned: MySqlCommandScope): Promise<void> =>
         this.settleTransactionPreparedExecution(owned))
       .executeInputOwned(scope, input);

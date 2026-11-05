@@ -9,7 +9,9 @@ import { MySqlServerInfo } from '../model/MySqlServerInfo';
 import {
   MySqlDatabaseSessionStatus, MySqlQueryExecutionSummary, MySqlQueryResultSink
 } from '../model/MySqlQueryStream';
-import { MySqlMetricsProvider } from '../metrics/MySqlMetricsProvider';
+import {
+  MySqlMetricsProvider
+} from '../features/metrics/MySqlMetricsProvider';
 import {
   MySqlConnectionFeatures, MySqlFeatureConnection
 } from './MySqlConnectionFeatures';

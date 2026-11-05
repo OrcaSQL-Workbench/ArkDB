@@ -3,22 +3,30 @@ import connectionDiagnosticsTest from './connection/ConnectionDiagnostics.test';
 import connectionOpeningTest from './connection/ConnectionOpening.test';
 import connectionStateTest from './connection/ConnectionState.test';
 import mySqlExecutionObserverTest from './connection/MySqlExecutionObserver.test';
-import mySqlSessionInitializationTest from './connection/MySqlSessionInitialization.test';
-import mySqlSessionResetTest from './connection/MySqlSessionReset.test';
+import mySqlSessionInitializationTest from
+  './features/session/MySqlSessionInitialization.test';
+import mySqlSessionResetTest from './features/session/MySqlSessionReset.test';
 import mySqlExecutionControllerTest from './execution/MySqlExecutionController.test';
 import mySqlCancellationTest from './execution/MySqlCancellation.test';
-import mySqlBatchExecutorTest from './execution/MySqlBatchExecutor.test';
+import mySqlBatchExecutorTest from
+  './features/batch/MySqlBatchExecutor.test';
 import mySqlCommandGateTest from './execution/MySqlCommandGate.test';
 import mySqlDeadlineExecutorTest from './execution/MySqlDeadlineExecutor.test';
 import mySqlFailureTest from './execution/MySqlFailure.test';
-import mySqlInsertRowsExecutorTest from './execution/MySqlInsertRowsExecutor.test';
+import mySqlInsertRowsExecutorTest from
+  './features/insert/MySqlInsertRowsExecutor.test';
 import mySqlStatementCacheTest from
   './features/prepared/MySqlStatementCache.test';
-import mySqlNamedExecutorTest from './execution/MySqlNamedExecutor.test';
-import mySqlProcedureCallerTest from './execution/MySqlProcedureCaller.test';
-import mySqlTransactionRunnerTest from './execution/MySqlTransactionRunner.test';
-import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';
-import mySqlMetadataProviderTest from './metadata/MySqlMetadataProvider.test';
+import mySqlNamedExecutorTest from
+  './features/named/MySqlNamedExecutor.test';
+import mySqlProcedureCallerTest from
+  './features/procedure/MySqlProcedureCaller.test';
+import mySqlTransactionRunnerTest from
+  './features/transaction/MySqlTransactionRunner.test';
+import mySqlServerMetricsProviderTest from
+  './features/metrics/MySqlServerMetricsProvider.test';
+import mySqlMetadataProviderTest from
+  './features/metadata/MySqlMetadataProvider.test';
 import queryStreamTest from './command/QueryStream.test';
 import longDataTest from './features/longdata/LongData.test';
 import multiStatementsTest from './command/MultiStatements.test';
@@ -30,7 +38,8 @@ import packetChannelTest from './protocol/PacketChannel.test';
 import packetCodecTest from './protocol/PacketCodec.test';
 import mySqlUploadPumpTest from './features/longdata/MySqlUploadPump.test';
 import mySqlSqlHelpersTest from './value/MySqlSqlHelpers.test';
-import sqlTemplateScannerTest from './value/SqlTemplateScanner.test';
+import sqlTemplateScannerTest from
+  './features/named/SqlTemplateScanner.test';
 import mySqlRowMapperTest from './value/MySqlRowMapper.test';
 import typeMapperTest from './value/TypeMapper.test';
 import binaryParameterEncoderTest from './value/BinaryParameterEncoder.test';

@@ -12,7 +12,7 @@ import {
 import {
   MySqlInsertRowsInput,
   MySqlPreparedInsertRowsExecutor, snapshotMySqlInsertRowsInput
-} from '../execution/MySqlInsertRowsExecutor';
+} from '../features/insert/MySqlInsertRowsExecutor';
 import {
   mysqlOperationFailure as operationFailure
 } from '../execution/MySqlFailure';
@@ -21,17 +21,21 @@ import {
 } from '../model/MySqlOperationError';
 import {
   MySqlBatchError, MySqlBatchOptions, MySqlBatchResult, validateMySqlBatchOptions
-} from '../model/MySqlBatch';
+} from '../features/batch/MySqlBatch';
 import { MySqlCursorOptions } from '../features/cursor/MySqlCursorOptions';
-import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
+import {
+  MySqlInsertRowsOptions
+} from '../features/insert/MySqlInsertRows';
 import {
   MySqlLongDataOptions, MySqlLongParameter
 } from '../features/longdata/MySqlLongDataOptions';
-import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
+import {
+  MySqlNamedParameter
+} from '../features/named/MySqlNamedParameter';
 import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {
   MySqlProcedureArgument, MySqlProcedureResult
-} from '../model/MySqlProcedure';
+} from '../features/procedure/MySqlProcedure';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import {
   MySqlQueryExecutionSummary, MySqlQueryResultSink

@@ -1,16 +1,22 @@
 import { QueryOptions } from '@arkdb/core';
 import { MySqlPreparedStatement } from './MySqlPreparedContracts';
-import { MySqlBatchOptions, MySqlBatchResult } from '../model/MySqlBatch';
+import {
+  MySqlBatchOptions, MySqlBatchResult
+} from '../features/batch/MySqlBatch';
 import { MySqlDeadlineOptions } from '../model/MySqlDeadlineOptions';
-import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
+import {
+  MySqlInsertRowsOptions
+} from '../features/insert/MySqlInsertRows';
 import {
   MySqlLongDataOptions, MySqlLongParameter
 } from '../features/longdata/MySqlLongDataOptions';
-import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
+import {
+  MySqlNamedParameter
+} from '../features/named/MySqlNamedParameter';
 import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {
   MySqlProcedureArgument, MySqlProcedureResult
-} from '../model/MySqlProcedure';
+} from '../features/procedure/MySqlProcedure';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import {
   MySqlQueryExecutionSummary, MySqlQueryResultSink
@@ -19,6 +25,11 @@ import {
 export interface MySqlBatchExecutor {
   execute(sql: string, rows: MySqlParameter[][],
     options?: MySqlBatchOptions): Promise<MySqlBatchResult>;
+}
+
+export interface MySqlBatchSupportContract {
+  itemOptions(options: QueryOptions, remainingBytes: number): QueryOptions;
+  resultBytes(result: MySqlQueryResult): number;
 }
 
 export interface MySqlDeadlineExecutor {
@@ -30,6 +41,18 @@ export interface MySqlDeadlineExecutor {
 export interface MySqlInsertRowsExecutor {
   execute(tableParts: string[], columns: string[], rows: MySqlParameter[][],
     options?: MySqlInsertRowsOptions): Promise<MySqlBatchResult>;
+}
+
+export interface MySqlInsertRowsGroupSnapshot {
+  readonly startIndex: number;
+  readonly rows: MySqlParameter[][];
+}
+
+export interface MySqlInsertRowsSnapshot {
+  readonly tableParts: string[];
+  readonly columns: string[];
+  readonly groups: MySqlInsertRowsGroupSnapshot[];
+  readonly options: MySqlInsertRowsOptions;
 }
 
 export interface MySqlLongDataExecutor {

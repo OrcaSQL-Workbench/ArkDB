@@ -5,13 +5,17 @@ import {
   MySqlConnectionFeatures
 } from '../api/MySqlConnectionFeatures';
 import {
-  MySqlTransactionRunnerHost
-} from '../execution/MySqlTransactionRunner';
+  MySqlInsertRowsSnapshot
+} from '../api/MySqlFeatureContracts';
 import {
-  MySqlInsertRowsInput
-} from '../execution/MySqlInsertRowsExecutor';
+  MySqlTransactionRunnerHost
+} from '../features/transaction/MySqlTransactionRunner';
 import { MySqlCommandScope } from '../execution/MySqlCommandGate';
-import { MySqlBatchResult } from '../model/MySqlBatch';
+import { MySqlBatchResult } from '../features/batch/MySqlBatch';
+import {
+  MySqlInsertRowsOptions
+} from '../features/insert/MySqlInsertRows';
+import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import {
   MySqlDatabaseSessionStatus, MySqlQueryExecutionSummary,
@@ -36,8 +40,11 @@ export class MySqlTransactionConnectionHost
   private executeStream: (scope: MySqlCommandScope, sql: string,
     options: QueryOptions,
     sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>;
+  private snapshotInsertRowsInput: (tableParts: string[],
+    columns: string[], rows: MySqlParameter[][],
+    options?: MySqlInsertRowsOptions) => MySqlInsertRowsSnapshot;
   private executeInsertRows: (scope: MySqlCommandScope,
-    input: MySqlInsertRowsInput) => Promise<MySqlBatchResult>;
+    input: MySqlInsertRowsSnapshot) => Promise<MySqlBatchResult>;
 
   constructor(readState: () => ConnectionState,
     readFeatures: () => MySqlConnectionFeatures,
@@ -53,8 +60,11 @@ export class MySqlTransactionConnectionHost
     executeStream: (scope: MySqlCommandScope, sql: string,
       options: QueryOptions,
       sink: MySqlQueryResultSink) => Promise<MySqlQueryExecutionSummary>,
+    snapshotInsertRowsInput: (tableParts: string[], columns: string[],
+      rows: MySqlParameter[][],
+      options?: MySqlInsertRowsOptions) => MySqlInsertRowsSnapshot,
     executeInsertRows: (scope: MySqlCommandScope,
-      input: MySqlInsertRowsInput) => Promise<MySqlBatchResult>) {
+      input: MySqlInsertRowsSnapshot) => Promise<MySqlBatchResult>) {
     this.readState = readState;
     this.readFeatures = readFeatures;
     this.readServerInfo = readServerInfo;
@@ -66,6 +76,7 @@ export class MySqlTransactionConnectionHost
     this.retire = retire;
     this.executeQuery = executeQuery;
     this.executeStream = executeStream;
+    this.snapshotInsertRowsInput = snapshotInsertRowsInput;
     this.executeInsertRows = executeInsertRows;
   }
 
@@ -104,8 +115,15 @@ export class MySqlTransactionConnectionHost
     return this.executeStream(scope, sql, options, sink);
   }
 
+  snapshotInsertRows(tableParts: string[], columns: string[],
+    rows: MySqlParameter[][],
+    options?: MySqlInsertRowsOptions): MySqlInsertRowsSnapshot {
+    return this.snapshotInsertRowsInput(
+      tableParts, columns, rows, options);
+  }
+
   insertRows(scope: MySqlCommandScope,
-    input: MySqlInsertRowsInput): Promise<MySqlBatchResult> {
+    input: MySqlInsertRowsSnapshot): Promise<MySqlBatchResult> {
     return this.executeInsertRows(scope, input);
   }
 }

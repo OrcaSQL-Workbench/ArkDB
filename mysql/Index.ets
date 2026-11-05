@@ -32,9 +32,9 @@ export type { MySqlValue as SqlValue } from './src/main/ets/mysql/model/MySqlQue
 
 export { ConnectionConfigField, ConnectionValidationIssue, SslMode, SslConfig, ConnectionConfig } from
   './src/main/ets/mysql/model/ConnectionConfig';
-export { MySqlSessionOptions } from './src/main/ets/mysql/model/MySqlSessionOptions';
+export { MySqlSessionOptions } from './src/main/ets/mysql/features/session/MySqlSessionOptions';
 export { MySqlTransactionIsolation, MySqlTransactionOptions } from
-  './src/main/ets/mysql/model/MySqlTransactionOptions';
+  './src/main/ets/mysql/features/transaction/MySqlTransactionOptions';
 export { MySqlDeadlineOptions } from './src/main/ets/mysql/model/MySqlDeadlineOptions';
 export type { MySqlByteSource } from './src/main/ets/mysql/features/longdata/MySqlByteSource';
 export {
@@ -67,33 +67,43 @@ export type {
 export type { MySqlTransactionRunner } from
   './src/main/ets/mysql/api/MySqlConnectionFeatures';
 export { MySqlBatchError, MySqlBatchOptions, MySqlBatchResult } from
-  './src/main/ets/mysql/model/MySqlBatch';
+  './src/main/ets/mysql/features/batch/MySqlBatch';
 export { MySqlCursorOptions } from './src/main/ets/mysql/features/cursor/MySqlCursorOptions';
 export { MySqlExecutionOutcome, MySqlOperationError } from
   './src/main/ets/mysql/model/MySqlOperationError';
-export { MySqlInsertRowsOptions } from './src/main/ets/mysql/model/MySqlInsertRows';
+export {
+  MySqlInsertRowsOptions
+} from './src/main/ets/mysql/features/insert/MySqlInsertRows';
 export { MySqlParameter, MySqlParameterType } from
   './src/main/ets/mysql/features/prepared/MySqlParameter';
 export type { MySqlParameterValue } from
   './src/main/ets/mysql/features/prepared/MySqlParameter';
-export { MySqlNamedParameter } from './src/main/ets/mysql/model/MySqlNamedParameter';
+export {
+  MySqlNamedParameter
+} from './src/main/ets/mysql/features/named/MySqlNamedParameter';
 export {
   MySqlProcedureArgument, MySqlParameterDirection, MySqlProcedureResult
-} from './src/main/ets/mysql/model/MySqlProcedure';
+} from './src/main/ets/mysql/features/procedure/MySqlProcedure';
 export { mapMySqlRows } from './src/main/ets/mysql/value/MySqlRowMapper';
 export { quoteMySqlIdentifier, mysqlPlaceholders } from './src/main/ets/mysql/value/MySqlSqlHelpers';
 export { MySqlConnection, createMySqlConnection } from './src/main/ets/mysql/MySqlConnection';
 export { MySqlDriverFactory } from './src/main/ets/mysql/driver/MySqlDriverFactory';
 export { MySqlExecutionController } from './src/main/ets/mysql/execution/MySqlExecutionController';
-export { MySqlMetadataProvider } from './src/main/ets/mysql/metadata/MySqlMetadataProvider';
-export { MySqlServerMetricsProvider } from './src/main/ets/mysql/metrics/MySqlServerMetricsProvider';
+export {
+  MySqlMetadataProvider
+} from './src/main/ets/mysql/features/metadata/MySqlMetadataProvider';
+export {
+  MySqlServerMetricsProvider
+} from './src/main/ets/mysql/features/metrics/MySqlServerMetricsProvider';
 export { MetricGauge, MetricCounter, ServerMetricsAvailability, ServerMetricsErrorKind,
   ReplicationIoRunning, ReplicationSqlRunning, ServerMetricsCategory,
   ServerOverviewSnapshot, ServerProcessInfo, ServerProcessSnapshot, InnoDbSnapshot,
   QueryActivitySnapshot, ReplicationChannelInfo, ReplicationSnapshot,
   MAX_METRICS_PROCESS_ROWS, MAX_METRICS_REPLICATION_CHANNELS, MAX_METRICS_UNSIGNED_64,
   MAX_PROCESS_COMMAND_UTF8_BYTES, MAX_PROCESS_STATE_UTF8_BYTES,
-  MAX_REPLICATION_CHANNEL_NAME_UTF8_BYTES } from './src/main/ets/mysql/metrics/MySqlServerMetrics';
-export type { ServerMetricsModel } from './src/main/ets/mysql/metrics/MySqlServerMetrics';
+  MAX_REPLICATION_CHANNEL_NAME_UTF8_BYTES } from
+  './src/main/ets/mysql/features/metrics/MySqlServerMetrics';
+export type { ServerMetricsModel } from
+  './src/main/ets/mysql/features/metrics/MySqlServerMetrics';
 export type { MySqlMetricsProvider, MySqlMetricsProvider as ServerMetricsProvider } from
-  './src/main/ets/mysql/metrics/MySqlMetricsProvider';
+  './src/main/ets/mysql/features/metrics/MySqlMetricsProvider';

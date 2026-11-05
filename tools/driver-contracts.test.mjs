@@ -203,7 +203,7 @@ test('shared contracts describe restricted prepared insert rows', async () => {
   const contracts = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
   const index = await readFile(join(ROOT, 'mysql', 'Index.ets'), 'utf8');
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
-    'execution', 'MySqlInsertRowsExecutor.ets'), 'utf8');
+    'features', 'insert', 'MySqlInsertRowsExecutor.ets'), 'utf8');
   assert.match(contracts, /\bmysqlFeatures\.insertRows\b/);
   assert.match(contracts, /\bMySqlInsertRowsOptions\b/);
   assert.match(contracts, /\bINSERT INTO \.\.\. VALUES\b/);
@@ -230,7 +230,7 @@ test('shared contracts describe restricted prepared insert rows', async () => {
 
 test('transaction runner observes the same promise returned to detached callers', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
-    'execution', 'MySqlTransactionRunner.ets'), 'utf8');
+    'features', 'transaction', 'MySqlTransactionRunner.ets'), 'utf8');
   const scopedStart = source.indexOf('class ScopedMySqlTransactionSession');
   const marker = 'runCommand<T>(operation: () => Promise<T>): Promise<T> {';
   const markerIndex = source.indexOf(marker, scopedStart);
@@ -261,7 +261,7 @@ test('transaction runner observes the same promise returned to detached callers'
 
 test('transaction-scoped insert rows returns the exact observed promise', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
-    'execution', 'MySqlTransactionRunner.ets'), 'utf8');
+    'features', 'transaction', 'MySqlTransactionRunner.ets'), 'utf8');
   const scopedStart = source.indexOf('class ScopedMySqlInsertRowsExecutor');
   const scopedEnd = source.indexOf('function snapshotTransactionOptions', scopedStart);
   assert.notEqual(scopedStart, -1);
@@ -278,7 +278,7 @@ test('transaction-scoped insert rows returns the exact observed promise', async 
 
 test('restricted insert preserves request validation before row snapshots', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
-    'execution', 'MySqlInsertRowsExecutor.ets'), 'utf8');
+    'features', 'insert', 'MySqlInsertRowsExecutor.ets'), 'utf8');
   const start = source.indexOf('export function snapshotMySqlInsertRowsInput');
   const end = source.indexOf('function requireIdentifierStrings', start);
   assert.notEqual(start, -1);

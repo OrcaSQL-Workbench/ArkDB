@@ -98,6 +98,7 @@ test('legacy custom connections and sessions remain valid feature-helper inputs'
     'api', 'MySqlConnectionFeatures.ets'), 'utf8');
   const contracts = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
     'api', 'MySqlContracts.ets'), 'utf8');
+  const documentation = await readFile(join(ROOT, 'docs', 'driver-contracts.md'), 'utf8');
   assert.match(features,
     /export interface MySqlFeatureConnection \{[\s\S]{0,100}readonly mysqlFeatures\?: MySqlConnectionFeatures/);
   assert.match(features, /export interface MySqlSession extends MySqlFeatureConnection/);
@@ -106,6 +107,8 @@ test('legacy custom connections and sessions remain valid feature-helper inputs'
     /export function requireMySqlFeatures\(connection: MySqlFeatureConnection\): MySqlConnectionFeatures;/);
   assert.match(contracts,
     /export function requireMySqlFeatures\(connection: MySqlDbConnection\): MySqlConnectionFeatures;/);
+  assert.match(documentation, /\bfeature-bearing sessions and legacy MySQL\s+connections\b/);
+  assert.doesNotMatch(documentation, /\bfeature-bearing sessions and actual core\s+connections\b/);
 
   const fixture = `
 interface CoreDbConnection {

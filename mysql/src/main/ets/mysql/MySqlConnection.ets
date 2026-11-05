@@ -55,7 +55,9 @@ import {
 import {
   MySqlPreparedInsertRowsExecutor, snapshotMySqlInsertRowsInput
 } from './execution/MySqlInsertRowsExecutor';
-import { MySqlPreparedProcedureCaller } from './execution/MySqlProcedureCaller';
+import {
+  MySqlPreparedProcedureCaller
+} from './features/procedure/MySqlProcedureCaller';
 import { MySqlConnectionDeadlineExecutor } from './execution/MySqlDeadlineExecutor';
 import {
   MySqlConnectionSessionController

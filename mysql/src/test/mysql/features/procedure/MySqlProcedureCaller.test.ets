@@ -2,25 +2,27 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, QueryOptions
 } from '@arkdb/core';
-import { MySqlProcedureCaller } from '../../../main/ets/mysql/api/MySqlFeatureContracts';
+import {
+  MySqlProcedureCaller
+} from '../../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   MySqlExecutionOutcome, MySqlOperationError
-} from '../../../main/ets/mysql/model/MySqlOperationError';
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlProcedureArgument, MySqlParameterDirection
-} from '../../../main/ets/mysql/model/MySqlProcedure';
+} from '../../../../main/ets/mysql/features/procedure/MySqlProcedure';
 import {
   MySqlParameter, MySqlParameterType
-} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
-import { MySqlValue } from '../../../main/ets/mysql/model/MySqlQueryResult';
+} from '../../../../main/ets/mysql/features/prepared/MySqlParameter';
+import { MySqlValue } from '../../../../main/ets/mysql/model/MySqlQueryResult';
 import {
   Capabilities, ColumnType, FieldFlag, StatusFlags
-} from '../../../main/ets/mysql/protocol/Constants';
-import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
-import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
+} from '../../../../main/ets/mysql/protocol/Constants';
+import { PacketReader } from '../../../../main/ets/mysql/protocol/PacketReader';
+import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
 import {
   PreparedExecutionFixture, columnPayload, hex, okPayload, preparedFailureOf, prepareResponse
-} from '../command/PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 export default function mySqlProcedureCallerTest(): void {
   describe('MySQL binary procedure caller', () => {

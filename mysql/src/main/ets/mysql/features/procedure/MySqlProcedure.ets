@@ -1,8 +1,10 @@
 import { ArkDbError } from '@arkdb/core';
 import {
   MySqlParameter, MySqlParameterType
-} from '../features/prepared/MySqlParameter';
-import { MySqlQueryResult, MySqlValue } from './MySqlQueryResult';
+} from '../prepared/MySqlParameter';
+import {
+  MySqlQueryResult, MySqlValue
+} from '../../model/MySqlQueryResult';
 
 export enum MySqlParameterDirection {
   In = 'in',

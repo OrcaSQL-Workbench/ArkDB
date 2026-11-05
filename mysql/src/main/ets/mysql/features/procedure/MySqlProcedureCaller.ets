@@ -1,34 +1,40 @@
 import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
-import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor';
+import { MySqlPreparedExecutorHost } from '../prepared/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedFailure
-} from '../features/prepared/PreparedStatement';
-import { MySqlResultTerminatorObservation } from '../command/ResultStream';
-import { MySqlProcedureCaller } from '../api/MySqlFeatureContracts';
-import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+} from '../prepared/PreparedStatement';
+import {
+  MySqlResultTerminatorObservation
+} from '../../command/ResultStream';
+import { MySqlProcedureCaller } from '../../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../../api/MySqlPreparedContracts';
 import {
   OwnedStatementLifecycle
-} from '../features/prepared/OwnedStatementLifecycle';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
+} from '../prepared/OwnedStatementLifecycle';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../model/MySqlOperationError';
 import {
   MySqlParameter, MySqlParameterType
-} from '../features/prepared/MySqlParameter';
+} from '../prepared/MySqlParameter';
 import {
   MySqlProcedureArgument, MySqlParameterDirection, MySqlProcedureResult
-} from '../model/MySqlProcedure';
+} from './MySqlProcedure';
 import {
   MySqlColumnDef, MySqlQueryResult, MySqlValue, mysqlColumnDecodesAsBytes
-} from '../model/MySqlQueryResult';
+} from '../../model/MySqlQueryResult';
 import {
   Capabilities, ColumnType, FieldFlag, StatusFlags
-} from '../protocol/Constants';
+} from '../../protocol/Constants';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../features/prepared/BinaryParameterEncoder';
+} from '../prepared/BinaryParameterEncoder';
 import {
   mysqlPlaceholders, quoteMySqlIdentifier
-} from '../value/MySqlSqlHelpers';
-import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
+} from '../../value/MySqlSqlHelpers';
+import {
+  MySqlCommandKind, MySqlCommandScope
+} from '../../execution/MySqlCommandGate';
 
 export class MySqlPreparedProcedureCaller implements MySqlProcedureCaller {
   private host: MySqlPreparedExecutorHost;

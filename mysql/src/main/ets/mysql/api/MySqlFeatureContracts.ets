@@ -12,7 +12,7 @@ import {
 import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {
   MySqlProcedureArgument, MySqlProcedureResult
-} from '../model/MySqlProcedure';
+} from '../features/procedure/MySqlProcedure';
 import { MySqlQueryResult } from '../model/MySqlQueryResult';
 import {
   MySqlQueryExecutionSummary, MySqlQueryResultSink

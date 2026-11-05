@@ -17,7 +17,8 @@ import mySqlStatementCacheTest from
   './features/prepared/MySqlStatementCache.test';
 import mySqlNamedExecutorTest from
   './features/named/MySqlNamedExecutor.test';
-import mySqlProcedureCallerTest from './execution/MySqlProcedureCaller.test';
+import mySqlProcedureCallerTest from
+  './features/procedure/MySqlProcedureCaller.test';
 import mySqlTransactionRunnerTest from
   './features/transaction/MySqlTransactionRunner.test';
 import mySqlServerMetricsProviderTest from './metrics/MySqlServerMetricsProvider.test';

@@ -409,6 +409,26 @@ test('R08 named feature owns its vertical production and test files', () => {
   ]);
 });
 
+test('R08 procedure feature owns its vertical production and test files', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  assertFeatureOwnership(graph, 'procedure', [
+    [
+      'mysql/src/main/ets/mysql/model/MySqlProcedure.ets',
+      'mysql/src/main/ets/mysql/features/procedure/MySqlProcedure.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/execution/MySqlProcedureCaller.ets',
+      'mysql/src/main/ets/mysql/features/procedure/MySqlProcedureCaller.ets'
+    ]
+  ], [
+    [
+      'mysql/src/test/mysql/execution/MySqlProcedureCaller.test.ets',
+      'mysql/src/test/mysql/features/procedure/MySqlProcedureCaller.test.ets'
+    ]
+  ]);
+});
+
 test('rejects stale cursor ownership paths', () => {
   const stalePaths = FORBIDDEN_MYSQL_CURSOR_PATHS.filter((path) =>
     existsSync(join(ROOT, ...path.split('/'))));

@@ -381,6 +381,34 @@ test('R08 transaction feature owns its vertical production and test files', () =
   ]);
 });
 
+test('R08 named feature owns its vertical production and test files', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  assertFeatureOwnership(graph, 'named', [
+    [
+      'mysql/src/main/ets/mysql/model/MySqlNamedParameter.ets',
+      'mysql/src/main/ets/mysql/features/named/MySqlNamedParameter.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/value/SqlTemplateScanner.ets',
+      'mysql/src/main/ets/mysql/features/named/SqlTemplateScanner.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/execution/MySqlNamedExecutor.ets',
+      'mysql/src/main/ets/mysql/features/named/MySqlNamedExecutor.ets'
+    ]
+  ], [
+    [
+      'mysql/src/test/mysql/value/SqlTemplateScanner.test.ets',
+      'mysql/src/test/mysql/features/named/SqlTemplateScanner.test.ets'
+    ],
+    [
+      'mysql/src/test/mysql/execution/MySqlNamedExecutor.test.ets',
+      'mysql/src/test/mysql/features/named/MySqlNamedExecutor.test.ets'
+    ]
+  ]);
+});
+
 test('rejects stale cursor ownership paths', () => {
   const stalePaths = FORBIDDEN_MYSQL_CURSOR_PATHS.filter((path) =>
     existsSync(join(ROOT, ...path.split('/'))));

@@ -1,27 +1,31 @@
 import { ArkDbError, QueryOptions, validateQueryOptions } from '@arkdb/core';
-import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor';
+import { MySqlPreparedExecutorHost } from '../prepared/PreparedExecutor';
 import {
   MySqlPreparedSession, preparedFailure
-} from '../features/prepared/PreparedStatement';
-import { MySqlNamedExecutor } from '../api/MySqlFeatureContracts';
-import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
+} from '../prepared/PreparedStatement';
+import { MySqlNamedExecutor } from '../../api/MySqlFeatureContracts';
+import { MySqlPreparedStatement } from '../../api/MySqlPreparedContracts';
 import {
   OwnedStatementLifecycle
-} from '../features/prepared/OwnedStatementLifecycle';
-import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
-import { MySqlExecutionOutcome, MySqlOperationError } from '../model/MySqlOperationError';
-import { MySqlParameter } from '../features/prepared/MySqlParameter';
-import { MySqlQueryResult } from '../model/MySqlQueryResult';
+} from '../prepared/OwnedStatementLifecycle';
+import { MySqlNamedParameter } from './MySqlNamedParameter';
+import {
+  MySqlExecutionOutcome, MySqlOperationError
+} from '../../model/MySqlOperationError';
+import { MySqlParameter } from '../prepared/MySqlParameter';
+import { MySqlQueryResult } from '../../model/MySqlQueryResult';
 import {
   MySqlQueryExecutionSummary, MySqlQueryResultSink
-} from '../model/MySqlQueryStream';
+} from '../../model/MySqlQueryStream';
 import {
   EncodedBinaryParameters, encodeBinaryParameters
-} from '../features/prepared/BinaryParameterEncoder';
+} from '../prepared/BinaryParameterEncoder';
 import {
   CompiledSqlTemplate, SqlTemplateScanner
-} from '../value/SqlTemplateScanner';
-import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
+} from './SqlTemplateScanner';
+import {
+  MySqlCommandKind, MySqlCommandScope
+} from '../../execution/MySqlCommandGate';
 
 export interface MySqlNamedExecutorHost extends MySqlPreparedExecutorHost {
   readSessionSqlMode(scope: MySqlCommandScope): Promise<string>;

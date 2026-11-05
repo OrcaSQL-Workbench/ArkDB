@@ -27,7 +27,9 @@ import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
 import {
   MySqlLongDataOptions, MySqlLongParameter
 } from '../features/longdata/MySqlLongDataOptions';
-import { MySqlNamedParameter } from '../model/MySqlNamedParameter';
+import {
+  MySqlNamedParameter
+} from '../features/named/MySqlNamedParameter';
 import { MySqlParameter } from '../features/prepared/MySqlParameter';
 import {
   MySqlProcedureArgument, MySqlProcedureResult

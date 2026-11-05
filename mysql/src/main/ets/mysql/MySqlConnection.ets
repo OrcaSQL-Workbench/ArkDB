@@ -51,7 +51,7 @@ import {
 import { MySqlPreparedBatchExecutor } from './execution/MySqlBatchExecutor';
 import {
   MySqlPreparedNamedExecutor
-} from './execution/MySqlNamedExecutor';
+} from './features/named/MySqlNamedExecutor';
 import {
   MySqlPreparedInsertRowsExecutor, snapshotMySqlInsertRowsInput
 } from './execution/MySqlInsertRowsExecutor';

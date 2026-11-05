@@ -76,7 +76,9 @@ export { MySqlParameter, MySqlParameterType } from
   './src/main/ets/mysql/features/prepared/MySqlParameter';
 export type { MySqlParameterValue } from
   './src/main/ets/mysql/features/prepared/MySqlParameter';
-export { MySqlNamedParameter } from './src/main/ets/mysql/model/MySqlNamedParameter';
+export {
+  MySqlNamedParameter
+} from './src/main/ets/mysql/features/named/MySqlNamedParameter';
 export {
   MySqlProcedureArgument, MySqlParameterDirection, MySqlProcedureResult
 } from './src/main/ets/mysql/model/MySqlProcedure';

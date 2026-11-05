@@ -1,6 +1,8 @@
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import { describe, expect, it } from '@ohos/hypium';
-import { SqlTemplateScanner } from '../../../main/ets/mysql/value/SqlTemplateScanner';
+import {
+  SqlTemplateScanner
+} from '../../../../main/ets/mysql/features/named/SqlTemplateScanner';
 
 export default function sqlTemplateScannerTest(): void {
   describe('MySQL SQL template scanner', () => {

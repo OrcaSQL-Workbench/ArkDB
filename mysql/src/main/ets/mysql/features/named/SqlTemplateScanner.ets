@@ -1,7 +1,7 @@
 import { ArkDbError } from '@arkdb/core';
 import {
   isNamedParameterPart, isNamedParameterStart
-} from '../model/MySqlNamedParameter';
+} from './MySqlNamedParameter';
 
 export class CompiledSqlTemplate {
   readonly sql: string;

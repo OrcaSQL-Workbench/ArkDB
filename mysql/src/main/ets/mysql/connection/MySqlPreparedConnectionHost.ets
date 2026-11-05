@@ -10,7 +10,7 @@ import {
 } from '../command/ResultStream';
 import {
   MySqlNamedExecutorHost
-} from '../execution/MySqlNamedExecutor';
+} from '../features/named/MySqlNamedExecutor';
 import {
   MySqlCommandGate, MySqlCommandKind, MySqlCommandPhase, MySqlCommandScope
 } from '../execution/MySqlCommandGate';

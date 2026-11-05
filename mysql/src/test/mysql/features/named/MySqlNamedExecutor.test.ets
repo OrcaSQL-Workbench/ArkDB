@@ -2,21 +2,27 @@ import {
   ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryOptions, QueryResult, ServerInfo
 } from '@arkdb/core';
 import { describe, expect, it } from '@ohos/hypium';
-import { MySqlNamedExecutor } from '../../../main/ets/mysql/api/MySqlFeatureContracts';
-import { MySqlNamedParameter } from '../../../main/ets/mysql/model/MySqlNamedParameter';
+import {
+  MySqlNamedExecutor
+} from '../../../../main/ets/mysql/api/MySqlFeatureContracts';
+import {
+  MySqlNamedParameter
+} from '../../../../main/ets/mysql/features/named/MySqlNamedParameter';
 import { MySqlExecutionOutcome, MySqlOperationError } from
-  '../../../main/ets/mysql/model/MySqlOperationError';
+  '../../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlParameter, MySqlParameterType, MySqlParameterValue
-} from '../../../main/ets/mysql/features/prepared/MySqlParameter';
-import { MySqlQueryResultSummary } from '../../../main/ets/mysql/model/MySqlQueryStream';
-import { PacketReader } from '../../../main/ets/mysql/protocol/PacketReader';
-import { PacketWriter } from '../../../main/ets/mysql/protocol/PacketWriter';
-import { Capabilities } from '../../../main/ets/mysql/protocol/Constants';
+} from '../../../../main/ets/mysql/features/prepared/MySqlParameter';
+import {
+  MySqlQueryResultSummary
+} from '../../../../main/ets/mysql/model/MySqlQueryStream';
+import { PacketReader } from '../../../../main/ets/mysql/protocol/PacketReader';
+import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
+import { Capabilities } from '../../../../main/ets/mysql/protocol/Constants';
 import {
   PreparedExecutionFixture, PreparedGate, PreparedRecordingSink, binaryIntResult, columnPayload,
   eofPayload, flushPrepared, hex, okPayload, prepareResponse, preparedFailureOf
-} from '../command/PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 class HoldingEndSink extends PreparedRecordingSink {
   readonly entered: PreparedGate = new PreparedGate();

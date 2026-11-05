@@ -15,7 +15,8 @@ import mySqlFailureTest from './execution/MySqlFailure.test';
 import mySqlInsertRowsExecutorTest from './execution/MySqlInsertRowsExecutor.test';
 import mySqlStatementCacheTest from
   './features/prepared/MySqlStatementCache.test';
-import mySqlNamedExecutorTest from './execution/MySqlNamedExecutor.test';
+import mySqlNamedExecutorTest from
+  './features/named/MySqlNamedExecutor.test';
 import mySqlProcedureCallerTest from './execution/MySqlProcedureCaller.test';
 import mySqlTransactionRunnerTest from
   './features/transaction/MySqlTransactionRunner.test';
@@ -32,7 +33,8 @@ import packetChannelTest from './protocol/PacketChannel.test';
 import packetCodecTest from './protocol/PacketCodec.test';
 import mySqlUploadPumpTest from './features/longdata/MySqlUploadPump.test';
 import mySqlSqlHelpersTest from './value/MySqlSqlHelpers.test';
-import sqlTemplateScannerTest from './value/SqlTemplateScanner.test';
+import sqlTemplateScannerTest from
+  './features/named/SqlTemplateScanner.test';
 import mySqlRowMapperTest from './value/MySqlRowMapper.test';
 import typeMapperTest from './value/TypeMapper.test';
 import binaryParameterEncoderTest from './value/BinaryParameterEncoder.test';

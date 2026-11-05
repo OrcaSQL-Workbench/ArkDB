@@ -5,17 +5,140 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
 import JSON5 from 'json5';
-import { checkPackage, exportedNames, importSpecifiers, ROOT } from './check-package.mjs';
+import {
+  checkArkTsTests, checkPackage, exportedNames, importSpecifiers, ROOT
+} from './check-package.mjs';
 
 test('discovers the current standalone interface and registered suites', () => {
   const result = checkPackage();
   assert.equal(result.manifest.name, '@arkdb/mysql');
-  assert.ok(result.testSuites > 0);
+  assert.equal(result.testSuites, 58);
+  assert.equal(result.testCases, 815);
   assert.ok(result.sourceFiles > 0);
+  assert.deepEqual(result.testOwners, [
+    'auth',
+    'command',
+    'connection',
+    'diagnostics',
+    'execution',
+    'features/batch',
+    'features/cursor',
+    'features/insert',
+    'features/longdata',
+    'features/metadata',
+    'features/metrics',
+    'features/named',
+    'features/prepared',
+    'features/procedure',
+    'features/session',
+    'features/transaction',
+    'model',
+    'protocol',
+    'public',
+    'transport',
+    'value'
+  ]);
   assert.deepEqual(result.exports, exportedNames(readFileSync(join(ROOT, 'mysql', 'Index.ets'), 'utf8')));
   assert.ok(result.exports.includes('ArkDbError'));
   assert.ok(result.exports.includes('ArkDbErrorKind'));
   assert.ok(!result.exports.some((name) => name.startsWith('OrcaSql')));
+});
+
+test('preserves exact core, consumer and acceptance suite registrations', () => {
+  const core = checkPackage(ROOT, 'core');
+  const consumer = checkArkTsTests(
+    ROOT, 'examples/mysql-client/entry/src/test', 'mysql-client');
+  const acceptance = checkArkTsTests(
+    ROOT, 'examples/mysql-device-acceptance/entry/src/test',
+    'mysql-device-acceptance');
+
+  assert.deepEqual(
+    [core.testSuites, core.testCases, core.testOwners],
+    [1, 13, ['.']]
+  );
+  assert.deepEqual(
+    [consumer.testSuites, consumer.testCases, consumer.testOwners],
+    [3, 20, ['consumer', 'sample']]
+  );
+  assert.deepEqual(
+    [acceptance.testSuites, acceptance.testCases, acceptance.testOwners],
+    [3, 14, ['acceptance', 'evidence']]
+  );
+});
+
+test('rejects duplicate executable suite registrations', async (t) => {
+  const root = await workspaceFixture(t);
+  const list = join(root, 'mysql', 'src', 'test', 'List.test.ets');
+  await writeFile(list,
+    "import first from './public/PublicInterface.test';\n" +
+    "import duplicate from './public/PublicInterface.test';\n" +
+    'export default function tests(): void { first(); duplicate(); }\n');
+
+  assert.throws(() => checkPackage(root),
+    /registered more than once.*PublicInterface\.test\.ets/i);
+});
+
+test('rejects shared fixture exports from executable suites', async (t) => {
+  const root = await workspaceFixture(t);
+  const suite = join(root, 'mysql', 'src', 'test', 'Probe.test.ets');
+  await writeFile(suite,
+    'export class SharedFixture {}\n' +
+    'export default function suite(): void {}\n');
+
+  assert.throws(() => checkPackage(root), /Executable ArkTS suite must not export shared fixtures/i);
+});
+
+test('allows an executable suite exported through a default assignment', async (t) => {
+  const root = await workspaceFixture(t);
+  const suite = join(root, 'mysql', 'src', 'test', 'public',
+    'PublicInterface.test.ets');
+  await writeFile(suite,
+    'function publicInterfaceTest(): void {}\n' +
+    'export default publicInterfaceTest;\n');
+
+  assert.doesNotThrow(() => checkPackage(root));
+});
+
+test('rejects an executable suite exported through export equals', async (t) => {
+  const root = await workspaceFixture(t);
+  const suite = join(root, 'mysql', 'src', 'test', 'public',
+    'PublicInterface.test.ets');
+  await writeFile(suite,
+    'function publicInterfaceTest(): void {}\n' +
+    'export = publicInterfaceTest;\n');
+
+  assert.throws(() => checkPackage(root),
+    /Executable ArkTS suite must not export shared fixtures/i);
+});
+
+test('requires support sources to use explicit fixture ownership', async (t) => {
+  const root = await workspaceFixture(t);
+  await writeFile(join(root, 'mysql', 'src', 'test', 'SharedFixture.ets'),
+    'export class SharedFixture {}\n');
+
+  assert.throws(() => checkPackage(root), /Test support source must live under a fixtures directory/i);
+});
+
+test('rejects stale relative imports in ArkTS test sources', async (t) => {
+  const root = await workspaceFixture(t);
+  const suite = join(root, 'mysql', 'src', 'test', 'public',
+    'PublicInterface.test.ets');
+  await writeFile(suite, readFileSync(suite, 'utf8') +
+    "\nimport { MissingFixture } from '../fixtures/MissingFixture';\n");
+
+  assert.throws(() => checkPackage(root), /Unresolved ArkTS test import.*MissingFixture/i);
+});
+
+test('rejects a directory as a resolved ArkTS test import', async (t) => {
+  const root = await workspaceFixture(t);
+  const fixtures = join(root, 'mysql', 'src', 'test', 'fixtures');
+  await mkdir(fixtures, { recursive: true });
+  const suite = join(root, 'mysql', 'src', 'test', 'public',
+    'PublicInterface.test.ets');
+  await writeFile(suite, readFileSync(suite, 'utf8') +
+    "\nimport { MissingFixture } from '../fixtures';\n");
+
+  assert.throws(() => checkPackage(root), /Unresolved ArkTS test import.*fixtures/i);
 });
 
 test('allows additional registered modules without freezing the workspace layout', async (t) => {

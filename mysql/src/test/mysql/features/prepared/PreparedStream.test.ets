@@ -14,7 +14,7 @@ import { PacketWriter } from '../../../../main/ets/mysql/protocol/PacketWriter';
 import {
   PreparedExecutionFixture, PreparedGate, PreparedRecordingSink, binaryIntResult, columnPayload,
   eofPayload, flushPrepared, hex, okPayload, preparedFailureOf, prepareResponse
-} from '../../command/PreparedExecutionFixture';
+} from './fixtures/PreparedExecutionFixture';
 
 class FinalAcknowledgementSink extends PreparedRecordingSink {
   private acknowledge: (() => void) | null = null;

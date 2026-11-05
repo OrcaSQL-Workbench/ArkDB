@@ -25,7 +25,7 @@ import { MockSocket, socket } from '../../../../mock/NetworkKit.mock';
 import {
   PreparedGate, PreparedSocket, columnPayload, eofPayload, errorPayload, framePacket, handshake,
   okPayload, preparedFailureOf
-} from '../../command/PreparedExecutionFixture';
+} from '../prepared/fixtures/PreparedExecutionFixture';
 
 interface SessionSentPacket {
   data: ArrayBuffer;

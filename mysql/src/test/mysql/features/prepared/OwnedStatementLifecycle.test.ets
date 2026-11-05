@@ -16,10 +16,10 @@ import {
 } from '../../../../main/ets/mysql/model/MySqlOperationError';
 import { Capabilities } from '../../../../main/ets/mysql/protocol/Constants';
 import { PacketChannel } from '../../../../main/ets/mysql/protocol/PacketChannel';
-import { PacketTransportFixture } from '../../protocol/PacketTransportFixture';
+import { PacketTransportFixture } from '../../protocol/fixtures/PacketTransportFixture';
 import {
   framePacket, prepareResponse
-} from '../../command/PreparedExecutionFixture';
+} from './fixtures/PreparedExecutionFixture';
 
 class OwnedLifecycleTransport extends PacketTransportFixture {
   failWriteAt: number = 0;

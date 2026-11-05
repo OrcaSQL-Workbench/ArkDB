@@ -1,9 +1,9 @@
-import sampleRunnerTest from './SampleRunner.test';
-import legacyPublicInterfaceTest from './LegacyPublicInterface.test';
-import preparedPublicInterfaceTest from './PreparedPublicInterface.test';
+import legacyPublicInterfaceTest from './consumer/LegacyPublicInterface.test';
+import preparedPublicInterfaceTest from './consumer/PreparedPublicInterface.test';
+import sampleRunnerTest from './sample/SampleRunner.test';
 
 export default function testsuite(): void {
-  sampleRunnerTest();
   legacyPublicInterfaceTest();
   preparedPublicInterfaceTest();
+  sampleRunnerTest();
 }

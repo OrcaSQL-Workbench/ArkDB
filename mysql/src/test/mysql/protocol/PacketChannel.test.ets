@@ -1,7 +1,7 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { Logger, LogLevel, LogSink, ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import { MAX_LOGICAL_PACKET_BYTES, PacketChannel } from '../../../main/ets/mysql/protocol/PacketChannel';
-import { PacketTransportFixture } from './PacketTransportFixture';
+import { PacketTransportFixture } from './fixtures/PacketTransportFixture';
 import { TcpTransport } from '../../../main/ets/mysql/transport/TcpTransport';
 import { socket } from '../../../mock/NetworkKit.mock';
 

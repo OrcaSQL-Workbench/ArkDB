@@ -17,7 +17,7 @@ import { socket } from '../../../../mock/NetworkKit.mock';
 import {
   PreparedSocket, columnPayload, eofPayload, errorPayload, flushPrepared, framePacket,
   handshake, okPayload, prepareResponse, preparedFailureOf
-} from '../../command/PreparedExecutionFixture';
+} from '../prepared/fixtures/PreparedExecutionFixture';
 import {
   MySqlCommandScope
 } from '../../../../main/ets/mysql/execution/MySqlCommandGate';

@@ -109,9 +109,9 @@ be replayed.
 | `entry/src/main/ets/sample/DeviceReceiptSigner.ets` | Sign the canonical payload with the one-time Ed25519 key |
 | `entry/src/main/ets/sample/DeviceReceiptClipboard.ets` | Copy the exact signed envelope without reformatting |
 | `device-acceptance-cases.json` | Canonical ordered cases and runtime profile included in the acceptance fingerprint |
-| `entry/src/test/DeviceAcceptanceRunner.test.ets` | Synthetic fixed-case, failure, unbound, and privacy behavior |
-| `entry/src/test/DeviceReceiptSigner.test.ets` | Exact UTF-8 view and Ed25519 vector behavior |
-| `entry/src/test/DeviceReceiptClipboard.test.ets` | Exact transfer and bounded-input rejection |
+| `entry/src/test/acceptance/DeviceAcceptanceRunner.test.ets` | Synthetic fixed-case, failure, unbound, and privacy behavior |
+| `entry/src/test/evidence/DeviceReceiptSigner.test.ets` | Exact UTF-8 view and Ed25519 vector behavior |
+| `entry/src/test/evidence/DeviceReceiptClipboard.test.ets` | Exact transfer and bounded-input rejection |
 
 The repository does not claim hardware remote attestation, direct read-only
 privilege verification, or production certification. Physical-device,

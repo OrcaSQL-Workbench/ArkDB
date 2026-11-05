@@ -462,8 +462,9 @@ test('adding an independently typed adapter changes registration only, not MySQL
   for (const name of ['LICENSE', 'README.md', 'README.OpenSource', 'CHANGELOG.md']) {
     await cp(join(root, 'core', name), join(directory, name));
   }
-  const probe = (await readFile(join(root, 'core', 'src', 'test', 'ReferenceAdapter.ets'), 'utf8'))
-    .replace("from '../../Index'", "from '@arkdb/core'");
+  const probe = (await readFile(
+    join(root, 'core', 'src', 'test', 'fixtures', 'ReferenceAdapter.ets'), 'utf8'))
+    .replace("from '../../../Index'", "from '@arkdb/core'");
   await writeFile(join(directory, 'src', 'main', 'ets', 'Probe.ets'), probe);
   await writeFile(join(directory, 'Index.ets'), "export { ProbeFactory, ProbeOptions } from './src/main/ets/Probe';\n");
   await writeFile(join(directory, 'src', 'main', 'module.json5'), JSON.stringify({

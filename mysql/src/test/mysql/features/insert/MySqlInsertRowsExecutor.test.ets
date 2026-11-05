@@ -24,7 +24,7 @@ import { utf8Decode } from '../../../../main/ets/mysql/protocol/Charsets';
 import {
   PreparedExecutionFixture, PreparedGate, binaryIntResult, errorPayload,
   hex, okPayload, prepareResponse
-} from '../../command/PreparedExecutionFixture';
+} from '../prepared/fixtures/PreparedExecutionFixture';
 
 export default function mySqlInsertRowsExecutorTest(): void {
   describe('MySQL restricted INSERT rows', () => {

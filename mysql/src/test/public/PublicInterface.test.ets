@@ -26,7 +26,7 @@ import {
 import {
   PreparedSocket, PreparedRecordingSink, prepareResponse, binaryIntResult, columnPayload,
   eofPayload, okPayload, framePacket, handshake, flushPrepared
-} from '../mysql/command/PreparedExecutionFixture';
+} from '../mysql/features/prepared/fixtures/PreparedExecutionFixture';
 import { Capabilities, ColumnType } from '../../main/ets/mysql/protocol/Constants';
 import { PacketWriter } from '../../main/ets/mysql/protocol/PacketWriter';
 import { socket } from '../../mock/NetworkKit.mock';

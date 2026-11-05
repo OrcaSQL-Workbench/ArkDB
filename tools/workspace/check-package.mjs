@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
 import { dependencyClosure, discoverPackages, driverArgument, readJson5, resolvePackage, ROOT } from './driver-packages.mjs';
@@ -47,7 +47,8 @@ function testSyntax(file, source) {
 }
 
 function exportedFixtureStatement(statement) {
-  if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)) return true;
+  if (ts.isExportDeclaration(statement)) return true;
+  if (ts.isExportAssignment(statement)) return statement.isExportEquals;
   const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) ?? [] : [];
   const exported = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
   const defaulted = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword);
@@ -141,7 +142,8 @@ function checkTestSources(root, id, testRoot) {
       if (!specifier.startsWith('.')) continue;
       const base = resolve(dirname(file), specifier);
       const candidates = [base, `${base}.ets`, join(base, 'Index.ets')];
-      if (!candidates.some((candidate) => existsSync(candidate))) {
+      if (!candidates.some((candidate) =>
+        existsSync(candidate) && statSync(candidate).isFile())) {
         throw new Error(`Unresolved ArkTS test import in ${relative(root, file)}: ${specifier}`);
       }
     }

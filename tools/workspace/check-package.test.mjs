@@ -88,6 +88,29 @@ test('rejects shared fixture exports from executable suites', async (t) => {
   assert.throws(() => checkPackage(root), /Executable ArkTS suite must not export shared fixtures/i);
 });
 
+test('allows an executable suite exported through a default assignment', async (t) => {
+  const root = await workspaceFixture(t);
+  const suite = join(root, 'mysql', 'src', 'test', 'public',
+    'PublicInterface.test.ets');
+  await writeFile(suite,
+    'function publicInterfaceTest(): void {}\n' +
+    'export default publicInterfaceTest;\n');
+
+  assert.doesNotThrow(() => checkPackage(root));
+});
+
+test('rejects an executable suite exported through export equals', async (t) => {
+  const root = await workspaceFixture(t);
+  const suite = join(root, 'mysql', 'src', 'test', 'public',
+    'PublicInterface.test.ets');
+  await writeFile(suite,
+    'function publicInterfaceTest(): void {}\n' +
+    'export = publicInterfaceTest;\n');
+
+  assert.throws(() => checkPackage(root),
+    /Executable ArkTS suite must not export shared fixtures/i);
+});
+
 test('requires support sources to use explicit fixture ownership', async (t) => {
   const root = await workspaceFixture(t);
   await writeFile(join(root, 'mysql', 'src', 'test', 'SharedFixture.ets'),
@@ -104,6 +127,18 @@ test('rejects stale relative imports in ArkTS test sources', async (t) => {
     "\nimport { MissingFixture } from '../fixtures/MissingFixture';\n");
 
   assert.throws(() => checkPackage(root), /Unresolved ArkTS test import.*MissingFixture/i);
+});
+
+test('rejects a directory as a resolved ArkTS test import', async (t) => {
+  const root = await workspaceFixture(t);
+  const fixtures = join(root, 'mysql', 'src', 'test', 'fixtures');
+  await mkdir(fixtures, { recursive: true });
+  const suite = join(root, 'mysql', 'src', 'test', 'public',
+    'PublicInterface.test.ets');
+  await writeFile(suite, readFileSync(suite, 'utf8') +
+    "\nimport { MissingFixture } from '../fixtures';\n");
+
+  assert.throws(() => checkPackage(root), /Unresolved ArkTS test import.*fixtures/i);
 });
 
 test('allows additional registered modules without freezing the workspace layout', async (t) => {

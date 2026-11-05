@@ -230,7 +230,7 @@ test('shared contracts describe restricted prepared insert rows', async () => {
 
 test('transaction runner observes the same promise returned to detached callers', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
-    'execution', 'MySqlTransactionRunner.ets'), 'utf8');
+    'features', 'transaction', 'MySqlTransactionRunner.ets'), 'utf8');
   const scopedStart = source.indexOf('class ScopedMySqlTransactionSession');
   const marker = 'runCommand<T>(operation: () => Promise<T>): Promise<T> {';
   const markerIndex = source.indexOf(marker, scopedStart);
@@ -261,7 +261,7 @@ test('transaction runner observes the same promise returned to detached callers'
 
 test('transaction-scoped insert rows returns the exact observed promise', async () => {
   const source = await readFile(join(ROOT, 'mysql', 'src', 'main', 'ets', 'mysql',
-    'execution', 'MySqlTransactionRunner.ets'), 'utf8');
+    'features', 'transaction', 'MySqlTransactionRunner.ets'), 'utf8');
   const scopedStart = source.indexOf('class ScopedMySqlInsertRowsExecutor');
   const scopedEnd = source.indexOf('function snapshotTransactionOptions', scopedStart);
   assert.notEqual(scopedStart, -1);

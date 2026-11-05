@@ -3,31 +3,35 @@ import { errorManager } from '@kit.AbilityKit';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, DbConnection, QueryResult, ServerInfo
 } from '@arkdb/core';
-import { MySqlSession } from '../../../main/ets/mysql/api/MySqlSession';
+import { MySqlSession } from '../../../../main/ets/mysql/api/MySqlSession';
 import {
   MySqlInsertRowsExecutor
-} from '../../../main/ets/mysql/api/MySqlFeatureContracts';
+} from '../../../../main/ets/mysql/api/MySqlFeatureContracts';
 import {
   MySqlInsertRowsOptions
-} from '../../../main/ets/mysql/model/MySqlInsertRows';
+} from '../../../../main/ets/mysql/model/MySqlInsertRows';
 import { MySqlParameter, MySqlParameterType } from
-  '../../../main/ets/mysql/features/prepared/MySqlParameter';
+  '../../../../main/ets/mysql/features/prepared/MySqlParameter';
 import {
   MySqlExecutionOutcome, MySqlOperationError
-} from '../../../main/ets/mysql/model/MySqlOperationError';
+} from '../../../../main/ets/mysql/model/MySqlOperationError';
 import {
   MySqlBatchError, MySqlBatchResult
-} from '../../../main/ets/mysql/model/MySqlBatch';
-import { MySqlQueryResult } from '../../../main/ets/mysql/model/MySqlQueryResult';
+} from '../../../../main/ets/mysql/model/MySqlBatch';
+import {
+  MySqlQueryResult
+} from '../../../../main/ets/mysql/model/MySqlQueryResult';
 import {
   MySqlTransactionIsolation, MySqlTransactionOptions
-} from '../../../main/ets/mysql/model/MySqlTransactionOptions';
-import { Capabilities, StatusFlags } from '../../../main/ets/mysql/protocol/Constants';
-import { utf8Decode } from '../../../main/ets/mysql/protocol/Charsets';
+} from '../../../../main/ets/mysql/features/transaction/MySqlTransactionOptions';
+import {
+  Capabilities, StatusFlags
+} from '../../../../main/ets/mysql/protocol/Constants';
+import { utf8Decode } from '../../../../main/ets/mysql/protocol/Charsets';
 import {
   PreparedExecutionFixture, PreparedGate, errorPayload, flushPrepared, okPayload,
   prepareResponse
-} from '../command/PreparedExecutionFixture';
+} from '../../command/PreparedExecutionFixture';
 
 class TransactionOptionsFixture extends MySqlTransactionOptions {}
 

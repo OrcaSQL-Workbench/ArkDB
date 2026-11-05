@@ -32,6 +32,18 @@ export interface MySqlInsertRowsExecutor {
     options?: MySqlInsertRowsOptions): Promise<MySqlBatchResult>;
 }
 
+export interface MySqlInsertRowsGroupSnapshot {
+  readonly startIndex: number;
+  readonly rows: MySqlParameter[][];
+}
+
+export interface MySqlInsertRowsSnapshot {
+  readonly tableParts: string[];
+  readonly columns: string[];
+  readonly groups: MySqlInsertRowsGroupSnapshot[];
+  readonly options: MySqlInsertRowsOptions;
+}
+
 export interface MySqlLongDataExecutor {
   execute(statement: MySqlPreparedStatement, parameters: MySqlParameter[],
     sources: MySqlLongParameter[], options?: MySqlLongDataOptions): Promise<MySqlQueryResult>;

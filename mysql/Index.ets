@@ -34,7 +34,7 @@ export { ConnectionConfigField, ConnectionValidationIssue, SslMode, SslConfig, C
   './src/main/ets/mysql/model/ConnectionConfig';
 export { MySqlSessionOptions } from './src/main/ets/mysql/features/session/MySqlSessionOptions';
 export { MySqlTransactionIsolation, MySqlTransactionOptions } from
-  './src/main/ets/mysql/model/MySqlTransactionOptions';
+  './src/main/ets/mysql/features/transaction/MySqlTransactionOptions';
 export { MySqlDeadlineOptions } from './src/main/ets/mysql/model/MySqlDeadlineOptions';
 export type { MySqlByteSource } from './src/main/ets/mysql/features/longdata/MySqlByteSource';
 export {

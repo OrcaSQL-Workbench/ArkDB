@@ -13,7 +13,9 @@ import { MySqlServerInfo } from '../model/MySqlServerInfo';
 import {
   MySqlDatabaseSessionStatus, MySqlQueryExecutionSummary, MySqlQueryResultSink
 } from '../model/MySqlQueryStream';
-import { MySqlTransactionOptions } from '../model/MySqlTransactionOptions';
+import {
+  MySqlTransactionOptions
+} from '../features/transaction/MySqlTransactionOptions';
 
 export interface MySqlSession {
   readonly mysqlFeatures: MySqlConnectionFeatures;

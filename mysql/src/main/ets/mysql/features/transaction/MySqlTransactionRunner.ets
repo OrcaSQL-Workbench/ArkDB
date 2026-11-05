@@ -1,34 +1,32 @@
 import { ArkDbError, ConnectionState, QueryOptions } from '@arkdb/core';
 import {
-  MySqlConnectionFeatures, MySqlSession, MySqlTransactionRunner
-} from '../api/MySqlConnectionFeatures';
-import { MySqlInsertRowsExecutor } from '../api/MySqlFeatureContracts';
+  MySqlInsertRowsExecutor, MySqlInsertRowsSnapshot
+} from '../../api/MySqlFeatureContracts';
 import {
-  MySqlInsertRowsInput,
-  snapshotMySqlInsertRowsInput
-} from './MySqlInsertRowsExecutor';
+  MySqlConnectionFeatures, MySqlSession, MySqlTransactionRunner
+} from '../../api/MySqlConnectionFeatures';
 import {
   MySqlBatchResult
-} from '../model/MySqlBatch';
-import { MySqlInsertRowsOptions } from '../model/MySqlInsertRows';
-import { MySqlParameter } from '../features/prepared/MySqlParameter';
-import { MySqlServerInfo } from '../model/MySqlServerInfo';
+} from '../../model/MySqlBatch';
+import { MySqlInsertRowsOptions } from '../../model/MySqlInsertRows';
+import { MySqlParameter } from '../prepared/MySqlParameter';
+import { MySqlServerInfo } from '../../model/MySqlServerInfo';
 import {
   MySqlExecutionOutcome, MySqlOperationError
-} from '../model/MySqlOperationError';
-import { MySqlQueryResult } from '../model/MySqlQueryResult';
+} from '../../model/MySqlOperationError';
+import { MySqlQueryResult } from '../../model/MySqlQueryResult';
 import {
   MySqlDatabaseSessionStatus, MySqlQueryExecutionSummary, MySqlQueryResultSink
-} from '../model/MySqlQueryStream';
+} from '../../model/MySqlQueryStream';
 import {
   MySqlTransactionIsolation, MySqlTransactionOptions, validateMySqlTransactionOptions
-} from '../model/MySqlTransactionOptions';
-import { quoteMySqlIdentifier } from '../value/MySqlSqlHelpers';
-import { MySqlCommandScope } from './MySqlCommandGate';
+} from './MySqlTransactionOptions';
+import { quoteMySqlIdentifier } from '../../value/MySqlSqlHelpers';
+import { MySqlCommandScope } from '../../execution/MySqlCommandGate';
 import {
   mysqlCleanupError as toTransactionCleanupError,
   mysqlOperationFailure as transactionFailure
-} from './MySqlFailure';
+} from '../../execution/MySqlFailure';
 
 export const MYSQL_COMMIT_NO_CHAIN_NO_RELEASE = 'COMMIT AND NO CHAIN NO RELEASE';
 export const MYSQL_ROLLBACK_NO_CHAIN_NO_RELEASE = 'ROLLBACK AND NO CHAIN NO RELEASE';
@@ -46,8 +44,11 @@ export interface MySqlTransactionRunnerHost {
   query(scope: MySqlCommandScope, sql: string): Promise<MySqlQueryResult>;
   queryStream(scope: MySqlCommandScope, sql: string, options: QueryOptions,
     sink: MySqlQueryResultSink): Promise<MySqlQueryExecutionSummary>;
+  snapshotInsertRows(tableParts: string[], columns: string[],
+    rows: MySqlParameter[][],
+    options?: MySqlInsertRowsOptions): MySqlInsertRowsSnapshot;
   insertRows(scope: MySqlCommandScope,
-    input: MySqlInsertRowsInput): Promise<MySqlBatchResult>;
+    input: MySqlInsertRowsSnapshot): Promise<MySqlBatchResult>;
 }
 
 export class MySqlConnectionTransactionRunner implements MySqlTransactionRunner {
@@ -245,7 +246,12 @@ class ScopedMySqlTransactionSession implements MySqlSession {
     this.scope = scope;
     this.scopedFeatures.insertRows =
       new ScopedMySqlInsertRowsExecutor(
-        (input: MySqlInsertRowsInput): Promise<MySqlBatchResult> =>
+        (tableParts: string[], columns: string[],
+          rows: MySqlParameter[][],
+          options?: MySqlInsertRowsOptions): MySqlInsertRowsSnapshot =>
+          this.host.snapshotInsertRows(
+            tableParts, columns, rows, options),
+        (input: MySqlInsertRowsSnapshot): Promise<MySqlBatchResult> =>
           this.runCommand<MySqlBatchResult>(
             (): Promise<MySqlBatchResult> =>
               this.host.insertRows(this.scope, input)));
@@ -376,20 +382,27 @@ class ScopedMySqlTransactionSession implements MySqlSession {
 }
 
 class ScopedMySqlInsertRowsExecutor implements MySqlInsertRowsExecutor {
+  private snapshotInput: (tableParts: string[], columns: string[],
+    rows: MySqlParameter[][],
+    options?: MySqlInsertRowsOptions) => MySqlInsertRowsSnapshot;
   private executeInput: (
-    input: MySqlInsertRowsInput) => Promise<MySqlBatchResult>;
+    input: MySqlInsertRowsSnapshot) => Promise<MySqlBatchResult>;
 
-  constructor(executeInput: (
-    input: MySqlInsertRowsInput) => Promise<MySqlBatchResult>) {
+  constructor(snapshotInput: (tableParts: string[], columns: string[],
+    rows: MySqlParameter[][],
+    options?: MySqlInsertRowsOptions) => MySqlInsertRowsSnapshot,
+    executeInput: (
+      input: MySqlInsertRowsSnapshot) => Promise<MySqlBatchResult>) {
+    this.snapshotInput = snapshotInput;
     this.executeInput = executeInput;
   }
 
   execute(tableParts: string[], columns: string[],
     rows: MySqlParameter[][],
     options?: MySqlInsertRowsOptions): Promise<MySqlBatchResult> {
-    let input: MySqlInsertRowsInput;
+    let input: MySqlInsertRowsSnapshot;
     try {
-      input = snapshotMySqlInsertRowsInput(
+      input = this.snapshotInput(
         tableParts, columns, rows, options);
     } catch (error) {
       const task = Promise.reject<MySqlBatchResult>(error as Object);

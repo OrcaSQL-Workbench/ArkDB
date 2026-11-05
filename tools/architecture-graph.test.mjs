@@ -149,6 +149,36 @@ const MYSQL_LEGACY_VERTICAL_OWNERS = [
     /^mysql\/src\/main\/ets\/mysql\/metrics\//
   ]
 ];
+const MYSQL_LEGACY_VERTICAL_IMPLEMENTATIONS = [
+  [
+    'transaction',
+    /^mysql\/src\/main\/ets\/mysql\/execution\/MySqlTransactionRunner\.ets$/
+  ],
+  [
+    'named',
+    /^mysql\/src\/main\/ets\/mysql\/(?:execution\/MySqlNamedExecutor|value\/SqlTemplateScanner)\.ets$/
+  ],
+  [
+    'procedure',
+    /^mysql\/src\/main\/ets\/mysql\/execution\/MySqlProcedureCaller\.ets$/
+  ],
+  [
+    'batch',
+    /^mysql\/src\/main\/ets\/mysql\/execution\/(?:MySqlBatchExecutor|MySqlBatchSupport)\.ets$/
+  ],
+  [
+    'insert',
+    /^mysql\/src\/main\/ets\/mysql\/execution\/MySqlInsertRowsExecutor\.ets$/
+  ],
+  [
+    'metadata',
+    /^mysql\/src\/main\/ets\/mysql\/metadata\/(?:MySqlMetadataProvider|MySqlMetadataSql)\.ets$/
+  ],
+  [
+    'metrics',
+    /^mysql\/src\/main\/ets\/mysql\/metrics\/(?:MySqlMetricsSql|MySqlServerMetricsProvider)\.ets$/
+  ]
+];
 const MYSQL_VERTICAL_IMPLEMENTATION_PATH =
   new RegExp('^mysql/src/main/ets/mysql/features/' +
     '(?!(?:' + MYSQL_VERTICAL_CONTRACTS + ')$)' +
@@ -166,6 +196,24 @@ function mysqlSiblingImplementationRule(owner) {
     from: new RegExp(
       '^mysql/src/main/ets/mysql/features/' + owner + '/'),
     to: mysqlSiblingImplementationPath(owner),
+    transitive: true,
+    message: 'MySQL feature ownership must not depend on sibling implementations.'
+  };
+}
+
+function mysqlLegacySiblingImplementationPath(owner) {
+  const siblings = MYSQL_LEGACY_VERTICAL_IMPLEMENTATIONS
+    .filter(([candidate]) => candidate !== owner)
+    .map(([_candidate, pattern]) => pattern.source)
+    .join('|');
+  return new RegExp('(?:' + siblings + ')');
+}
+
+function mysqlMigratedToLegacySiblingRule(owner) {
+  return {
+    from: new RegExp(
+      '^mysql/src/main/ets/mysql/features/' + owner + '/'),
+    to: mysqlLegacySiblingImplementationPath(owner),
     transitive: true,
     message: 'MySQL feature ownership must not depend on sibling implementations.'
   };
@@ -236,6 +284,7 @@ const ARCHITECTURE_POLICY = {
       message: 'MySQL public contracts must not depend on feature implementation ownership.'
     },
     ...MYSQL_VERTICAL_FEATURES.map(mysqlSiblingImplementationRule),
+    ...MYSQL_VERTICAL_FEATURES.map(mysqlMigratedToLegacySiblingRule),
     ...MYSQL_LEGACY_VERTICAL_OWNERS.map(mysqlLegacySiblingImplementationRule),
     {
       from: /^mysql\/src\/main\/ets\/mysql\/(?:protocol|transport)\//,
@@ -310,6 +359,26 @@ test('metadata context normalization does not import session implementation owne
     false,
     'Metadata must own its context normalization instead of importing session implementation.'
   );
+});
+
+test('R08 transaction feature owns its vertical production and test files', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  assertFeatureOwnership(graph, 'transaction', [
+    [
+      'mysql/src/main/ets/mysql/model/MySqlTransactionOptions.ets',
+      'mysql/src/main/ets/mysql/features/transaction/MySqlTransactionOptions.ets'
+    ],
+    [
+      'mysql/src/main/ets/mysql/execution/MySqlTransactionRunner.ets',
+      'mysql/src/main/ets/mysql/features/transaction/MySqlTransactionRunner.ets'
+    ]
+  ], [
+    [
+      'mysql/src/test/mysql/execution/MySqlTransactionRunner.test.ets',
+      'mysql/src/test/mysql/features/transaction/MySqlTransactionRunner.test.ets'
+    ]
+  ]);
 });
 
 test('rejects stale cursor ownership paths', () => {
@@ -1029,6 +1098,26 @@ test('rejects MySQL vertical feature dependencies on sibling implementations', (
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
     /MySQL feature ownership must not depend on sibling implementations.*features\/transaction\/MySqlTransactionRunner\.ets -> mysql\/src\/main\/ets\/mysql\/features\/insert\/NewInsertHelper\.ets/
+  );
+});
+
+test('rejects MySQL vertical feature dependencies on legacy sibling implementations', () => {
+  const graph = {
+    files: [
+      'mysql/src/main/ets/mysql/features/transaction/MySqlTransactionRunner.ets',
+      'mysql/src/main/ets/mysql/execution/MySqlInsertRowsExecutor.ets'
+    ],
+    dependencies: {
+      'mysql/src/main/ets/mysql/features/transaction/MySqlTransactionRunner.ets': [
+        'mysql/src/main/ets/mysql/execution/MySqlInsertRowsExecutor.ets'
+      ],
+      'mysql/src/main/ets/mysql/execution/MySqlInsertRowsExecutor.ets': []
+    }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+    /MySQL feature ownership must not depend on sibling implementations.*features\/transaction\/MySqlTransactionRunner\.ets -> mysql\/src\/main\/ets\/mysql\/execution\/MySqlInsertRowsExecutor\.ets/
   );
 });
 

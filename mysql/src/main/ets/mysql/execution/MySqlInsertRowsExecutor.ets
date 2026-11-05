@@ -3,7 +3,10 @@ import { MySqlPreparedExecutorHost } from '../features/prepared/PreparedExecutor
 import {
   MySqlPreparedSession, preparedCleanup, preparedFailure
 } from '../features/prepared/PreparedStatement';
-import { MySqlInsertRowsExecutor } from '../api/MySqlFeatureContracts';
+import {
+  MySqlInsertRowsExecutor, MySqlInsertRowsGroupSnapshot,
+  MySqlInsertRowsSnapshot
+} from '../api/MySqlFeatureContracts';
 import { MySqlPreparedStatement } from '../api/MySqlPreparedContracts';
 import {
   OwnedStatementLifecycle
@@ -31,7 +34,7 @@ import {
 } from './MySqlBatchSupport';
 import { MySqlCommandKind, MySqlCommandScope } from './MySqlCommandGate';
 
-export class MySqlInsertRowsInput {
+export class MySqlInsertRowsInput implements MySqlInsertRowsSnapshot {
   readonly tableParts: string[];
   readonly columns: string[];
   readonly groups: MySqlInsertRowsGroup[];
@@ -47,7 +50,7 @@ export class MySqlInsertRowsInput {
   }
 }
 
-export class MySqlInsertRowsGroup {
+export class MySqlInsertRowsGroup implements MySqlInsertRowsGroupSnapshot {
   readonly startIndex: number;
   readonly rows: MySqlParameter[][];
 
@@ -80,7 +83,7 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
       tableParts, columns, rows, options));
   }
 
-  async executeInput(input: MySqlInsertRowsInput): Promise<MySqlBatchResult> {
+  async executeInput(input: MySqlInsertRowsSnapshot): Promise<MySqlBatchResult> {
     if (input.groups.length === 0) return new MySqlBatchResult();
     const progress = new InsertRowsProgress();
     let scopeEntered = false;
@@ -98,7 +101,7 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
   }
 
   async executeInputOwned(scope: MySqlCommandScope,
-    input: MySqlInsertRowsInput): Promise<MySqlBatchResult> {
+    input: MySqlInsertRowsSnapshot): Promise<MySqlBatchResult> {
     if (input.groups.length === 0) return new MySqlBatchResult();
     const progress = new InsertRowsProgress();
     try {
@@ -110,7 +113,7 @@ export class MySqlPreparedInsertRowsExecutor implements MySqlInsertRowsExecutor 
   }
 
   private async executeOwnedCore(scope: MySqlCommandScope,
-    input: MySqlInsertRowsInput,
+    input: MySqlInsertRowsSnapshot,
     progress: InsertRowsProgress): Promise<MySqlBatchResult> {
     let remainingBytes: number = input.options.maxBufferedBytes;
     for (const group of input.groups) {

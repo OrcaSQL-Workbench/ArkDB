@@ -732,6 +732,63 @@ test('ordinary consumer follows imported Hvigor Node helpers', async (t) => {
     /ArkTS project imports must not name a sibling project/);
 });
 
+test('shared helpers are validated in both application and Hvigor modes', async (t) => {
+  const root = await fixture(t);
+  const project = join(root, 'examples', 'mysql-client');
+  const entry = join(project, 'entry', 'src', 'main', 'js', 'Entry.js');
+  await mkdir(join(entry, '..'), { recursive: true });
+  await writeFile(entry, "import '../../../../bridge.js';\n");
+  await writeFile(join(project, 'bridge.js'), "import './shared.mjs';\n");
+  await writeFile(join(project, 'shared.mjs'), "import 'node:fs';\n");
+  const hvigor = join(project, 'hvigorfile.ts');
+  await writeFile(hvigor, (await readFile(hvigor, 'utf8')) +
+    "\nimport './shared.mjs';\n");
+
+  assert.throws(() => checkDriverContracts(root),
+    /Node built-in imports are not supported in ordinary application sources/);
+});
+
+test('Hvigor entry points are also validated when application-reachable', async (t) => {
+  const root = await fixture(t);
+  const project = join(root, 'examples', 'mysql-client');
+  const entry = join(project, 'entry', 'src', 'main', 'js', 'Entry.js');
+  await mkdir(join(entry, '..'), { recursive: true });
+  await writeFile(entry, "import '../../../../hvigorfile.ts';\n");
+  const hvigor = join(project, 'hvigorfile.ts');
+  await writeFile(hvigor, (await readFile(hvigor, 'utf8')) +
+    "\nimport fs from 'node:fs';\nvoid fs;\n");
+
+  assert.throws(() => checkDriverContracts(root),
+    /Node built-in imports are not supported in ordinary application sources/);
+});
+
+test('ordinary consumer rejects extensionless build-tool helpers', async (t) => {
+  const root = await fixture(t);
+  const project = join(root, 'examples', 'mysql-client');
+  const hvigor = join(project, 'hvigorfile.ts');
+  await writeFile(hvigor, (await readFile(hvigor, 'utf8')) +
+    "\nimport './bridge';\n");
+  await writeFile(join(project, 'bridge'),
+    "import '../mysql-device-acceptance/hvigorfile.ts';\n");
+
+  assert.throws(() => checkDriverContracts(root),
+    /Unsupported isolated project source suffix/);
+});
+
+test('ordinary consumer rejects unreferenced TSX and JSX sources', async (t) => {
+  for (const suffix of ['tsx', 'jsx']) {
+    const root = await fixture(t);
+    const source = join(root, 'examples', 'mysql-client', 'entry', 'src',
+      'main', 'js', `Hidden.${suffix}`);
+    await mkdir(join(source, '..'), { recursive: true });
+    await writeFile(source,
+      "import 'arkdb-mysql-device-acceptance';\n");
+
+    assert.throws(() => checkDriverContracts(root),
+      /Unsupported isolated project source suffix/);
+  }
+});
+
 test('ordinary consumer Hvigor scripts allow benign node built-ins', async (t) => {
   const root = await fixture(t);
   const script = join(root, 'examples', 'mysql-client', 'hvigorfile.ts');
@@ -794,6 +851,11 @@ test('ordinary consumer Hvigor scripts reject hidden CommonJS loaders', async (t
 });
 
 test('ordinary consumer Hvigor scripts reject reflective Node loaders', async (t) => {
+  const overflowKey = Array.from({ length: 64 }, (_, index) =>
+    `false ? 'safe${index}' : `).join('') + "'constructor'";
+  const root = await fixture(t);
+  const script = join(root, 'examples', 'mysql-client', 'hvigorfile.ts');
+  const base = await readFile(script, 'utf8');
   for (const loader of [
     "import processAlias from 'node:process';\n" +
     "processAlias['getBuiltin' + 'Module']('module')" +
@@ -805,14 +867,70 @@ test('ordinary consumer Hvigor scripts reject reflective Node loaders', async (t
     "module.require('../mysql-device-acceptance/hvigorfile.ts');\n",
     "Object.getPrototypeOf(async function () {}).constructor(" +
     "\"return import('../mysql-device-acceptance/hvigorfile.ts')\")();\n",
+    "const key = 'constructor';\n" +
+    "({})[key][key](\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "const key = `con${'structor'}`;\n" +
+    "({})[key][key](\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "let key = 'constructor';\n" +
+    "if (false) key = 'safe';\n" +
+    "({})[key][key](\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "if (true) { var key = 'constructor'; }\n" +
+    "({})[key][key](\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "const key = 'constructor';\n" +
+    "function unused() { const key = 'safe'; }\n" +
+    "({})[key][key](\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "let key = 'safe';\n" +
+    "({})[key = 'constructor'][key](\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "let key = 'con';\n" +
+    "key += 'structor';\n" +
+    "({})[key][key](\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "let key = 'con';\n" +
+    "key += 'structor';\n" +
+    "const Loader = ({})[key][key];\n" +
+    "Loader(\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "let key = 'con';\n" +
+    "key = key + 'structor';\n" +
+    "const Loader = ({})[key][key];\n" +
+    "Loader(\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
+    "function load(key = 'constructor') {\n" +
+    "  return ({})[key][key](\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n" +
+    "}\nload();\n",
+    "let key = 'con';\n" +
+    "key += 'structor';\n" +
+    "const load = ({})[key][key]`return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)`;\n" +
+    "load()('../mysql-device-acceptance/hvigorfile.ts');\n",
+    `const key = ${overflowKey};\n` +
+    "const Loader = ({})[key][key];\n" +
+    "Loader(\"return process.getBuiltinModule('module')" +
+    ".createRequire(import.meta.url)\")()" +
+    "('../mysql-device-acceptance/hvigorfile.ts');\n",
     "const globalAlias = globalThis;\n" +
     "const processAlias = globalAlias['pro' + 'cess'];\n" +
     "processAlias['getBuiltin' + 'Module']('module')" +
     ".createRequire(import.meta.url)('../mysql-device-acceptance/hvigorfile.ts');\n"
   ]) {
-    const root = await fixture(t);
-    const script = join(root, 'examples', 'mysql-client', 'hvigorfile.ts');
-    await writeFile(script, (await readFile(script, 'utf8')) + `\n${loader}`);
+    await writeFile(script, `${base}\n${loader}`);
 
     assert.throws(() => checkDriverContracts(root),
       /(?:Node loader|CommonJS) imports are not supported in isolated projects/);
@@ -1011,6 +1129,228 @@ test('ordinary consumer resolves declaration-file imports', async (t) => {
     'export interface ProbeType {}\n');
 
   assert.doesNotThrow(() => checkDriverContracts(root));
+});
+
+test('ordinary consumer allows relative JSON modules', async (t) => {
+  const root = await fixture(t);
+  const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+  const manifestPath = join(moduleRoot, 'oh-package.json5');
+  const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+  manifest.main = 'Probe.ts';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await writeFile(join(moduleRoot, 'Probe.ts'),
+    "import config from './config.json';\n" +
+    'export const value = config.value;\n');
+  await writeFile(join(moduleRoot, 'config.json'), '{"value":true}\n');
+  await writeFile(join(moduleRoot, 'config.json.ts'),
+    "import 'arkdb-mysql-device-acceptance';\n");
+
+  assert.doesNotThrow(() => checkDriverContracts(root));
+});
+
+test('ordinary consumer rejects malformed JSON modules', async (t) => {
+  const root = await fixture(t);
+  const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+  const manifestPath = join(moduleRoot, 'oh-package.json5');
+  const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+  manifest.main = 'Probe.ts';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await writeFile(join(moduleRoot, 'Probe.ts'),
+    "import config from './config.json';\n" +
+    'export const value = config.value;\n');
+  await writeFile(join(moduleRoot, 'config.json'), '{"value":}\n');
+
+  assert.throws(() => checkDriverContracts(root),
+    /Cannot parse ArkTS project JSON module.*config\.json/);
+});
+
+test('ordinary consumer traverses runtime and declaration targets together', async (t) => {
+  const root = await fixture(t);
+  const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+  const manifestPath = join(moduleRoot, 'oh-package.json5');
+  const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+  manifest.types = 'Types.d.ts';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await writeFile(join(moduleRoot, 'Types.d.ts'),
+    "import type { Bridge } from './Bridge.js';\n" +
+    'export interface Types extends Bridge {}\n');
+  await writeFile(join(moduleRoot, 'Bridge.js'), 'export const bridge = true;\n');
+  await writeFile(join(moduleRoot, 'Bridge.d.ts'),
+    'export interface Bridge {}\n');
+  await writeFile(join(moduleRoot, 'Bridge.ts'),
+    "import 'arkdb-mysql-device-acceptance';\n" +
+    'export interface Bridge {}\n');
+
+  assert.throws(() => checkDriverContracts(root),
+    /ArkTS project imports must not name a sibling project/);
+});
+
+test('JSX specifiers traverse TypeScript implementation targets', async (t) => {
+  const root = await fixture(t);
+  const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+  const manifestPath = join(moduleRoot, 'oh-package.json5');
+  const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+  manifest.types = 'Types.d.ts';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await writeFile(join(moduleRoot, 'Types.d.ts'),
+    "import type { Bridge } from './Bridge.jsx';\n" +
+    'export interface Types extends Bridge {}\n');
+  await writeFile(join(moduleRoot, 'Bridge.d.ts'),
+    'export interface Bridge {}\n');
+  await writeFile(join(moduleRoot, 'Bridge.ts'),
+    "import 'arkdb-mysql-device-acceptance';\n" +
+    'export interface Bridge {}\n');
+
+  assert.throws(() => checkDriverContracts(root),
+    /ArkTS project imports must not name a sibling project/);
+});
+
+test('JSX and declaration specifiers traverse JavaScript implementations', async (t) => {
+  for (const specifier of ['Bridge.jsx', 'Bridge.d.ts']) {
+    const root = await fixture(t);
+    const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+    const manifestPath = join(moduleRoot, 'oh-package.json5');
+    const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+    manifest.types = 'Types.d.ts';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(moduleRoot, 'Types.d.ts'),
+      `import type { Bridge } from './${specifier}';\n` +
+      'export interface Types extends Bridge {}\n');
+    await writeFile(join(moduleRoot, 'Bridge.d.ts'),
+      'export interface Bridge {}\n');
+    await writeFile(join(moduleRoot, 'Bridge.js'),
+      "import 'arkdb-mysql-device-acceptance';\n");
+
+    assert.throws(() => checkDriverContracts(root),
+      /ArkTS project imports must not name a sibling project/);
+  }
+});
+
+test('JavaScript and declaration specifiers reject JSX implementations', async (t) => {
+  for (const specifier of ['Bridge.js', 'Bridge.d.ts']) {
+    const root = await fixture(t);
+    const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+    const manifestPath = join(moduleRoot, 'oh-package.json5');
+    const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+    manifest.types = 'Types.d.ts';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(moduleRoot, 'Types.d.ts'),
+      `import type { Bridge } from './${specifier}';\n` +
+      'export interface Types extends Bridge {}\n');
+    await writeFile(join(moduleRoot, 'Bridge.d.ts'),
+      'export interface Bridge {}\n');
+    await writeFile(join(moduleRoot, 'Bridge.jsx'),
+      "import 'arkdb-mysql-device-acceptance';\n");
+
+    assert.throws(() => checkDriverContracts(root),
+      /Unsupported isolated project source suffix/);
+  }
+});
+
+test('JavaScript substitution preserves parent directory names', async (t) => {
+  const root = await fixture(t);
+  const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+  const manifestPath = join(moduleRoot, 'oh-package.json5');
+  const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+  manifest.types = 'dir.js/Types.d.ts';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const directory = join(moduleRoot, 'dir.js');
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'Types.d.ts'),
+    "import type { Bridge } from './Bridge.js';\n" +
+    'export interface Types extends Bridge {}\n');
+  await writeFile(join(directory, 'Bridge.ts'),
+    "import 'arkdb-mysql-device-acceptance';\n" +
+    'export interface Bridge {}\n');
+
+  assert.throws(() => checkDriverContracts(root),
+    /ArkTS project imports must not name a sibling project/);
+});
+
+test('mjs and cjs specifiers do not substitute TypeScript sources', async (t) => {
+  for (const suffix of ['mjs', 'cjs']) {
+    const root = await fixture(t);
+    const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+    const manifestPath = join(moduleRoot, 'oh-package.json5');
+    const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+    manifest.types = 'Types.d.ts';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(moduleRoot, 'Types.d.ts'),
+      `import type { Bridge } from './Bridge.${suffix}';\n` +
+      'export interface Types extends Bridge {}\n');
+    await writeFile(join(moduleRoot, 'Bridge.ts'),
+      "import 'arkdb-mysql-device-acceptance';\n" +
+      'export interface Bridge {}\n');
+    await writeFile(join(moduleRoot, `Bridge.${suffix}.ts`),
+      "import 'arkdb-mysql-device-acceptance';\n" +
+      'export interface BridgeWithAppendedSuffix {}\n');
+
+    assert.throws(() => checkDriverContracts(root),
+      new RegExp(`Unresolved ArkTS project import.*Bridge\\.${suffix}`));
+  }
+});
+
+test('JavaScript specifiers do not append source suffixes', async (t) => {
+  const root = await fixture(t);
+  const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+  const manifestPath = join(moduleRoot, 'oh-package.json5');
+  const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+  manifest.types = 'Types.d.ts';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await writeFile(join(moduleRoot, 'Types.d.ts'),
+    "import type { Bridge } from './Bridge.js';\n" +
+    'export interface Types extends Bridge {}\n');
+  await writeFile(join(moduleRoot, 'Bridge.js'), 'export const bridge = true;\n');
+  await writeFile(join(moduleRoot, 'Bridge.d.ts'),
+    'export interface Bridge {}\n');
+  await writeFile(join(moduleRoot, 'Bridge.js.ts'),
+    "import 'arkdb-mysql-device-acceptance';\n");
+
+  assert.doesNotThrow(() => checkDriverContracts(root));
+});
+
+test('unsupported TypeScript substitutions fail closed', async (t) => {
+  for (const [specifier, unsupported] of [
+    ['Bridge.js', 'Bridge.tsx'],
+    ['Bridge.mjs', 'Bridge.mts']
+  ]) {
+    const root = await fixture(t);
+    const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+    const manifestPath = join(moduleRoot, 'oh-package.json5');
+    const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+    manifest.types = 'Types.d.ts';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(moduleRoot, 'Types.d.ts'),
+      `import type { Bridge } from './${specifier}';\n` +
+      'export interface Types extends Bridge {}\n');
+    await writeFile(join(moduleRoot, specifier),
+      'export const bridge = true;\n');
+    await writeFile(join(moduleRoot, unsupported),
+      "import 'arkdb-mysql-device-acceptance';\n");
+
+    assert.throws(() => checkDriverContracts(root),
+      /Unsupported isolated project source suffix/);
+  }
+});
+
+test('explicit declaration specifiers also traverse implementations', async (t) => {
+  const root = await fixture(t);
+  const moduleRoot = join(root, 'examples', 'mysql-client', 'entry');
+  const manifestPath = join(moduleRoot, 'oh-package.json5');
+  const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
+  manifest.types = 'Types.d.ts';
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await writeFile(join(moduleRoot, 'Types.d.ts'),
+    "import type { Bridge } from './Bridge.d.ts';\n" +
+    'export interface Types extends Bridge {}\n');
+  await writeFile(join(moduleRoot, 'Bridge.d.ts'),
+    'export interface Bridge {}\n');
+  await writeFile(join(moduleRoot, 'Bridge.ts'),
+    "import 'arkdb-mysql-device-acceptance';\n" +
+    'export interface Bridge {}\n');
+
+  assert.throws(() => checkDriverContracts(root),
+    /ArkTS project imports must not name a sibling project/);
 });
 
 test('ordinary consumer maps JavaScript specifiers to d.ts declarations', async (t) => {

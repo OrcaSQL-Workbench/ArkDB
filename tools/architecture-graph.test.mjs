@@ -928,25 +928,30 @@ test('rejects JavaScript tooling whose package scope can be CommonJS', async (t)
 });
 
 test('rejects native TypeScript tooling outside the supported mjs seam', async (t) => {
-  const root = await fixture(t, {
-    'tools/a.mts': "import './b.mts';",
-    'tools/b.mts': "import './a.mts';"
-  });
+  for (const suffix of ['mts', 'tsx', 'jsx']) {
+    const root = await fixture(t, {
+      [`tools/a.${suffix}`]: `import './b.${suffix}';`,
+      [`tools/b.${suffix}`]: `import './a.${suffix}';`
+    });
 
-  assert.throws(() => readArkTsGraph(root), /Node tooling source.*a\.mts.*\.mjs/i);
+    assert.throws(() => readArkTsGraph(root),
+      new RegExp(`Node tooling source.*a\\.${suffix}.*\\.mjs`, 'i'));
+  }
 });
 
 test('rejects non-ArkTS package runtime source suffixes', async (t) => {
-  const root = await fixture(t, {
-    'build-profile.json5': "{modules:[{name:'core',srcPath:'./core'}]}",
-    'core/arkdb-package.json': '{"kind":"shared"}',
-    'core/oh-package.json5': "{name:'@arkdb/core'}",
-    'core/Index.ets': 'export class Root {}',
-    'core/src/main/ets/Runtime.ts': 'export class Runtime {}'
-  });
+  for (const suffix of ['ts', 'tsx', 'jsx']) {
+    const root = await fixture(t, {
+      'build-profile.json5': "{modules:[{name:'core',srcPath:'./core'}]}",
+      'core/arkdb-package.json': '{"kind":"shared"}',
+      'core/oh-package.json5': "{name:'@arkdb/core'}",
+      'core/Index.ets': 'export class Root {}',
+      [`core/src/main/ets/Runtime.${suffix}`]: 'export class Runtime {}'
+    });
 
-  assert.throws(() => readArkTsGraph(root),
-    /ArkDB runtime source.*Runtime\.ts.*lowercase \.ets/i);
+    assert.throws(() => readArkTsGraph(root),
+      new RegExp(`ArkDB runtime source.*Runtime\\.${suffix}.*lowercase \\.ets`, 'i'));
+  }
 });
 
 test('does not hide package runtime sources in generated-name directories', async (t) => {
@@ -1436,16 +1441,226 @@ test('rejects dynamic tooling imports instead of hiding ownership edges', async 
     /Dynamic Node imports are not supported.*tools.*a\.mjs/i);
 
   const source = join(root, 'tools', 'a.mjs');
+  const overflowKey = Array.from({ length: 64 }, (_, index) =>
+    `false ? 'safe${index}' : `).join('') + "'constructor'";
   for (const hidden of [
     "eval(\"import('./b.mjs')\");",
     "new Function(\"return import('./b.mjs')\")();",
     "Object.getPrototypeOf(async function () {}).constructor(" +
-      "\"return import('./b.mjs')\")();"
+      "\"return import('./b.mjs')\")();",
+    "const key = 'constructor';\n" +
+      "({})[key][key](\"return import('./b.mjs')\")();",
+    "const key = `con${'structor'}`;\n" +
+      "({})[key][key](\"return import('./b.mjs')\")();",
+    "let key = 'constructor';\n" +
+      "if (false) key = 'safe';\n" +
+      "({})[key][key](\"return import('./b.mjs')\")();",
+    "if (true) { var key = 'constructor'; }\n" +
+      "({})[key][key](\"return import('./b.mjs')\")();",
+    "const key = 'constructor';\n" +
+      "function unused() { const key = 'safe'; }\n" +
+      "({})[key][key](\"return import('./b.mjs')\")();",
+    "let key = 'safe';\n" +
+      "({})[key = 'constructor'][key](\"return import('./b.mjs')\")();",
+    "let key = 'con';\n" +
+      "key += 'structor';\n" +
+      "({})[key][key](\"return import('./b.mjs')\")();",
+    "let key = 'con';\n" +
+      "key += 'structor';\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let key = 'con';\n" +
+      "key = key + 'structor';\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let key = '';\n" +
+      "key ||= 'constructor';\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const key = '' || 'constructor';\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const [key] = ['constructor'];\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let key;\n" +
+      "[key] = ['constructor'];\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const names = ['constructor'];\n" +
+      "let key;\n" +
+      "[key] = names;\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const override = { key: 'constructor' };\n" +
+      "const { key } = { key: 'safe', ...override };\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "function load(key = 'constructor') {\n" +
+      "  return ({})[key][key](\"return import('./b.mjs')\")();\n" +
+      "}\nload();",
+    "function load(key) {\n" +
+      "  return ({})[key][key](\"return import('./b.mjs')\")();\n" +
+      "}\nload('constructor');",
+    "function load(key = 'safe') {\n" +
+      "  return ({})[key][key](\"return import('./b.mjs')\")();\n" +
+      "}\nload('constructor');",
+    "function load(key = 'safe') {\n" +
+      "  const Loader = ({})[key][key];\n" +
+      "  return Loader(\"return import('./b.mjs')\")();\n" +
+      "}\nload('constructor');",
+    "function load(key) {\n" +
+      "  const proto = ({})[key];\n" +
+      "  const Loader = proto[key];\n" +
+      "  return Loader(\"return import('./b.mjs')\")();\n" +
+      "}\nload('constructor');",
+    "const key = ['con', 'structor'].join('');\n" +
+      "const object = {};\n" +
+      "const ObjectCtor = object[key];\n" +
+      "const Loader = ObjectCtor[key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const key = (() => 'constructor')();\n" +
+      "const holder = { proto: ({})[key] };\n" +
+      "const Loader = holder.proto[key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "function load(key) {\n" +
+      "  const Loader = ((async function () {})[key] as any);\n" +
+      "  return Loader(\"return import('./b.mjs')\")();\n" +
+      "}\nload('constructor');",
+    "function load(key) {\n" +
+      "  return ({})[key][key].call(" +
+      "null, \"return import('./b.mjs')\")();\n" +
+      "}\nload('constructor');",
+    "let key = false;\n" +
+      "key = key || 'constructor';\n" +
+      "({})[key][key](\"return import('./b.mjs')\")();",
+    "const key = 'constructor';\n" +
+      "function load(alias = key) {\n" +
+      "  var key = 'safe';\n" +
+      "  return ({})[alias][alias](\"return import('./b.mjs')\")();\n" +
+      "}\nload();",
+    "const { 'constructor': Loader } = " +
+      "Object.getPrototypeOf(async function () {});\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const key = 'constructor';\n" +
+      "const { [key]: Loader } = " +
+      "Object.getPrototypeOf(async function () {});\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const key = 'constructor';\n" +
+      "let Loader;\n" +
+      "({ [key]: Loader } = " +
+      "Object.getPrototypeOf(async function () {}));\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const key = ['constructor'];\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const [unused, key] = [...['safe', 'constructor'], 'safe'];\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const key = ['safe'];\n" +
+      "key[0] = 'constructor';\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const [...[, key]] = [[0, 'safe'], 'constructor'];\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "for (const key of ['constructor']) {\n" +
+      "  ({})[key][key](\"return import('./b.mjs')\")();\n" +
+      "}",
+    "let key = 'safe';\n" +
+      "for (key of ['constructor']) {\n" +
+      "  ({})[key][key](\"return import('./b.mjs')\")();\n" +
+      "}",
+    "let key = 'safe';\n" +
+      "for (key of ['safe', ...['constructor']]) {\n" +
+      "  ({})[key][key](\"return import('./b.mjs')\")();\n" +
+      "}",
+    "const key = 'constructor';\n" +
+      "let Loader = () => undefined;\n" +
+      "for ({ [key]: Loader } of [" +
+      "Object.getPrototypeOf(async function () {})]) {\n" +
+      "  Loader(\"return import('./b.mjs')\")();\n" +
+      "}",
+    "const { constructor } = " +
+      "Object.getPrototypeOf(async function () {});\n" +
+      "constructor(\"return import('./b.mjs')\")();",
+    "const Loader = Object.getOwnPropertyDescriptor(" +
+      "Object.getPrototypeOf(async function () {}), 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const Loader = Object.getOwnPropertyDescriptor.call(" +
+      "Object, Object.getPrototypeOf(async function () {}), " +
+      "'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const api = 'getOwnPropertyDescriptor';\n" +
+      "const Loader = Object[api](" +
+      "Object.getPrototypeOf(async function () {}), " +
+      "'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const { getOwnPropertyDescriptor: descriptor } = Object;\n" +
+      "const Loader = descriptor(" +
+      "Object.getPrototypeOf(async function () {}), " +
+      "'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const O = Object;\n" +
+      "const Loader = O.getOwnPropertyDescriptor(" +
+      "Object.getPrototypeOf(async function () {}), " +
+      "'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let descriptor;\n" +
+      "({ holder: { ['getOwnPropertyDescriptor']: descriptor } } = " +
+      "{ holder: Object });\n" +
+      "const Loader = descriptor(" +
+      "Object.getPrototypeOf(async function () {}), " +
+      "'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const descriptors = Object.getOwnPropertyDescriptors(" +
+      "Object.getPrototypeOf(async function () {}));\n" +
+      "const Loader = Object.values(descriptors)[0].value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let key = 'con';\n" +
+      "key += 'structor';\n" +
+      "const load = ({})[key][key]`return import('./b.mjs')`;\n" +
+      "load();",
+    `const key = ${overflowKey};\n` +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    `const prefix = ${overflowKey.replace("'constructor'", "'con'")};\n` +
+      "const key = prefix + 'structor';\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();"
   ]) {
     await writeFile(source, hidden);
     assert.throws(() => readArkTsGraph(root),
       /Node code generation is not supported.*tools.*a\.mjs/i);
   }
+});
+
+test('allows benign indexed tooling writes and loop shadowing', async (t) => {
+  const root = await fixture(t, {
+    'tools/a.mjs': `
+const key = 'safe';
+const values = {};
+values[key] = () => true;
+values[key]();
+const counts = { safe: 0 };
+counts[key] += 1;
+const handlers = { safe: () => true };
+handlers[key]();
+const helper = {
+  getOwnPropertyDescriptor: () => 'safe'
+};
+helper.getOwnPropertyDescriptor();
+for (const key of ['other']) {
+  void key;
+}
+values[key]();
+for (const key of ['safe']) {
+  handlers[key]();
+}
+`
+  });
+
+  assert.doesNotThrow(() => readArkTsGraph(root));
 });
 
 test('rejects dynamic ArkTS imports instead of hiding runtime edges', async (t) => {

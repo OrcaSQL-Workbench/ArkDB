@@ -2,6 +2,9 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import JSON5 from 'json5';
 import ts from 'typescript';
+import {
+  createStaticStringResolver, STATIC_STRING_INCOMPLETE
+} from './lib/static-string-analysis.mjs';
 
 /**
  * @typedef {{
@@ -32,9 +35,18 @@ const IGNORED_DIRECTORIES = new Set([
   'build', 'dist', 'node_modules', 'oh_modules', 'test-fixtures'
 ]);
 const NODE_SOURCE = /\.mjs$/;
-const NODE_LIKE_SOURCE = /\.(?:[cm]?js|[cm]?ts)$/i;
-const ARKTS_LIKE_SOURCE = /\.(?:ets|[cm]?js|[cm]?ts)$/i;
+const NODE_LIKE_SOURCE = /\.(?:[cm]?[jt]s|jsx|tsx)$/i;
+const ARKTS_LIKE_SOURCE = /\.(?:ets|[cm]?[jt]s|jsx|tsx)$/i;
 const HVIGOR_SOURCE = /(?:^|[\\/])hvigorfile\.ts$/;
+const NODE_CODEGEN_MEMBERS = new Set(['constructor']);
+const DESCRIPTOR_MEMBERS = new Set([
+  'getOwnPropertyDescriptor',
+  'getOwnPropertyDescriptors'
+]);
+const STATIC_CODEGEN_NAMES = new Set([
+  ...NODE_CODEGEN_MEMBERS,
+  ...DESCRIPTOR_MEMBERS
+]);
 
 function buildToolSource(file) {
   return NODE_SOURCE.test(file) || HVIGOR_SOURCE.test(file);
@@ -236,6 +248,80 @@ function unwrapParentheses(node) {
   return current;
 }
 
+function invokedExpression(node) {
+  let expression = node;
+  while (expression.parent !== undefined &&
+    ((ts.isParenthesizedExpression(expression.parent) ||
+      ts.isAsExpression(expression.parent) ||
+      ts.isTypeAssertionExpression(expression.parent) ||
+      ts.isSatisfiesExpression(expression.parent) ||
+      ts.isNonNullExpression(expression.parent)) &&
+      expression.parent.expression === expression)) {
+    expression = expression.parent;
+  }
+  if (expression.parent !== undefined &&
+    (ts.isPropertyAccessExpression(expression.parent) ||
+      ts.isElementAccessExpression(expression.parent)) &&
+    expression.parent.expression === expression) {
+    const member = ts.isPropertyAccessExpression(expression.parent)
+      ? expression.parent.name.text
+      : expression.parent.argumentExpression === undefined
+        ? null
+        : constantString(expression.parent.argumentExpression);
+    if (['apply', 'bind', 'call'].includes(member)) {
+      return invokedExpression(expression.parent);
+    }
+  }
+  return expression.parent !== undefined &&
+    ((ts.isCallExpression(expression.parent) ||
+      ts.isNewExpression(expression.parent) ||
+      ts.isTaggedTemplateExpression(expression.parent)) &&
+      (expression.parent.expression === expression ||
+        expression.parent.tag === expression));
+}
+
+function escapedExpression(node) {
+  let expression = node;
+  while (expression.parent !== undefined &&
+    ((ts.isParenthesizedExpression(expression.parent) ||
+      ts.isAsExpression(expression.parent) ||
+      ts.isTypeAssertionExpression(expression.parent) ||
+      ts.isSatisfiesExpression(expression.parent) ||
+      ts.isNonNullExpression(expression.parent)) &&
+      expression.parent.expression === expression)) {
+    expression = expression.parent;
+  }
+  const parent = expression.parent;
+  return parent !== undefined &&
+    ((ts.isVariableDeclaration(parent) && parent.initializer === expression) ||
+      (ts.isBinaryExpression(parent) &&
+        parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        parent.right === expression) ||
+      (ts.isReturnStatement(parent) && parent.expression === expression) ||
+      (ts.isCallExpression(parent) &&
+        parent.arguments.includes(expression)) ||
+      (ts.isArrowFunction(parent) && parent.body === expression) ||
+      (ts.isPropertyAssignment(parent) &&
+        parent.initializer === expression) ||
+      (ts.isArrayLiteralExpression(parent) &&
+        parent.elements.includes(expression)) ||
+      (ts.isConditionalExpression(parent) &&
+        (parent.whenTrue === expression ||
+          parent.whenFalse === expression)));
+}
+
+function codeGenerationBase(node, literalBindings) {
+  const base = unwrapParentheses(node.expression);
+  return ts.isObjectLiteralExpression(base) ||
+    ts.isArrayLiteralExpression(base) ||
+    ts.isFunctionExpression(base) ||
+    ts.isArrowFunction(base) ||
+    ts.isClassExpression(base) ||
+    (ts.isIdentifier(base) && literalBindings.has(base.text)) ||
+    (ts.isCallExpression(base) &&
+      namedMember(base.expression, 'Object', 'getPrototypeOf'));
+}
+
 function processExpression(node) {
   const expression = unwrapParentheses(node);
   return (ts.isIdentifier(expression) && expression.text === 'process') ||
@@ -297,6 +383,76 @@ function memberOwnedBy(node, owner) {
   }
   const target = unwrapParentheses(expression.expression);
   return ts.isIdentifier(target) && target.text === owner;
+}
+
+function staticPropertyName(node) {
+  const name = unwrapParentheses(node);
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) ||
+    ts.isNumericLiteral(name)) {
+    return name.text;
+  }
+  return null;
+}
+
+function assignmentPropertyName(node) {
+  if (!ts.isPropertyAssignment(node) &&
+    !ts.isShorthandPropertyAssignment(node)) {
+    return null;
+  }
+  const object = node.parent;
+  if (!ts.isObjectLiteralExpression(object)) return null;
+  let expression = object;
+  while (expression.parent !== undefined) {
+    const parent = expression.parent;
+    if ((ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isTypeAssertionExpression(parent) ||
+      ts.isSatisfiesExpression(parent) ||
+      ts.isNonNullExpression(parent)) &&
+      parent.expression === expression) {
+      expression = parent;
+      continue;
+    }
+    if (ts.isPropertyAssignment(parent) &&
+      parent.initializer === expression &&
+      ts.isObjectLiteralExpression(parent.parent)) {
+      expression = parent.parent;
+      continue;
+    }
+    if (ts.isArrayLiteralExpression(parent)) {
+      expression = parent;
+      continue;
+    }
+    break;
+  }
+  const assignment = expression.parent;
+  if (ts.isBinaryExpression(assignment) &&
+    assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    unwrapParentheses(assignment.left) ===
+      unwrapParentheses(expression)) {
+    return node.name;
+  }
+  if ((ts.isForOfStatement(assignment) ||
+    ts.isForInStatement(assignment)) &&
+    unwrapParentheses(assignment.initializer) ===
+      unwrapParentheses(expression)) {
+    return node.name;
+  }
+  return null;
+}
+
+function namedMember(node, owner, name) {
+  const expression = unwrapParentheses(node);
+  if (ts.isPropertyAccessExpression(expression)) {
+    return ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === owner &&
+      expression.name.text === name;
+  }
+  return ts.isElementAccessExpression(expression) &&
+    ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+    unwrapParentheses(expression.expression).text === owner &&
+    expression.argumentExpression !== undefined &&
+    constantString(expression.argumentExpression) === name;
 }
 
 function reflectiveCall(node) {
@@ -396,12 +552,87 @@ function referencedPathSpecifier(fileName) {
 
 function staticSpecifiers(file) {
   const syntax = sourceSyntax(file);
+  const literalBindings = new Set();
+  const objectAliases = new Set(['Object']);
+  function collectLiteralBindings(node) {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+      node.initializer !== undefined) {
+      const initializer = unwrapParentheses(node.initializer);
+      if (ts.isIdentifier(initializer) &&
+        objectAliases.has(initializer.text)) {
+        objectAliases.add(node.name.text);
+      }
+      if (ts.isObjectLiteralExpression(initializer) ||
+        ts.isArrayLiteralExpression(initializer) ||
+        ts.isFunctionExpression(initializer) ||
+        ts.isArrowFunction(initializer) ||
+        ts.isClassExpression(initializer) ||
+        (ts.isCallExpression(initializer) &&
+          namedMember(initializer.expression, 'Object', 'getPrototypeOf'))) {
+        literalBindings.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, collectLiteralBindings);
+  }
+  collectLiteralBindings(syntax);
+  const staticStrings = createStaticStringResolver(
+    syntax,
+    unwrapParentheses,
+    STATIC_CODEGEN_NAMES
+  );
   const specifiers = [
     ...syntax.referencedFiles.map((reference) =>
       referencedPathSpecifier(reference.fileName)),
     ...syntax.typeReferenceDirectives.map((reference) => reference.fileName)
   ];
   function visit(node) {
+    const computedNames = ts.isElementAccessExpression(node) &&
+      node.argumentExpression !== undefined
+      ? staticStrings(node.argumentExpression)
+      : new Set();
+    const extractedNames = new Set();
+    if (ts.isBindingElement(node) && node.propertyName !== undefined) {
+      if (ts.isComputedPropertyName(node.propertyName)) {
+        for (const name of staticStrings(node.propertyName.expression)) {
+          extractedNames.add(name);
+        }
+      } else {
+        const name = staticPropertyName(node.propertyName);
+        if (name !== null) extractedNames.add(name);
+      }
+    } else if (ts.isBindingElement(node) &&
+      ts.isObjectBindingPattern(node.parent) &&
+      ts.isIdentifier(node.name)) {
+      extractedNames.add(node.name.text);
+    }
+    const assignedProperty = assignmentPropertyName(node);
+    if (assignedProperty !== null) {
+      if (ts.isComputedPropertyName(assignedProperty)) {
+        for (const name of staticStrings(assignedProperty.expression)) {
+          extractedNames.add(name);
+        }
+      } else {
+        const name = staticPropertyName(assignedProperty);
+        if (name !== null) extractedNames.add(name);
+      }
+    }
+    const descriptorNames = ts.isCallExpression(node) &&
+      namedMember(node.expression, 'Object', 'getOwnPropertyDescriptor') &&
+      node.arguments[1] !== undefined
+      ? staticStrings(node.arguments[1])
+      : new Set();
+    const memberReceiver = (ts.isPropertyAccessExpression(node) ||
+      ts.isElementAccessExpression(node)) &&
+      ts.isIdentifier(unwrapParentheses(node.expression))
+      ? unwrapParentheses(node.expression).text
+      : null;
+    const descriptorAccess = memberReceiver !== null &&
+      objectAliases.has(memberReceiver) &&
+      ((ts.isPropertyAccessExpression(node) &&
+        DESCRIPTOR_MEMBERS.has(node.name.text)) ||
+        (ts.isElementAccessExpression(node) &&
+          [...computedNames].some((name) =>
+            DESCRIPTOR_MEMBERS.has(name))));
     if (buildToolSource(file) && ts.isIdentifier(node) &&
       (node.text === 'eval' || node.text === 'Function')) {
       throw new Error(`Node code generation is not supported: ${file}`);
@@ -419,10 +650,28 @@ function staticSpecifiers(file) {
       moduleExpression(node)) {
       throw new Error(`CommonJS loader access is not supported: ${file}`);
     } else if (buildToolSource(file) &&
-      ((ts.isPropertyAccessExpression(node) && node.name.text === 'constructor') ||
+      ((ts.isPropertyAccessExpression(node) &&
+        NODE_CODEGEN_MEMBERS.has(node.name.text)) ||
         (ts.isElementAccessExpression(node) &&
-          node.argumentExpression !== undefined &&
-          constantString(node.argumentExpression) === 'constructor'))) {
+          ([...computedNames].some((name) =>
+            NODE_CODEGEN_MEMBERS.has(name)) ||
+            (computedNames.has(STATIC_STRING_INCOMPLETE) &&
+              (invokedExpression(node) ||
+                ts.isElementAccessExpression(
+                  unwrapParentheses(node.expression)) ||
+                (escapedExpression(node) &&
+                  codeGenerationBase(node, literalBindings)))))))) {
+      throw new Error(`Node code generation is not supported: ${file}`);
+    } else if (buildToolSource(file) &&
+      ([...extractedNames].some((name) =>
+        NODE_CODEGEN_MEMBERS.has(name) ||
+        DESCRIPTOR_MEMBERS.has(name)) ||
+        extractedNames.has(STATIC_STRING_INCOMPLETE) ||
+        [...descriptorNames].some((name) =>
+          NODE_CODEGEN_MEMBERS.has(name)) ||
+        descriptorNames.has(STATIC_STRING_INCOMPLETE))) {
+      throw new Error(`Node code generation is not supported: ${file}`);
+    } else if (buildToolSource(file) && descriptorAccess) {
       throw new Error(`Node code generation is not supported: ${file}`);
     } else if (HVIGOR_SOURCE.test(file) &&
       (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&

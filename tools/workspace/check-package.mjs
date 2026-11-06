@@ -6,6 +6,9 @@ import {
 } from 'node:path';
 import ts from 'typescript';
 import { dependencyClosure, discoverPackages, driverArgument, readJson5, resolvePackage, ROOT } from './driver-packages.mjs';
+import {
+  createStaticStringResolver, STATIC_STRING_INCOMPLETE
+} from '../lib/static-string-analysis.mjs';
 
 export { readJson5, ROOT } from './driver-packages.mjs';
 
@@ -45,6 +48,68 @@ function unwrapImportExpression(node) {
     current = current.expression;
   }
   return current;
+}
+
+function invokedExpression(node) {
+  let expression = node;
+  while (expression.parent !== undefined &&
+    ((ts.isParenthesizedExpression(expression.parent) ||
+      ts.isAsExpression(expression.parent) ||
+      ts.isTypeAssertionExpression(expression.parent) ||
+      ts.isSatisfiesExpression(expression.parent) ||
+      ts.isNonNullExpression(expression.parent)) &&
+      expression.parent.expression === expression)) {
+    expression = expression.parent;
+  }
+  if (expression.parent !== undefined &&
+    (ts.isPropertyAccessExpression(expression.parent) ||
+      ts.isElementAccessExpression(expression.parent)) &&
+    expression.parent.expression === expression) {
+    const member = ts.isPropertyAccessExpression(expression.parent)
+      ? expression.parent.name.text
+      : expression.parent.argumentExpression === undefined
+        ? null
+        : constantString(expression.parent.argumentExpression);
+    if (['apply', 'bind', 'call'].includes(member)) {
+      return invokedExpression(expression.parent);
+    }
+  }
+  return expression.parent !== undefined &&
+    ((ts.isCallExpression(expression.parent) ||
+      ts.isNewExpression(expression.parent) ||
+      ts.isTaggedTemplateExpression(expression.parent)) &&
+      (expression.parent.expression === expression ||
+        expression.parent.tag === expression));
+}
+
+function escapedExpression(node) {
+  let expression = node;
+  while (expression.parent !== undefined &&
+    ((ts.isParenthesizedExpression(expression.parent) ||
+      ts.isAsExpression(expression.parent) ||
+      ts.isTypeAssertionExpression(expression.parent) ||
+      ts.isSatisfiesExpression(expression.parent) ||
+      ts.isNonNullExpression(expression.parent)) &&
+      expression.parent.expression === expression)) {
+    expression = expression.parent;
+  }
+  const parent = expression.parent;
+  return parent !== undefined &&
+    ((ts.isVariableDeclaration(parent) && parent.initializer === expression) ||
+      (ts.isBinaryExpression(parent) &&
+        parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        parent.right === expression) ||
+      (ts.isReturnStatement(parent) && parent.expression === expression) ||
+      (ts.isCallExpression(parent) &&
+        parent.arguments.includes(expression)) ||
+      (ts.isArrowFunction(parent) && parent.body === expression) ||
+      (ts.isPropertyAssignment(parent) &&
+        parent.initializer === expression) ||
+      (ts.isArrayLiteralExpression(parent) &&
+        parent.elements.includes(expression)) ||
+      (ts.isConditionalExpression(parent) &&
+        (parent.whenTrue === expression ||
+          parent.whenFalse === expression)));
 }
 
 function isolatedProcessExpression(node) {
@@ -96,6 +161,15 @@ const HVIGOR_DEPENDENCY_APIS = new Set([
 const NODE_LOADER_IDENTIFIERS = new Set([
   'constructor', 'createRequire', 'eval', 'Function', 'getBuiltinModule',
   'globalThis', 'process', 'Reflect'
+]);
+const DESCRIPTOR_MEMBERS = new Set([
+  'getOwnPropertyDescriptor',
+  'getOwnPropertyDescriptors'
+]);
+const STATIC_NODE_IDENTIFIERS = new Set([
+  ...HVIGOR_DEPENDENCY_APIS,
+  ...NODE_LOADER_IDENTIFIERS,
+  ...DESCRIPTOR_MEMBERS
 ]);
 const NODE_BUILTIN_ROOTS = new Set([
   '_http_agent',
@@ -226,6 +300,76 @@ function memberOwnedBy(node, owner) {
   return ts.isIdentifier(target) && target.text === owner;
 }
 
+function staticPropertyName(node) {
+  const name = unwrapImportExpression(node);
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) ||
+    ts.isNumericLiteral(name)) {
+    return name.text;
+  }
+  return null;
+}
+
+function assignmentPropertyName(node) {
+  if (!ts.isPropertyAssignment(node) &&
+    !ts.isShorthandPropertyAssignment(node)) {
+    return null;
+  }
+  const object = node.parent;
+  if (!ts.isObjectLiteralExpression(object)) return null;
+  let expression = object;
+  while (expression.parent !== undefined) {
+    const parent = expression.parent;
+    if ((ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isTypeAssertionExpression(parent) ||
+      ts.isSatisfiesExpression(parent) ||
+      ts.isNonNullExpression(parent)) &&
+      parent.expression === expression) {
+      expression = parent;
+      continue;
+    }
+    if (ts.isPropertyAssignment(parent) &&
+      parent.initializer === expression &&
+      ts.isObjectLiteralExpression(parent.parent)) {
+      expression = parent.parent;
+      continue;
+    }
+    if (ts.isArrayLiteralExpression(parent)) {
+      expression = parent;
+      continue;
+    }
+    break;
+  }
+  const assignment = expression.parent;
+  if (ts.isBinaryExpression(assignment) &&
+    assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    unwrapImportExpression(assignment.left) ===
+      unwrapImportExpression(expression)) {
+    return node.name;
+  }
+  if ((ts.isForOfStatement(assignment) ||
+    ts.isForInStatement(assignment)) &&
+    unwrapImportExpression(assignment.initializer) ===
+      unwrapImportExpression(expression)) {
+    return node.name;
+  }
+  return null;
+}
+
+function namedMember(node, owner, name) {
+  const expression = unwrapImportExpression(node);
+  if (ts.isPropertyAccessExpression(expression)) {
+    return ts.isIdentifier(unwrapImportExpression(expression.expression)) &&
+      unwrapImportExpression(expression.expression).text === owner &&
+      expression.name.text === name;
+  }
+  return ts.isElementAccessExpression(expression) &&
+    ts.isIdentifier(unwrapImportExpression(expression.expression)) &&
+    unwrapImportExpression(expression.expression).text === owner &&
+    expression.argumentExpression !== undefined &&
+    constantString(expression.argumentExpression) === name;
+}
+
 function identifierInTypePosition(node) {
   const identifier = node;
   let current = node.parent;
@@ -279,25 +423,83 @@ function referencedIdentifier(node, name) {
 }
 
 function sourceImportCandidates(base) {
-  const runtimeSuffix = base.match(/\.(?:cjs|mjs|js)$/);
+  if (base.endsWith('.json')) return [base];
+  if (base.endsWith('.d.ts')) {
+    const stem = base.slice(0, -'.d.ts'.length);
+    return [
+      `${stem}.ts`,
+      `${stem}.tsx`,
+      base,
+      `${stem}.js`,
+      `${stem}.jsx`
+    ];
+  }
+  if (base.endsWith('.d.ets')) {
+    const stem = base.slice(0, -'.d.ets'.length);
+    return [`${stem}.ets`, base];
+  }
+  if (base.endsWith('.d.mts')) {
+    const stem = base.slice(0, -'.d.mts'.length);
+    return [`${stem}.mts`, base];
+  }
+  if (base.endsWith('.d.cts')) {
+    const stem = base.slice(0, -'.d.cts'.length);
+    return [`${stem}.cts`, base];
+  }
+  if (base.endsWith('.mjs')) {
+    const stem = base.slice(0, -'.mjs'.length);
+    return [`${stem}.mts`, `${stem}.d.mts`, base];
+  }
+  if (base.endsWith('.cjs')) {
+    const stem = base.slice(0, -'.cjs'.length);
+    return [`${stem}.cts`, `${stem}.d.cts`, base];
+  }
+  if (base.endsWith('.js')) {
+    const stem = base.slice(0, -'.js'.length);
+    return [
+      `${stem}.ts`,
+      `${stem}.tsx`,
+      `${stem}.ets`,
+      `${stem}.d.ts`,
+      `${stem}.d.ets`,
+      base,
+      `${stem}.jsx`
+    ];
+  }
+  if (base.endsWith('.jsx')) {
+    const stem = base.slice(0, -'.jsx'.length);
+    return [
+      `${stem}.tsx`,
+      `${stem}.ts`,
+      `${stem}.d.ts`,
+      `${stem}.d.ets`,
+      base,
+      `${stem}.js`
+    ];
+  }
+  if (/\.(?:d\.(?:cts|ets|mts|ts)|cts|ets|mts|ts|tsx)$/.test(base)) {
+    return [base];
+  }
   return [
     base,
-    ...(runtimeSuffix ? [
-      base.replace(runtimeSuffix[0], '.d.ts'),
-      base.replace(runtimeSuffix[0], '.d.ets')
-    ] : []),
     `${base}.ets`,
     `${base}.ts`,
+    `${base}.tsx`,
     `${base}.d.ets`,
     `${base}.d.ts`,
     `${base}.js`,
+    `${base}.jsx`,
     `${base}.mjs`,
+    `${base}.cjs`,
     join(base, 'Index.ets'),
     join(base, 'Index.ts'),
+    join(base, 'Index.tsx'),
     join(base, 'Index.d.ets'),
     join(base, 'Index.d.ts'),
     join(base, 'Index.js'),
-    join(base, 'Index.mjs')
+    join(base, 'Index.jsx'),
+    join(base, 'Index.mjs'),
+    join(base, 'Index.cjs')
   ];
 }
 
@@ -313,16 +515,74 @@ function referencedPathSpecifier(fileName) {
 export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
   const syntax = ts.createSourceFile(
     'ArkTsImports.ets', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const objectAliases = new Set(['Object']);
+  function collectObjectAliases(node) {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+      node.initializer !== undefined) {
+      const initializer = unwrapImportExpression(node.initializer);
+      if (ts.isIdentifier(initializer) &&
+        objectAliases.has(initializer.text)) {
+        objectAliases.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, collectObjectAliases);
+  }
+  collectObjectAliases(syntax);
+  const staticStrings = createStaticStringResolver(
+    syntax, unwrapImportExpression, STATIC_NODE_IDENTIFIERS);
   const specifiers = [
     ...syntax.referencedFiles.map((reference) =>
       referencedPathSpecifier(reference.fileName)),
     ...syntax.typeReferenceDirectives.map((reference) => reference.fileName)
   ];
   function visit(node) {
-    const computedName = ts.isElementAccessExpression(node) &&
+    const computedNames = ts.isElementAccessExpression(node) &&
       node.argumentExpression !== undefined
-      ? constantString(node.argumentExpression)
+      ? staticStrings(node.argumentExpression)
+      : new Set();
+    const extractedNames = new Set();
+    if (ts.isBindingElement(node) && node.propertyName !== undefined) {
+      if (ts.isComputedPropertyName(node.propertyName)) {
+        for (const name of staticStrings(node.propertyName.expression)) {
+          extractedNames.add(name);
+        }
+      } else {
+        const name = staticPropertyName(node.propertyName);
+        if (name !== null) extractedNames.add(name);
+      }
+    } else if (ts.isBindingElement(node) &&
+      ts.isObjectBindingPattern(node.parent) &&
+      ts.isIdentifier(node.name)) {
+      extractedNames.add(node.name.text);
+    }
+    const assignedProperty = assignmentPropertyName(node);
+    if (assignedProperty !== null) {
+      if (ts.isComputedPropertyName(assignedProperty)) {
+        for (const name of staticStrings(assignedProperty.expression)) {
+          extractedNames.add(name);
+        }
+      } else {
+        const name = staticPropertyName(assignedProperty);
+        if (name !== null) extractedNames.add(name);
+      }
+    }
+    const descriptorNames = ts.isCallExpression(node) &&
+      namedMember(node.expression, 'Object', 'getOwnPropertyDescriptor') &&
+      node.arguments[1] !== undefined
+      ? staticStrings(node.arguments[1])
+      : new Set();
+    const memberReceiver = (ts.isPropertyAccessExpression(node) ||
+      ts.isElementAccessExpression(node)) &&
+      ts.isIdentifier(unwrapImportExpression(node.expression))
+      ? unwrapImportExpression(node.expression).text
       : null;
+    const descriptorAccess = memberReceiver !== null &&
+      objectAliases.has(memberReceiver) &&
+      ((ts.isPropertyAccessExpression(node) &&
+        DESCRIPTOR_MEMBERS.has(node.name.text)) ||
+        (ts.isElementAccessExpression(node) &&
+          [...computedNames].some((name) =>
+            DESCRIPTOR_MEMBERS.has(name))));
     if (strictNodeLoaders && referencedIdentifier(node, 'arguments')) {
       throw new Error('Node loader imports are not supported in isolated projects.');
     } else if (referencedIdentifier(node, 'global') ||
@@ -348,14 +608,37 @@ export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
     } else if (strictNodeLoaders && ts.isIdentifier(node) &&
       HVIGOR_DEPENDENCY_APIS.has(node.text)) {
       throw new Error('Dependency-mutating Hvigor APIs are not supported.');
-    } else if (strictNodeLoaders && computedName !== null &&
-      HVIGOR_DEPENDENCY_APIS.has(computedName)) {
+    } else if (strictNodeLoaders &&
+      ([...extractedNames].some((name) =>
+        HVIGOR_DEPENDENCY_APIS.has(name) ||
+        NODE_LOADER_IDENTIFIERS.has(name) ||
+        DESCRIPTOR_MEMBERS.has(name)) ||
+        extractedNames.has(STATIC_STRING_INCOMPLETE))) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders &&
+      ([...descriptorNames].some((name) =>
+        NODE_LOADER_IDENTIFIERS.has(name)) ||
+        descriptorNames.has(STATIC_STRING_INCOMPLETE))) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders &&
+      descriptorAccess) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders &&
+      computedNames.has(STATIC_STRING_INCOMPLETE) &&
+      (invokedExpression(node) ||
+        escapedExpression(node) ||
+        (ts.isElementAccessExpression(node) &&
+          ts.isElementAccessExpression(
+            unwrapImportExpression(node.expression))))) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders &&
+      [...computedNames].some((name) => HVIGOR_DEPENDENCY_APIS.has(name))) {
       throw new Error('Dependency-mutating Hvigor APIs are not supported.');
     } else if (strictNodeLoaders && ts.isIdentifier(node) &&
       NODE_LOADER_IDENTIFIERS.has(node.text)) {
       throw new Error('Node loader imports are not supported in isolated projects.');
-    } else if (strictNodeLoaders && computedName !== null &&
-      NODE_LOADER_IDENTIFIERS.has(computedName)) {
+    } else if (strictNodeLoaders &&
+      [...computedNames].some((name) => NODE_LOADER_IDENTIFIERS.has(name))) {
       throw new Error('Node loader imports are not supported in isolated projects.');
     } else if (strictNodeLoaders && ts.isCallExpression(node) &&
       ts.isIdentifier(node.expression) &&
@@ -426,6 +709,16 @@ function exactRepositoryPath(root, target, kind, { optional = false } = {}) {
   }
   let current = repository;
   for (const part of relative(repository, path).split(sep)) {
+    const parentInfo = lstatSync(current);
+    if (parentInfo.isSymbolicLink()) {
+      throw new Error(`ArkTS project sources must not use symbolic links: ` +
+        `${relative(repository, current)}`);
+    }
+    if (!parentInfo.isDirectory()) {
+      if (optional) return null;
+      throw new Error(`ArkTS project path parent must be a directory: ` +
+        `${relative(repository, current)}`);
+    }
     const entries = readdirSync(current, { withFileTypes: true });
     const entry = entries.find((candidate) => candidate.name === part);
     if (!entry) {
@@ -561,6 +854,11 @@ function testOwner(testRoot, file) {
   return parts[1];
 }
 
+function coreTestOwner(testRoot, file) {
+  const parts = relative(testRoot, file).split(sep);
+  return parts.length > 1 ? parts[0] : '.';
+}
+
 const MYSQL_TEST_OWNERS = [
   'auth',
   'command',
@@ -588,7 +886,7 @@ const MYSQL_TEST_OWNERS = [
 function checkTestSources(root, id, testRoot, enforceCanonicalOwners = false) {
   const files = listFiles(testRoot);
   const invalidSource = files.find((file) =>
-    /\.(?:ets|[cm]?js|[cm]?ts)$/i.test(file) && !file.endsWith('.ets'));
+    /\.(?:ets|[cm]?[jt]s|jsx|tsx)$/i.test(file) && !file.endsWith('.ets'));
   if (invalidSource !== undefined) {
     throw new Error(`ArkDB package test source ${invalidSource} must use the exact ` +
       'lowercase .ets suffix.');
@@ -691,10 +989,11 @@ function checkTestSources(root, id, testRoot, enforceCanonicalOwners = false) {
 
   const ownedSources = sources.filter((file) =>
     !file.endsWith(`${sep}List.test.ets`));
+  const owner = id === 'core' ? coreTestOwner : testOwner;
   const sourceOwners = [...new Set(ownedSources.map((file) =>
-    testOwner(testRoot, file)))].sort();
+    owner(testRoot, file)))].sort();
   const testOwners = [...new Set(testFiles.map((file) =>
-    testOwner(testRoot, file)))].sort();
+    owner(testRoot, file)))].sort();
   if (id === 'mysql' && enforceCanonicalOwners) {
     const missingOwners = MYSQL_TEST_OWNERS.filter((owner) => !testOwners.includes(owner));
     const unexpectedOwners = sourceOwners.filter((owner) =>
@@ -703,6 +1002,16 @@ function checkTestSources(root, id, testRoot, enforceCanonicalOwners = false) {
       throw new Error(`MySQL tests must mirror production ownership; ` +
         `unexpected owners: ${unexpectedOwners.join(', ') || 'none'}; ` +
         `missing owners: ${missingOwners.join(', ') || 'none'}.`);
+    }
+  } else if (id === 'core' && enforceCanonicalOwners) {
+    const expectedSourceOwners = ['.', 'fixtures'];
+    const unexpectedOwners = sourceOwners.filter((owner) =>
+      !expectedSourceOwners.includes(owner));
+    const missingOwners = ['.'].filter((owner) => !testOwners.includes(owner));
+    if (unexpectedOwners.length > 0 || missingOwners.length > 0) {
+      throw new Error(`Core tests must use canonical ownership; ` +
+        `unexpected owners: ${unexpectedOwners.join(', ') || 'none'}; ` +
+        `missing executable owners: ${missingOwners.join(', ') || 'none'}.`);
     }
   }
   return { testFiles, testOwners, testCases };
@@ -757,6 +1066,7 @@ export function checkIsolatedArkTsProject(root, projectRoot) {
   const declaredEntries = [];
   const strictEntries = [];
   const sourcePattern = /\.(?:ets|ts|js|mjs)$/;
+  const sourceLikePattern = /\.(?:ets|[cm]?[jt]s|jsx|tsx)$/i;
   for (const script of [
     join(project, 'hvigorfile.ts'),
     ...moduleRoots.map((moduleRoot) => join(moduleRoot, 'hvigorfile.ts'))
@@ -862,25 +1172,33 @@ export function checkIsolatedArkTsProject(root, projectRoot) {
     exactRepositoryPath(
       repository, join(moduleRoot, 'src'), 'directory', { optional: true }))
     .filter((directory) => directory !== null);
+  const sourceFiles = sourceDirectories.flatMap((directory) =>
+    listFiles(directory));
+  const unsupportedSource = sourceFiles.find((file) =>
+    sourceLikePattern.test(file) && !sourcePattern.test(file));
+  if (unsupportedSource !== undefined) {
+    throw new Error(`Unsupported isolated project source suffix: ` +
+      `${relative(repository, unsupportedSource)}`);
+  }
   const initialSources = [...new Set([
-    ...sourceDirectories.flatMap((directory) =>
-      listFiles(directory).filter((file) => sourcePattern.test(file))),
+    ...sourceFiles.filter((file) => sourcePattern.test(file)),
     ...declaredEntries
   ])];
-  const strictSourceSet = new Set(strictEntries);
   const pendingSources = [
     ...initialSources.map((file) => ({ file, strict: false })),
     ...strictEntries.map((file) => ({ file, strict: true }))
   ];
-  const visitedSources = new Map();
+  const visitedSources = new Set();
+  const visitedFiles = new Set();
   const externalImports = [];
   while (pendingSources.length > 0) {
     const pending = pendingSources.shift();
     const file = pending.file;
     const strict = pending.strict;
-    const visitedStrict = visitedSources.get(file);
-    if (visitedStrict === true || (visitedStrict === false && !strict)) continue;
-    visitedSources.set(file, visitedStrict === true || strict);
+    const visitKey = `${strict ? 'strict' : 'application'}\0${file}`;
+    if (visitedSources.has(visitKey)) continue;
+    visitedSources.add(visitKey);
+    visitedFiles.add(file);
     let specifiers;
     try {
       specifiers = importSpecifiers(readFileSync(file, 'utf8'), {
@@ -918,42 +1236,47 @@ export function checkIsolatedArkTsProject(root, projectRoot) {
         continue;
       }
       const base = resolve(dirname(file), specifier);
-      let target = null;
+      const targets = [];
       const candidates = sourceImportCandidates(base);
       for (const candidate of candidates) {
         if (!within(repository, candidate)) {
-          target = candidate;
+          targets.push(candidate);
           break;
         }
         const exact = exactRepositoryPath(
           repository, candidate, 'file', { optional: true });
-        if (exact !== null) {
-          target = exact;
-          break;
-        }
+        if (exact !== null && !targets.includes(exact)) targets.push(exact);
       }
-      if (target === null) {
+      if (targets.length === 0) {
         throw new Error(`Unresolved ArkTS project import in ${relative(repository, file)}: ${specifier}`);
       }
-      if (!within(project, target)) {
-        throw new Error(`ArkTS project sources must not import a sibling project: ` +
-          `${relative(repository, file)} -> ${relative(repository, target)}`);
-      }
-      if (/\.(?:[cm]?js|[cm]?ts|ets)$/i.test(target) &&
-        !sourcePattern.test(target)) {
-        throw new Error(`Unsupported isolated project source suffix: ` +
-          `${relative(repository, target)}`);
-      }
-      if (sourcePattern.test(target)) {
+      for (const target of targets) {
+        if (!within(project, target)) {
+          throw new Error(`ArkTS project sources must not import a sibling project: ` +
+            `${relative(repository, file)} -> ${relative(repository, target)}`);
+        }
+        if (/\.json$/i.test(target)) {
+          try {
+            JSON.parse(readFileSync(target, 'utf8'));
+          } catch (error) {
+            throw new Error(`Cannot parse ArkTS project JSON module: ` +
+              `${relative(repository, target)}`, { cause: error });
+          }
+          continue;
+        }
+        if (!sourcePattern.test(target)) {
+          throw new Error(`Unsupported isolated project source suffix: ` +
+            `${relative(repository, target)}`);
+        }
         pendingSources.push({
           file: target,
-          strict: strict || strictSourceSet.has(target)
+          strict
         });
       }
     }
   }
   return {
-    sourceFiles: visitedSources.size,
+    sourceFiles: visitedFiles.size,
     identities: [...identities],
     dependencies,
     externalImports

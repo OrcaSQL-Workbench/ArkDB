@@ -78,6 +78,32 @@ test('preserves exact core, consumer and acceptance suite registrations', () => 
   );
 });
 
+test('rejects unowned core fixture directories', async (t) => {
+  for (const owner of ['rogue', 'mysql']) {
+    const root = await workspaceFixture(t);
+    const fixture = join(root, 'core', 'src', 'test', owner, 'fixtures',
+      'Helper.ets');
+    await mkdir(join(fixture, '..'), { recursive: true });
+    await writeFile(fixture, 'export class Helper {}\n');
+
+    assert.throws(() => checkPackage(root, 'core'),
+      new RegExp(`Core tests must use canonical ownership.*unexpected owners: ${owner}`));
+  }
+});
+
+test('rejects TSX and JSX package test sources', async (t) => {
+  for (const suffix of ['tsx', 'jsx']) {
+    const root = await workspaceFixture(t);
+    const source = join(root, 'core', 'src', 'test', 'fixtures',
+      `Helper.${suffix}`);
+    await mkdir(join(source, '..'), { recursive: true });
+    await writeFile(source, 'export class Helper {}\n');
+
+    assert.throws(() => checkPackage(root, 'core'),
+      /must use the exact lowercase \.ets suffix/);
+  }
+});
+
 test('rejects duplicate executable suite registrations', async (t) => {
   const root = await workspaceFixture(t);
   const list = join(root, 'mysql', 'src', 'test', 'List.test.ets');
@@ -366,4 +392,287 @@ test('import scanning covers both concrete and type-only seams', () => {
     './Runtime',
     './dynamic'
   ]);
+});
+
+test('strict import scanning rejects mutated and destructured loader aliases', () => {
+  for (const source of [
+    `
+      let key = '';
+      key ||= 'constructor';
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = '' || 'constructor';
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const [key] = ['constructor'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let key;
+      [key] = ['constructor'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const names = ['constructor'];
+      let key;
+      [key] = names;
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const override = { key: 'constructor' };
+      const { key } = { key: 'safe', ...override };
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const [api] = ['setDependenciesOpt'];
+      project[api]({});
+    `,
+    `
+      let api;
+      ({ api } = { api: 'setDependenciesOpt' });
+      project[api]({});
+    `,
+    `
+      function load(key) {
+        return ({})[key][key]("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function load(key = 'safe') {
+        return ({})[key][key]("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function load(key = 'safe') {
+        const Loader = ({})[key][key];
+        return Loader("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function load(key) {
+        const proto = ({})[key];
+        const Loader = proto[key];
+        return Loader("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function load(key) {
+        const Loader = ((async function () {})[key] as any);
+        return Loader("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function apply(name) {
+        project[name].call(project, {});
+      }
+      apply('setDependenciesOpt');
+    `,
+    `
+      const get = (name) => project[name];
+      get('setDependenciesOpt')({});
+    `,
+    `
+      function invoke(value) {
+        return value;
+      }
+      function apply(name) {
+        invoke(project[name]);
+      }
+      apply('setDependenciesOpt');
+    `,
+    `
+      let name = false;
+      name = name || 'setDependenciesOpt';
+      project[name]({});
+    `,
+    `
+      function apply(name) {
+        const mutate = project[name];
+        mutate.call(project, {});
+      }
+      apply('setDependenciesOpt');
+    `,
+    `
+      const key = 'constructor';
+      function load(alias = key) {
+        var key = 'safe';
+        return ({})[alias][alias]("return import('./hidden.mjs')")();
+      }
+      load();
+    `,
+    `
+      const { 'setDependenciesOpt': mutate } = project;
+      mutate({});
+    `,
+    `
+      const { 'constructor': Loader } =
+        Object.getPrototypeOf(async function () {});
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = 'constructor';
+      const { [key]: Loader } =
+        Object.getPrototypeOf(async function () {});
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = 'constructor';
+      let Loader;
+      ({ [key]: Loader } =
+        Object.getPrototypeOf(async function () {}));
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = ['constructor'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const [unused, key] = [...['safe', 'constructor'], 'safe'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = ['safe'];
+      key[0] = 'constructor';
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const [...[, key]] = [[0, 'safe'], 'constructor'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      for (const key of ['constructor']) {
+        ({})[key][key]("return import('./hidden.mjs')")();
+      }
+    `,
+    `
+      let key = 'safe';
+      for (key of ['constructor']) {
+        ({})[key][key]("return import('./hidden.mjs')")();
+      }
+    `,
+    `
+      let key = 'safe';
+      for (key of ['safe', ...['constructor']]) {
+        ({})[key][key]("return import('./hidden.mjs')")();
+      }
+    `,
+    `
+      const key = 'constructor';
+      let Loader = () => undefined;
+      for ({ [key]: Loader } of [
+        Object.getPrototypeOf(async function () {})
+      ]) {
+        Loader("return import('./hidden.mjs')")();
+      }
+    `,
+    `
+      const { constructor } =
+        Object.getPrototypeOf(async function () {});
+      constructor("return import('./hidden.mjs')")();
+    `,
+    `
+      const Loader = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(async function () {}), 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const Loader = Object.getOwnPropertyDescriptor.call(
+        Object,
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const api = 'getOwnPropertyDescriptor';
+      const Loader = Object[api](
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const { getOwnPropertyDescriptor: descriptor } = Object;
+      const Loader = descriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const O = Object;
+      const Loader = O.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let descriptor;
+      ({ holder: { ['getOwnPropertyDescriptor']: descriptor } } =
+        { holder: Object });
+      const Loader = descriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const descriptors = Object.getOwnPropertyDescriptors(
+        Object.getPrototypeOf(async function () {})
+      );
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `
+  ]) {
+    assert.throws(() => importSpecifiers(source, {
+      strictNodeLoaders: true
+    }), /(?:Node loader imports|Dependency-mutating Hvigor APIs) are not supported/);
+  }
+});
+
+test('strict import scanning allows safe indexed writes and loop shadowing', () => {
+  assert.doesNotThrow(() => importSpecifiers(`
+    const key = 'safe';
+    const values = {};
+    values[key] = () => true;
+    values[key]();
+    const counts = { safe: 0 };
+    counts[key] += 1;
+    const handlers = { safe: () => true };
+    handlers[key]();
+    interface Helper {
+      getOwnPropertyDescriptor(): string;
+    }
+    const helper: Helper = {
+      getOwnPropertyDescriptor: () => 'safe'
+    };
+    helper.getOwnPropertyDescriptor();
+    for (const key of ['other']) {
+      void key;
+    }
+    values[key]();
+    for (const key of ['safe']) {
+      handlers[key]();
+    }
+  `, {
+    strictNodeLoaders: true
+  }));
 });

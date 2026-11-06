@@ -211,12 +211,12 @@ const MYSQL_FEATURE_CONTRACT_MODELS = [
 ].join('|');
 const MYSQL_CONTRACT_MODEL_PATH = new RegExp(
   '^mysql/src/main/ets/mysql/' +
-  '(?:model/[^/]+\\.ets|features/(?:' + MYSQL_FEATURE_CONTRACT_MODELS +
+  '(?:model/.+\\.ets|features/(?:' + MYSQL_FEATURE_CONTRACT_MODELS +
   ')|protocol/Constants\\.ets)$'
 );
 const MYSQL_NON_LEAF_IMPLEMENTATION_PATH = new RegExp(
   '^mysql/src/main/ets/mysql/' +
-  '(?!(?:model/[^/]+\\.ets|features/(?:' + MYSQL_FEATURE_CONTRACT_MODELS +
+  '(?!(?:model/.+\\.ets|features/(?:' + MYSQL_FEATURE_CONTRACT_MODELS +
   ')|protocol/Constants\\.ets)$).+'
 );
 const MYSQL_VERTICAL_FEATURE_PATTERN = MYSQL_VERTICAL_FEATURES.join('|');
@@ -786,7 +786,7 @@ test('reads triple-slash runtime references as dependency edges', async (t) => {
     'core/oh-package.json5': "{name:'@arkdb/core'}",
     'core/Index.ets': "export { RuntimeA } from './src/main/ets/RuntimeA';",
     'core/src/main/ets/RuntimeA.ets':
-      "/// <reference path='./RuntimeB.ets' />\nexport class RuntimeA {}",
+      "/// <reference path='RuntimeB.ets' />\nexport class RuntimeA {}",
     'core/src/main/ets/RuntimeB.ets': 'export class RuntimeB {}'
   });
 
@@ -1475,6 +1475,57 @@ test('rejects Hvigor CommonJS loader syntax', async (t) => {
     "module.require('./hidden.mjs');\n");
   assert.throws(() => readArkTsGraph(root),
     /CommonJS loader access is not supported/i);
+
+  for (const source of [
+    "require('./hidden.mjs');\n",
+    "const load = require;\nload('./hidden.mjs');\n",
+    "const load = (require);\nload('./hidden.mjs');\n",
+    "const load = (require as NodeRequire);\nload('./hidden.mjs');\n",
+    "const load = typeof require === 'function' ? require : undefined;\n" +
+      "load?.('./hidden.mjs');\n",
+    "const load = [require][0];\nload('./hidden.mjs');\n",
+    "const load = require.bind(null);\nload('./hidden.mjs');\n",
+    "const load = module.require.bind(module);\nload('./hidden.mjs');\n",
+    "module!.require('./hidden.mjs');\n",
+    "const moduleAlias = module;\nmoduleAlias.require('./hidden.mjs');\n",
+    "const { ['require']: load } = module || {};\nload('./hidden.mjs');\n",
+    "class Loader extends require {}\n" +
+      "Object.getPrototypeOf(Loader)('./hidden.mjs');\n",
+    "global.require('./hidden.mjs');\n",
+    "global['require']('./hidden.mjs');\n",
+    "global.module.require('./hidden.mjs');\n",
+    "globalThis.require('./hidden.mjs');\n",
+    "globalThis.module.require('./hidden.mjs');\n",
+    "const moduleAlias = globalThis.module;\nmoduleAlias.require('./hidden.mjs');\n",
+    "let moduleAlias;\nmoduleAlias ??= globalThis.module;\n" +
+      "moduleAlias.require('./hidden.mjs');\n",
+    "globalThis.module.createRequire(import.meta.url)('./hidden.mjs');\n",
+    "let globalAlias;\nglobalAlias ??= globalThis;\n" +
+      "globalAlias.require('./hidden.mjs');\n",
+    "const globalAlias = global;\nglobalAlias.require('./hidden.mjs');\n",
+    "const load = arguments[1];\nload('./hidden.mjs');\n",
+    "arguments[2].require('./hidden.mjs');\n",
+    "declare function require(name: string): Object;\n" +
+      "export { require as loader };\n"
+  ]) {
+    await writeFile(join(root, 'hvigorfile.ts'), source);
+    assert.throws(() => readArkTsGraph(root),
+      /CommonJS loader access is not supported/i);
+  }
+});
+
+test('allows benign module-shaped declaration names in Hvigor', async (t) => {
+  const root = await fixture(t, {
+    'hvigorfile.ts':
+      'interface Config { module: string; require?: boolean }\n' +
+      'type RequireType = typeof require;\n' +
+      'type ModuleType = typeof module;\n' +
+      'class Holder { module: string = \"entry\"; require(): boolean { return false; } }\n' +
+      'const { module: kind, require: needed } = new Holder();\n' +
+      'void kind;\nvoid needed;\n'
+  });
+
+  assert.doesNotThrow(() => readArkTsGraph(root));
 });
 
 test('rejects unsupported Hvigor module specifiers', async (t) => {
@@ -1625,6 +1676,30 @@ test('rejects contract and model leaves that reach command implementations', () 
   assert.throws(
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
     /MySQL contract and model leaves must not depend on implementations.*features\/session\/MySqlSessionOptions\.ets -> mysql\/src\/main\/ets\/mysql\/command\/Query\.ets/
+  );
+});
+
+test('rejects nested model leaves that reach feature implementations', () => {
+  const graph = {
+    files: [
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets',
+      'mysql/src/main/ets/mysql/model/nested/Bridge.ets',
+      'mysql/src/main/ets/mysql/features/session/MySqlSessionRunner.ets'
+    ],
+    dependencies: {
+      'mysql/src/main/ets/mysql/api/MySqlContracts.ets': [
+        'mysql/src/main/ets/mysql/model/nested/Bridge.ets'
+      ],
+      'mysql/src/main/ets/mysql/model/nested/Bridge.ets': [
+        'mysql/src/main/ets/mysql/features/session/MySqlSessionRunner.ets'
+      ],
+      'mysql/src/main/ets/mysql/features/session/MySqlSessionRunner.ets': []
+    }
+  };
+
+  assert.throws(
+    () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+    /MySQL contract and model leaves must not depend on implementations.*model\/nested\/Bridge\.ets/
   );
 });
 

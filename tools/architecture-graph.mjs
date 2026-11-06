@@ -226,7 +226,13 @@ function sourceSyntax(file) {
 
 function unwrapParentheses(node) {
   let current = node;
-  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  while (ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isNonNullExpression(current)) {
+    current = current.expression;
+  }
   return current;
 }
 
@@ -260,6 +266,20 @@ function reflectExpression(node) {
       unwrapParentheses(expression.argumentExpression).text === 'Reflect');
 }
 
+function moduleExpression(node) {
+  const expression = unwrapParentheses(node);
+  return (ts.isIdentifier(expression) && expression.text === 'module') ||
+    (ts.isPropertyAccessExpression(expression) &&
+      ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === 'globalThis' &&
+      expression.name.text === 'module') ||
+    (ts.isElementAccessExpression(expression) &&
+      ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === 'globalThis' &&
+      expression.argumentExpression !== undefined &&
+      constantString(expression.argumentExpression) === 'module');
+}
+
 function rootedAtGlobalThis(node) {
   let expression = unwrapParentheses(node);
   while (ts.isPropertyAccessExpression(expression) ||
@@ -284,6 +304,23 @@ function reflectiveCall(node) {
   return memberOwnedBy(node.expression, 'Reflect');
 }
 
+function moduleRequireAccess(node) {
+  let expression = unwrapParentheses(node);
+  const names = [];
+  while (ts.isPropertyAccessExpression(expression) ||
+    ts.isElementAccessExpression(expression)) {
+    if (ts.isPropertyAccessExpression(expression)) {
+      names.push(expression.name.text);
+    } else if (expression.argumentExpression !== undefined) {
+      names.push(constantString(expression.argumentExpression));
+    }
+    expression = unwrapParentheses(expression.expression);
+  }
+  return ts.isIdentifier(expression) &&
+    ['global', 'globalThis', 'module'].includes(expression.text) &&
+    names.includes('require');
+}
+
 function constantString(node) {
   const expression = unwrapParentheses(node);
   if (ts.isStringLiteralLike(expression)) return expression.text;
@@ -296,10 +333,72 @@ function constantString(node) {
   return null;
 }
 
+function identifierInTypePosition(node) {
+  const identifier = node;
+  let current = node.parent;
+  while (current !== undefined) {
+    if (ts.isExpressionWithTypeArguments(current) &&
+      ts.isHeritageClause(current.parent) &&
+      current.parent.token === ts.SyntaxKind.ExtendsKeyword &&
+      (ts.isClassDeclaration(current.parent.parent) ||
+        ts.isClassExpression(current.parent.parent))) {
+      let nested = identifier;
+      while (nested !== current && nested.parent !== undefined) {
+        if (nested === current.expression) return false;
+        nested = nested.parent;
+      }
+      if (nested === current.expression) return false;
+    }
+    if (ts.isTypeNode(current)) return true;
+    if (ts.isStatement(current)) return false;
+    current = current.parent;
+  }
+  return false;
+}
+
+function referencedLoaderIdentifier(node, name) {
+  if (!ts.isIdentifier(node) || node.text !== name) return false;
+  if (identifierInTypePosition(node)) return false;
+  const parent = node.parent;
+  if (ts.isExportSpecifier(parent)) {
+    const declaration = ts.isNamedExports(parent.parent) &&
+      ts.isExportDeclaration(parent.parent.parent)
+      ? parent.parent.parent
+      : null;
+    if (declaration?.moduleSpecifier !== undefined ||
+      declaration?.isTypeOnly === true || parent.isTypeOnly) {
+      return false;
+    }
+    return parent.propertyName === undefined
+      ? parent.name === node
+      : parent.propertyName === node;
+  }
+  if (parent && 'name' in parent && parent.name === node &&
+    !ts.isShorthandPropertyAssignment(parent)) {
+    return false;
+  }
+  if ((ts.isBindingElement(parent) && parent.propertyName === node) ||
+    (ts.isImportSpecifier(parent) && parent.propertyName === node) ||
+    (ts.isQualifiedName(parent) && parent.right === node)) {
+    return false;
+  }
+  return true;
+}
+
+function referencedPathSpecifier(fileName) {
+  if (fileName.startsWith('.') || isAbsolute(fileName) ||
+    /^[A-Za-z]:[\\/]/.test(fileName) ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(fileName)) {
+    return fileName;
+  }
+  return `./${fileName}`;
+}
+
 function staticSpecifiers(file) {
   const syntax = sourceSyntax(file);
   const specifiers = [
-    ...syntax.referencedFiles.map((reference) => reference.fileName),
+    ...syntax.referencedFiles.map((reference) =>
+      referencedPathSpecifier(reference.fileName)),
     ...syntax.typeReferenceDirectives.map((reference) => reference.fileName)
   ];
   function visit(node) {
@@ -307,16 +406,41 @@ function staticSpecifiers(file) {
       (node.text === 'eval' || node.text === 'Function')) {
       throw new Error(`Node code generation is not supported: ${file}`);
     } else if (buildToolSource(file) &&
+      referencedLoaderIdentifier(node, 'require')) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) &&
+      (referencedLoaderIdentifier(node, 'arguments') ||
+        referencedLoaderIdentifier(node, 'global') ||
+        referencedLoaderIdentifier(node, 'globalThis') ||
+        referencedLoaderIdentifier(node, 'module'))) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) &&
+      (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+      moduleExpression(node)) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (buildToolSource(file) &&
       ((ts.isPropertyAccessExpression(node) && node.name.text === 'constructor') ||
         (ts.isElementAccessExpression(node) &&
           node.argumentExpression !== undefined &&
           constantString(node.argumentExpression) === 'constructor'))) {
       throw new Error(`Node code generation is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) &&
+      (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+      moduleRequireAccess(node)) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
     } else if (buildToolSource(file) && ts.isIdentifier(node) &&
       node.text === 'getBuiltinModule') {
       throw new Error(`Node getBuiltinModule access is not supported: ${file}`);
     } else if (buildToolSource(file) && reflectiveCall(node)) {
       throw new Error(`Node reflective access is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) && ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      moduleExpression(node.initializer)) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) && ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      moduleExpression(node.right)) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
     } else if (buildToolSource(file) && ts.isVariableDeclaration(node) &&
       node.initializer !== undefined &&
       ((ts.isIdentifier(unwrapParentheses(node.initializer)) &&

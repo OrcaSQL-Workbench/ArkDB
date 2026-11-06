@@ -132,6 +132,9 @@ export async function inspectHar(file, expected, expectedExports, moduleDefiniti
     visitedDeclarations.add(declaration);
     for (const specifier of importSpecifiers(text(declaration))) {
       if (Object.hasOwn(manifest.dependencies ?? {}, specifier)) continue;
+      if (specifier.startsWith('@kit.') || specifier.startsWith('@ohos.')) {
+        continue;
+      }
       if (!specifier.startsWith('.')) {
         throw new Error(`Unresolved packaged public declaration: ${specifier}`);
       }

@@ -50,7 +50,7 @@ test('resolves explicitly suffixed packaged declaration references', async (t) =
     undefined,
     'types.d.ets',
     undefined,
-    "/// <reference path='./types.d.ets' />\n" +
+    "/// <reference path='types.d.ets' />\n" +
     `export { ${fixtureExports.join(', ')} } from './public';\n`);
 
   await assert.doesNotReject(inspectHar(file, expected, fixtureExports));
@@ -92,6 +92,20 @@ test('resolves JavaScript declaration specifiers to d.ts files', async (t) => {
     'public.d.ts',
     undefined,
     `export { ${fixtureExports.join(', ')} } from './public.js';\n`);
+
+  await assert.doesNotReject(inspectHar(file, expected, fixtureExports));
+});
+
+test('allows platform imports in transitive declarations', async (t) => {
+  const file = await fixture(
+    t,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    "import type { socket } from '@kit.NetworkKit';\n" +
+    'export declare class SyntheticDeclaration {}\n');
 
   await assert.doesNotReject(inspectHar(file, expected, fixtureExports));
 });

@@ -592,6 +592,18 @@ test('ordinary consumer root dev dependencies cannot name device acceptance', as
     /ArkTS project dependencies must not name a sibling project/);
 });
 
+test('ordinary consumer Hvigor config cannot depend on device acceptance', async (t) => {
+  const root = await fixture(t);
+  const configPath = join(root, 'examples', 'mysql-client', 'hvigor',
+    'hvigor-config.json5');
+  const config = JSON5.parse(await readFile(configPath, 'utf8'));
+  config.dependencies['arkdb-mysql-device-acceptance'] = '1.0.0';
+  await writeFile(configPath, JSON.stringify(config));
+
+  assert.throws(() => checkDriverContracts(root),
+    /ArkTS project dependencies must not name a sibling project/);
+});
+
 test('ordinary consumer package imports cannot name device acceptance', async (t) => {
   const root = await fixture(t);
   const source = join(root, 'examples', 'mysql-client', 'entry', 'src', 'main',
@@ -667,6 +679,18 @@ test('ordinary consumer rejects encoded file URL imports', async (t) => {
     /Absolute module URLs are not supported in isolated projects/);
 });
 
+test('ordinary consumer rejects absolute filesystem imports', async (t) => {
+  const root = await fixture(t);
+  const source = join(root, 'examples', 'mysql-client', 'hvigorfile.ts');
+  const target = join(root, 'examples', 'mysql-device-acceptance',
+    'hvigorfile.ts');
+  await writeFile(source, (await readFile(source, 'utf8')) +
+    `\nimport ${JSON.stringify(target)};\n`);
+
+  assert.throws(() => checkDriverContracts(root),
+    /Absolute filesystem imports are not supported in isolated projects/);
+});
+
 test('ordinary consumer worker paths cannot point at device acceptance', async (t) => {
   const root = await fixture(t);
   const profilePath = join(root, 'examples', 'mysql-client', 'entry',
@@ -708,6 +732,55 @@ test('ordinary consumer follows imported Hvigor Node helpers', async (t) => {
     /ArkTS project imports must not name a sibling project/);
 });
 
+test('ordinary consumer Hvigor scripts allow benign node built-ins', async (t) => {
+  const root = await fixture(t);
+  const script = join(root, 'examples', 'mysql-client', 'hvigorfile.ts');
+  await writeFile(script, (await readFile(script, 'utf8')) +
+    "\nimport path from 'node:path';\n" +
+    "import { readFileSync } from 'node:fs';\n" +
+    "import { readFile } from 'node:fs/promises';\n" +
+    "import os from 'os';\n" +
+    "import sqlitePackage from 'sqlite';\n" +
+    'void path;\nvoid readFileSync;\nvoid readFile;\nvoid os;\n');
+
+  assert.doesNotThrow(() => checkDriverContracts(root));
+});
+
+test('ordinary consumer Hvigor scripts allow benign module-shaped declarations', async (t) => {
+  const root = await fixture(t);
+  const script = join(root, 'examples', 'mysql-client', 'hvigorfile.ts');
+  await writeFile(script, (await readFile(script, 'utf8')) +
+    "\ninterface Config { module: string; require?: boolean }\n" +
+    'type RequireType = typeof require;\n' +
+    'type ModuleType = typeof module;\n' +
+    "class Holder { module: string = 'entry'; require(): boolean { return false; } }\n" +
+    'const { module: kind, require: needed } = new Holder();\n' +
+    'void kind;\nvoid needed;\n');
+
+  assert.doesNotThrow(() => checkDriverContracts(root));
+});
+
+test('ordinary consumer Hvigor scripts reject execution-capable node built-ins', async (t) => {
+  for (const builtin of [
+    'node:child_process',
+    'child_process',
+    'inspector',
+    'node:sea',
+    'node:vm',
+    'vm',
+    'node:worker_threads',
+    'worker_threads'
+  ]) {
+    const root = await fixture(t);
+    const script = join(root, 'examples', 'mysql-client', 'hvigorfile.ts');
+    await writeFile(script, (await readFile(script, 'utf8')) +
+      `\nimport ${JSON.stringify(builtin)};\n`);
+
+    assert.throws(() => checkDriverContracts(root),
+      /Node built-in import is not allowed in isolated build tooling/);
+  }
+});
+
 test('ordinary consumer Hvigor scripts reject hidden CommonJS loaders', async (t) => {
   const root = await fixture(t);
   const script = join(root, 'examples', 'mysql-client', 'hvigorfile.ts');
@@ -742,7 +815,7 @@ test('ordinary consumer Hvigor scripts reject reflective Node loaders', async (t
     await writeFile(script, (await readFile(script, 'utf8')) + `\n${loader}`);
 
     assert.throws(() => checkDriverContracts(root),
-      /Node loader imports are not supported in isolated projects/);
+      /(?:Node loader|CommonJS) imports are not supported in isolated projects/);
   }
 });
 
@@ -834,11 +907,66 @@ test('ordinary application sources may use benign module-shaped properties', asy
     'js', 'Benign.ts');
   await mkdir(join(source, '..'), { recursive: true });
   await writeFile(source,
+    'interface Config { module: string; require?: boolean }\n' +
+    'type RequireType = typeof require;\n' +
+    'type ModuleType = typeof module;\n' +
+    'class Holder { module: string = \"entry\"; require(): boolean { return false; } }\n' +
     "const config = { module: 'entry' };\n" +
     'const state = { getDependenciesOpt: false };\n' +
-    'export const values = [config.module, state.getDependenciesOpt, Object.constructor];\n');
+    'const { module: kind, require: needed } = new Holder();\n' +
+    'export const values = [config.module, state.getDependenciesOpt, ' +
+      'Object.constructor, kind, needed];\n');
 
   assert.doesNotThrow(() => checkDriverContracts(root));
+});
+
+test('ordinary application sources cannot import Node built-ins', async (t) => {
+  const root = await fixture(t);
+  const source = join(root, 'examples', 'mysql-client', 'entry', 'src', 'main',
+    'js', 'NodeImport.ts');
+  await mkdir(join(source, '..'), { recursive: true });
+  await writeFile(source,
+    "import { readFileSync } from 'node:fs';\nvoid readFileSync;\n");
+
+  assert.throws(() => checkDriverContracts(root),
+    /Node built-in imports are not supported in ordinary application sources/);
+});
+
+test('ordinary application sources cannot use CommonJS imports', async (t) => {
+  for (const statement of [
+    "require('node:fs');\n",
+    "const load = require;\nload('./Bridge.js');\n",
+    "module.require('./Bridge.js');\n",
+    "const load = module.require;\nload('./Bridge.js');\n",
+    "const { ['require']: load } = module;\nload('./Bridge.js');\n",
+    "const { ['require']: load } = module || {};\nload('./Bridge.js');\n",
+    "class Loader extends require {}\n" +
+      "Object.getPrototypeOf(Loader)('./Bridge.js');\n",
+    "global.require('./Bridge.js');\n",
+    "global['require']('./Bridge.js');\n",
+    "global.module.require('./Bridge.js');\n",
+    "globalThis.require('./Bridge.js');\n",
+    "globalThis.module.require('./Bridge.js');\n",
+    "const moduleAlias = globalThis.module;\nmoduleAlias.require('./Bridge.js');\n",
+    "let moduleAlias;\nmoduleAlias ??= globalThis.module;\n" +
+      "moduleAlias.require('./Bridge.js');\n",
+    "globalThis.module.createRequire(import.meta.url)('./Bridge.js');\n",
+    "const { require: load } = globalThis;\nload('./Bridge.js');\n",
+    "Object(globalThis).require('./Bridge.js');\n",
+    "const globalAlias = global;\nglobalAlias.require('./Bridge.js');\n",
+    "import load = require('./Bridge.js');\n",
+    "declare function require(name: string): Object;\n" +
+      "export { require as loader };\n"
+  ]) {
+    const root = await fixture(t);
+    const source = join(root, 'examples', 'mysql-client', 'entry', 'src',
+      'main', 'js', 'CommonJs.js');
+    await mkdir(join(source, '..'), { recursive: true });
+    await writeFile(source, statement);
+
+    assert.throws(() => checkDriverContracts(root),
+      /CommonJS imports are not supported in isolated projects/);
+  }
 });
 
 test('ordinary consumer scans a registered module declared entry', async (t) => {

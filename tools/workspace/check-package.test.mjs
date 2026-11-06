@@ -172,7 +172,7 @@ test('resolves explicitly suffixed production declaration references', async (t)
   'export interface FixtureTypes {}\n');
   const source = join(directory, 'MySqlServerInfo.ets');
   await writeFile(source,
-  "/// <reference path='./Types.d.ets' />\n" +
+  "/// <reference path='Types.d.ets' />\n" +
   readFileSync(source, 'utf8'));
 
   assert.doesNotThrow(() => checkPackage(root, 'mysql'));

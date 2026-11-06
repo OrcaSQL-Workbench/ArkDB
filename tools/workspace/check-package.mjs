@@ -1,7 +1,9 @@
 import {
   existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  basename, dirname, isAbsolute, join, posix, relative, resolve, sep, win32
+} from 'node:path';
 import ts from 'typescript';
 import { dependencyClosure, discoverPackages, driverArgument, readJson5, resolvePackage, ROOT } from './driver-packages.mjs';
 
@@ -35,7 +37,13 @@ export function exportedNames(source) {
 
 function unwrapImportExpression(node) {
   let current = node;
-  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  while (ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isNonNullExpression(current)) {
+    current = current.expression;
+  }
   return current;
 }
 
@@ -52,6 +60,20 @@ function isolatedProcessExpression(node) {
       expression.argumentExpression !== undefined &&
       ts.isStringLiteralLike(unwrapImportExpression(expression.argumentExpression)) &&
       unwrapImportExpression(expression.argumentExpression).text === 'process');
+}
+
+function isolatedModuleExpression(node) {
+  const expression = unwrapImportExpression(node);
+  return (ts.isIdentifier(expression) && expression.text === 'module') ||
+    (ts.isPropertyAccessExpression(expression) &&
+      ts.isIdentifier(unwrapImportExpression(expression.expression)) &&
+      unwrapImportExpression(expression.expression).text === 'globalThis' &&
+      expression.name.text === 'module') ||
+    (ts.isElementAccessExpression(expression) &&
+      ts.isIdentifier(unwrapImportExpression(expression.expression)) &&
+      unwrapImportExpression(expression.expression).text === 'globalThis' &&
+      expression.argumentExpression !== undefined &&
+      constantString(expression.argumentExpression) === 'module');
 }
 
 function isolatedRootedAtGlobalThis(node) {
@@ -73,8 +95,97 @@ const HVIGOR_DEPENDENCY_APIS = new Set([
 ]);
 const NODE_LOADER_IDENTIFIERS = new Set([
   'constructor', 'createRequire', 'eval', 'Function', 'getBuiltinModule',
-  'globalThis', 'module', 'process', 'Reflect', 'require'
+  'globalThis', 'process', 'Reflect'
 ]);
+const NODE_BUILTIN_ROOTS = new Set([
+  '_http_agent',
+  '_http_client',
+  '_http_common',
+  '_http_incoming',
+  '_http_outgoing',
+  '_http_server',
+  '_stream_duplex',
+  '_stream_passthrough',
+  '_stream_readable',
+  '_stream_transform',
+  '_stream_wrap',
+  '_stream_writable',
+  '_tls_common',
+  '_tls_wrap',
+  'assert',
+  'async_hooks',
+  'buffer',
+  'child_process',
+  'cluster',
+  'console',
+  'constants',
+  'crypto',
+  'dgram',
+  'diagnostics_channel',
+  'dns',
+  'domain',
+  'events',
+  'fs',
+  'http',
+  'http2',
+  'https',
+  'inspector',
+  'module',
+  'net',
+  'os',
+  'path',
+  'perf_hooks',
+  'process',
+  'punycode',
+  'querystring',
+  'readline',
+  'repl',
+  'stream',
+  'string_decoder',
+  'sys',
+  'timers',
+  'tls',
+  'trace_events',
+  'tty',
+  'url',
+  'util',
+  'v8',
+  'vm',
+  'wasi',
+  'worker_threads',
+  'zlib'
+]);
+const NODE_PREFIX_ONLY_BUILTIN_ROOTS = new Set([
+  'sea',
+  'sqlite',
+  'test'
+]);
+const SAFE_NODE_BUILTIN_ROOTS = new Set([
+  'assert',
+  'buffer',
+  'crypto',
+  'fs',
+  'os',
+  'path',
+  'url',
+  'util'
+]);
+
+function absoluteModuleSpecifier(value) {
+  return isAbsolute(value) || posix.isAbsolute(value) || win32.isAbsolute(value);
+}
+
+function nodeBuiltinRoot(specifier) {
+  const prefixed = specifier.startsWith('node:');
+  const name = prefixed
+    ? specifier.slice('node:'.length)
+    : specifier;
+  const root = name.split('/', 1)[0];
+  if (NODE_PREFIX_ONLY_BUILTIN_ROOTS.has(root)) {
+    return prefixed ? root : null;
+  }
+  return NODE_BUILTIN_ROOTS.has(root) ? root : null;
+}
 
 function constantString(node) {
   const expression = unwrapImportExpression(node);
@@ -88,6 +199,23 @@ function constantString(node) {
   return null;
 }
 
+function moduleRequireAccess(node) {
+  let expression = unwrapImportExpression(node);
+  const names = [];
+  while (ts.isPropertyAccessExpression(expression) ||
+    ts.isElementAccessExpression(expression)) {
+    if (ts.isPropertyAccessExpression(expression)) {
+      names.push(expression.name.text);
+    } else if (expression.argumentExpression !== undefined) {
+      names.push(constantString(expression.argumentExpression));
+    }
+    expression = unwrapImportExpression(expression.expression);
+  }
+  return ts.isIdentifier(expression) &&
+    ['global', 'globalThis', 'module'].includes(expression.text) &&
+    names.includes('require');
+}
+
 function memberOwnedBy(node, owner) {
   const expression = unwrapImportExpression(node);
   if (!ts.isPropertyAccessExpression(expression) &&
@@ -96,6 +224,58 @@ function memberOwnedBy(node, owner) {
   }
   const target = unwrapImportExpression(expression.expression);
   return ts.isIdentifier(target) && target.text === owner;
+}
+
+function identifierInTypePosition(node) {
+  const identifier = node;
+  let current = node.parent;
+  while (current !== undefined) {
+    if (ts.isExpressionWithTypeArguments(current) &&
+      ts.isHeritageClause(current.parent) &&
+      current.parent.token === ts.SyntaxKind.ExtendsKeyword &&
+      (ts.isClassDeclaration(current.parent.parent) ||
+        ts.isClassExpression(current.parent.parent))) {
+      let nested = identifier;
+      while (nested !== current && nested.parent !== undefined) {
+        if (nested === current.expression) return false;
+        nested = nested.parent;
+      }
+      if (nested === current.expression) return false;
+    }
+    if (ts.isTypeNode(current)) return true;
+    if (ts.isStatement(current)) return false;
+    current = current.parent;
+  }
+  return false;
+}
+
+function referencedIdentifier(node, name) {
+  if (!ts.isIdentifier(node) || node.text !== name) return false;
+  if (identifierInTypePosition(node)) return false;
+  const parent = node.parent;
+  if (ts.isExportSpecifier(parent)) {
+    const declaration = ts.isNamedExports(parent.parent) &&
+      ts.isExportDeclaration(parent.parent.parent)
+      ? parent.parent.parent
+      : null;
+    if (declaration?.moduleSpecifier !== undefined ||
+      declaration?.isTypeOnly === true || parent.isTypeOnly) {
+      return false;
+    }
+    return parent.propertyName === undefined
+      ? parent.name === node
+      : parent.propertyName === node;
+  }
+  if (parent && 'name' in parent && parent.name === node &&
+    !ts.isShorthandPropertyAssignment(parent)) {
+    return false;
+  }
+  if ((ts.isBindingElement(parent) && parent.propertyName === node) ||
+    (ts.isImportSpecifier(parent) && parent.propertyName === node) ||
+    (ts.isQualifiedName(parent) && parent.right === node)) {
+    return false;
+  }
+  return true;
 }
 
 function sourceImportCandidates(base) {
@@ -121,11 +301,21 @@ function sourceImportCandidates(base) {
   ];
 }
 
+function referencedPathSpecifier(fileName) {
+  if (fileName.startsWith('.') || absoluteModuleSpecifier(fileName) ||
+    /^[A-Za-z]:[\\/]/.test(fileName) ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(fileName)) {
+    return fileName;
+  }
+  return `./${fileName}`;
+}
+
 export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
   const syntax = ts.createSourceFile(
     'ArkTsImports.ets', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const specifiers = [
-    ...syntax.referencedFiles.map((reference) => reference.fileName),
+    ...syntax.referencedFiles.map((reference) =>
+      referencedPathSpecifier(reference.fileName)),
     ...syntax.typeReferenceDirectives.map((reference) => reference.fileName)
   ];
   function visit(node) {
@@ -133,7 +323,29 @@ export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
       node.argumentExpression !== undefined
       ? constantString(node.argumentExpression)
       : null;
-    if (strictNodeLoaders && ts.isIdentifier(node) &&
+    if (strictNodeLoaders && referencedIdentifier(node, 'arguments')) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (referencedIdentifier(node, 'global') ||
+      referencedIdentifier(node, 'globalThis') ||
+      referencedIdentifier(node, 'module')) {
+      throw new Error('CommonJS imports are not supported in isolated projects.');
+    } else if ((ts.isPropertyAccessExpression(node) ||
+      ts.isElementAccessExpression(node)) &&
+      isolatedModuleExpression(node)) {
+      throw new Error('CommonJS imports are not supported in isolated projects.');
+    } else if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+      moduleRequireAccess(node)) {
+      throw new Error('CommonJS imports are not supported in isolated projects.');
+    } else if (ts.isVariableDeclaration(node) && node.initializer !== undefined &&
+      isolatedModuleExpression(node.initializer)) {
+      throw new Error('CommonJS imports are not supported in isolated projects.');
+    } else if (ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isolatedModuleExpression(node.right)) {
+      throw new Error('CommonJS imports are not supported in isolated projects.');
+    } else if (referencedIdentifier(node, 'require')) {
+      throw new Error('CommonJS imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders && ts.isIdentifier(node) &&
       HVIGOR_DEPENDENCY_APIS.has(node.text)) {
       throw new Error('Dependency-mutating Hvigor APIs are not supported.');
     } else if (strictNodeLoaders && computedName !== null &&
@@ -179,6 +391,9 @@ export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
       ts.isExternalModuleReference(node.moduleReference) &&
       node.moduleReference.expression &&
       ts.isStringLiteral(node.moduleReference.expression)) {
+      if (!node.isTypeOnly) {
+        throw new Error('CommonJS imports are not supported in isolated projects.');
+      }
       specifiers.push(node.moduleReference.expression.text);
     } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) &&
       ts.isStringLiteral(node.argument.literal)) {
@@ -586,6 +801,7 @@ export function checkIsolatedArkTsProject(root, projectRoot) {
   ]));
   const manifestFiles = [
     join(project, 'oh-package.json5'),
+    join(project, 'hvigor', 'hvigor-config.json5'),
     ...moduleManifests.keys()
   ].map((file) => exactRepositoryPath(
     repository, file, 'file', { optional: true }))
@@ -676,9 +892,21 @@ export function checkIsolatedArkTsProject(root, projectRoot) {
     }
     for (const specifier of specifiers) {
       if (!specifier.startsWith('.')) {
-        if (strict &&
-          ['module', 'node:module', 'process', 'node:process'].includes(specifier)) {
-          throw new Error('Node loader imports are not supported in isolated projects.');
+        if (absoluteModuleSpecifier(specifier)) {
+          throw new Error(
+            'Absolute filesystem imports are not supported in isolated projects.');
+        }
+        const builtinRoot = nodeBuiltinRoot(specifier);
+        if (builtinRoot !== null) {
+          if (!strict) {
+            throw new Error(
+              'Node built-in imports are not supported in ordinary application sources.');
+          }
+          if (!SAFE_NODE_BUILTIN_ROOTS.has(builtinRoot)) {
+            throw new Error(
+              'Node built-in import is not allowed in isolated build tooling.');
+          }
+          continue;
         }
         if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(specifier)) {
           throw new Error('Absolute module URLs are not supported in isolated projects.');

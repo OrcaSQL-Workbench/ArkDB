@@ -1,25 +1,31 @@
 # Changelog
 
-## 1.0.2 - 2026-10-24 (engineering preview)
+## 1.1.0 - 2026-11-07 (engineering preview)
 
-- Depend on the independent `@arkdb/core` 1.0.0 source module for common errors,
-  results, metadata and connection contracts.
-- Preserve the 1.0.1 MySQL connection, non-generic factory, handle-based controller
-  and provider interfaces; expose generic contracts under distinct `Core...` names.
-- Keep native scalar/column/stream types, numeric error codes and established
-  constructor defaults. Make additions to existing data shapes optional.
-- Keep one shared error constructor with a separate numeric/textual `nativeCode`;
-  preserve portable unknown observations separately from native stream defaults.
-- Compile core plus MySQL into one self-contained delivery HAR, with internal
-  declarations, source provenance and no consumer core dependency/override.
-- Validate the assembled manifest, merged module definition and combined legal
-  notices when publishing the sealed single-HAR release.
-- Expose adapter-typed factory creation and optional connection features; keep
-  native MySQL creation/provider helpers and public native information aliases.
+- Preserve every published 1.0.2 package-root contract while adding the optional
+  MySQL capabilities below and advancing the embedded core source contract to 1.1.0.
 - Expose optional MySQL prepared statements, typed parameters, identifier quoting
   and positional placeholder helpers from the single package entry. Resolve the
   connection-owned executor lazily on every call, preserving ready/busy checks,
   physical-session ownership and the shared streaming/cleanup pipeline.
+- Add validated, snapshotted session time-zone and SQL-mode initialization plus
+  owned session fingerprints for features that must observe current server context.
+- Add the opt-in `preparedCacheSize` private convenience-statement cache. Retain
+  exact-SQL handles only within one physical generation and reuse context, evict
+  unborrowed LRU entries, retire the context on non-cache command admission, and
+  never probe, replay or silently exceed capacity.
+- Add optional prepared batch execution through `mysqlFeatures.batch`. Reuse one
+  prepared statement serially under one command owner, enforce item/result
+  budgets, stop at the first failure, and retain completed results, failure index
+  and execution outcome without starting transactions or replaying writes.
+- Add optional callback transactions through `mysqlFeatures.transactions` with
+  typed isolation/read-only/snapshot options, one scoped `MySqlSession`, owned
+  query/stream/savepoint operations, successful commit, synchronized rollback,
+  expiry at callback settlement and retained primary/cleanup/unknown outcomes.
+- Add `mysqlFeatures.session.reset()` using `COM_RESET_CONNECTION`. Advance the
+  physical generation, invalidate prepared/cache ownership, reapply configured
+  schema/autocommit/session defaults, verify the resulting owned fingerprint and
+  close rather than reuse a connection after unsupported or uncertain reset.
 - Add optional SQL-mode-aware named parameters through `mysqlFeatures.named`.
   Probe the current owned session mode for every call, scan only executable
   `:name` markers, reject mixed positional markers and executable comments, bind
@@ -133,6 +139,38 @@
   expiry. Retain any unknown attempt and force final `Unknown`, keep expired
   prepared close idempotent, retire unresolved targets without replay, and
   leave legacy `QueryOptions.statementTimeoutMs` validation-only.
+- Keep `MySqlConnection` as the public/protected facade while moving lifecycle,
+  control, settlement, prepared and feature implementations behind typed internal
+  seams that preserve protected virtual dispatch and public error identity.
+- Group runtime sources by owned capability, centralize portable query validation
+  and failure composition in core, and keep MySQL configuration, wire behavior
+  and native information inside the adapter.
+- Enforce explicit runtime/tooling ownership, zero strongly connected file sets,
+  transitive tooling-layer rules and package-root compatibility in SDK-free checks.
+- Align native tests with their feature owners, separate ordinary consumer and
+  bound-device acceptance harnesses, and retain one self-contained HAR with no
+  consumer-installed core artifact.
+- Add a fail-closed bound-device evidence verifier that binds the sealed release,
+  ordinary-consumer and acceptance fingerprints, exact signed HAP, one-time
+  Ed25519 receipt and fixed case verdicts. Keep device evidence outside `dist`
+  and explicitly avoid hardware-attestation or production-certification claims.
+
+## 1.0.2 - 2026-10-24 (engineering preview)
+
+- Depend on the independent `@arkdb/core` 1.0.0 source module for common errors,
+  results, metadata and connection contracts.
+- Preserve the 1.0.1 MySQL connection, non-generic factory, handle-based controller
+  and provider interfaces; expose generic contracts under distinct `Core...` names.
+- Keep native scalar/column/stream types, numeric error codes and established
+  constructor defaults. Make additions to existing data shapes optional.
+- Keep one shared error constructor with a separate numeric/textual `nativeCode`;
+  preserve portable unknown observations separately from native stream defaults.
+- Compile core plus MySQL into one self-contained delivery HAR, with internal
+  declarations, source provenance and no consumer core dependency/override.
+- Validate the assembled manifest, merged module definition and combined legal
+  notices when publishing the sealed single-HAR release.
+- Expose adapter-typed factory creation and optional connection features; keep
+  native MySQL creation/provider helpers and public native information aliases.
 - Keep configuration, TCP/TLS, handshake/column details and InnoDB metrics in MySQL.
 - Add connection-owned cancellation lifetime and explicit reuse outcomes;
   retain the lower-level handle-based control-session primitive.

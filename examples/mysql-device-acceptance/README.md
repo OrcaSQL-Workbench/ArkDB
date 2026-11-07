@@ -9,7 +9,7 @@ The committed harness is deliberately unbound. **Run bound device acceptance**
 is disabled until a maintainer prepares a challenge from an exact sealed release:
 
 ```powershell
-npm run device:prepare -- --driver mysql --bundle dist\mysql-v1.0.2
+npm run device:prepare -- --driver mysql --bundle dist\mysql-v1.1.0
 ```
 
 Preparation requires a clean checkout at the sealed source commit. It verifies
@@ -71,8 +71,8 @@ Verify the exported receipt and actual signed HAP:
 ```powershell
 npm run device:verify -- `
   --receipt C:\Evidence\device-receipt.json `
-  --manifest dist\mysql-v1.0.2\arkdb-mysql-1.0.2.manifest.json `
-  --consumer dist\mysql-v1.0.2\arkdb-mysql-1.0.2.consumer.json `
+  --manifest dist\mysql-v1.1.0\arkdb-mysql-1.1.0.manifest.json `
+  --consumer dist\mysql-v1.1.0\arkdb-mysql-1.1.0.consumer.json `
   --hap C:\Evidence\entry-default-signed.hap `
   --profile M1 `
   --out C:\Evidence\device-verified.json

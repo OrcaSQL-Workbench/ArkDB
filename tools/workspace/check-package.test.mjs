@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { copyFile, cp, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
@@ -372,6 +372,8 @@ async function workspaceFixture(t) {
 
 async function independentModule(root, directory, id, name) {
   const target = join(root, ...directory.split('\\'));
+  const coreVersion = JSON5.parse(
+    await readFile(join(root, 'core', 'oh-package.json5'), 'utf8')).version;
   await mkdir(join(target, 'src', 'main', 'ets'), { recursive: true });
   await mkdir(join(target, 'src', 'test'), { recursive: true });
   for (const file of ['LICENSE', 'README.md', 'CHANGELOG.md', 'README.OpenSource']) {
@@ -379,7 +381,7 @@ async function independentModule(root, directory, id, name) {
   }
   await writeFile(join(target, 'oh-package.json5'), JSON.stringify({
     name, version: '1.0.0', main: 'Index.ets', license: 'Apache-2.0', author: 'Synthetic fixture',
-    dependencies: { '@arkdb/core': '1.0.0' }
+    dependencies: { '@arkdb/core': coreVersion }
   }));
   await writeFile(join(target, 'arkdb-package.json'), '{"kind":"driver"}');
   await writeFile(join(target, 'src', 'main', 'module.json5'), JSON.stringify({ module: { name: id, type: 'har' } }));

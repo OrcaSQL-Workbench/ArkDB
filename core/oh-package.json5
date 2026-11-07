@@ -1,6 +1,6 @@
 {
   "name": "@arkdb/core",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Unreleased shared ArkDB contracts and HarmonyOS diagnostics; no database implementation.",
   "main": "Index.ets",
   "author": "OrcaSQL Workbench",

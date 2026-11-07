@@ -1,6 +1,6 @@
 # Build and consume a driver HAR
 
-ArkDB distributes Harmony Archives, not the whole repository. **Both MySQL 1.0.1 and the MySQL 1.0.2 engineering-preview delivery use one HAR.** Core 1.0.0 is maintained separately in source and included in the selected driver artifact, not installed separately by users. Local native suites and the exact-archive consumer gate establish different evidence; neither certifies device interoperability or publication.
+ArkDB distributes Harmony Archives, not the whole repository. **MySQL 1.0.1, 1.0.2 and the MySQL 1.1.0 engineering-preview delivery each use one HAR.** Core 1.1.0 is maintained separately in source and included in the selected driver artifact, not installed separately by users. Local native suites and the exact-archive consumer gate establish different evidence; neither certifies device interoperability or publication.
 
 ## Implemented drivers
 
@@ -27,22 +27,22 @@ npm run pack -- --driver mysql
 The local next-version MySQL outputs are:
 
 ```text
-build\mysql-v1.0.2\
-  arkdb-mysql-1.0.2-local.har
-  arkdb-mysql-1.0.2-local.har.sha256
-  arkdb-mysql-1.0.2-local.manifest.json
+build\mysql-v1.1.0\
+  arkdb-mysql-1.1.0-local.har
+  arkdb-mysql-1.1.0-local.har.sha256
+  arkdb-mysql-1.1.0-local.manifest.json
   evidence\
-    arkdb-mysql-1.0.2-local.consumer.json
-    arkdb-mysql-1.0.2-local.readiness.json
+    arkdb-mysql-1.1.0-local.consumer.json
+    arkdb-mysql-1.1.0-local.readiness.json
   work\        # owned temporary delivery/consumer/download projects
   history\     # preserved older outputs, when present
 ```
 
-The manifest binds package/source identity, size and SHA-256. `artifactChannel: "local"` labels a local candidate, even though the SDK compiles optimized release-mode bytecode. The `-local` suffix is only a filename label: `oh-package.json5` and the HAR retain numeric version `1.0.2`. One current candidate is written per version; fingerprints identify its source rather than timestamped filenames. `delivery: "self-contained"` distinguishes the new format; `sourceDependencies` and `embeddedPackages` retain the shared source graph while runtime `dependencies` and `dependencyArtifacts` are empty. Clean builds record their commit; uncommitted candidates have `sourceClean:false`, `sourceCommit:null` and `checkoutHead`, not a false reviewed-source claim.
+The manifest binds package/source identity, size and SHA-256. `artifactChannel: "local"` labels a local candidate, even though the SDK compiles optimized release-mode bytecode. The `-local` suffix is only a filename label: `oh-package.json5` and the HAR retain numeric version `1.1.0`. One current candidate is written per version; fingerprints identify its source rather than timestamped filenames. `delivery: "self-contained"` distinguishes the new format; `sourceDependencies` and `embeddedPackages` retain the shared source graph while runtime `dependencies` and `dependencyArtifacts` are empty. Clean builds record their commit; uncommitted candidates have `sourceClean:false`, `sourceCommit:null` and `checkoutHead`, not a false reviewed-source claim.
 
 `dist\<driver>-v<version>\` is the ready, sealed release area. Its HAR filenames have no `-local` suffix. Test records never appear as loose `dist` files. Download/publication receipts live under the matching tag's `build\<driver>-v<version>\evidence\`, even when the current source has another version. Older outputs are preserved under each version's `history\`, never selected as fallbacks. The historical layout migration's size/hash ledger remains at `build\mysql-v2.0.0\evidence\layout-migration.json`; that earlier candidate directory is not the current build target.
 
-Interface compatibility determines release versioning, not the number of generated HARs. The MySQL public entry preserves the published 1.0.1 connection/factory names, native scalar/stream types and defaults; the portable core interfaces have distinct `Core...` export names. Current source uses the corrected 1.0.2 version. Local naming alone does not prove compatibility. The compatibility consumer is checked against both the original 1.0.1 HAR and the rebuilt candidate.
+Interface compatibility determines release versioning, not the number of generated HARs. The MySQL public entry preserves every published 1.0.2 package-root contract, including the 1.0.1 connection/factory names, native scalar/stream types and defaults; the portable core interfaces have distinct `Core...` export names. Current source uses 1.1.0 for the additive feature and architecture release. Local naming alone does not prove compatibility. The compatibility consumer is checked against the immutable 1.0.2 public contract and the rebuilt candidate.
 
 `npm run verify -- --driver mysql` is the local gate: SDK-free checks, declared core/MySQL source suites, single-HAR packaging, exact-archive sample/README compilation, local sample tests and nonpublishing OHPM checks. Runtime restoration is first proved with an unavailable registry and no test-only dependency; the public test framework is acquired separately afterward. Native suite launching generates current HAR BuildProfiles and uses registered source paths. Nothing is published.
 
@@ -112,7 +112,7 @@ The API24 pipeline deliberately uses standard compilation of one generated SDK m
 
 `--driver mysql` selects the `mysql` build-module registration and its actual source path. It is not an arbitrary directory argument and does not create a driver from a name. Existing changed-path planning helpers can identify affected registered drivers, but **no cloud HAR-build workflow is configured or required**.
 
-The delivery route prepares one selected driver with shared code inside its HAR, then separately authorizes upload of the same bytes. The next tag, `mysql-v1.0.2`, must match clean reviewed source. This source does not recreate, move or overwrite `mysql-v1.0.1`. Pushing a tag does not compile a HAR in Actions.
+The delivery route prepares one selected driver with shared code inside its HAR, then separately authorizes upload of the same bytes. The next tag, `mysql-v1.1.0`, must match clean reviewed source. This source does not recreate, move or overwrite `mysql-v1.0.1` or `mysql-v1.0.2`. Pushing a tag does not compile a HAR in Actions.
 
 Package identity and directory identity need not be identical. For example, a future real module named `pgsql` could live under `drivers/pgsql` and publish a package named `@arkdb/postgres`; its artifact name would follow the package identity. There is no placeholder PostgreSQL package in this repository.
 
@@ -123,17 +123,17 @@ To add a driver, implement its HAR/public entry, package/legal/usage files and c
 After reviewing/committing the source and creating the matching local annotated tag through the owner-approved Git workflow:
 
 ```powershell
-npm run release:prepare -- --driver mysql --tag mysql-v1.0.2
+npm run release:prepare -- --driver mysql --tag mysql-v1.1.0
 ```
 
-After owner approval, preparation requires clean source and full declared verification. It creates `dist\mysql-v1.0.2\` with one HAR, checksum, provenance manifest, consumer/readiness evidence and `release-set.json`. The verified HAR bytes are unchanged when the local filename becomes canonical; checksum basenames, manifest filenames/channels and any legacy dependency-file references are normalized before sealing. Local metadata is left untouched. It does not create/push a tag or publish. Local uncommitted candidates are not eligible for this sealing step.
+After owner approval, preparation requires clean source and full declared verification. It creates `dist\mysql-v1.1.0\` with one HAR, checksum, provenance manifest, consumer/readiness evidence and `release-set.json`. The verified HAR bytes are unchanged when the local filename becomes canonical; checksum basenames, manifest filenames/channels and any legacy dependency-file references are normalized before sealing. Local metadata is left untouched. It does not create/push a tag or publish. Local uncommitted candidates are not eligible for this sealing step.
 
 The `release-set.json` pins the annotated tag object, source commit, package identity, platform, exact asset digests/sizes, and actual local validation counts. No stale `dist` receipt, SDK, credential or unrelated HAP is admitted merely because it is present. Existing output is preserved and rejected rather than overwritten; inspect interrupted attempts before deliberately moving them aside.
 
 With a matching remote tag already present and explicit owner release approval, the separate local publish command uploads only that sealed set:
 
 ```powershell
-npm run release:publish -- --driver mysql --tag mysql-v1.0.2 --confirm-publish
+npm run release:publish -- --driver mysql --tag mysql-v1.1.0 --confirm-publish
 ```
 
 It verifies an initially private draft's complete assets before making an engineering prerelease publicly downloadable. It does not rebuild. A completed identical release is reusable; a conflicting same-name asset is never replaced. See [releasing](releasing.md) for permissions, partial uploads and uncertain-write recovery.
@@ -167,16 +167,16 @@ Alternatively, keep a project-local `libs\arkdb-mysql-1.0.1.har` and declare its
 }
 ```
 
-The filenames above apply to **published 1.0.1**. Its packaged guide describes that version; the current [source usage guide](../mysql/README.md) describes 1.0.2. Select the matching 1.0.2 archive/checksum/manifest from [GitHub Releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases) when consuming that version. Both use one HAR. Do not add ArkDB source modules to the application's module registry.
+The filenames above apply to **published 1.0.1**. The later [mysql-v1.0.2](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.2) release is also immutable: its HAR is 132,838 bytes with SHA-256 `8974e3bda9415fda26036b7b5b7d335a2c8f901ceda74381d1e657362c093986`. The current [source usage guide](../mysql/README.md) describes 1.1.0. Select the matching version's archive/checksum/manifest from [GitHub Releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases). Every release uses one HAR. Do not add ArkDB source modules to the application's module registry.
 
-## Consume a local 1.0.2 single-HAR candidate
+## Consume a local 1.1.0 single-HAR candidate
 
-Verify the candidate's checksum and put only `arkdb-mysql-1.0.2-local.har` under `MyApp\libs`. The module `entry\oh-package.json5` declares:
+Verify the candidate's checksum and put only `arkdb-mysql-1.1.0-local.har` under `MyApp\libs`. The module `entry\oh-package.json5` declares:
 
 ```json5
 {
   "dependencies": {
-    "@arkdb/mysql": "file:../libs/arkdb-mysql-1.0.2-local.har"
+    "@arkdb/mysql": "file:../libs/arkdb-mysql-1.1.0-local.har"
   }
 }
 ```
@@ -188,7 +188,7 @@ When upgrading, replace the dependency with a deliberately selected new HAR vers
 Maintainers can verify the public download itself:
 
 ```powershell
-npm run release:verify-download -- --driver mysql --tag mysql-v1.0.2
+npm run release:verify-download -- --driver mysql --tag mysql-v1.1.0
 ```
 
 After that version is published, this reads the actual Release, downloads and checks the sealed assets, and builds/tests an independent MySQL sample against the downloaded HAR and packaged examples. A failed or mismatched download cannot fall back to local artifacts or driver source. The command needs the matching source-version consumer/toolchain, not driver-source compilation. Ordinary users install the HAR directly in their own projects.

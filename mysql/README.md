@@ -2,24 +2,24 @@
 
 A headless, pure-ArkTS MySQL driver for HarmonyOS. This is a Harmony Archive (HAR), not a separately running system driver. It requires HarmonyOS networking and crypto Kits; it does not run in Node.js or a browser.
 
-**Source status:** `1.0.2` is engineering-preview release source. Core 1.0.0 remains independently maintained in source and is compiled into **one self-contained MySQL HAR**; users do not install a core HAR. ArkTS/native contracts and exact-archive consumption have separate local gates below. Device interoperability remains unverified. The published `1.0.1` engineering preview remains unchanged. Consult [official releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases) for actual downloads; a source version is not publication. The target remains HarmonyOS 6.1.1 / API 24, tablet and 2in1. MariaDB is experimental.
+**Source status:** `1.1.0` is engineering-preview release source. Core 1.1.0 remains independently maintained in source and is compiled into **one self-contained MySQL HAR**; users do not install a core HAR. ArkTS/native contracts and exact-archive consumption have separate local gates below. Device interoperability remains unverified. The published `1.0.1` and `1.0.2` engineering previews remain unchanged. Consult [official releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases) for actual downloads; a source version is not publication. The target remains HarmonyOS 6.1.1 / API 24, tablet and 2in1. MariaDB is experimental.
 
-The public entry retains the 1.0.1 MySQL connection/factory interface and native data shapes. Shared core does not require existing callers to adopt a generic factory or replace native calls with feature lookups. See [shared contracts](../docs/driver-contracts.md) for the distinct `Core...` interfaces and additive optional features. The examples below describe 1.0.2, not retroactive changes to the packaged 1.0.1 guide.
+The public entry retains every published 1.0.2 package-root contract, including the earlier 1.0.1 MySQL connection/factory interface and native data shapes. Shared core does not require existing callers to adopt a generic factory or replace native calls with feature lookups. See [shared contracts](../docs/driver-contracts.md) for the distinct `Core...` interfaces and additive optional features. The examples below describe 1.1.0, not retroactive changes to the packaged 1.0.1 or 1.0.2 guides.
 
 ## Install
 
-For 1.0.2, select `arkdb-mysql-1.0.2.har` and its matching checksum/manifest from
+For 1.1.0, select `arkdb-mysql-1.1.0.har` and its matching checksum/manifest from
 the official releases above. After checking the checksum, install it from your
 application's module directory:
 
 ```powershell
-ohpm install C:\Downloads\arkdb-mysql-1.0.2.har
+ohpm install C:\Downloads\arkdb-mysql-1.1.0.har
 ```
 
-For the existing **standalone 1.0.1** preview, download its HAR, checksum and manifest from the same reviewed release, verify the checksum, and install it from your application's module directory:
+For the existing **standalone 1.0.2** preview, download its HAR, checksum and manifest from the same reviewed release, verify the checksum, and install it from your application's module directory:
 
 ```powershell
-ohpm install C:\Downloads\arkdb-mysql-1.0.1.har
+ohpm install C:\Downloads\arkdb-mysql-1.0.2.har
 ```
 
 This source does not rebuild or overwrite that version. Build local candidates with the documented API-24 toolchain:
@@ -30,7 +30,7 @@ npm run restore
 npm run pack -- --driver mysql
 ```
 
-The local output is `build\mysql-v1.0.2\arkdb-mysql-1.0.2-local.har`, with `.har.sha256` and `.manifest.json`. Compare the SHA-256 before installing. `-local` labels the filename, not the package version or import: the HAR contains `@arkdb/mysql@1.0.2`. The manifest records the local artifact channel, original source dependencies and embedded source fingerprints; the HAR itself has no external core dependency. OHPM registry publication is not required for local-file installation.
+The local output is `build\mysql-v1.1.0\arkdb-mysql-1.1.0-local.har`, with `.har.sha256` and `.manifest.json`. Compare the SHA-256 before installing. `-local` labels the filename, not the package version or import: the HAR contains `@arkdb/mysql@1.1.0`. The manifest records the local artifact channel, original source dependencies and embedded source fingerprints; the HAR itself has no external core dependency. OHPM registry publication is not required for local-file installation.
 
 Maintainers build on their existing development computer, then separately authorize upload of the verified bytes to GitHub Releases. A version tag does not trigger a cloud build, and GitHub Actions does not install a HarmonyOS SDK. Ordinary consumers install the HAR in a compatible HarmonyOS project without cloning ArkDB or copying its driver source.
 
@@ -39,7 +39,7 @@ Put that one HAR under `MyApp\libs`. The `MyApp\entry\oh-package.json5` configur
 ```json5
 {
   "dependencies": {
-    "@arkdb/mysql": "file:../libs/arkdb-mysql-1.0.2-local.har"
+    "@arkdb/mysql": "file:../libs/arkdb-mysql-1.1.0-local.har"
   }
 }
 ```
@@ -1030,7 +1030,7 @@ The factory also exposes capability flags and metadata/server-metrics providers.
 
 Local validation includes actual ArkTS compilation and the core/MySQL native contract suites, including deterministic protocol, cancellation and metrics fixtures. The exact-archive consumer gate restores one HAR with no core file, source override or available registry, then compiles the packaged examples and unsigned sample HAP. It separately restores test-only dependencies and executes offline lifecycle/error-identity cases. SDK-free fakes are separate tooling evidence, not substitutes for native checks. Candidate manifests and consumer records bind results to exact bytes and source fingerprints.
 
-The historical published 1.0.1 verification remains recorded in [releasing](../docs/releasing.md), not as evidence for 1.0.2/core. A future release verifier must consume its exact single-HAR download and cannot fall back to local source or stale `dist`.
+The historical published 1.0.1 and 1.0.2 identities remain recorded in [releasing](../docs/releasing.md), not as evidence for 1.1.0/core. The 1.1.0 release verifier must consume its exact single-HAR download and cannot fall back to local source or stale `dist`.
 
 Network, certificate and crypto replacements used by local Hypium tests are not real-device tests. Local preparation, public GitHub download availability, OHPM registry availability, and actual device interoperability are separate states.
 

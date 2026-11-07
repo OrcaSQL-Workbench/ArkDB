@@ -2,10 +2,10 @@
 
 ## Status and ownership
 
-This is the engineering-preview source architecture for `@arkdb/mysql` 1.0.2 with
-`@arkdb/core` 1.0.0. The published `mysql-v1.0.1` preview remains a standalone HAR
-from source commit `27d4095575ca56ff4f1b9d38221e610034f3a049`; its tag and bytes are
-not changed by this migration. PostgreSQL is not implemented.
+This is the engineering-preview source architecture for `@arkdb/mysql` 1.1.0 with
+`@arkdb/core` 1.1.0. The published `mysql-v1.0.1` and `mysql-v1.0.2` previews
+remain immutable standalone HARs; their tags and bytes are not changed by this
+release. PostgreSQL is not implemented.
 
 | Module | Owns |
 | --- | --- |
@@ -545,7 +545,7 @@ selected driver, rejects cycles, unregistered/version-mismatched dependencies
 and shared-to-driver dependencies. Core changes affect dependent build plans and
 source fingerprints without modifying those implementations.
 
-The MySQL source manifest declares `@arkdb/core: "1.0.0"` and the development
+The MySQL source manifest declares `@arkdb/core: "1.1.0"` and the development
 project overrides it to local source. That is not the consumer dependency model.
 The delivery workspace keeps the chosen package name and public entry, copies
 each selected source package once, and rewrites only actual module specifiers

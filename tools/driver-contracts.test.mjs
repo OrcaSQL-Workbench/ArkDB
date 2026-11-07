@@ -471,9 +471,11 @@ test('adding an independently typed adapter changes registration only, not MySQL
   await writeFile(join(directory, 'src', 'main', 'module.json5'), JSON.stringify({
     module: { name: 'probe', type: 'har' }
   }));
+  const coreVersion = JSON5.parse(
+    await readFile(join(root, 'core', 'oh-package.json5'), 'utf8')).version;
   await writeFile(join(directory, 'oh-package.json5'), JSON.stringify({
     name: '@arkdb/probe', version: '1.0.0', main: 'Index.ets', author: 'Test fixture', license: 'Apache-2.0',
-    dependencies: { '@arkdb/core': '1.0.0' }
+    dependencies: { '@arkdb/core': coreVersion }
   }));
   await writeFile(join(directory, 'arkdb-package.json'), '{"kind":"driver"}');
   await writeFile(join(directory, 'src', 'test', 'List.test.ets'),

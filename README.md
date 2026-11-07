@@ -2,35 +2,35 @@
 
 Native ArkTS database drivers for HarmonyOS, distributed as headless Harmony Archives (HARs).
 
-**MySQL is the only database implementation.** MySQL 1.0.2 engineering-preview source uses core 1.0.0 internally, but its delivery is **one self-contained `@arkdb/mysql` HAR**. Users do not install core separately. PostgreSQL is not implemented. ArkDB does not require OrcaSQL Workbench, Node.js, a WebView, or a native MySQL client at runtime.
+**MySQL is the only database implementation.** MySQL 1.1.0 engineering-preview source uses core 1.1.0 internally, but its delivery is **one self-contained `@arkdb/mysql` HAR**. Users do not install core separately. PostgreSQL is not implemented. ArkDB does not require OrcaSQL Workbench, Node.js, a WebView, or a native MySQL client at runtime.
 
 | Package | Status | Platform |
 | --- | --- | --- |
-| [`@arkdb/mysql`](mysql/README.md) | [1.0.1 engineering preview](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.1); downloadable HAR, not published to OHPM | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
-| MySQL 1.0.2 with shared [`core`](core/README.md) source | Engineering-preview release source; consult [GitHub Releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases) for published downloads | HarmonyOS 6.1.1 / API 24; device interoperability remains unverified |
+| [`@arkdb/mysql`](mysql/README.md) | [1.1.0 engineering preview](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.1.0); one self-contained HAR, not published to OHPM | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
+| [`@arkdb/core`](core/README.md) 1.1.0 source contract | Embedded in the selected driver HAR; not separately installed or published | HarmonyOS source module; no database implementation |
 
-The published 1.0.1 tag/HAR remains immutable. Its successful historical checks below do not validate the new split. See [shared driver contracts](docs/driver-contracts.md) for ownership, optional interfaces and compatibility changes.
+The published 1.0.1 and 1.0.2 tags/HARs remain immutable. Their historical checks do not validate 1.1.0. See [shared driver contracts](docs/driver-contracts.md) for ownership, optional interfaces and compatibility changes.
 
-The current driver supports the MySQL text protocol, optional typed prepared statements, restricted prepared multi-row INSERT, session initialization, authentication, TCP/TLS, bounded streamed results, transactions, metadata, cancellation primitives, and server metrics. MariaDB is experimental. Statement caching, pooling and an automatically managed Worker are not implemented. Read the [usage and execution contract](mysql/README.md) before integrating it.
+The current driver supports the MySQL text protocol, optional typed prepared statements and private convenience-statement caching, restricted prepared multi-row INSERT, session initialization, authentication, TCP/TLS, bounded streamed results, transactions, metadata, cancellation primitives, and server metrics. MariaDB is experimental. Pooling and an automatically managed Worker are not implemented. Read the [usage and execution contract](mysql/README.md) before integrating it.
 
 The [package guide](mysql/README.md) includes configuration defaults and examples for typed rows, errors, verified/custom-CA TLS, bounded streaming, transactions, cancellation, and providers. The [runnable example](examples/mysql-client/README.md) supplies a host-owned Worker and UI; it is not a new managed-client interface inside the driver.
 
 ## Download and use
 
-For 1.0.2, select `arkdb-mysql-1.0.2.har` and its matching checksum/manifest from
+For 1.1.0, select `arkdb-mysql-1.1.0.har` and its matching checksum/manifest from
 [GitHub Releases](https://github.com/OrcaSQL-Workbench/ArkDB/releases), verify the
 checksum, and install that one HAR. Source versioning alone does not establish
-publication or OHPM availability. The 1.0.1 links below remain historical downloads.
+publication or OHPM availability. The 1.0.2 links below remain historical downloads.
 
-The [1.0.1 engineering preview](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.1) is available through GitHub Releases, independently of OHPM. Download the [HAR](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.har), matching [SHA-256](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.har.sha256), and [manifest](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.1/arkdb-mysql-1.0.1.manifest.json), verify the checksum, then install the HAR from the consuming application's module directory:
+The [1.0.2 engineering preview](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.0.2) is available through GitHub Releases, independently of OHPM. Download the [HAR](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.2/arkdb-mysql-1.0.2.har), matching [SHA-256](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.2/arkdb-mysql-1.0.2.har.sha256), and [manifest](https://github.com/OrcaSQL-Workbench/ArkDB/releases/download/mysql-v1.0.2/arkdb-mysql-1.0.2.manifest.json), verify the checksum, then install the HAR from the consuming application's module directory:
 
 ```powershell
-ohpm install C:\Downloads\arkdb-mysql-1.0.1.har
+ohpm install C:\Downloads\arkdb-mysql-1.0.2.har
 ```
 
 Import from `@arkdb/mysql`, not internal source paths. Users need a compatible HarmonyOS project/toolchain to build their application, but do not need ArkDB's source, maintenance dependencies, or an OHPM publisher account. See the [download/install guide](docs/building-drivers.md).
 
-The actual **published 1.0.1** HAR was downloaded, checksum-verified, installed and compiled in a fresh independent sample, including its eight packaged README examples and six local sample cases. Real-device networking/TLS/cancellation evidence remains unverified; this is not a production certification or evidence for 1.0.2/core.
+The immutable **published 1.0.2** HAR is 132,838 bytes with SHA-256 `8974e3bda9415fda26036b7b5b7d335a2c8f901ceda74381d1e657362c093986`, from source commit `f532d0c37adf4dbba7a1a313679f0024822ed752`. Real-device networking/TLS/cancellation evidence remains unverified; this is not a production certification or evidence for 1.1.0/core.
 
 ## Build an individual driver
 
@@ -41,7 +41,7 @@ npm run drivers
 npm run pack -- --driver mysql
 ```
 
-The selector reads registered driver declarations and their source directories; shared source modules are not database drivers. It compiles core plus the selected driver into one temporary delivery module, preserving the maintained source separation. MySQL packaging produces `build\mysql-v1.0.2\arkdb-mysql-1.0.2-local.har`, its checksum and source manifest. A future PostgreSQL selection follows the same model without editing MySQL implementation; it does not invent an unimplemented driver.
+The selector reads registered driver declarations and their source directories; shared source modules are not database drivers. It compiles core plus the selected driver into one temporary delivery module, preserving the maintained source separation. MySQL packaging produces `build\mysql-v1.1.0\arkdb-mysql-1.1.0-local.har`, its checksum and source manifest. A future PostgreSQL selection follows the same model without editing MySQL implementation; it does not invent an unimplemented driver.
 
 ## Generated output locations
 
@@ -55,7 +55,7 @@ The selector reads registered driver declarations and their source directories; 
 | `build\<driver>-v<version>\history\` | Preserved older outputs; never used as a build fallback |
 | `dist\<driver>-v<version>\` | Immutable, reviewed-source release bundle with canonical filenames, without `-local` |
 
-The filename label is separate from interface compatibility. Current source uses version **1.0.2**, preserving the 1.0.1 connection/factory interface and native result shapes. Portable contracts use distinct `CoreDbConnection`, `CoreDbDriverFactory` and other `Core...` exports instead of replacing established MySQL names. No version is published merely by producing a local candidate; the released 1.0.1 version and bytes remain unchanged.
+The filename label is separate from interface compatibility. Current source uses version **1.1.0**, preserving the published 1.0.2 package-root contracts, the earlier 1.0.1 connection/factory interface and native result shapes. Portable contracts use distinct `CoreDbConnection`, `CoreDbDriverFactory` and other `Core...` exports instead of replacing established MySQL names. No version is published merely by producing a local candidate; the released 1.0.1 and 1.0.2 versions and bytes remain unchanged.
 
 ## Develop
 
@@ -80,14 +80,14 @@ npm run verify
 | `npm run test:consumer` | Build the sample HAP/Worker and README examples against the exact HAR, then run offline sample lifecycle tests |
 | `npm run example:prepare` | Install the verified HAR into the runnable Worker sample |
 | `npm run example:build` | Compile its unsigned HAP for opening/running with owner-supplied debug signing |
-| `npm run device:prepare -- --driver mysql --bundle dist\mysql-v1.0.2` | From exact clean sealed source, build one unsigned HAR-bound HAP with an embedded one-time Ed25519 key and publish the pending challenge last |
+| `npm run device:prepare -- --driver mysql --bundle dist\mysql-v1.1.0` | From exact clean sealed source, build one unsigned HAR-bound HAP with an embedded one-time Ed25519 key and publish the pending challenge last |
 | `npm run device:verify -- --receipt <file> --manifest <file> --consumer <file> --hap <signed-hap> --profile M1 --out <file>` | Bind the signed receipt to the sealed HAR/consumer and actual signed HAP, then atomically consume the challenge only when every mandatory case passed |
 | `npm run release:check` | Validate current archive/sample/guide evidence and run nonpublishing OHPM checks |
 | `npm run verify:registry` | After publication, restore an exact registry version into a fresh sample and verify acquisition |
 | `npm run verify -- --driver mysql` | Local tooling + declared source-module tests + single-HAR packaging + own sample/README tests + nonpublishing preflight; never publishes |
-| `npm run release:prepare -- --driver mysql --tag mysql-v1.0.2` | Authorized build/sealing from clean source and an existing matching annotated tag |
-| `npm run release:publish -- --driver mysql --tag mysql-v1.0.2 --confirm-publish` | After separate owner approval, upload the sealed single-HAR release without rebuilding |
-| `npm run release:verify-download -- --driver mysql --tag mysql-v1.0.2` | After publication, download the exact release and install/compile its HAR in the matching independent consumer |
+| `npm run release:prepare -- --driver mysql --tag mysql-v1.1.0` | Authorized build/sealing from clean source and an existing matching annotated tag |
+| `npm run release:publish -- --driver mysql --tag mysql-v1.1.0 --confirm-publish` | After separate owner approval, upload the sealed single-HAR release without rebuilding |
+| `npm run release:verify-download -- --driver mysql --tag mysql-v1.1.0` | After publication, download the exact release and install/compile its HAR in the matching independent consumer |
 
 **Release route: build locally, distribute through GitHub Releases.** Maintainers use their existing DevEco/CLI installation; there is no dedicated server, self-hosted runner, or SDK installation in GitHub Actions. A tag identifies the reviewed source version; it does not trigger HAR compilation. Hosted CI runs `check` only. The [official-toolchain investigation](docs/hosted-toolchain.md) is historical background, not a prerequisite for this local route.
 

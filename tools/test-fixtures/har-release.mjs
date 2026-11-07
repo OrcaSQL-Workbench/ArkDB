@@ -141,13 +141,17 @@ export async function sharedReleaseFixture(t) {
   await cp(join(ROOT, 'core'), join(fixture.root, 'core'), {
     recursive: true, filter: (file) => !ignored.has(basename(file))
   });
+  const coreManifestPath = join(fixture.root, 'core', 'oh-package.json5');
+  const coreManifest = JSON5.parse(await readFile(coreManifestPath, 'utf8'));
+  coreManifest.version = '1.0.0';
+  await writeFile(coreManifestPath, JSON.stringify(coreManifest));
   const profilePath = join(fixture.root, 'build-profile.json5');
   const profile = JSON5.parse(await readFile(profilePath, 'utf8'));
   profile.modules.unshift({ name: 'core', srcPath: './core' });
   await writeFile(profilePath, JSON.stringify(profile));
   const manifestPath = join(fixture.root, 'mysql', 'oh-package.json5');
   const manifest = JSON5.parse(await readFile(manifestPath, 'utf8'));
-  manifest.dependencies = { '@arkdb/core': '1.0.0' };
+  manifest.dependencies = { '@arkdb/core': coreManifest.version };
   const declarationPath = join(fixture.root, 'mysql', 'arkdb-package.json');
   const declaration = JSON5.parse(await readFile(declarationPath, 'utf8'));
   declaration.verification.nativeModules = ['core', 'mysql'];

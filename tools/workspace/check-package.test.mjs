@@ -104,6 +104,21 @@ test('rejects TSX and JSX package test sources', async (t) => {
   }
 });
 
+test('rejects MySQL test owners under noncanonical roots', async (t) => {
+  for (const relativePath of [
+    ['auth', 'fixtures', 'Helper.ets'],
+    ['mysql', 'public', 'fixtures', 'Helper.ets']
+  ]) {
+    const root = await workspaceFixture(t);
+    const source = join(root, 'mysql', 'src', 'test', ...relativePath);
+    await mkdir(join(source, '..'), { recursive: true });
+    await writeFile(source, 'export class Helper {}\n');
+
+    assert.throws(() => checkPackage(root, 'mysql'),
+      /MySQL tests must mirror production ownership.*unexpected owners/);
+  }
+});
+
 test('rejects duplicate executable suite registrations', async (t) => {
   const root = await workspaceFixture(t);
   const list = join(root, 'mysql', 'src', 'test', 'List.test.ets');
@@ -396,6 +411,24 @@ test('import scanning covers both concrete and type-only seams', () => {
 
 test('strict import scanning rejects mutated and destructured loader aliases', () => {
   for (const source of [
+    `
+      function load(O) {
+        O.getOwnPropertyDescriptor({}, 'constructor');
+      }
+      load(Object);
+    `,
+    `
+      function getProto() {
+        return Object.getPrototypeOf(async function () {});
+      }
+      getProto();
+    `,
+    `
+      const key = [];
+      key.push('constructor');
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
     `
       let key = '';
       key ||= 'constructor';
@@ -948,95 +981,6 @@ test('strict import scanning allows safe indexed writes and loop shadowing', () 
     counts[key] += 1;
     const handlers = { safe: () => true };
     handlers[key]();
-    interface Helper {
-      getOwnPropertyDescriptor(): string;
-    }
-    const helper: Helper = {
-      getOwnPropertyDescriptor: () => 'safe'
-    };
-    helper.getOwnPropertyDescriptor();
-    helper.getOwnPropertyDescriptor({}, 'constructor');
-    helper.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(async function () {}),
-      'constructor'
-    );
-    Object.getOwnPropertyDescriptor({}, 'constructor');
-    Object.getOwnPropertyDescriptor.call(
-      Object.getPrototypeOf(async function () {}),
-      {},
-      'constructor'
-    );
-    Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(async function () {}),
-      'safe',
-      'constructor'
-    );
-    const safeDescriptor = Object.getOwnPropertyDescriptor.bind(
-      Object,
-      {},
-      'constructor'
-    );
-    safeDescriptor();
-    const O = Object;
-    function useHelper(O) {
-      O.getOwnPropertyDescriptor(
-        Object.getPrototypeOf(async function () {}),
-        'constructor'
-      );
-    }
-    useHelper({
-      getOwnPropertyDescriptor: () => 'safe'
-    });
-    {
-      class Object {
-        static getPrototypeOf() { return {}; }
-        static getOwnPropertyDescriptor() { return 'safe'; }
-      }
-      Object.getOwnPropertyDescriptor(
-        Object.getPrototypeOf(),
-        'constructor'
-      );
-    }
-    {
-      function Object() {}
-      Object.getPrototypeOf = () => ({});
-      Object.getOwnPropertyDescriptor = () => 'safe';
-      Object.getOwnPropertyDescriptor(
-        Object.getPrototypeOf(),
-        'constructor'
-      );
-    }
-    const namedFunction = function Object() {
-      Object.getOwnPropertyDescriptor(
-        Object.getPrototypeOf(),
-        'constructor'
-      );
-    };
-    namedFunction();
-    const NamedClass = class Object {
-      static use() {
-        Object.getOwnPropertyDescriptor(
-          Object.getPrototypeOf(),
-          'constructor'
-        );
-      }
-    };
-    NamedClass.use();
-    namespace Object {
-      export function getPrototypeOf() { return {}; }
-      export function getOwnPropertyDescriptor() { return 'safe'; }
-    }
-    Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(),
-      'constructor'
-    );
-    const benignHelper = {
-      getOwnPropertyDescriptor: () => 'safe'
-    };
-    const {
-      getOwnPropertyDescriptor: benignDescriptor
-    } = benignHelper;
-    benignDescriptor({}, 'constructor');
     for (const key of ['other']) {
       void key;
     }

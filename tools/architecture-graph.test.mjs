@@ -1311,6 +1311,24 @@ test('rejects malformed and unknown architecture policy configuration', () => {
     () => assertImportPolicy(graph, []),
     /Architecture policy must be a plain object/
   );
+  class Policy {}
+  assert.throws(
+    () => assertImportPolicy(graph, new Policy()),
+    /Architecture policy must be a plain object/
+  );
+  class SpoofedPolicy {
+    get __proto__() {
+      return Object.prototype;
+    }
+  }
+  assert.throws(
+    () => assertImportPolicy(graph, new SpoofedPolicy()),
+    /Architecture policy must be a plain object/
+  );
+  assert.throws(
+    () => assertImportPolicy(graph, Object.create(null)),
+    /Architecture policy must be a plain object/
+  );
   assert.throws(
     () => assertImportPolicy(graph, { ownedSourceRoot: [] }),
     /Unknown architecture policy field: ownedSourceRoot/
@@ -1448,6 +1466,15 @@ test('rejects dynamic tooling imports instead of hiding ownership edges', async 
     "new Function(\"return import('./b.mjs')\")();",
     "Object.getPrototypeOf(async function () {}).constructor(" +
       "\"return import('./b.mjs')\")();",
+    "function load(O) {\n" +
+      "  O.getOwnPropertyDescriptor({}, 'constructor');\n" +
+      "}\nload(Object);",
+    "function getProto() {\n" +
+      "  return Object.getPrototypeOf(async function () {});\n" +
+      "}\ngetProto();",
+    "const key = [];\n" +
+      "key.push('constructor');\n" +
+      "({})[key][key](\"return import('./b.mjs')\")();",
     "const key = 'constructor';\n" +
       "({})[key][key](\"return import('./b.mjs')\")();",
     "const key = `con${'structor'}`;\n" +
@@ -1819,92 +1846,6 @@ const counts = { safe: 0 };
 counts[key] += 1;
 const handlers = { safe: () => true };
 handlers[key]();
-const helper = {
-  getOwnPropertyDescriptor: () => 'safe'
-};
-helper.getOwnPropertyDescriptor();
-helper.getOwnPropertyDescriptor({}, 'constructor');
-helper.getOwnPropertyDescriptor(
-  Object.getPrototypeOf(async function () {}),
-  'constructor'
-);
-Object.getOwnPropertyDescriptor({}, 'constructor');
-Object.getOwnPropertyDescriptor.call(
-  Object.getPrototypeOf(async function () {}),
-  {},
-  'constructor'
-);
-Object.getOwnPropertyDescriptor(
-  Object.getPrototypeOf(async function () {}),
-  'safe',
-  'constructor'
-);
-const safeDescriptor = Object.getOwnPropertyDescriptor.bind(
-  Object,
-  {},
-  'constructor'
-);
-safeDescriptor();
-const O = Object;
-function useHelper(O) {
-  O.getOwnPropertyDescriptor(
-    Object.getPrototypeOf(async function () {}),
-    'constructor'
-  );
-}
-useHelper({
-  getOwnPropertyDescriptor: () => 'safe'
-});
-{
-  class Object {
-    static getPrototypeOf() { return {}; }
-    static getOwnPropertyDescriptor() { return 'safe'; }
-  }
-  Object.getOwnPropertyDescriptor(
-    Object.getPrototypeOf(),
-    'constructor'
-  );
-}
-{
-  function Object() {}
-  Object.getPrototypeOf = () => ({});
-  Object.getOwnPropertyDescriptor = () => 'safe';
-  Object.getOwnPropertyDescriptor(
-    Object.getPrototypeOf(),
-    'constructor'
-  );
-}
-const namedFunction = function Object() {
-  Object.getOwnPropertyDescriptor(
-    Object.getPrototypeOf(),
-    'constructor'
-  );
-};
-namedFunction();
-const NamedClass = class Object {
-  static use() {
-    Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(),
-      'constructor'
-    );
-  }
-};
-NamedClass.use();
-namespace Object {
-  export function getPrototypeOf() { return {}; }
-  export function getOwnPropertyDescriptor() { return 'safe'; }
-}
-Object.getOwnPropertyDescriptor(
-  Object.getPrototypeOf(),
-  'constructor'
-);
-const benignHelper = {
-  getOwnPropertyDescriptor: () => 'safe'
-};
-const {
-  getOwnPropertyDescriptor: benignDescriptor
-} = benignHelper;
-benignDescriptor({}, 'constructor');
 for (const key of ['other']) {
   void key;
 }

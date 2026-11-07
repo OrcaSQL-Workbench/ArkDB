@@ -775,6 +775,26 @@ test('ordinary consumer rejects extensionless build-tool helpers', async (t) => 
     /Unsupported isolated project source suffix/);
 });
 
+test('ordinary consumer rejects package-import build-tool aliases', async (t) => {
+  const root = await fixture(t);
+  const project = join(root, 'examples', 'mysql-client');
+  await writeFile(join(project, 'package.json'), JSON.stringify({
+    name: 'mysql-client-build',
+    type: 'module',
+    imports: {
+      '#bridge': './bridge.mjs'
+    }
+  }));
+  await writeFile(join(project, 'bridge.mjs'),
+    "import '../mysql-device-acceptance/hvigorfile.ts';\n");
+  const hvigor = join(project, 'hvigorfile.ts');
+  await writeFile(hvigor, (await readFile(hvigor, 'utf8')) +
+    "\nimport '#bridge';\n");
+
+  assert.throws(() => checkDriverContracts(root),
+    /Package import mappings are not supported in isolated build tooling/);
+});
+
 test('ordinary consumer rejects unreferenced TSX and JSX sources', async (t) => {
   for (const suffix of ['tsx', 'jsx']) {
     const root = await fixture(t);

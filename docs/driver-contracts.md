@@ -69,8 +69,13 @@ closure, including triple-slash references, bundle identities, worker paths and
 project/module Hvigor scripts. Normal, development and dynamic dependency
 sections are checked; parameterized dependency rewriting and local source-package
 indirection are rejected. Hvigor and reachable Node helpers cannot use hidden
-loaders or dependency-mutation APIs. Package test sources use exact lowercase
-`.ets`, support remains under explicit `fixtures` owners, and only the canonical
+loaders or dependency-mutation APIs. In strict build-tool scans, any member
+access named `getPrototypeOf`, `getOwnPropertyDescriptor` or
+`getOwnPropertyDescriptors` is rejected regardless of receiver. Array-derived
+computed names are always treated as unresolved; they and other unresolved
+computed names are rejected when invoked, escaped or nested rather than
+interpreted through arbitrary JavaScript data flow. Package test sources use
+exact lowercase `.ets`, support remains under explicit `fixtures` owners, and only the canonical
 suite registries may aggregate executable suites. Removed production, test and
 sample paths remain forbidden.
 

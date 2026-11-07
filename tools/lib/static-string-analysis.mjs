@@ -1067,16 +1067,6 @@ export function createStaticStringResolver(
       return resolved;
     }
     if (ts.isArrayLiteralExpression(expression)) {
-      if (expression.elements.some((element) =>
-        ts.isSpreadElement(element))) {
-        return new Set([STATIC_STRING_INCOMPLETE]);
-      }
-      if (expression.elements.every((element) =>
-        ts.isStringLiteralLike(element))) {
-        return new Set([expression.elements
-          .map((element) => element.text)
-          .join(',')]);
-      }
       return new Set([STATIC_STRING_INCOMPLETE]);
     }
     if (ts.isObjectLiteralExpression(expression)) {

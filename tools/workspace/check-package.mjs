@@ -163,10 +163,14 @@ const NODE_LOADER_IDENTIFIERS = new Set([
   'constructor', 'createRequire', 'eval', 'Function', 'getBuiltinModule',
   'globalThis', 'process', 'Reflect'
 ]);
+const REFLECTIVE_CODEGEN_MEMBERS = new Set([
+  ...DESCRIPTOR_MEMBERS,
+  'getPrototypeOf'
+]);
 const STATIC_NODE_IDENTIFIERS = new Set([
   ...HVIGOR_DEPENDENCY_APIS,
   ...NODE_LOADER_IDENTIFIERS,
-  ...DESCRIPTOR_MEMBERS
+  ...REFLECTIVE_CODEGEN_MEMBERS
 ]);
 const NODE_BUILTIN_ROOTS = new Set([
   '_http_agent',
@@ -581,8 +585,15 @@ export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
     } else if (strictNodeLoaders &&
       ([...extractedNames].some((name) =>
         HVIGOR_DEPENDENCY_APIS.has(name) ||
-        NODE_LOADER_IDENTIFIERS.has(name)) ||
+        NODE_LOADER_IDENTIFIERS.has(name) ||
+        REFLECTIVE_CODEGEN_MEMBERS.has(name)) ||
         extractedNames.has(STATIC_STRING_INCOMPLETE))) {
+      throw new Error('Node loader imports are not supported in isolated projects.');
+    } else if (strictNodeLoaders &&
+      ((ts.isPropertyAccessExpression(node) &&
+        REFLECTIVE_CODEGEN_MEMBERS.has(node.name.text)) ||
+        [...computedNames].some((name) =>
+          REFLECTIVE_CODEGEN_MEMBERS.has(name)))) {
       throw new Error('Node loader imports are not supported in isolated projects.');
     } else if (strictNodeLoaders &&
       descriptorCall) {
@@ -818,6 +829,16 @@ function testOwner(testRoot, file) {
   return parts[1];
 }
 
+function mysqlTestOwner(testRoot, file) {
+  const parts = relative(testRoot, file).split(sep);
+  if (parts.length === 1) return '.';
+  if (parts[0] === 'public') return 'public';
+  if (parts[0] !== 'mysql') return `root/${parts[0]}`;
+  if (parts[1] === 'features') return `features/${parts[2]}`;
+  if (parts[1] === 'public') return 'mysql/public';
+  return parts[1];
+}
+
 function coreTestOwner(testRoot, file) {
   const parts = relative(testRoot, file).split(sep);
   return parts.length > 1 ? parts[0] : '.';
@@ -953,7 +974,9 @@ function checkTestSources(root, id, testRoot, enforceCanonicalOwners = false) {
 
   const ownedSources = sources.filter((file) =>
     !file.endsWith(`${sep}List.test.ets`));
-  const owner = id === 'core' ? coreTestOwner : testOwner;
+  const owner = id === 'core'
+    ? coreTestOwner
+    : id === 'mysql' ? mysqlTestOwner : testOwner;
   const sourceOwners = [...new Set(ownedSources.map((file) =>
     owner(testRoot, file)))].sort();
   const testOwners = [...new Set(testFiles.map((file) =>
@@ -1192,6 +1215,10 @@ export function checkIsolatedArkTsProject(root, projectRoot) {
         }
         if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(specifier)) {
           throw new Error('Absolute module URLs are not supported in isolated projects.');
+        }
+        if (strict && specifier.startsWith('#')) {
+          throw new Error(
+            'Package import mappings are not supported in isolated build tooling.');
         }
         externalImports.push({
           file: relative(repository, file),

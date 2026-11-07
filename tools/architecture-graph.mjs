@@ -39,7 +39,12 @@ const NODE_SOURCE = /\.mjs$/;
 const NODE_LIKE_SOURCE = /\.(?:[cm]?[jt]s|jsx|tsx)$/i;
 const ARKTS_LIKE_SOURCE = /\.(?:ets|[cm]?[jt]s|jsx|tsx)$/i;
 const HVIGOR_SOURCE = /(?:^|[\\/])hvigorfile\.ts$/;
-const NODE_CODEGEN_MEMBERS = new Set(['constructor']);
+const NODE_CODEGEN_MEMBERS = new Set([
+  'constructor',
+  'getOwnPropertyDescriptor',
+  'getOwnPropertyDescriptors',
+  'getPrototypeOf'
+]);
 const STATIC_CODEGEN_NAMES = new Set([
   ...NODE_CODEGEN_MEMBERS,
   ...DESCRIPTOR_MEMBERS
@@ -547,6 +552,26 @@ function referencedPathSpecifier(fileName) {
   return `./${fileName}`;
 }
 
+function allowedPlainObjectPrototypeCheck(file, node) {
+  if (!file.endsWith(
+    `${sep}tools${sep}architecture-graph.mjs`) ||
+    !ts.isPropertyAccessExpression(node) ||
+    node.name.text !== 'getPrototypeOf' ||
+    !ts.isIdentifier(unwrapParentheses(node.expression)) ||
+    unwrapParentheses(node.expression).text !== 'Object') {
+    return false;
+  }
+  let current = node.parent;
+  while (current !== undefined) {
+    if (ts.isFunctionDeclaration(current)) {
+      return current.name?.text === 'plainObject';
+    }
+    if (ts.isFunctionLike(current)) return false;
+    current = current.parent;
+  }
+  return false;
+}
+
 function staticSpecifiers(file) {
   const syntax = sourceSyntax(file);
   const staticStrings = createStaticStringResolver(
@@ -629,7 +654,8 @@ function staticSpecifiers(file) {
       throw new Error(`CommonJS loader access is not supported: ${file}`);
     } else if (buildToolSource(file) &&
       ((ts.isPropertyAccessExpression(node) &&
-        NODE_CODEGEN_MEMBERS.has(node.name.text)) ||
+        NODE_CODEGEN_MEMBERS.has(node.name.text) &&
+        !allowedPlainObjectPrototypeCheck(file, node)) ||
         (ts.isElementAccessExpression(node) &&
           ([...computedNames].some((name) =>
             NODE_CODEGEN_MEMBERS.has(name)) ||

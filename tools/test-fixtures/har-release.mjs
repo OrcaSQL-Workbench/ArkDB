@@ -33,6 +33,7 @@ export async function releaseFixture(t) {
   const declarationPath = join(root, 'mysql', 'arkdb-package.json');
   const declaration = JSON5.parse(await readFile(declarationPath, 'utf8'));
   declaration.verification.nativeModules = ['mysql'];
+  declaration.testOwnership = 'fixture';
   await writeFile(declarationPath, JSON.stringify(declaration));
   await writeFile(fixtureManifestPath, `${JSON.stringify(fixtureManifest, null, 2)}\n`);
   // A synthetic legacy, single-HAR source layout, not the current core-dependent implementation.

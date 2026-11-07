@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { copyFile, cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
 import JSON5 from 'json5';
 import {
-  checkArkTsTests, checkPackage, exportedNames, importSpecifiers, ROOT
+  checkArkTsTests, checkPackage, exportedNames, importSpecifiers,
+  requiresCanonicalTestOwners, ROOT
 } from './check-package.mjs';
 
 test('discovers the current standalone interface and registered suites', () => {
@@ -44,6 +45,17 @@ test('discovers the current standalone interface and registered suites', () => {
   assert.ok(!result.exports.some((name) => name.startsWith('OrcaSql')));
 });
 
+test('canonical packages cannot disable test ownership enforcement', async (t) => {
+  assert.throws(() => requiresCanonicalTestOwners(ROOT, {
+    testOwnership: 'fixture'
+  }), /Canonical packages cannot disable test ownership enforcement/);
+
+  const root = await workspaceFixture(t);
+  assert.equal(requiresCanonicalTestOwners(root, {
+    testOwnership: 'fixture'
+  }), false);
+});
+
 test('preserves exact core, consumer and acceptance suite registrations', () => {
   const core = checkPackage(ROOT, 'core');
   const consumer = checkArkTsTests(
@@ -66,6 +78,47 @@ test('preserves exact core, consumer and acceptance suite registrations', () => 
   );
 });
 
+test('rejects unowned core fixture directories', async (t) => {
+  for (const owner of ['rogue', 'mysql']) {
+    const root = await workspaceFixture(t);
+    const fixture = join(root, 'core', 'src', 'test', owner, 'fixtures',
+      'Helper.ets');
+    await mkdir(join(fixture, '..'), { recursive: true });
+    await writeFile(fixture, 'export class Helper {}\n');
+
+    assert.throws(() => checkPackage(root, 'core'),
+      new RegExp(`Core tests must use canonical ownership.*unexpected owners: ${owner}`));
+  }
+});
+
+test('rejects TSX and JSX package test sources', async (t) => {
+  for (const suffix of ['tsx', 'jsx']) {
+    const root = await workspaceFixture(t);
+    const source = join(root, 'core', 'src', 'test', 'fixtures',
+      `Helper.${suffix}`);
+    await mkdir(join(source, '..'), { recursive: true });
+    await writeFile(source, 'export class Helper {}\n');
+
+    assert.throws(() => checkPackage(root, 'core'),
+      /must use the exact lowercase \.ets suffix/);
+  }
+});
+
+test('rejects MySQL test owners under noncanonical roots', async (t) => {
+  for (const relativePath of [
+    ['auth', 'fixtures', 'Helper.ets'],
+    ['mysql', 'public', 'fixtures', 'Helper.ets']
+  ]) {
+    const root = await workspaceFixture(t);
+    const source = join(root, 'mysql', 'src', 'test', ...relativePath);
+    await mkdir(join(source, '..'), { recursive: true });
+    await writeFile(source, 'export class Helper {}\n');
+
+    assert.throws(() => checkPackage(root, 'mysql'),
+      /MySQL tests must mirror production ownership.*unexpected owners/);
+  }
+});
+
 test('rejects duplicate executable suite registrations', async (t) => {
   const root = await workspaceFixture(t);
   const list = join(root, 'mysql', 'src', 'test', 'List.test.ets');
@@ -86,6 +139,17 @@ test('rejects shared fixture exports from executable suites', async (t) => {
     'export default function suite(): void {}\n');
 
   assert.throws(() => checkPackage(root), /Executable ArkTS suite must not export shared fixtures/i);
+});
+
+test('rejects linked package test roots', async (t) => {
+  const root = await workspaceFixture(t);
+  const testRoot = join(root, 'mysql', 'src', 'test');
+  await rm(testRoot, { recursive: true, force: true });
+  await symlink(join(root, 'core', 'src', 'test'), testRoot,
+    process.platform === 'win32' ? 'junction' : 'dir');
+
+  assert.throws(() => checkPackage(root),
+    /Source links are not supported/);
 });
 
 test('allows an executable suite exported through a default assignment', async (t) => {
@@ -139,6 +203,107 @@ test('rejects a directory as a resolved ArkTS test import', async (t) => {
     "\nimport { MissingFixture } from '../fixtures';\n");
 
   assert.throws(() => checkPackage(root), /Unresolved ArkTS test import.*fixtures/i);
+});
+
+test('resolves explicitly suffixed production declaration references', async (t) => {
+  const root = await workspaceFixture(t);
+  const directory = join(root, 'mysql', 'src', 'main', 'ets', 'mysql',
+  'model');
+  await writeFile(join(directory, 'Types.d.ets'),
+  'export interface FixtureTypes {}\n');
+  const source = join(directory, 'MySqlServerInfo.ets');
+  await writeFile(source,
+  "/// <reference path='Types.d.ets' />\n" +
+  readFileSync(source, 'utf8'));
+
+  assert.doesNotThrow(() => checkPackage(root, 'mysql'));
+});
+
+test('rejects unowned MySQL test directories', async (t) => {
+  const root = await workspaceFixture(t);
+  const suite = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+  'rogue', 'Rogue.test.ets');
+  await mkdir(join(suite, '..'), { recursive: true });
+  await writeFile(suite, 'export default function rogueTest(): void {}\n');
+  const list = join(root, 'mysql', 'src', 'test', 'List.test.ets');
+  await writeFile(list, readFileSync(list, 'utf8')
+  .replace(
+    "import publicInterfaceTest from './public/PublicInterface.test';",
+    "import publicInterfaceTest from './public/PublicInterface.test';\n" +
+    "import rogueTest from './mysql/features/rogue/Rogue.test';")
+  .replace('  publicInterfaceTest();', '  publicInterfaceTest();\n  rogueTest();'));
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+  /MySQL tests must mirror production ownership.*unexpected owners: features\/rogue/);
+});
+
+test('rejects fixtures under unowned MySQL test directories', async (t) => {
+  const root = await workspaceFixture(t);
+  const fixture = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+  'rogue', 'fixtures', 'Helper.ets');
+  await mkdir(join(fixture, '..'), { recursive: true });
+  await writeFile(fixture, 'export class Helper {}\n');
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+  /MySQL tests must mirror production ownership.*unexpected owners: features\/rogue/);
+});
+
+test('rejects non-ArkTS package test support sources', async (t) => {
+  const root = await workspaceFixture(t);
+  const fixture = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+    'cursor', 'fixtures', 'Helper.ts');
+  await writeFile(fixture, 'export class Helper {}\n');
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+    /ArkDB package test source.*Helper\.ts.*lowercase \.ets/);
+});
+
+test('requires an executable suite for every canonical MySQL owner', async (t) => {
+  const root = await workspaceFixture(t);
+  const cursor = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+    'cursor');
+  for (const name of [
+    'MySqlCursorFetch.test.ets',
+    'MySqlCursorLifecycle.test.ets',
+    'MySqlCursorOpen.test.ets'
+  ]) {
+    await rm(join(cursor, name));
+  }
+  const list = join(root, 'mysql', 'src', 'test', 'mysql', 'List.test.ets');
+  await writeFile(list, readFileSync(list, 'utf8')
+    .replace("import mySqlCursorFetchTest from './features/cursor/MySqlCursorFetch.test';\n", '')
+    .replace(
+      "import mySqlCursorLifecycleTest from\n  './features/cursor/MySqlCursorLifecycle.test';\n",
+      '')
+    .replace("import mySqlCursorOpenTest from './features/cursor/MySqlCursorOpen.test';\n", '')
+    .replace('  mySqlCursorFetchTest();\n', '')
+    .replace('  mySqlCursorLifecycleTest();\n', '')
+    .replace('  mySqlCursorOpenTest();\n', ''));
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+    /MySQL tests must mirror production ownership.*missing owners: features\/cursor/);
+});
+
+test('rejects executable cases hidden inside nested suite registries', async (t) => {
+  const root = await workspaceFixture(t);
+  const nested = join(root, 'mysql', 'src', 'test', 'mysql', 'features',
+    'cursor', 'List.test.ets');
+  await writeFile(nested,
+    "import { it } from '@ohos/hypium';\n" +
+    "export default function hiddenRegistry(): void {\n" +
+    "  it('hiddenNestedRegistryCase', 0, () => {});\n" +
+    "}\n");
+  const list = join(root, 'mysql', 'src', 'test', 'mysql', 'List.test.ets');
+  await writeFile(list, readFileSync(list, 'utf8')
+    .replace(
+      "import mySqlCursorFetchTest from './features/cursor/MySqlCursorFetch.test';",
+      "import hiddenRegistry from './features/cursor/List.test';\n" +
+      "import mySqlCursorFetchTest from './features/cursor/MySqlCursorFetch.test';")
+    .replace('  mySqlCursorFetchTest();',
+      '  hiddenRegistry();\n  mySqlCursorFetchTest();'));
+
+  assert.throws(() => checkPackage(root, 'mysql'),
+    /ArkTS suite registries must not declare test cases|Unexpected ArkTS suite registry/);
 });
 
 test('allows additional registered modules without freezing the workspace layout', async (t) => {
@@ -228,8 +393,602 @@ async function independentModule(root, directory, id, name) {
 
 test('import scanning covers both concrete and type-only seams', () => {
   assert.deepEqual(importSpecifiers(`
+    import './side-effect';
     import BuildProfile from '../../BuildProfile';
     import { socket } from '@kit.NetworkKit';
     export type { Connection } from './Connection';
-  `), ['../../BuildProfile', '@kit.NetworkKit', './Connection']);
+    type Runtime = import('./Runtime').Runtime;
+    void import('./dynamic');
+  `), [
+    './side-effect',
+    '../../BuildProfile',
+    '@kit.NetworkKit',
+    './Connection',
+    './Runtime',
+    './dynamic'
+  ]);
+});
+
+test('strict import scanning rejects mutated and destructured loader aliases', () => {
+  for (const source of [
+    `
+      function load(O) {
+        O.getOwnPropertyDescriptor({}, 'constructor');
+      }
+      load(Object);
+    `,
+    `
+      function getProto() {
+        return Object.getPrototypeOf(async function () {});
+      }
+      getProto();
+    `,
+    `
+      const key = [];
+      key.push('constructor');
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let key = '';
+      key ||= 'constructor';
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = '' || 'constructor';
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const [key] = ['constructor'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let key;
+      [key] = ['constructor'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let key = 'safe';
+      [, key] = [...['safe', 'constructor'], 'safe'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const names = ['constructor'];
+      let key;
+      [key] = names;
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const override = { key: 'constructor' };
+      const { key } = { key: 'safe', ...override };
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const [api] = ['setDependenciesOpt'];
+      project[api]({});
+    `,
+    `
+      let api;
+      ({ api } = { api: 'setDependenciesOpt' });
+      project[api]({});
+    `,
+    `
+      function load(key) {
+        return ({})[key][key]("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function load(key = 'safe') {
+        return ({})[key][key]("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function load(key = 'safe') {
+        const Loader = ({})[key][key];
+        return Loader("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function load(key) {
+        const proto = ({})[key];
+        const Loader = proto[key];
+        return Loader("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function load(key) {
+        const Loader = ((async function () {})[key] as any);
+        return Loader("return import('./hidden.mjs')")();
+      }
+      load('constructor');
+    `,
+    `
+      function apply(name) {
+        project[name].call(project, {});
+      }
+      apply('setDependenciesOpt');
+    `,
+    `
+      const get = (name) => project[name];
+      get('setDependenciesOpt')({});
+    `,
+    `
+      function invoke(value) {
+        return value;
+      }
+      function apply(name) {
+        invoke(project[name]);
+      }
+      apply('setDependenciesOpt');
+    `,
+    `
+      let name = false;
+      name = name || 'setDependenciesOpt';
+      project[name]({});
+    `,
+    `
+      function apply(name) {
+        const mutate = project[name];
+        mutate.call(project, {});
+      }
+      apply('setDependenciesOpt');
+    `,
+    `
+      const key = 'constructor';
+      function load(alias = key) {
+        var key = 'safe';
+        return ({})[alias][alias]("return import('./hidden.mjs')")();
+      }
+      load();
+    `,
+    `
+      const { 'setDependenciesOpt': mutate } = project;
+      mutate({});
+    `,
+    `
+      const { 'constructor': Loader } =
+        Object.getPrototypeOf(async function () {});
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = 'constructor';
+      const { [key]: Loader } =
+        Object.getPrototypeOf(async function () {});
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = 'constructor';
+      let Loader;
+      ({ [key]: Loader } =
+        Object.getPrototypeOf(async function () {}));
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = ['constructor'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const [unused, key] = [...['safe', 'constructor'], 'safe'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const key = ['safe'];
+      key[0] = 'constructor';
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const [...[, key]] = [[0, 'safe'], 'constructor'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      for (const key of ['constructor']) {
+        ({})[key][key]("return import('./hidden.mjs')")();
+      }
+    `,
+    `
+      let key = 'safe';
+      for (key of ['constructor']) {
+        ({})[key][key]("return import('./hidden.mjs')")();
+      }
+    `,
+    `
+      let key = 'safe';
+      for (key of ['safe', ...['constructor']]) {
+        ({})[key][key]("return import('./hidden.mjs')")();
+      }
+    `,
+    `
+      const key = 'constructor';
+      let Loader = () => undefined;
+      for ({ [key]: Loader } of [
+        Object.getPrototypeOf(async function () {})
+      ]) {
+        Loader("return import('./hidden.mjs')")();
+      }
+    `,
+    `
+      const { constructor } =
+        Object.getPrototypeOf(async function () {});
+      constructor("return import('./hidden.mjs')")();
+    `,
+    `
+      const Loader = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(async function () {}), 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const Loader = Object.getOwnPropertyDescriptor.call(
+        Object,
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      O = Object;
+      const Loader = O.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      O = Object;
+      const descriptor = O.getOwnPropertyDescriptor;
+      const proto = O.getPrototypeOf(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const member = 'getOwnPropertyDescriptor';
+      const descriptor = Object[member];
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const descriptor = Object.getOwnPropertyDescriptor.bind(Object);
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let descriptor = Object.getOwnPropertyDescriptors;
+      if (false) descriptor = Object.getOwnPropertyDescriptor;
+      const proto = Object.getPrototypeOf(async function () {});
+      const descriptors = descriptor(proto);
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const plural = true;
+      const member = plural
+        ? 'getOwnPropertyDescriptors'
+        : 'getOwnPropertyDescriptor';
+      const descriptor = Object[member];
+      const proto = Object.getPrototypeOf(async function () {});
+      const descriptors = descriptor(proto);
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const holder = { d: Object.getOwnPropertyDescriptor };
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = holder.d(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const d = Object.getOwnPropertyDescriptor;
+      const holder = { d };
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = holder.d(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      class Holder {
+        constructor(d) {
+          this.d = d;
+        }
+      }
+      const holder = new Holder(Object.getOwnPropertyDescriptor);
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = holder.d(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      let getProto;
+      let descriptor;
+      [O, getProto, descriptor] = [
+        Object,
+        Object.getPrototypeOf,
+        Object.getOwnPropertyDescriptor
+      ];
+      const proto = getProto(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let getProto;
+      [, getProto] = [
+        ...[null, Object.getPrototypeOf],
+        null
+      ];
+      const proto = getProto(async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      let getProto;
+      let descriptor;
+      [, O, getProto, descriptor] = [
+        ...[
+          null,
+          Object,
+          Object.getPrototypeOf,
+          Object.getOwnPropertyDescriptor
+        ],
+        null
+      ];
+      const proto = getProto(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      function load(
+        descriptor = Object.getOwnPropertyDescriptor,
+        proto = Object.getPrototypeOf(async function () {})
+      ) {
+        var Object = { safe: true };
+        const Loader = descriptor(proto, 'constructor').value;
+        Loader("return import('./hidden.mjs')")();
+      }
+      load();
+    `,
+    `
+      function load({
+        descriptor = Object.getOwnPropertyDescriptor,
+        proto = Object.getPrototypeOf(async function () {})
+      } = {}) {
+        const Loader = descriptor(proto, 'constructor').value;
+        Loader("return import('./hidden.mjs')")();
+      }
+      load();
+    `,
+    `
+      let a = Object.getOwnPropertyDescriptor;
+      let b = Object.getOwnPropertyDescriptor;
+      let c = Object.getOwnPropertyDescriptor;
+      function step() {
+        c = b;
+        b = a;
+        a = Object.getOwnPropertyDescriptors;
+      }
+      step();
+      step();
+      step();
+      const proto = Object.getPrototypeOf(async function () {});
+      const descriptors = c(proto);
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const member = 'getPrototypeOf';
+      const proto = Object[member](async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const getProto = Object.getPrototypeOf;
+      const proto = getProto(async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const proto = Object.getPrototypeOf.call(
+        Object,
+        async function () {}
+      );
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const proto = Object.getPrototypeOf.apply(
+        Object,
+        [async function () {}]
+      );
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const getProto = Object.getPrototypeOf.bind(Object);
+      const proto = getProto(async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const O = Object;
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = O.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const O = Object;
+      const proto = O.getPrototypeOf(async function () {});
+      const Loader = O.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let proto;
+      proto = Object.getPrototypeOf(async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const Loader = Object.getOwnPropertyDescriptor.apply(Object, [
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ]).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const wrapper = true ? 'call' : 'apply';
+      const Loader = Object.getOwnPropertyDescriptor[wrapper](
+        Object,
+        [
+          Object.getPrototypeOf(async function () {}),
+          'constructor'
+        ]
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const args = [
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ];
+      const Loader = Object.getOwnPropertyDescriptor.apply(
+        Object,
+        [...args]
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const O = Object;
+      const descriptors = O.getOwnPropertyDescriptors(
+        Object.getPrototypeOf(async function () {})
+      );
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      O = Object;
+      const descriptors = O.getOwnPropertyDescriptors(
+        Object.getPrototypeOf(async function () {})
+      );
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const descriptors = Object.getOwnPropertyDescriptors.apply(Object, [
+        Object.getPrototypeOf(async function () {})
+      ]);
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const api = 'getOwnPropertyDescriptor';
+      const Loader = Object[api](
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const { getOwnPropertyDescriptor: descriptor } = Object;
+      const Loader = descriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const O = Object;
+      const Loader = O.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let descriptor;
+      ({ holder: { ['getOwnPropertyDescriptor']: descriptor } } =
+        { holder: Object });
+      const Loader = descriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const descriptors = Object.getOwnPropertyDescriptors(
+        Object.getPrototypeOf(async function () {})
+      );
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `
+  ]) {
+    assert.throws(() => importSpecifiers(source, {
+      strictNodeLoaders: true
+    }), /(?:Node loader imports|Dependency-mutating Hvigor APIs) are not supported/,
+    source);
+  }
+});
+
+test('strict import scanning allows safe indexed writes and loop shadowing', () => {
+  assert.doesNotThrow(() => importSpecifiers(`
+    const key = 'safe';
+    const values = {};
+    values[key] = () => true;
+    values[key]();
+    const counts = { safe: 0 };
+    counts[key] += 1;
+    const handlers = { safe: () => true };
+    handlers[key]();
+    for (const key of ['other']) {
+      void key;
+    }
+    values[key]();
+    for (const key of ['safe']) {
+      handlers[key]();
+    }
+  `, {
+    strictNodeLoaders: true
+  }));
 });

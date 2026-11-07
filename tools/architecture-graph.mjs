@@ -2,6 +2,10 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import JSON5 from 'json5';
 import ts from 'typescript';
+import {
+  createDescriptorCallResolver, createStaticStringResolver,
+  DESCRIPTOR_MEMBERS, STATIC_STRING_INCOMPLETE
+} from './lib/static-string-analysis.mjs';
 
 /**
  * @typedef {{
@@ -12,9 +16,12 @@ import ts from 'typescript';
  * @typedef {string | RegExp} ArchitecturePathPattern
  *
  * @typedef {{
- *   allowedCycles?: string[][],
- *   allowedRootToolFiles?: string[],
- *   ownedToolDirectories?: string[],
+ *   ownedSourceRoots?: Array<{
+ *     root: string,
+ *     files?: string[],
+ *     directories?: string[]
+ *   }>,
+ *   forbiddenSources?: ArchitecturePathPattern[],
  *   prohibitedDependencies?: Array<{
  *     from: ArchitecturePathPattern,
  *     to: ArchitecturePathPattern,
@@ -29,7 +36,23 @@ const IGNORED_DIRECTORIES = new Set([
   'build', 'dist', 'node_modules', 'oh_modules', 'test-fixtures'
 ]);
 const NODE_SOURCE = /\.mjs$/;
-const NODE_LIKE_SOURCE = /\.(?:[cm]?js|[cm]?ts)$/i;
+const NODE_LIKE_SOURCE = /\.(?:[cm]?[jt]s|jsx|tsx)$/i;
+const ARKTS_LIKE_SOURCE = /\.(?:ets|[cm]?[jt]s|jsx|tsx)$/i;
+const HVIGOR_SOURCE = /(?:^|[\\/])hvigorfile\.ts$/;
+const NODE_CODEGEN_MEMBERS = new Set([
+  'constructor',
+  'getOwnPropertyDescriptor',
+  'getOwnPropertyDescriptors',
+  'getPrototypeOf'
+]);
+const STATIC_CODEGEN_NAMES = new Set([
+  ...NODE_CODEGEN_MEMBERS,
+  ...DESCRIPTOR_MEMBERS
+]);
+
+function buildToolSource(file) {
+  return NODE_SOURCE.test(file) || HVIGOR_SOURCE.test(file);
+}
 
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -139,8 +162,12 @@ function packageSources(directory) {
   const runtime = exactEntry(main, 'ets', 'directory');
   const files = [index];
   walk(runtime, (file) => {
-    if (file.endsWith('.ets')) files.push(file);
-  });
+    if (file.endsWith('.ets')) {
+      files.push(file);
+    } else if (ARKTS_LIKE_SOURCE.test(file)) {
+      throw new Error(`ArkDB runtime source ${file} must use the exact lowercase .ets suffix.`);
+    }
+  }, () => false);
   return files;
 }
 
@@ -159,6 +186,14 @@ function toolingSources(root) {
     if (NODE_SOURCE.test(file)) files.push(file);
   }, (parent, name) => parent === directory && name === 'build' ? false : ignoredDirectory(name));
   return files;
+}
+
+function hvigorSources(root, packageRoots) {
+  return [
+    exactEntry(root, 'hvigorfile.ts', 'file', { optional: true }),
+    ...packageRoots.map((packageRoot) =>
+      exactEntry(packageRoot, 'hvigorfile.ts', 'file', { optional: true }))
+  ].filter((file) => file !== null);
 }
 
 function packageEntries(directories) {
@@ -193,7 +228,9 @@ function rootPackageName(root) {
 
 function sourceSyntax(file) {
   const source = readFileSync(file, 'utf8');
-  const kind = file.endsWith('.ets') ? ts.ScriptKind.TS : ts.ScriptKind.JS;
+  const kind = file.endsWith('.ets') || file.endsWith('.ts')
+    ? ts.ScriptKind.TS
+    : ts.ScriptKind.JS;
   const syntax = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, kind);
   if (syntax.parseDiagnostics.length > 0) {
     throw new Error(`Cannot parse architecture source: ${file}`);
@@ -203,8 +240,88 @@ function sourceSyntax(file) {
 
 function unwrapParentheses(node) {
   let current = node;
-  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  while (ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isNonNullExpression(current)) {
+    current = current.expression;
+  }
   return current;
+}
+
+function invokedExpression(node) {
+  let expression = node;
+  while (expression.parent !== undefined &&
+    ((ts.isParenthesizedExpression(expression.parent) ||
+      ts.isAsExpression(expression.parent) ||
+      ts.isTypeAssertionExpression(expression.parent) ||
+      ts.isSatisfiesExpression(expression.parent) ||
+      ts.isNonNullExpression(expression.parent)) &&
+      expression.parent.expression === expression)) {
+    expression = expression.parent;
+  }
+  if (expression.parent !== undefined &&
+    (ts.isPropertyAccessExpression(expression.parent) ||
+      ts.isElementAccessExpression(expression.parent)) &&
+    expression.parent.expression === expression) {
+    const member = ts.isPropertyAccessExpression(expression.parent)
+      ? expression.parent.name.text
+      : expression.parent.argumentExpression === undefined
+        ? null
+        : constantString(expression.parent.argumentExpression);
+    if (['apply', 'bind', 'call'].includes(member)) {
+      return invokedExpression(expression.parent);
+    }
+  }
+  return expression.parent !== undefined &&
+    ((ts.isCallExpression(expression.parent) ||
+      ts.isNewExpression(expression.parent) ||
+      ts.isTaggedTemplateExpression(expression.parent)) &&
+      (expression.parent.expression === expression ||
+        expression.parent.tag === expression));
+}
+
+function escapedExpression(node) {
+  let expression = node;
+  while (expression.parent !== undefined &&
+    ((ts.isParenthesizedExpression(expression.parent) ||
+      ts.isAsExpression(expression.parent) ||
+      ts.isTypeAssertionExpression(expression.parent) ||
+      ts.isSatisfiesExpression(expression.parent) ||
+      ts.isNonNullExpression(expression.parent)) &&
+      expression.parent.expression === expression)) {
+    expression = expression.parent;
+  }
+  const parent = expression.parent;
+  return parent !== undefined &&
+    ((ts.isVariableDeclaration(parent) && parent.initializer === expression) ||
+      (ts.isBinaryExpression(parent) &&
+        parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        parent.right === expression) ||
+      (ts.isReturnStatement(parent) && parent.expression === expression) ||
+      (ts.isCallExpression(parent) &&
+        parent.arguments.includes(expression)) ||
+      (ts.isArrowFunction(parent) && parent.body === expression) ||
+      (ts.isPropertyAssignment(parent) &&
+        parent.initializer === expression) ||
+      (ts.isArrayLiteralExpression(parent) &&
+        parent.elements.includes(expression)) ||
+      (ts.isConditionalExpression(parent) &&
+        (parent.whenTrue === expression ||
+          parent.whenFalse === expression)));
+}
+
+function codeGenerationBase(node, literalBindings) {
+  const base = unwrapParentheses(node.expression);
+  return ts.isObjectLiteralExpression(base) ||
+    ts.isArrayLiteralExpression(base) ||
+    ts.isFunctionExpression(base) ||
+    ts.isArrowFunction(base) ||
+    ts.isClassExpression(base) ||
+    (ts.isIdentifier(base) && literalBindings.has(base.text)) ||
+    (ts.isCallExpression(base) &&
+      namedMember(base.expression, 'Object', 'getPrototypeOf'));
 }
 
 function processExpression(node) {
@@ -213,24 +330,414 @@ function processExpression(node) {
     (ts.isPropertyAccessExpression(expression) &&
       ts.isIdentifier(unwrapParentheses(expression.expression)) &&
       unwrapParentheses(expression.expression).text === 'globalThis' &&
-      expression.name.text === 'process');
+      expression.name.text === 'process') ||
+    (ts.isElementAccessExpression(expression) &&
+      ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === 'globalThis' &&
+      expression.argumentExpression !== undefined &&
+      ts.isStringLiteralLike(unwrapParentheses(expression.argumentExpression)) &&
+      unwrapParentheses(expression.argumentExpression).text === 'process');
+}
+
+function reflectExpression(node) {
+  const expression = unwrapParentheses(node);
+  return (ts.isIdentifier(expression) && expression.text === 'Reflect') ||
+    (ts.isPropertyAccessExpression(expression) &&
+      ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === 'globalThis' &&
+      expression.name.text === 'Reflect') ||
+    (ts.isElementAccessExpression(expression) &&
+      ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === 'globalThis' &&
+      expression.argumentExpression !== undefined &&
+      ts.isStringLiteralLike(unwrapParentheses(expression.argumentExpression)) &&
+      unwrapParentheses(expression.argumentExpression).text === 'Reflect');
+}
+
+function moduleExpression(node) {
+  const expression = unwrapParentheses(node);
+  return (ts.isIdentifier(expression) && expression.text === 'module') ||
+    (ts.isPropertyAccessExpression(expression) &&
+      ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === 'globalThis' &&
+      expression.name.text === 'module') ||
+    (ts.isElementAccessExpression(expression) &&
+      ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === 'globalThis' &&
+      expression.argumentExpression !== undefined &&
+      constantString(expression.argumentExpression) === 'module');
+}
+
+function rootedAtGlobalThis(node) {
+  let expression = unwrapParentheses(node);
+  while (ts.isPropertyAccessExpression(expression) ||
+    ts.isElementAccessExpression(expression)) {
+    expression = unwrapParentheses(expression.expression);
+  }
+  return ts.isIdentifier(expression) && expression.text === 'globalThis';
+}
+
+function memberOwnedBy(node, owner) {
+  const expression = unwrapParentheses(node);
+  if (!ts.isPropertyAccessExpression(expression) &&
+    !ts.isElementAccessExpression(expression)) {
+    return false;
+  }
+  const target = unwrapParentheses(expression.expression);
+  return ts.isIdentifier(target) && target.text === owner;
+}
+
+function staticPropertyName(node) {
+  const name = unwrapParentheses(node);
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name) ||
+    ts.isNumericLiteral(name)) {
+    return name.text;
+  }
+  return null;
+}
+
+function assignmentPropertyName(node) {
+  if (!ts.isPropertyAssignment(node) &&
+    !ts.isShorthandPropertyAssignment(node)) {
+    return null;
+  }
+  const object = node.parent;
+  if (!ts.isObjectLiteralExpression(object)) return null;
+  let expression = object;
+  while (expression.parent !== undefined) {
+    const parent = expression.parent;
+    if ((ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isTypeAssertionExpression(parent) ||
+      ts.isSatisfiesExpression(parent) ||
+      ts.isNonNullExpression(parent)) &&
+      parent.expression === expression) {
+      expression = parent;
+      continue;
+    }
+    if (ts.isPropertyAssignment(parent) &&
+      parent.initializer === expression &&
+      ts.isObjectLiteralExpression(parent.parent)) {
+      expression = parent.parent;
+      continue;
+    }
+    if (ts.isArrayLiteralExpression(parent)) {
+      expression = parent;
+      continue;
+    }
+    break;
+  }
+  const assignment = expression.parent;
+  if (ts.isBinaryExpression(assignment) &&
+    assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    unwrapParentheses(assignment.left) ===
+      unwrapParentheses(expression)) {
+    return node.name;
+  }
+  if ((ts.isForOfStatement(assignment) ||
+    ts.isForInStatement(assignment)) &&
+    unwrapParentheses(assignment.initializer) ===
+      unwrapParentheses(expression)) {
+    return node.name;
+  }
+  return null;
+}
+
+function namedMember(node, owner, name) {
+  const expression = unwrapParentheses(node);
+  if (ts.isPropertyAccessExpression(expression)) {
+    return ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+      unwrapParentheses(expression.expression).text === owner &&
+      expression.name.text === name;
+  }
+  return ts.isElementAccessExpression(expression) &&
+    ts.isIdentifier(unwrapParentheses(expression.expression)) &&
+    unwrapParentheses(expression.expression).text === owner &&
+    expression.argumentExpression !== undefined &&
+    constantString(expression.argumentExpression) === name;
+}
+
+function reflectiveCall(node) {
+  if (!ts.isCallExpression(node)) return false;
+  return memberOwnedBy(node.expression, 'Reflect');
+}
+
+function moduleRequireAccess(node) {
+  let expression = unwrapParentheses(node);
+  const names = [];
+  while (ts.isPropertyAccessExpression(expression) ||
+    ts.isElementAccessExpression(expression)) {
+    if (ts.isPropertyAccessExpression(expression)) {
+      names.push(expression.name.text);
+    } else if (expression.argumentExpression !== undefined) {
+      names.push(constantString(expression.argumentExpression));
+    }
+    expression = unwrapParentheses(expression.expression);
+  }
+  return ts.isIdentifier(expression) &&
+    ['global', 'globalThis', 'module'].includes(expression.text) &&
+    names.includes('require');
+}
+
+function constantString(node) {
+  const expression = unwrapParentheses(node);
+  if (ts.isStringLiteralLike(expression)) return expression.text;
+  if (ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = constantString(expression.left);
+    const right = constantString(expression.right);
+    if (left !== null && right !== null) return `${left}${right}`;
+  }
+  return null;
+}
+
+function identifierInTypePosition(node) {
+  const identifier = node;
+  let current = node.parent;
+  while (current !== undefined) {
+    if (ts.isExpressionWithTypeArguments(current) &&
+      ts.isHeritageClause(current.parent) &&
+      current.parent.token === ts.SyntaxKind.ExtendsKeyword &&
+      (ts.isClassDeclaration(current.parent.parent) ||
+        ts.isClassExpression(current.parent.parent))) {
+      let nested = identifier;
+      while (nested !== current && nested.parent !== undefined) {
+        if (nested === current.expression) return false;
+        nested = nested.parent;
+      }
+      if (nested === current.expression) return false;
+    }
+    if (ts.isTypeNode(current)) return true;
+    if (ts.isStatement(current)) return false;
+    current = current.parent;
+  }
+  return false;
+}
+
+function referencedLoaderIdentifier(node, name) {
+  if (!ts.isIdentifier(node) || node.text !== name) return false;
+  if (identifierInTypePosition(node)) return false;
+  const parent = node.parent;
+  if (ts.isExportSpecifier(parent)) {
+    const declaration = ts.isNamedExports(parent.parent) &&
+      ts.isExportDeclaration(parent.parent.parent)
+      ? parent.parent.parent
+      : null;
+    if (declaration?.moduleSpecifier !== undefined ||
+      declaration?.isTypeOnly === true || parent.isTypeOnly) {
+      return false;
+    }
+    return parent.propertyName === undefined
+      ? parent.name === node
+      : parent.propertyName === node;
+  }
+  if (parent && 'name' in parent && parent.name === node &&
+    !ts.isShorthandPropertyAssignment(parent)) {
+    return false;
+  }
+  if ((ts.isBindingElement(parent) && parent.propertyName === node) ||
+    (ts.isImportSpecifier(parent) && parent.propertyName === node) ||
+    (ts.isQualifiedName(parent) && parent.right === node)) {
+    return false;
+  }
+  return true;
+}
+
+function referencedPathSpecifier(fileName) {
+  if (fileName.startsWith('.') || isAbsolute(fileName) ||
+    /^[A-Za-z]:[\\/]/.test(fileName) ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(fileName)) {
+    return fileName;
+  }
+  return `./${fileName}`;
+}
+
+function allowedPlainObjectPrototypeCheck(file, node) {
+  if (!file.endsWith(
+    `${sep}tools${sep}architecture-graph.mjs`) ||
+    !ts.isPropertyAccessExpression(node) ||
+    node.name.text !== 'getPrototypeOf' ||
+    !ts.isIdentifier(unwrapParentheses(node.expression)) ||
+    unwrapParentheses(node.expression).text !== 'Object') {
+    return false;
+  }
+  let current = node.parent;
+  while (current !== undefined) {
+    if (ts.isFunctionDeclaration(current)) {
+      return current.name?.text === 'plainObject';
+    }
+    if (ts.isFunctionLike(current)) return false;
+    current = current.parent;
+  }
+  return false;
 }
 
 function staticSpecifiers(file) {
-  const specifiers = [];
   const syntax = sourceSyntax(file);
+  const staticStrings = createStaticStringResolver(
+    syntax,
+    unwrapParentheses,
+    STATIC_CODEGEN_NAMES
+  );
+  const dangerousDescriptorCall = createDescriptorCallResolver(
+    syntax, unwrapParentheses, staticStrings);
+  const literalBindings = new Set();
+  function collectLiteralBindings(node) {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+      node.initializer !== undefined) {
+      const initializer = unwrapParentheses(node.initializer);
+      if (ts.isObjectLiteralExpression(initializer) ||
+        ts.isArrayLiteralExpression(initializer) ||
+        ts.isFunctionExpression(initializer) ||
+        ts.isArrowFunction(initializer) ||
+        ts.isClassExpression(initializer) ||
+        (ts.isCallExpression(initializer) &&
+          namedMember(initializer.expression, 'Object', 'getPrototypeOf'))) {
+        literalBindings.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, collectLiteralBindings);
+  }
+  collectLiteralBindings(syntax);
+  const specifiers = [
+    ...syntax.referencedFiles.map((reference) =>
+      referencedPathSpecifier(reference.fileName)),
+    ...syntax.typeReferenceDirectives.map((reference) => reference.fileName)
+  ];
   function visit(node) {
-    if (NODE_SOURCE.test(file) && ts.isIdentifier(node) && node.text === 'getBuiltinModule') {
+    const computedNames = ts.isElementAccessExpression(node) &&
+      node.argumentExpression !== undefined
+      ? staticStrings(node.argumentExpression)
+      : new Set();
+    const extractedNames = new Set();
+    if (ts.isBindingElement(node) && node.propertyName !== undefined) {
+      if (ts.isComputedPropertyName(node.propertyName)) {
+        for (const name of staticStrings(node.propertyName.expression)) {
+          extractedNames.add(name);
+        }
+      } else {
+        const name = staticPropertyName(node.propertyName);
+        if (name !== null) extractedNames.add(name);
+      }
+    } else if (ts.isBindingElement(node) &&
+      ts.isObjectBindingPattern(node.parent) &&
+      ts.isIdentifier(node.name)) {
+      extractedNames.add(node.name.text);
+    }
+    const assignedProperty = assignmentPropertyName(node);
+    if (assignedProperty !== null) {
+      if (ts.isComputedPropertyName(assignedProperty)) {
+        for (const name of staticStrings(assignedProperty.expression)) {
+          extractedNames.add(name);
+        }
+      } else {
+        const name = staticPropertyName(assignedProperty);
+        if (name !== null) extractedNames.add(name);
+      }
+    }
+    const descriptorCall = dangerousDescriptorCall(node);
+    if (buildToolSource(file) && ts.isIdentifier(node) &&
+      (node.text === 'eval' || node.text === 'Function')) {
+      throw new Error(`Node code generation is not supported: ${file}`);
+    } else if (buildToolSource(file) &&
+      referencedLoaderIdentifier(node, 'require')) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) &&
+      (referencedLoaderIdentifier(node, 'arguments') ||
+        referencedLoaderIdentifier(node, 'global') ||
+        referencedLoaderIdentifier(node, 'globalThis') ||
+        referencedLoaderIdentifier(node, 'module'))) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) &&
+      (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+      moduleExpression(node)) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (buildToolSource(file) &&
+      ((ts.isPropertyAccessExpression(node) &&
+        NODE_CODEGEN_MEMBERS.has(node.name.text) &&
+        !allowedPlainObjectPrototypeCheck(file, node)) ||
+        (ts.isElementAccessExpression(node) &&
+          ([...computedNames].some((name) =>
+            NODE_CODEGEN_MEMBERS.has(name)) ||
+            (computedNames.has(STATIC_STRING_INCOMPLETE) &&
+              (invokedExpression(node) ||
+                ts.isElementAccessExpression(
+                  unwrapParentheses(node.expression)) ||
+                (escapedExpression(node) &&
+                  codeGenerationBase(node, literalBindings)))))))) {
+      throw new Error(`Node code generation is not supported: ${file}`);
+    } else if (buildToolSource(file) &&
+      ([...extractedNames].some((name) =>
+        NODE_CODEGEN_MEMBERS.has(name)) ||
+        extractedNames.has(STATIC_STRING_INCOMPLETE))) {
+      throw new Error(`Node code generation is not supported: ${file}`);
+    } else if (buildToolSource(file) && descriptorCall) {
+      throw new Error(`Node code generation is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) &&
+      (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+      moduleRequireAccess(node)) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (buildToolSource(file) && ts.isIdentifier(node) &&
+      node.text === 'getBuiltinModule') {
       throw new Error(`Node getBuiltinModule access is not supported: ${file}`);
-    } else if (NODE_SOURCE.test(file) && ts.isElementAccessExpression(node) &&
+    } else if (buildToolSource(file) && reflectiveCall(node)) {
+      throw new Error(`Node reflective access is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) && ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      moduleExpression(node.initializer)) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (HVIGOR_SOURCE.test(file) && ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      moduleExpression(node.right)) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
+    } else if (buildToolSource(file) && ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      ((ts.isIdentifier(unwrapParentheses(node.initializer)) &&
+        unwrapParentheses(node.initializer).text === 'globalThis') ||
+        reflectExpression(node.initializer) ||
+        processExpression(node.initializer))) {
+      const kind = ts.isIdentifier(unwrapParentheses(node.initializer)) &&
+        unwrapParentheses(node.initializer).text === 'globalThis'
+        ? 'globalThis'
+        : reflectExpression(node.initializer) ? 'reflective' : 'process';
+      throw new Error(`Node ${kind} aliases are not supported: ${file}`);
+    } else if (buildToolSource(file) && ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ((ts.isIdentifier(unwrapParentheses(node.right)) &&
+        unwrapParentheses(node.right).text === 'globalThis') ||
+        reflectExpression(node.right) ||
+        processExpression(node.right))) {
+      const kind = ts.isIdentifier(unwrapParentheses(node.right)) &&
+        unwrapParentheses(node.right).text === 'globalThis'
+        ? 'globalThis'
+        : reflectExpression(node.right) ? 'reflective' : 'process';
+      throw new Error(`Node ${kind} aliases are not supported: ${file}`);
+    } else if (buildToolSource(file) && ts.isElementAccessExpression(node) &&
+      rootedAtGlobalThis(node)) {
+      throw new Error(`Node computed globalThis access is not supported: ${file}`);
+    } else if (buildToolSource(file) && ts.isElementAccessExpression(node) &&
+      node.argumentExpression !== undefined &&
+      ts.isStringLiteralLike(unwrapParentheses(node.argumentExpression)) &&
+      unwrapParentheses(node.argumentExpression).text === 'getBuiltinModule') {
+      throw new Error(`Node getBuiltinModule access is not supported: ${file}`);
+    } else if (buildToolSource(file) && ts.isElementAccessExpression(node) &&
       processExpression(node.expression)) {
       throw new Error(`Node computed process access is not supported: ${file}`);
-    } else if (NODE_SOURCE.test(file) && ts.isCallExpression(node) &&
+    } else if (ts.isCallExpression(node) &&
       node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      throw new Error(`Dynamic Node imports are not supported: ${file}`);
+      const kind = buildToolSource(file) ? 'Node' : 'ArkTS';
+      throw new Error(`Dynamic ${kind} imports are not supported: ${file}`);
+    } else if (buildToolSource(file) && ts.isCallExpression(node) &&
+      memberOwnedBy(node.expression, 'module')) {
+      throw new Error(`CommonJS loader access is not supported: ${file}`);
     } else if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-      if (NODE_SOURCE.test(file) && ['module', 'node:module'].includes(node.moduleSpecifier.text)) {
+      if (buildToolSource(file) &&
+        ['process', 'node:process'].includes(node.moduleSpecifier.text)) {
+        throw new Error(`Node process module imports are not supported: ${file}`);
+      }
+      if (buildToolSource(file) &&
+        ['module', 'node:module'].includes(node.moduleSpecifier.text)) {
         throw new Error(`Node createRequire-capable module imports are not supported: ${file}`);
       }
       specifiers.push(node.moduleSpecifier.text);
@@ -238,6 +745,9 @@ function staticSpecifiers(file) {
       ts.isExternalModuleReference(node.moduleReference) &&
       node.moduleReference.expression &&
       ts.isStringLiteral(node.moduleReference.expression)) {
+      if (buildToolSource(file)) {
+        throw new Error(`CommonJS imports are not supported: ${file}`);
+      }
       specifiers.push(node.moduleReference.expression.text);
     } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) &&
       ts.isStringLiteral(node.argument.literal)) {
@@ -292,37 +802,40 @@ function resolveSource(file, specifier, sources, packages, toolingPackage) {
   let required = false;
   let arkTsRequired = false;
   const nodeSource = NODE_SOURCE.test(file);
-  if (nodeSource && /[\u0000-\u0020]/.test(specifier)) {
+  const buildSource = buildToolSource(file);
+  if (buildSource && /[\u0000-\u0020]/.test(specifier)) {
     throw new Error(`Node tooling imports must use canonical URL encoding: ${specifier}`);
   }
-  if (nodeSource && specifier.includes('\\')) {
+  if (buildSource && specifier.includes('\\')) {
     throw new Error(`Node tooling imports must use URL path separators: ${specifier}`);
   }
   const nodeRelative = specifier === '.' || specifier === '..' ||
     specifier.startsWith('./') || specifier.startsWith('../');
-  if (nodeSource && specifier.startsWith('.') && !nodeRelative) {
+  if (buildSource && specifier.startsWith('.') && !nodeRelative) {
     throw new Error(`Node tooling imports require a valid relative Node specifier: ${specifier}`);
   }
-  if (nodeSource && specifier.startsWith('#')) {
+  if (buildSource && specifier.startsWith('#')) {
     throw new Error(`Node package import mappings are not supported by architecture scanning: ${specifier}`);
   }
   let absoluteUrl = null;
-  if (nodeSource && !nodeRelative) {
+  if (buildSource && !nodeRelative) {
     try {
       absoluteUrl = new URL(specifier);
     } catch {
       absoluteUrl = null;
     }
   }
-  if (nodeSource && absoluteUrl !== null && absoluteUrl.protocol !== 'node:') {
+  if (buildSource && absoluteUrl !== null && absoluteUrl.protocol !== 'node:') {
     throw new Error(`Unsupported absolute Node module URL: ${specifier}`);
   }
-  if (nodeSource && absoluteUrl?.protocol === 'node:') return null;
-  if (nodeSource && specifier.startsWith('/')) {
+  if (buildSource && absoluteUrl?.protocol === 'node:') return null;
+  if (buildSource && specifier.startsWith('/')) {
     throw new Error(`Unsupported absolute Node module URL: ${specifier}`);
   }
   let nodeLocal = false;
-  if (nodeSource && nodeRelative) {
+  if (HVIGOR_SOURCE.test(file) && nodeRelative) {
+    throw new Error(`Hvigor local imports are not supported by architecture scanning: ${specifier}`);
+  } else if (nodeSource && nodeRelative) {
     const rawPath = specifier.split(/[?#]/, 1)[0];
     if (/%(?:2f|5c)/i.test(rawPath)) {
       throw new Error(`Node tooling imports must not use an encoded path separator: ${specifier}`);
@@ -344,7 +857,7 @@ function resolveSource(file, specifier, sources, packages, toolingPackage) {
     base = resolve(dirname(file), specifier);
     arkTsRequired = true;
   } else {
-    if (nodeSource) {
+    if (buildSource) {
       if (toolingPackage !== null &&
         (specifier === toolingPackage || specifier.startsWith(`${toolingPackage}/`))) {
         throw new Error(`Root Node package self-reference is not supported: ${specifier}`);
@@ -400,6 +913,7 @@ export function readArkTsGraph(root) {
   const toolingPackage = rootPackageName(directory);
   const absoluteFiles = [
     ...packageRoots.flatMap((packageRoot) => packageSources(packageRoot)),
+    ...hvigorSources(directory, packageRoots),
     ...toolingSources(directory)
   ];
   const sources = new Map(absoluteFiles.map((file) => [pathKey(file), file]));
@@ -507,16 +1021,17 @@ function matchesPath(file, pattern) {
   throw new Error('Architecture policy path patterns must be strings or regular expressions.');
 }
 
-function cycleKey(cycle) {
-  if (!Array.isArray(cycle) || cycle.length === 0 ||
-    cycle.some((file) => typeof file !== 'string')) {
-    throw new Error('Allowed architecture cycles must be nonempty file lists.');
-  }
-  const ordered = [...cycle].sort(compareText);
-  if (new Set(ordered).size !== ordered.length) {
-    throw new Error('Allowed architecture cycles must not repeat files.');
-  }
-  return ordered.join('\0');
+function plainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function unknownField(value, allowed) {
+  return Object.keys(value).find((field) => !allowed.has(field));
+}
+
+function architecturePathPattern(value) {
+  return (typeof value === 'string' && value.length > 0) || value instanceof RegExp;
 }
 
 function dependencyPaths(source, dependencies) {
@@ -538,49 +1053,105 @@ function dependencyPaths(source, dependencies) {
 }
 
 /**
- * Enforces exact known cycle findings and prohibited dependency rules.
+ * Enforces zero import cycles and prohibited dependency rules.
  *
  * @param {ArchitectureGraph} graph
  * @param {ArchitecturePolicy} policy
  * @returns {void}
  */
 export function assertImportPolicy(graph, policy) {
-  if (!policy || typeof policy !== 'object') throw new Error('Architecture policy is required.');
+  if (!plainObject(policy)) throw new Error('Architecture policy must be a plain object.');
+  if (Object.hasOwn(policy, 'allowedCycles')) {
+    throw new Error('Cycle allowlists are not supported.');
+  }
+  const unexpectedPolicyField = unknownField(policy, new Set([
+    'ownedSourceRoots', 'forbiddenSources', 'prohibitedDependencies'
+  ]));
+  if (unexpectedPolicyField !== undefined) {
+    throw new Error(`Unknown architecture policy field: ${unexpectedPolicyField}`);
+  }
   const { files, dependencies } = checkedGraph(graph);
-  if (policy.allowedRootToolFiles !== undefined ||
-    policy.ownedToolDirectories !== undefined) {
-    const allowedRootToolFiles = policy.allowedRootToolFiles ?? [];
-    const ownedToolDirectories = policy.ownedToolDirectories ?? [];
-    if (!Array.isArray(allowedRootToolFiles) ||
-      allowedRootToolFiles.some((file) =>
-        typeof file !== 'string' || !/^tools\/[^/]+\.mjs$/.test(file)) ||
-      new Set(allowedRootToolFiles).size !== allowedRootToolFiles.length) {
-      throw new Error('Allowed root tooling sources must be unique root-level .mjs paths.');
+  const forbiddenSources = policy.forbiddenSources ?? [];
+  if (!Array.isArray(forbiddenSources)) throw new Error('Forbidden sources must be a list.');
+  if (forbiddenSources.some((pattern) => !architecturePathPattern(pattern))) {
+    throw new Error('Forbidden sources must contain path patterns.');
+  }
+  for (const file of files) {
+    if (forbiddenSources.some((pattern) => matchesPath(file, pattern))) {
+      throw new Error(`Stale architecture source is forbidden: ${file}`);
     }
-    if (!Array.isArray(ownedToolDirectories) ||
-      ownedToolDirectories.some((directory) =>
-        typeof directory !== 'string' || !/^[a-z][a-z0-9-]*$/.test(directory)) ||
-      new Set(ownedToolDirectories).size !== ownedToolDirectories.length) {
-      throw new Error('Owned tooling directories must be unique directory names.');
-    }
-    const allowed = new Set(allowedRootToolFiles);
-    const owned = new Set(ownedToolDirectories);
-    for (const file of files.filter((candidate) => candidate.startsWith('tools/'))) {
-      const path = file.slice('tools/'.length);
-      if (!path.includes('/')) {
-        if (!allowed.has(file)) throw new Error(`Unowned root tooling source: ${file}`);
-        continue;
+  }
+  if (!Array.isArray(policy.ownedSourceRoots) ||
+    policy.ownedSourceRoots.length === 0) {
+    throw new Error('Architecture policy must define nonempty owned source roots.');
+  }
+  const roots = policy.ownedSourceRoots.map((entry) => {
+      if (!plainObject(entry)) {
+        throw new Error('Owned source roots must contain plain objects.');
       }
-      if (!owned.has(path.split('/', 1)[0])) {
-        throw new Error(`Unowned tooling source: ${file}`);
+      const unexpectedRootField = unknownField(entry, new Set([
+        'root', 'files', 'directories'
+      ]));
+      if (unexpectedRootField !== undefined) {
+        throw new Error(`Unknown owned source root field: ${unexpectedRootField}`);
       }
-    }
+      const root = entry?.root;
+      const ownedFiles = entry?.files ?? [];
+      const ownedDirectories = entry?.directories ?? [];
+      if (typeof root !== 'string' ||
+        (root !== '' &&
+          !/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(root)) ||
+        !Array.isArray(ownedFiles) ||
+        ownedFiles.some((file) =>
+          typeof file !== 'string' || !/^[A-Za-z0-9._-]+$/.test(file)) ||
+        new Set(ownedFiles).size !== ownedFiles.length ||
+        !Array.isArray(ownedDirectories) ||
+        ownedDirectories.some((directory) =>
+          typeof directory !== 'string' || !/^[A-Za-z0-9._-]+$/.test(directory)) ||
+        new Set(ownedDirectories).size !== ownedDirectories.length) {
+        throw new Error('Owned source roots must define canonical roots, files, and directories.');
+      }
+      return {
+        root,
+        files: new Set(ownedFiles),
+        directories: new Set(ownedDirectories)
+      };
+  });
+  if (new Set(roots.map((entry) => entry.root)).size !== roots.length) {
+    throw new Error('Owned source roots must be unique.');
+  }
+  roots.sort((left, right) => right.root.length - left.root.length);
+  for (const file of files) {
+    const owner = roots.find((entry) =>
+      entry.root === '' || file.startsWith(`${entry.root}/`));
+    if (owner === undefined) throw new Error(`Unowned architecture source: ${file}`);
+    const path = owner.root === '' ? file : file.slice(owner.root.length + 1);
+    const separator = path.indexOf('/');
+    const owned = separator === -1
+      ? owner.files.has(path)
+      : owner.directories.has(path.slice(0, separator));
+    if (!owned) throw new Error(`Unowned architecture source: ${file}`);
   }
   const rules = policy.prohibitedDependencies ?? [];
   if (!Array.isArray(rules)) throw new Error('Prohibited dependencies must be a list.');
   for (const rule of rules) {
-    if (!rule || !('from' in rule) || !('to' in rule)) {
+    if (!plainObject(rule) || !('from' in rule) || !('to' in rule)) {
       throw new Error('Each prohibited dependency must define from and to patterns.');
+    }
+    const unexpectedRuleField = unknownField(rule, new Set([
+      'from', 'to', 'transitive', 'message'
+    ]));
+    if (unexpectedRuleField !== undefined) {
+      throw new Error(`Unknown architecture dependency rule field: ${unexpectedRuleField}`);
+    }
+    if (!architecturePathPattern(rule.from) || !architecturePathPattern(rule.to)) {
+      throw new Error('Architecture dependency rules must use path patterns.');
+    }
+    if (rule.transitive !== undefined && typeof rule.transitive !== 'boolean') {
+      throw new Error('Architecture dependency rule transitive must be boolean.');
+    }
+    if (rule.message !== undefined && typeof rule.message !== 'string') {
+      throw new Error('Architecture dependency rule message must be a string.');
     }
     for (const file of files) {
       if (!matchesPath(file, rule.from)) continue;
@@ -596,21 +1167,8 @@ export function assertImportPolicy(graph, policy) {
     }
   }
 
-  const allowedCycles = policy.allowedCycles ?? [];
-  if (!Array.isArray(allowedCycles)) throw new Error('Allowed cycles must be a list.');
-  const allowed = new Map(allowedCycles.map((cycle) => [cycleKey(cycle), cycle]));
-  if (allowed.size !== allowedCycles.length) throw new Error('Allowed cycles must be unique.');
   const actual = stronglyConnectedFiles(graph);
-  const actualKeys = new Set(actual.map(cycleKey));
-  for (const cycle of actual) {
-    if (!allowed.has(cycleKey(cycle))) {
-      throw new Error(`Unexpected import cycle: ${cycle.join(' -> ')}`);
-    }
-  }
-  for (const [key, cycle] of allowed) {
-    if (!actualKeys.has(key)) {
-      throw new Error(`Allowed import cycle is not present: ${[...cycle]
-        .sort(compareText).join(' -> ')}`);
-    }
+  if (actual.length > 0) {
+    throw new Error(`Unexpected import cycle: ${actual[0].join(' -> ')}`);
   }
 }

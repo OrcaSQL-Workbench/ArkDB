@@ -1,14 +1,48 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { checkPackage, importSpecifiers, listFiles } from './check-package.mjs';
-import { discoverDrivers, discoverPackages, ROOT } from './driver-packages.mjs';
+import {
+  checkIsolatedArkTsProject, checkPackage, importSpecifiers, listFiles
+} from './check-package.mjs';
+import {
+  discoverDrivers, discoverPackages, driverVerification, ROOT
+} from './driver-packages.mjs';
+
+function namesProject(value, identity) {
+  const escaped = identity.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+  return new RegExp(`(?:^|[:/])${escaped}(?:$|/)`).test(value);
+}
 
 export function checkDriverContracts(root = ROOT) {
   const packages = discoverPackages(root);
   const core = packages.find((entry) => entry.packageName === '@arkdb/core');
   if (!core || core.kind !== 'shared') throw new Error('One shared @arkdb/core HAR is required.');
   const drivers = discoverDrivers(root);
+  for (const driver of drivers) {
+    const siblings = drivers.filter((candidate) => candidate.id !== driver.id);
+    for (const sibling of siblings) {
+      if (Object.hasOwn(driver.manifest.dependencies ?? {}, sibling.packageName)) {
+        throw new Error(`Drivers must not depend on another driver: ` +
+          `${driver.packageName} -> ${sibling.packageName}`);
+      }
+    }
+    const runtimeFiles = [
+      join(driver.directory, 'Index.ets'),
+      ...listFiles(join(driver.directory, 'src', 'main', 'ets'))
+        .filter((file) => file.endsWith('.ets'))
+    ];
+    for (const file of runtimeFiles) {
+      for (const specifier of importSpecifiers(readFileSync(file, 'utf8'))) {
+        const sibling = siblings.find((candidate) =>
+          specifier === candidate.packageName ||
+          specifier.startsWith(`${candidate.packageName}/`));
+        if (sibling !== undefined) {
+          throw new Error(`Drivers must not import another driver: ` +
+            `${driver.packageName} -> ${specifier}`);
+        }
+      }
+    }
+  }
   for (const entry of packages) checkPackage(root, entry.id);
   const publicNames = new Set(checkPackage(root, core.id).exports);
   const sourceRoot = join(core.directory, 'src', 'main', 'ets');
@@ -45,7 +79,16 @@ export function checkDriverContracts(root = ROOT) {
   if (allSources.filter((file) => /\bclass ArkDbError\b/.test(readFileSync(file, 'utf8'))).length !== 1) {
     throw new Error('ArkDbError must have exactly one runtime identity.');
   }
+  const projects = [];
   for (const driver of drivers) {
+    if (typeof driver.declaration.verification?.consumer === 'string') {
+      const verification = driverVerification(root, driver.id);
+      projects.push(checkIsolatedArkTsProject(root, verification.consumerDirectory));
+      if (verification.deviceConsumerDirectory !== undefined) {
+        projects.push(checkIsolatedArkTsProject(
+          root, verification.deviceConsumerDirectory));
+      }
+    }
     if (driver.manifest.dependencies?.[core.packageName] !== core.version ||
       existsSync(join(driver.directory, 'src', 'main', 'ets', 'core', 'model', 'ArkDbError.ets'))) {
       throw new Error('Drivers must consume the shared core instead of embedding a private copy.');
@@ -58,6 +101,28 @@ export function checkDriverContracts(root = ROOT) {
         for (const binding of match[1].split(',')) {
           const name = binding.trim().split(/\s+as\s+/)[0];
           if (!publicNames.has(name)) throw new Error(`Unknown core public symbol in ${file}: ${name}`);
+        }
+      }
+    }
+  }
+  for (let sourceIndex = 0; sourceIndex < projects.length; sourceIndex += 1) {
+    const source = projects[sourceIndex];
+    for (let targetIndex = 0; targetIndex < projects.length; targetIndex += 1) {
+      if (sourceIndex === targetIndex) continue;
+      const target = projects[targetIndex];
+      for (const identity of target.identities) {
+        const dependency = source.dependencies.find((entry) =>
+          namesProject(entry.name, identity) ||
+          (typeof entry.value === 'string' && namesProject(entry.value, identity)));
+        if (dependency !== undefined) {
+          throw new Error(`ArkTS project dependencies must not name a sibling project: ` +
+            `${dependency.manifest} -> ${identity}`);
+        }
+        const imported = source.externalImports.find((entry) =>
+          namesProject(entry.specifier, identity));
+        if (imported !== undefined) {
+          throw new Error(`ArkTS project imports must not name a sibling project: ` +
+            `${imported.file} -> ${imported.specifier}`);
         }
       }
     }

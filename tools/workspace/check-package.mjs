@@ -7,7 +7,8 @@ import {
 import ts from 'typescript';
 import { dependencyClosure, discoverPackages, driverArgument, readJson5, resolvePackage, ROOT } from './driver-packages.mjs';
 import {
-  createStaticStringResolver, STATIC_STRING_INCOMPLETE
+  createDescriptorCallResolver, createStaticStringResolver,
+  DESCRIPTOR_MEMBERS, STATIC_STRING_INCOMPLETE
 } from '../lib/static-string-analysis.mjs';
 
 export { readJson5, ROOT } from './driver-packages.mjs';
@@ -161,10 +162,6 @@ const HVIGOR_DEPENDENCY_APIS = new Set([
 const NODE_LOADER_IDENTIFIERS = new Set([
   'constructor', 'createRequire', 'eval', 'Function', 'getBuiltinModule',
   'globalThis', 'process', 'Reflect'
-]);
-const DESCRIPTOR_MEMBERS = new Set([
-  'getOwnPropertyDescriptor',
-  'getOwnPropertyDescriptors'
 ]);
 const STATIC_NODE_IDENTIFIERS = new Set([
   ...HVIGOR_DEPENDENCY_APIS,
@@ -515,21 +512,10 @@ function referencedPathSpecifier(fileName) {
 export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
   const syntax = ts.createSourceFile(
     'ArkTsImports.ets', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const objectAliases = new Set(['Object']);
-  function collectObjectAliases(node) {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
-      node.initializer !== undefined) {
-      const initializer = unwrapImportExpression(node.initializer);
-      if (ts.isIdentifier(initializer) &&
-        objectAliases.has(initializer.text)) {
-        objectAliases.add(node.name.text);
-      }
-    }
-    ts.forEachChild(node, collectObjectAliases);
-  }
-  collectObjectAliases(syntax);
   const staticStrings = createStaticStringResolver(
     syntax, unwrapImportExpression, STATIC_NODE_IDENTIFIERS);
+  const dangerousDescriptorCall = createDescriptorCallResolver(
+    syntax, unwrapImportExpression, staticStrings);
   const specifiers = [
     ...syntax.referencedFiles.map((reference) =>
       referencedPathSpecifier(reference.fileName)),
@@ -566,23 +552,7 @@ export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
         if (name !== null) extractedNames.add(name);
       }
     }
-    const descriptorNames = ts.isCallExpression(node) &&
-      namedMember(node.expression, 'Object', 'getOwnPropertyDescriptor') &&
-      node.arguments[1] !== undefined
-      ? staticStrings(node.arguments[1])
-      : new Set();
-    const memberReceiver = (ts.isPropertyAccessExpression(node) ||
-      ts.isElementAccessExpression(node)) &&
-      ts.isIdentifier(unwrapImportExpression(node.expression))
-      ? unwrapImportExpression(node.expression).text
-      : null;
-    const descriptorAccess = memberReceiver !== null &&
-      objectAliases.has(memberReceiver) &&
-      ((ts.isPropertyAccessExpression(node) &&
-        DESCRIPTOR_MEMBERS.has(node.name.text)) ||
-        (ts.isElementAccessExpression(node) &&
-          [...computedNames].some((name) =>
-            DESCRIPTOR_MEMBERS.has(name))));
+    const descriptorCall = dangerousDescriptorCall(node);
     if (strictNodeLoaders && referencedIdentifier(node, 'arguments')) {
       throw new Error('Node loader imports are not supported in isolated projects.');
     } else if (referencedIdentifier(node, 'global') ||
@@ -611,17 +581,11 @@ export function importSpecifiers(source, { strictNodeLoaders = false } = {}) {
     } else if (strictNodeLoaders &&
       ([...extractedNames].some((name) =>
         HVIGOR_DEPENDENCY_APIS.has(name) ||
-        NODE_LOADER_IDENTIFIERS.has(name) ||
-        DESCRIPTOR_MEMBERS.has(name)) ||
+        NODE_LOADER_IDENTIFIERS.has(name)) ||
         extractedNames.has(STATIC_STRING_INCOMPLETE))) {
       throw new Error('Node loader imports are not supported in isolated projects.');
     } else if (strictNodeLoaders &&
-      ([...descriptorNames].some((name) =>
-        NODE_LOADER_IDENTIFIERS.has(name)) ||
-        descriptorNames.has(STATIC_STRING_INCOMPLETE))) {
-      throw new Error('Node loader imports are not supported in isolated projects.');
-    } else if (strictNodeLoaders &&
-      descriptorAccess) {
+      descriptorCall) {
       throw new Error('Node loader imports are not supported in isolated projects.');
     } else if (strictNodeLoaders &&
       computedNames.has(STATIC_STRING_INCOMPLETE) &&

@@ -419,6 +419,12 @@ test('strict import scanning rejects mutated and destructured loader aliases', (
       Loader("return import('./hidden.mjs')")();
     `,
     `
+      let key = 'safe';
+      [, key] = [...['safe', 'constructor'], 'safe'];
+      const Loader = ({})[key][key];
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
       const names = ['constructor'];
       let key;
       [key] = names;
@@ -601,6 +607,289 @@ test('strict import scanning rejects mutated and destructured loader aliases', (
       Loader("return import('./hidden.mjs')")();
     `,
     `
+      let O;
+      O = Object;
+      const Loader = O.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      O = Object;
+      const descriptor = O.getOwnPropertyDescriptor;
+      const proto = O.getPrototypeOf(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const member = 'getOwnPropertyDescriptor';
+      const descriptor = Object[member];
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const descriptor = Object.getOwnPropertyDescriptor.bind(Object);
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let descriptor = Object.getOwnPropertyDescriptors;
+      if (false) descriptor = Object.getOwnPropertyDescriptor;
+      const proto = Object.getPrototypeOf(async function () {});
+      const descriptors = descriptor(proto);
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const plural = true;
+      const member = plural
+        ? 'getOwnPropertyDescriptors'
+        : 'getOwnPropertyDescriptor';
+      const descriptor = Object[member];
+      const proto = Object.getPrototypeOf(async function () {});
+      const descriptors = descriptor(proto);
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const holder = { d: Object.getOwnPropertyDescriptor };
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = holder.d(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const d = Object.getOwnPropertyDescriptor;
+      const holder = { d };
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = holder.d(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      class Holder {
+        constructor(d) {
+          this.d = d;
+        }
+      }
+      const holder = new Holder(Object.getOwnPropertyDescriptor);
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = holder.d(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      let getProto;
+      let descriptor;
+      [O, getProto, descriptor] = [
+        Object,
+        Object.getPrototypeOf,
+        Object.getOwnPropertyDescriptor
+      ];
+      const proto = getProto(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let getProto;
+      [, getProto] = [
+        ...[null, Object.getPrototypeOf],
+        null
+      ];
+      const proto = getProto(async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      let getProto;
+      let descriptor;
+      [, O, getProto, descriptor] = [
+        ...[
+          null,
+          Object,
+          Object.getPrototypeOf,
+          Object.getOwnPropertyDescriptor
+        ],
+        null
+      ];
+      const proto = getProto(async function () {});
+      const Loader = descriptor(proto, 'constructor').value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      function load(
+        descriptor = Object.getOwnPropertyDescriptor,
+        proto = Object.getPrototypeOf(async function () {})
+      ) {
+        var Object = { safe: true };
+        const Loader = descriptor(proto, 'constructor').value;
+        Loader("return import('./hidden.mjs')")();
+      }
+      load();
+    `,
+    `
+      function load({
+        descriptor = Object.getOwnPropertyDescriptor,
+        proto = Object.getPrototypeOf(async function () {})
+      } = {}) {
+        const Loader = descriptor(proto, 'constructor').value;
+        Loader("return import('./hidden.mjs')")();
+      }
+      load();
+    `,
+    `
+      let a = Object.getOwnPropertyDescriptor;
+      let b = Object.getOwnPropertyDescriptor;
+      let c = Object.getOwnPropertyDescriptor;
+      function step() {
+        c = b;
+        b = a;
+        a = Object.getOwnPropertyDescriptors;
+      }
+      step();
+      step();
+      step();
+      const proto = Object.getPrototypeOf(async function () {});
+      const descriptors = c(proto);
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const member = 'getPrototypeOf';
+      const proto = Object[member](async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const getProto = Object.getPrototypeOf;
+      const proto = getProto(async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const proto = Object.getPrototypeOf.call(
+        Object,
+        async function () {}
+      );
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const proto = Object.getPrototypeOf.apply(
+        Object,
+        [async function () {}]
+      );
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const getProto = Object.getPrototypeOf.bind(Object);
+      const proto = getProto(async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const O = Object;
+      const proto = Object.getPrototypeOf(async function () {});
+      const Loader = O.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const O = Object;
+      const proto = O.getPrototypeOf(async function () {});
+      const Loader = O.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let proto;
+      proto = Object.getPrototypeOf(async function () {});
+      const Loader = Object.getOwnPropertyDescriptor(
+        proto,
+        'constructor'
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const Loader = Object.getOwnPropertyDescriptor.apply(Object, [
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ]).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const wrapper = true ? 'call' : 'apply';
+      const Loader = Object.getOwnPropertyDescriptor[wrapper](
+        Object,
+        [
+          Object.getPrototypeOf(async function () {}),
+          'constructor'
+        ]
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const args = [
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      ];
+      const Loader = Object.getOwnPropertyDescriptor.apply(
+        Object,
+        [...args]
+      ).value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const O = Object;
+      const descriptors = O.getOwnPropertyDescriptors(
+        Object.getPrototypeOf(async function () {})
+      );
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      let O;
+      O = Object;
+      const descriptors = O.getOwnPropertyDescriptors(
+        Object.getPrototypeOf(async function () {})
+      );
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
+      const descriptors = Object.getOwnPropertyDescriptors.apply(Object, [
+        Object.getPrototypeOf(async function () {})
+      ]);
+      const Loader = Object.values(descriptors)[0].value;
+      Loader("return import('./hidden.mjs')")();
+    `,
+    `
       const api = 'getOwnPropertyDescriptor';
       const Loader = Object[api](
         Object.getPrototypeOf(async function () {}),
@@ -644,7 +933,8 @@ test('strict import scanning rejects mutated and destructured loader aliases', (
   ]) {
     assert.throws(() => importSpecifiers(source, {
       strictNodeLoaders: true
-    }), /(?:Node loader imports|Dependency-mutating Hvigor APIs) are not supported/);
+    }), /(?:Node loader imports|Dependency-mutating Hvigor APIs) are not supported/,
+    source);
   }
 });
 
@@ -665,6 +955,88 @@ test('strict import scanning allows safe indexed writes and loop shadowing', () 
       getOwnPropertyDescriptor: () => 'safe'
     };
     helper.getOwnPropertyDescriptor();
+    helper.getOwnPropertyDescriptor({}, 'constructor');
+    helper.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(async function () {}),
+      'constructor'
+    );
+    Object.getOwnPropertyDescriptor({}, 'constructor');
+    Object.getOwnPropertyDescriptor.call(
+      Object.getPrototypeOf(async function () {}),
+      {},
+      'constructor'
+    );
+    Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(async function () {}),
+      'safe',
+      'constructor'
+    );
+    const safeDescriptor = Object.getOwnPropertyDescriptor.bind(
+      Object,
+      {},
+      'constructor'
+    );
+    safeDescriptor();
+    const O = Object;
+    function useHelper(O) {
+      O.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(async function () {}),
+        'constructor'
+      );
+    }
+    useHelper({
+      getOwnPropertyDescriptor: () => 'safe'
+    });
+    {
+      class Object {
+        static getPrototypeOf() { return {}; }
+        static getOwnPropertyDescriptor() { return 'safe'; }
+      }
+      Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(),
+        'constructor'
+      );
+    }
+    {
+      function Object() {}
+      Object.getPrototypeOf = () => ({});
+      Object.getOwnPropertyDescriptor = () => 'safe';
+      Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(),
+        'constructor'
+      );
+    }
+    const namedFunction = function Object() {
+      Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(),
+        'constructor'
+      );
+    };
+    namedFunction();
+    const NamedClass = class Object {
+      static use() {
+        Object.getOwnPropertyDescriptor(
+          Object.getPrototypeOf(),
+          'constructor'
+        );
+      }
+    };
+    NamedClass.use();
+    namespace Object {
+      export function getPrototypeOf() { return {}; }
+      export function getOwnPropertyDescriptor() { return 'safe'; }
+    }
+    Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(),
+      'constructor'
+    );
+    const benignHelper = {
+      getOwnPropertyDescriptor: () => 'safe'
+    };
+    const {
+      getOwnPropertyDescriptor: benignDescriptor
+    } = benignHelper;
+    benignDescriptor({}, 'constructor');
     for (const key of ['other']) {
       void key;
     }

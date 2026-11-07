@@ -96,6 +96,19 @@ test('resolves JavaScript declaration specifiers to d.ts files', async (t) => {
   await assert.doesNotReject(inspectHar(file, expected, fixtureExports));
 });
 
+test('preserves JavaScript parent directory names when resolving declarations', async (t) => {
+  const file = await fixture(
+    t,
+    {},
+    'public.d.ets',
+    'src/main/ets/dir.js/Bridge.d.ets',
+    undefined,
+    `export { ${fixtureExports.join(', ')} } from ` +
+      "'./src/main/ets/dir.js/Bridge.js';\n");
+
+  await assert.doesNotReject(inspectHar(file, expected, fixtureExports));
+});
+
 test('allows platform imports in transitive declarations', async (t) => {
   const file = await fixture(
     t,

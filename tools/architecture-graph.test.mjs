@@ -1487,6 +1487,10 @@ test('rejects dynamic tooling imports instead of hiding ownership edges', async 
       "[key] = ['constructor'];\n" +
       "const Loader = ({})[key][key];\n" +
       "Loader(\"return import('./b.mjs')\")();",
+    "let key = 'safe';\n" +
+      "[, key] = [...['safe', 'constructor'], 'safe'];\n" +
+      "const Loader = ({})[key][key];\n" +
+      "Loader(\"return import('./b.mjs')\")();",
     "const names = ['constructor'];\n" +
       "let key;\n" +
       "[key] = names;\n" +
@@ -1606,6 +1610,174 @@ test('rejects dynamic tooling imports instead of hiding ownership edges', async 
       "Object.getPrototypeOf(async function () {}), " +
       "'constructor').value;\n" +
       "Loader(\"return import('./b.mjs')\")();",
+    "let O;\n" +
+      "O = Object;\n" +
+      "const Loader = O.getOwnPropertyDescriptor(" +
+      "Object.getPrototypeOf(async function () {}), " +
+      "'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let O;\n" +
+      "O = Object;\n" +
+      "const descriptor = O.getOwnPropertyDescriptor;\n" +
+      "const proto = O.getPrototypeOf(async function () {});\n" +
+      "const Loader = descriptor(proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const member = 'getOwnPropertyDescriptor';\n" +
+      "const descriptor = Object[member];\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const Loader = descriptor(proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const descriptor = Object.getOwnPropertyDescriptor.bind(Object);\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const Loader = descriptor(proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let descriptor = Object.getOwnPropertyDescriptors;\n" +
+      "if (false) descriptor = Object.getOwnPropertyDescriptor;\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const descriptors = descriptor(proto);\n" +
+      "const Loader = Object.values(descriptors)[0].value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const plural = true;\n" +
+      "const member = plural ? " +
+      "'getOwnPropertyDescriptors' : 'getOwnPropertyDescriptor';\n" +
+      "const descriptor = Object[member];\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const descriptors = descriptor(proto);\n" +
+      "const Loader = Object.values(descriptors)[0].value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const holder = { d: Object.getOwnPropertyDescriptor };\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const Loader = holder.d(proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const d = Object.getOwnPropertyDescriptor;\n" +
+      "const holder = { d };\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const Loader = holder.d(proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "class Holder {\n" +
+      "  constructor(d) { this.d = d; }\n" +
+      "}\n" +
+      "const holder = new Holder(Object.getOwnPropertyDescriptor);\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const Loader = holder.d(proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let O;\n" +
+      "let getProto;\n" +
+      "let descriptor;\n" +
+      "[O, getProto, descriptor] = [" +
+      "Object, Object.getPrototypeOf, Object.getOwnPropertyDescriptor];\n" +
+      "const proto = getProto(async function () {});\n" +
+      "const Loader = descriptor(proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let getProto;\n" +
+      "[, getProto] = [...[null, Object.getPrototypeOf], null];\n" +
+      "const proto = getProto(async function () {});\n" +
+      "const Loader = Object.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let O;\n" +
+      "let getProto;\n" +
+      "let descriptor;\n" +
+      "[, O, getProto, descriptor] = [...[" +
+      "null, Object, Object.getPrototypeOf, " +
+      "Object.getOwnPropertyDescriptor], null];\n" +
+      "const proto = getProto(async function () {});\n" +
+      "const Loader = descriptor(proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "function load(" +
+      "descriptor = Object.getOwnPropertyDescriptor, " +
+      "proto = Object.getPrototypeOf(async function () {})) {\n" +
+      "  var Object = { safe: true };\n" +
+      "  const Loader = descriptor(proto, 'constructor').value;\n" +
+      "  Loader(\"return import('./b.mjs')\")();\n" +
+      "}\nload();",
+    "function load({" +
+      "descriptor = Object.getOwnPropertyDescriptor, " +
+      "proto = Object.getPrototypeOf(async function () {})" +
+      "} = {}) {\n" +
+      "  const Loader = descriptor(proto, 'constructor').value;\n" +
+      "  Loader(\"return import('./b.mjs')\")();\n" +
+      "}\nload();",
+    "let a = Object.getOwnPropertyDescriptor;\n" +
+      "let b = Object.getOwnPropertyDescriptor;\n" +
+      "let c = Object.getOwnPropertyDescriptor;\n" +
+      "function step() {\n" +
+      "  c = b;\n  b = a;\n" +
+      "  a = Object.getOwnPropertyDescriptors;\n" +
+      "}\nstep();\nstep();\nstep();\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const descriptors = c(proto);\n" +
+      "const Loader = Object.values(descriptors)[0].value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const member = 'getPrototypeOf';\n" +
+      "const proto = Object[member](async function () {});\n" +
+      "const Loader = Object.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const getProto = Object.getPrototypeOf;\n" +
+      "const proto = getProto(async function () {});\n" +
+      "const Loader = Object.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const proto = Object.getPrototypeOf.call(" +
+      "Object, async function () {});\n" +
+      "const Loader = Object.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const proto = Object.getPrototypeOf.apply(" +
+      "Object, [async function () {}]);\n" +
+      "const Loader = Object.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const getProto = Object.getPrototypeOf.bind(Object);\n" +
+      "const proto = getProto(async function () {});\n" +
+      "const Loader = Object.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const O = Object;\n" +
+      "const proto = Object.getPrototypeOf(async function () {});\n" +
+      "const Loader = O.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const O = Object;\n" +
+      "const proto = O.getPrototypeOf(async function () {});\n" +
+      "const Loader = O.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let proto;\n" +
+      "proto = Object.getPrototypeOf(async function () {});\n" +
+      "const Loader = Object.getOwnPropertyDescriptor(" +
+      "proto, 'constructor').value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const Loader = Object.getOwnPropertyDescriptor.apply(Object, [" +
+      "Object.getPrototypeOf(async function () {}), " +
+      "'constructor']).value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const wrapper = true ? 'call' : 'apply';\n" +
+      "const Loader = Object.getOwnPropertyDescriptor[wrapper](" +
+      "Object, [Object.getPrototypeOf(async function () {}), " +
+      "'constructor']).value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const args = [Object.getPrototypeOf(async function () {}), " +
+      "'constructor'];\n" +
+      "const Loader = Object.getOwnPropertyDescriptor.apply(" +
+      "Object, [...args]).value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const O = Object;\n" +
+      "const descriptors = O.getOwnPropertyDescriptors(" +
+      "Object.getPrototypeOf(async function () {}));\n" +
+      "const Loader = Object.values(descriptors)[0].value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "let O;\n" +
+      "O = Object;\n" +
+      "const descriptors = O.getOwnPropertyDescriptors(" +
+      "Object.getPrototypeOf(async function () {}));\n" +
+      "const Loader = Object.values(descriptors)[0].value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
+    "const descriptors = Object.getOwnPropertyDescriptors.apply(Object, [" +
+      "Object.getPrototypeOf(async function () {})]);\n" +
+      "const Loader = Object.values(descriptors)[0].value;\n" +
+      "Loader(\"return import('./b.mjs')\")();",
     "let descriptor;\n" +
       "({ holder: { ['getOwnPropertyDescriptor']: descriptor } } = " +
       "{ holder: Object });\n" +
@@ -1631,7 +1803,8 @@ test('rejects dynamic tooling imports instead of hiding ownership edges', async 
   ]) {
     await writeFile(source, hidden);
     assert.throws(() => readArkTsGraph(root),
-      /Node code generation is not supported.*tools.*a\.mjs/i);
+      /Node code generation is not supported.*tools.*a\.mjs/i,
+      hidden);
   }
 });
 
@@ -1650,6 +1823,88 @@ const helper = {
   getOwnPropertyDescriptor: () => 'safe'
 };
 helper.getOwnPropertyDescriptor();
+helper.getOwnPropertyDescriptor({}, 'constructor');
+helper.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(async function () {}),
+  'constructor'
+);
+Object.getOwnPropertyDescriptor({}, 'constructor');
+Object.getOwnPropertyDescriptor.call(
+  Object.getPrototypeOf(async function () {}),
+  {},
+  'constructor'
+);
+Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(async function () {}),
+  'safe',
+  'constructor'
+);
+const safeDescriptor = Object.getOwnPropertyDescriptor.bind(
+  Object,
+  {},
+  'constructor'
+);
+safeDescriptor();
+const O = Object;
+function useHelper(O) {
+  O.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(async function () {}),
+    'constructor'
+  );
+}
+useHelper({
+  getOwnPropertyDescriptor: () => 'safe'
+});
+{
+  class Object {
+    static getPrototypeOf() { return {}; }
+    static getOwnPropertyDescriptor() { return 'safe'; }
+  }
+  Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(),
+    'constructor'
+  );
+}
+{
+  function Object() {}
+  Object.getPrototypeOf = () => ({});
+  Object.getOwnPropertyDescriptor = () => 'safe';
+  Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(),
+    'constructor'
+  );
+}
+const namedFunction = function Object() {
+  Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(),
+    'constructor'
+  );
+};
+namedFunction();
+const NamedClass = class Object {
+  static use() {
+    Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(),
+      'constructor'
+    );
+  }
+};
+NamedClass.use();
+namespace Object {
+  export function getPrototypeOf() { return {}; }
+  export function getOwnPropertyDescriptor() { return 'safe'; }
+}
+Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(),
+  'constructor'
+);
+const benignHelper = {
+  getOwnPropertyDescriptor: () => 'safe'
+};
+const {
+  getOwnPropertyDescriptor: benignDescriptor
+} = benignHelper;
+benignDescriptor({}, 'constructor');
 for (const key of ['other']) {
   void key;
 }

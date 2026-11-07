@@ -141,10 +141,13 @@ export async function inspectHar(file, expected, expectedExports, moduleDefiniti
       const base = posix.normalize(posix.join(posix.dirname(declaration), specifier));
       const exactDeclaration = /\.(?:d\.ets|d\.ts)$/.test(base);
       const runtimeDeclaration = base.match(/\.(?:cjs|mjs|js)$/);
+      const runtimeStem = runtimeDeclaration === null
+        ? null
+        : base.slice(0, -runtimeDeclaration[0].length);
       const candidates = exactDeclaration ? [base] :
         runtimeDeclaration ? [
-          base.replace(runtimeDeclaration[0], '.d.ts'),
-          base.replace(runtimeDeclaration[0], '.d.ets')
+          `${runtimeStem}.d.ts`,
+          `${runtimeStem}.d.ets`
         ] : [
           `${base}.d.ets`,
           `${base}.d.ts`,

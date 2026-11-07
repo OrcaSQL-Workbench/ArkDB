@@ -3,7 +3,8 @@ import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:p
 import JSON5 from 'json5';
 import ts from 'typescript';
 import {
-  createStaticStringResolver, STATIC_STRING_INCOMPLETE
+  createDescriptorCallResolver, createStaticStringResolver,
+  DESCRIPTOR_MEMBERS, STATIC_STRING_INCOMPLETE
 } from './lib/static-string-analysis.mjs';
 
 /**
@@ -39,10 +40,6 @@ const NODE_LIKE_SOURCE = /\.(?:[cm]?[jt]s|jsx|tsx)$/i;
 const ARKTS_LIKE_SOURCE = /\.(?:ets|[cm]?[jt]s|jsx|tsx)$/i;
 const HVIGOR_SOURCE = /(?:^|[\\/])hvigorfile\.ts$/;
 const NODE_CODEGEN_MEMBERS = new Set(['constructor']);
-const DESCRIPTOR_MEMBERS = new Set([
-  'getOwnPropertyDescriptor',
-  'getOwnPropertyDescriptors'
-]);
 const STATIC_CODEGEN_NAMES = new Set([
   ...NODE_CODEGEN_MEMBERS,
   ...DESCRIPTOR_MEMBERS
@@ -552,16 +549,18 @@ function referencedPathSpecifier(fileName) {
 
 function staticSpecifiers(file) {
   const syntax = sourceSyntax(file);
+  const staticStrings = createStaticStringResolver(
+    syntax,
+    unwrapParentheses,
+    STATIC_CODEGEN_NAMES
+  );
+  const dangerousDescriptorCall = createDescriptorCallResolver(
+    syntax, unwrapParentheses, staticStrings);
   const literalBindings = new Set();
-  const objectAliases = new Set(['Object']);
   function collectLiteralBindings(node) {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
       node.initializer !== undefined) {
       const initializer = unwrapParentheses(node.initializer);
-      if (ts.isIdentifier(initializer) &&
-        objectAliases.has(initializer.text)) {
-        objectAliases.add(node.name.text);
-      }
       if (ts.isObjectLiteralExpression(initializer) ||
         ts.isArrayLiteralExpression(initializer) ||
         ts.isFunctionExpression(initializer) ||
@@ -575,11 +574,6 @@ function staticSpecifiers(file) {
     ts.forEachChild(node, collectLiteralBindings);
   }
   collectLiteralBindings(syntax);
-  const staticStrings = createStaticStringResolver(
-    syntax,
-    unwrapParentheses,
-    STATIC_CODEGEN_NAMES
-  );
   const specifiers = [
     ...syntax.referencedFiles.map((reference) =>
       referencedPathSpecifier(reference.fileName)),
@@ -616,23 +610,7 @@ function staticSpecifiers(file) {
         if (name !== null) extractedNames.add(name);
       }
     }
-    const descriptorNames = ts.isCallExpression(node) &&
-      namedMember(node.expression, 'Object', 'getOwnPropertyDescriptor') &&
-      node.arguments[1] !== undefined
-      ? staticStrings(node.arguments[1])
-      : new Set();
-    const memberReceiver = (ts.isPropertyAccessExpression(node) ||
-      ts.isElementAccessExpression(node)) &&
-      ts.isIdentifier(unwrapParentheses(node.expression))
-      ? unwrapParentheses(node.expression).text
-      : null;
-    const descriptorAccess = memberReceiver !== null &&
-      objectAliases.has(memberReceiver) &&
-      ((ts.isPropertyAccessExpression(node) &&
-        DESCRIPTOR_MEMBERS.has(node.name.text)) ||
-        (ts.isElementAccessExpression(node) &&
-          [...computedNames].some((name) =>
-            DESCRIPTOR_MEMBERS.has(name))));
+    const descriptorCall = dangerousDescriptorCall(node);
     if (buildToolSource(file) && ts.isIdentifier(node) &&
       (node.text === 'eval' || node.text === 'Function')) {
       throw new Error(`Node code generation is not supported: ${file}`);
@@ -664,14 +642,10 @@ function staticSpecifiers(file) {
       throw new Error(`Node code generation is not supported: ${file}`);
     } else if (buildToolSource(file) &&
       ([...extractedNames].some((name) =>
-        NODE_CODEGEN_MEMBERS.has(name) ||
-        DESCRIPTOR_MEMBERS.has(name)) ||
-        extractedNames.has(STATIC_STRING_INCOMPLETE) ||
-        [...descriptorNames].some((name) =>
-          NODE_CODEGEN_MEMBERS.has(name)) ||
-        descriptorNames.has(STATIC_STRING_INCOMPLETE))) {
+        NODE_CODEGEN_MEMBERS.has(name)) ||
+        extractedNames.has(STATIC_STRING_INCOMPLETE))) {
       throw new Error(`Node code generation is not supported: ${file}`);
-    } else if (buildToolSource(file) && descriptorAccess) {
+    } else if (buildToolSource(file) && descriptorCall) {
       throw new Error(`Node code generation is not supported: ${file}`);
     } else if (HVIGOR_SOURCE.test(file) &&
       (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&

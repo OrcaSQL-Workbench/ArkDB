@@ -1,0 +1,12 @@
+{
+  "name": "@arkdb/postgres",
+  "version": "1.0.0",
+  "description": "Native ArkTS PostgreSQL driver for HarmonyOS.",
+  "main": "Index.ets",
+  "author": "OrcaSQL Workbench",
+  "repository": "https://github.com/OrcaSQL-Workbench/ArkDB",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@arkdb/core": "1.1.0"
+  }
+}

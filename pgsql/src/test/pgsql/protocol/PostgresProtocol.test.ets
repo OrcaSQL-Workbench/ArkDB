@@ -34,6 +34,15 @@ export default function postgresProtocolTest(): void {
       expect(reader.remaining).assertEqual(0);
     });
 
+    it('copiesWriterChunksIntoPreallocatedFrameStorage', 0, () => {
+      const frame = new Uint8Array([0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa]);
+      new PostgresByteWriter()
+        .writeUInt8(0x11)
+        .writeUInt16(0x2233)
+        .copyTo(frame, 2);
+      assertBytes(frame, [0xaa, 0xaa, 0x11, 0x22, 0x33, 0xaa]);
+    });
+
     it('rejectsInvalidWritesAndTruncatedReadsWithoutMutation', 0, () => {
       assertTruncated(1, (reader: PostgresByteReader): void => { reader.readUInt8(); });
       assertTruncated(1, (reader: PostgresByteReader): void => { reader.readInt8(); });

@@ -1,6 +1,18 @@
 import { buffer } from '@kit.ArkTS';
 import { ArkDbError } from '@arkdb/core';
-import { MAX_POSTGRES_MESSAGE_BYTES } from './PostgresProtocolConstants';
+import {
+  MAX_POSTGRES_MESSAGE_BYTES, POSTGRES_LENGTH_BYTES, POSTGRES_NORMAL_HEADER_BYTES
+} from './PostgresProtocolConstants';
+
+export interface PostgresStartupParameter {
+  name: string;
+  value: string;
+}
+
+export enum PostgresFrontendTarget {
+  Statement = 0x53,
+  Portal = 0x50
+}
 
 export class PostgresByteReader {
   private readonly bytes: Uint8Array;
@@ -154,13 +166,21 @@ export class PostgresByteWriter {
     return this;
   }
 
+  copyTo(output: Uint8Array, offset: number): void {
+    if (!Number.isSafeInteger(offset) || offset < 0 ||
+      this.total > output.length - offset) {
+      throw ArkDbError.validation('PostgreSQL byte output destination is too small');
+    }
+    let position = offset;
+    for (const chunk of this.chunks) {
+      output.set(chunk, position);
+      position += chunk.length;
+    }
+  }
+
   toUint8Array(): Uint8Array {
     const output = new Uint8Array(this.total);
-    let offset = 0;
-    for (const chunk of this.chunks) {
-      output.set(chunk, offset);
-      offset += chunk.length;
-    }
+    this.copyTo(output, 0);
     return output;
   }
 
@@ -203,6 +223,195 @@ export class PostgresByteWriter {
     if (value.length === 0) return;
     this.chunks.push(value);
     this.total += value.length;
+  }
+}
+
+export class PostgresFrontendSerializer {
+  static sslRequest(): Uint8Array {
+    return untypedFrame(payloadWriter().writeUInt32(80877103));
+  }
+
+  static startup(parameters: PostgresStartupParameter[]): Uint8Array {
+    let hasUser = false;
+    for (const parameter of parameters) {
+      requireNonemptyName(parameter.name, 'PostgreSQL startup parameter name');
+      if (parameter.name === 'user') {
+        requireNonemptyName(parameter.value, 'PostgreSQL startup user');
+        hasUser = true;
+      }
+    }
+    if (!hasUser) throw ArkDbError.validation('PostgreSQL startup parameters require a user');
+    const payload = payloadWriter().writeUInt32(196608);
+    for (const parameter of parameters) {
+      payload.writeCString(parameter.name).writeCString(parameter.value);
+    }
+    return untypedFrame(payload.writeUInt8(0));
+  }
+
+  static password(password: string): Uint8Array {
+    return typedFrame(0x70, payloadWriter().writeCString(password));
+  }
+
+  static saslInitialResponse(mechanism: string, response: Uint8Array | null): Uint8Array {
+    requireNonemptyName(mechanism, 'PostgreSQL SASL mechanism');
+    const payload = payloadWriter().writeCString(mechanism);
+    if (response === null) {
+      payload.writeInt32(-1);
+    } else {
+      payload.writeInt32(response.length).writeBytes(response);
+    }
+    return typedFrame(0x70, payload);
+  }
+
+  static saslResponse(response: Uint8Array): Uint8Array {
+    return typedFrame(0x70, payloadWriter().writeBytes(response));
+  }
+
+  static query(query: string): Uint8Array {
+    return typedFrame(0x51, payloadWriter().writeCString(query));
+  }
+
+  static parse(statement: string, query: string, parameterTypeOids: number[]): Uint8Array {
+    requireCount(parameterTypeOids.length, 'PostgreSQL Parse parameter type count');
+    const payload = payloadWriter()
+      .writeCString(statement)
+      .writeCString(query)
+      .writeUInt16(parameterTypeOids.length);
+    for (const oid of parameterTypeOids) payload.writeUInt32(oid);
+    return typedFrame(0x50, payload);
+  }
+
+  static bind(portal: string, statement: string, parameterFormats: number[],
+    parameters: Array<Uint8Array | null>, resultFormats: number[]): Uint8Array {
+    requireCount(parameterFormats.length, 'PostgreSQL Bind parameter format count');
+    requireCount(parameters.length, 'PostgreSQL Bind parameter count');
+    requireCount(resultFormats.length, 'PostgreSQL Bind result format count');
+    requireParameterFormats(parameterFormats.length, parameters.length);
+    const payload = payloadWriter()
+      .writeCString(portal)
+      .writeCString(statement)
+      .writeUInt16(parameterFormats.length);
+    writeFormats(payload, parameterFormats);
+    payload.writeUInt16(parameters.length);
+    for (const parameter of parameters) {
+      if (parameter === null) {
+        payload.writeInt32(-1);
+      } else {
+        payload.writeInt32(parameter.length).writeBytes(parameter);
+      }
+    }
+    payload.writeUInt16(resultFormats.length);
+    writeFormats(payload, resultFormats);
+    return typedFrame(0x42, payload);
+  }
+
+  static describe(target: PostgresFrontendTarget, name: string): Uint8Array {
+    return typedFrame(0x44, payloadWriter()
+      .writeUInt8(requireTarget(target))
+      .writeCString(name));
+  }
+
+  static execute(portal: string, maximumRows: number): Uint8Array {
+    if (!Number.isInteger(maximumRows) || maximumRows < 0 || maximumRows > 2147483647) {
+      throw ArkDbError.validation(
+        'PostgreSQL Execute maximum rows must be in the nonnegative signed 32-bit range');
+    }
+    return typedFrame(0x45, payloadWriter()
+      .writeCString(portal)
+      .writeInt32(maximumRows));
+  }
+
+  static flush(): Uint8Array {
+    return typedFrame(0x48, payloadWriter());
+  }
+
+  static sync(): Uint8Array {
+    return typedFrame(0x53, payloadWriter());
+  }
+
+  static close(target: PostgresFrontendTarget, name: string): Uint8Array {
+    return typedFrame(0x43, payloadWriter()
+      .writeUInt8(requireTarget(target))
+      .writeCString(name));
+  }
+
+  static terminate(): Uint8Array {
+    return typedFrame(0x58, payloadWriter());
+  }
+
+  static copyData(data: Uint8Array): Uint8Array {
+    return typedFrame(0x64, payloadWriter().writeBytes(data));
+  }
+
+  static copyDone(): Uint8Array {
+    return typedFrame(0x63, payloadWriter());
+  }
+
+  static copyFail(message: string): Uint8Array {
+    return typedFrame(0x66, payloadWriter().writeCString(message));
+  }
+
+  static cancelRequest(processId: number, secretKey: number): Uint8Array {
+    return untypedFrame(payloadWriter()
+      .writeUInt32(80877102)
+      .writeInt32(processId)
+      .writeInt32(secretKey));
+  }
+}
+
+function payloadWriter(): PostgresByteWriter {
+  return new PostgresByteWriter(MAX_POSTGRES_MESSAGE_BYTES - POSTGRES_LENGTH_BYTES);
+}
+
+function typedFrame(type: number, payload: PostgresByteWriter): Uint8Array {
+  const frame = new Uint8Array(payload.length + POSTGRES_NORMAL_HEADER_BYTES);
+  new PostgresByteWriter(POSTGRES_NORMAL_HEADER_BYTES)
+    .writeUInt8(type)
+    .writeUInt32(payload.length + POSTGRES_LENGTH_BYTES)
+    .copyTo(frame, 0);
+  payload.copyTo(frame, POSTGRES_NORMAL_HEADER_BYTES);
+  return frame;
+}
+
+function untypedFrame(payload: PostgresByteWriter): Uint8Array {
+  const frame = new Uint8Array(payload.length + POSTGRES_LENGTH_BYTES);
+  new PostgresByteWriter(POSTGRES_LENGTH_BYTES)
+    .writeUInt32(payload.length + POSTGRES_LENGTH_BYTES)
+    .copyTo(frame, 0);
+  payload.copyTo(frame, POSTGRES_LENGTH_BYTES);
+  return frame;
+}
+
+function requireNonemptyName(value: string, label: string): void {
+  if (value.length === 0) throw ArkDbError.validation(label + ' cannot be empty');
+}
+
+function requireCount(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < 0 || value > 65535) {
+    throw ArkDbError.validation(label + ' exceeds the unsigned 16-bit protocol limit');
+  }
+}
+
+function requireParameterFormats(formatCount: number, parameterCount: number): void {
+  if (formatCount > 1 && formatCount !== parameterCount) {
+    throw ArkDbError.validation(
+      'PostgreSQL Bind parameter format count must be zero, one, or match the parameter count');
+  }
+}
+
+function requireTarget(target: PostgresFrontendTarget): number {
+  if (target !== PostgresFrontendTarget.Statement && target !== PostgresFrontendTarget.Portal) {
+    throw ArkDbError.validation('PostgreSQL target must be a statement or portal');
+  }
+  return target;
+}
+
+function writeFormats(writer: PostgresByteWriter, formats: number[]): void {
+  for (const format of formats) {
+    if (format !== 0 && format !== 1) {
+      throw ArkDbError.validation('PostgreSQL format code must be text or binary');
+    }
+    writer.writeInt16(format);
   }
 }
 

@@ -28,6 +28,10 @@
     {
       "name": "mysql",
       "srcPath": "./mysql"
+    },
+    {
+      "name": "pgsql",
+      "srcPath": "./pgsql"
     }
   ]
 }

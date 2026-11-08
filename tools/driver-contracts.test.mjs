@@ -15,9 +15,13 @@ import { sourceFingerprint } from './package-har.mjs';
 import { verificationCommands } from './verify-driver.mjs';
 
 test('core is a real independent shared HAR, not an extra database driver', () => {
-  assert.deepEqual(checkDriverContracts(), { sharedPackage: '@arkdb/core', drivers: ['mysql'] });
-  assert.deepEqual(discoverPackages().map((entry) => [entry.id, entry.kind]), [['core', 'shared'], ['mysql', 'driver']]);
+  assert.deepEqual(checkDriverContracts(),
+    { sharedPackage: '@arkdb/core', drivers: ['mysql', 'pgsql'] });
+  assert.deepEqual(discoverPackages().map((entry) => [entry.id, entry.kind]),
+    [['core', 'shared'], ['mysql', 'driver'], ['pgsql', 'driver']]);
   assert.deepEqual(dependencyClosure().map((entry) => entry.id), ['core', 'mysql']);
+  assert.deepEqual(dependencyClosure(ROOT, 'pgsql').map((entry) => entry.id),
+    ['core', 'pgsql']);
   assert.throws(() => resolveDriver(ROOT, 'core'), /not a database driver/);
   const verification = driverVerification();
   assert.deepEqual(verification.nativeModules, ['core', 'mysql']);
@@ -26,6 +30,13 @@ test('core is a real independent shared HAR, not an extra database driver', () =
   assert.equal(verification.consumerDirectory, join(ROOT, 'examples', 'mysql-client'));
   assert.equal(verification.deviceConsumerDirectory,
     join(ROOT, 'examples', 'mysql-device-acceptance'));
+  const postgresVerification = driverVerification(ROOT, 'pgsql');
+  assert.deepEqual(postgresVerification.nativeModules, ['core', 'pgsql']);
+  assert.equal(postgresVerification.consumer, 'examples/postgres-client');
+  assert.equal(postgresVerification.deviceConsumer, undefined);
+  assert.equal(postgresVerification.requiresInternet, false);
+  assert.equal(postgresVerification.consumerDirectory,
+    join(ROOT, 'examples', 'postgres-client'));
 });
 
 test('compatibility-only MySQL surface stays exported and explicitly deprecated', async () => {
@@ -484,7 +495,7 @@ test('adding an independently typed adapter changes registration only, not MySQL
   const profile = JSON5.parse(await readFile(join(root, 'build-profile.json5'), 'utf8'));
   profile.modules.push({ name: 'probe', srcPath: './drivers/probe' });
   await writeFile(join(root, 'build-profile.json5'), JSON.stringify(profile));
-  assert.deepEqual(checkDriverContracts(root).drivers, ['mysql', 'probe']);
+  assert.deepEqual(checkDriverContracts(root).drivers, ['mysql', 'pgsql', 'probe']);
   const mysqlIndexPath = join(root, 'mysql', 'Index.ets');
   const mysqlIndex = await readFile(mysqlIndexPath, 'utf8');
   await writeFile(mysqlIndexPath,
@@ -494,7 +505,7 @@ test('adding an independently typed adapter changes registration only, not MySQL
   await writeFile(mysqlIndexPath, mysqlIndex);
   assert.equal(await treeDigest(join(root, 'mysql')), mysql);
   assert.deepEqual(affectedDrivers(discoverDrivers(root), ['core/src/main/ets/model/QueryResult.ets'])
-    .map((entry) => entry.id), ['mysql', 'probe']);
+    .map((entry) => entry.id), ['mysql', 'pgsql', 'probe']);
   assert.deepEqual(affectedDrivers(discoverDrivers(root), ['drivers/probe/src/main/ets/Probe.ets'])
     .map((entry) => entry.id), ['probe']);
   assert.throws(() => driverVerification(root, 'probe'), /declare its own consumer/);
@@ -1447,7 +1458,8 @@ async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'arkdb-contracts-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const ignored = new Set(['build', '.test', '.hvigor', 'oh_modules', 'node_modules', 'BuildProfile.ets']);
-  for (const name of ['core', 'mysql', 'examples', 'build-profile.json5', 'oh-package.json5', 'hvigorfile.ts', 'hvigor', 'AppScope', 'LICENSE']) {
+  for (const name of ['core', 'mysql', 'pgsql', 'examples', 'build-profile.json5',
+    'oh-package.json5', 'hvigorfile.ts', 'hvigor', 'AppScope', 'LICENSE']) {
     await cp(join(ROOT, name), join(root, name), { recursive: true, filter: (file) => !ignored.has(basename(file)) });
   }
   return root;

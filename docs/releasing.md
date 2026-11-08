@@ -2,7 +2,7 @@
 
 **Build on the maintainer's existing development computer, then publish the verified HAR through GitHub Releases.** No permanent build server, self-hosted runner, cloud SDK download, or automatic tag-triggered HAR build is required. GitHub Actions continues to run SDK-free package/tool checks only.
 
-ArkDB is independent of OrcaSQL Workbench. The supported release module is `mysql` / `@arkdb/mysql`, targeting HarmonyOS 6.1.1 / API 24, tablet and 2in1, as a bytecode HAR with normalized OHM URLs. PostgreSQL is not implemented. Real-device networking, TLS/authentication and cancellation evidence remain deferred, so this release is an **engineering preview**, not a production certification.
+ArkDB is independent of OrcaSQL Workbench. The supported release module is `mysql` / `@arkdb/mysql`, targeting HarmonyOS 6.1.1 / API 24, tablet and 2in1, as a bytecode HAR with normalized OHM URLs. PostgreSQL is registered only as a compile-verified skeleton and is not release-ready; its runtime capabilities remain false and its operations remain unsupported. Real-device networking, TLS/authentication and cancellation evidence remain deferred, so this release is an **engineering preview**, not a production certification.
 
 **Current engineering-preview release source:** MySQL 1.1.0 depends on
 core 1.1.0 in source and compiles both into one self-contained HAR. Local native tests and exact-archive consumer checks
@@ -111,7 +111,7 @@ Only these named, matching regular files are sealed, collected from `build\<driv
 
 An existing versioned destination is never silently overwritten. If an attempt was interrupted, inspect and deliberately move the old local attempt aside before rebuilding. This command does not delete prior work. Once sealed, do not run another build to replace the bytes for that release.
 
-Future real drivers can reuse module discovery/packaging, but must provide their own complete validation/consumer adapter before release preparation succeeds. Choosing a nonexistent `pgsql` is an error, not an empty artifact.
+Future real drivers can reuse module discovery/packaging, but must provide their own complete validation/consumer adapter before release preparation succeeds. The registered `pgsql` skeleton is not release-ready; choosing a genuinely unknown driver is an error, not an empty artifact.
 
 ## Publish the same bytes from this computer
 

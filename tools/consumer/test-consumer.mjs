@@ -84,6 +84,18 @@ function requireBuild(result, label) {
   }
 }
 
+export function assertInternetPermission(module, requiresInternet) {
+  const hasInternet = Array.isArray(module.requestPermissions) &&
+    module.requestPermissions.some((permission) =>
+      permission?.name === 'ohos.permission.INTERNET');
+  if (requiresInternet && !hasInternet) {
+    throw new Error('The sample merged module is missing INTERNET.');
+  }
+  if (!requiresInternet && hasInternet) {
+    throw new Error('The sample merged module unexpectedly includes INTERNET.');
+  }
+}
+
 export function consumerMode(flags) {
   if (flags.length > 1 || flags.some((flag) =>
     !['--prepare', '--example', '--registry', '--compile-only'].includes(flag))) {
@@ -100,9 +112,7 @@ async function buildSample(workspace, dependencies = {}, requiresInternet = true
   if (!(await stat(hap)).isFile() || (await stat(hap)).size === 0) throw new Error('Sample HAP output is missing.');
   const module = JSON5.parse(await readFile(join(workspace, 'entry', 'build', 'default',
     'intermediates', 'merge_profile', 'default', 'module.json'), 'utf8')).module;
-  if (requiresInternet && !module.requestPermissions?.some((permission) => permission.name === 'ohos.permission.INTERNET')) {
-    throw new Error('The sample merged module is missing INTERNET.');
-  }
+  assertInternetPermission(module, requiresInternet);
   return hap;
 }
 

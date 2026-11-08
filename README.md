@@ -2,11 +2,12 @@
 
 Native ArkTS database drivers for HarmonyOS, distributed as headless Harmony Archives (HARs).
 
-**MySQL is the only database implementation.** MySQL 1.1.0 engineering-preview source uses core 1.1.0 internally, but its delivery is **one self-contained `@arkdb/mysql` HAR**. Users do not install core separately. PostgreSQL is not implemented. ArkDB does not require OrcaSQL Workbench, Node.js, a WebView, or a native MySQL client at runtime.
+**MySQL is the only database implementation.** MySQL 1.1.0 engineering-preview source uses core 1.1.0 internally, but its delivery is **one self-contained `@arkdb/mysql` HAR**. Users do not install core separately. PostgreSQL 1.0.0 is registered only as a compile-verified package skeleton; every runtime operation remains unsupported. ArkDB does not require OrcaSQL Workbench, Node.js, a WebView, or a native MySQL client at runtime.
 
 | Package | Status | Platform |
 | --- | --- | --- |
 | [`@arkdb/mysql`](mysql/README.md) | [1.1.0 engineering preview](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.1.0); one self-contained HAR, not published to OHPM | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
+| [`@arkdb/postgres`](pgsql/README.md) 1.0.0 source skeleton | Registered for package, contract and no-network consumer compilation; not a working protocol implementation or published release | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
 | [`@arkdb/core`](core/README.md) 1.1.0 source contract | Embedded in the selected driver HAR; not separately installed or published | HarmonyOS source module; no database implementation |
 
 The published 1.0.1 and 1.0.2 tags/HARs remain immutable. Their historical checks do not validate 1.1.0. See [shared driver contracts](docs/driver-contracts.md) for ownership, optional interfaces and compatibility changes.
@@ -41,7 +42,7 @@ npm run drivers
 npm run pack -- --driver mysql
 ```
 
-The selector reads registered driver declarations and their source directories; shared source modules are not database drivers. It compiles core plus the selected driver into one temporary delivery module, preserving the maintained source separation. MySQL packaging produces `build\mysql-v1.1.0\arkdb-mysql-1.1.0-local.har`, its checksum and source manifest. A future PostgreSQL selection follows the same model without editing MySQL implementation; it does not invent an unimplemented driver.
+The selector reads registered driver declarations and their source directories; shared source modules are not database drivers. It compiles core plus the selected driver into one temporary delivery module, preserving the maintained source separation. MySQL packaging produces `build\mysql-v1.1.0\arkdb-mysql-1.1.0-local.har`, its checksum and source manifest. PostgreSQL selection uses the same model and produces a skeleton candidate under `build\pgsql-v1.0.0\`; successful compilation does not establish protocol support, release readiness or publication.
 
 ## Generated output locations
 

@@ -44,7 +44,7 @@ This means the **existing download route was not ready for reliable automatic CI
 
 The pipeline guide states Linux GLIBC >=2.28, at least 8 GB RAM (16 GB recommended), and a 100 GB disk requirement. For CLI versions below 26 it recommends JDK 17 and describes the matching bundled Node runtime plus `JAVA_HOME`, `NODE_HOME`, and `COMMANDLINE_TOOL_DIR`. These are documentation requirements, not evidence that a particular GitHub-hosted image/archive combination has passed ArkDB's build.
 
-ArkDB's current target is HarmonyOS `6.1.1(24)` and a normalized-OHM-URL bytecode HAR, declared in `build-profile.json5` and `mysql/build-profile.json5`. The installed SDK identifies itself as `6.1.1.125`, API 24, `HarmonyOS-6.1.1`. Studio `6.1.1.300` must not be assumed to be the downloadable CLI archive version.
+ArkDB's current target is HarmonyOS `6.1.1(24)` and normalized-OHM-URL bytecode HARs, declared in `build-profile.json5` and the `mysql/build-profile.json5` and `pgsql/build-profile.json5` module profiles. The installed SDK identifies itself as `6.1.1.125`, API 24, `HarmonyOS-6.1.1`. Studio `6.1.1.300` must not be assumed to be the downloadable CLI archive version.
 
 ## Observed download-service behavior
 

@@ -1,0 +1,9 @@
+{
+  "name": "arkdb-postgres-example",
+  "version": "1.0.0",
+  "description": "ArkDB PostgreSQL skeleton consumer",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@arkdb/postgres": "file:../dependency/pgsql.har"
+  }
+}

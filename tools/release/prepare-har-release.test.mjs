@@ -32,7 +32,10 @@ test('prepares only exact verified assets and binds them to the clean annotated 
 test('unimplemented drivers and tag/version mistakes fail before any build', async (t) => {
   const fixture = await releaseFixture(t);
   const dependencies = { ...fixture.dependencies, verify: () => assert.fail('No verification may run') };
-  await assert.rejects(prepareHarRelease({ ...fixture.options, driver: 'pgsql' }, dependencies), /not implemented/);
+  await assert.rejects(
+    prepareHarRelease({ ...fixture.options, driver: 'unknown' }, dependencies),
+    /not implemented/
+  );
   for (const tag of ['mysql-v2.0.0', 'v1.0.0', '../escape', 'mysql;echo injected']) {
     await assert.rejects(prepareHarRelease({ ...fixture.options, tag }, dependencies), /tag|match/i);
   }

@@ -5,17 +5,14 @@ import {
 } from '@arkdb/core';
 import { PostgresByteTransport } from '../protocol/PostgresMessageChannel';
 import { MAX_POSTGRES_MESSAGE_BYTES } from '../protocol/PostgresProtocolConstants';
-
 const MAX_POSTGRES_WIRE_BYTES: number = MAX_POSTGRES_MESSAGE_BYTES + 1;
 const RECEIVE_BLOCK_BYTES: number = 64 * 1024;
 const SOCKET_CLOSE_TIMEOUT_MS: number = 1000;
-
 interface PendingRead {
   need: number;
   resolve: (value: Uint8Array | null | PromiseLike<Uint8Array | null>) => void;
   reject: (reason?: Object) => void;
 }
-
 export interface PostgresTcpSocket {
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void;
@@ -24,18 +21,14 @@ export interface PostgresTcpSocket {
   send(data: Uint8Array): Promise<void>;
   close(): Promise<void>;
 }
-
 export interface PostgresTcpSocketFactory {
   create(): PostgresTcpSocket;
 }
-
 class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
   private readonly tcp: socket.TCPSocket;
-
   constructor() {
     this.tcp = socket.constructTCPSocketInstance();
   }
-
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void {
     this.tcp.on('message', (info: socket.SocketMessageInfo): void => {
@@ -46,7 +39,6 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
       error(failure);
     });
   }
-
   clearListeners(): void {
     let firstFailure: Object | null = null;
     try {
@@ -66,7 +58,6 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
     }
     if (firstFailure !== null) throw new Error(asMessage(firstFailure));
   }
-
   async connect(host: string, port: number, timeoutMs: number): Promise<void> {
     const address: socket.NetAddress = { address: host, port: port };
     const options: socket.TCPConnectOptions = {
@@ -79,7 +70,6 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
       throw new Error(asMessage(error as Object));
     }
   }
-
   async send(data: Uint8Array): Promise<void> {
     const copy = new ArrayBuffer(data.length);
     new Uint8Array(copy).set(data);
@@ -90,7 +80,6 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
       throw new Error(asMessage(error as Object));
     }
   }
-
   async close(): Promise<void> {
     try {
       await this.tcp.close();
@@ -99,13 +88,11 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
     }
   }
 }
-
 class NetworkKitPostgresTcpSocketFactory implements PostgresTcpSocketFactory {
   create(): PostgresTcpSocket {
     return new NetworkKitPostgresTcpSocket();
   }
 }
-
 export class PostgresTcpTransport implements PostgresByteTransport {
   private readonly factory: PostgresTcpSocketFactory;
   private readonly maximumReceiveBytes: number;
@@ -121,7 +108,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
   private closeTask: Promise<void> = Promise.resolve();
   private closeFailure: ArkDbError | null = null;
   private operationFailures: Array<(error: ArkDbError) => void> = [];
-
   constructor(factory: PostgresTcpSocketFactory = new NetworkKitPostgresTcpSocketFactory(),
     maximumReceiveBytes: number = MAX_POSTGRES_MESSAGE_BYTES,
     timers: ConnectionTimerPort = new SystemConnectionTimerPort()) {
@@ -134,7 +120,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     this.maximumReceiveBytes = maximumReceiveBytes;
     this.timers = timers;
   }
-
   async connect(host: string, port: number, timeoutMs: number): Promise<void> {
     this.throwIfFailed();
     if (this.active !== null) {
@@ -165,7 +150,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       throw this.fatal!;
     }
   }
-
   read(length: number): Promise<Uint8Array | null> {
     return new Promise<Uint8Array | null>(
       (resolve: (value: Uint8Array | null | PromiseLike<Uint8Array | null>) => void,
@@ -192,7 +176,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
         this.tryResolve();
       });
   }
-
   async write(data: Uint8Array): Promise<number> {
     this.throwIfFailed();
     if (data.length > MAX_POSTGRES_WIRE_BYTES) {
@@ -212,7 +195,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       throw this.fatal!;
     }
   }
-
   runWhileOpen<T>(operation: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve: (value: T | PromiseLike<T>) => void,
       reject: (reason?: Object) => void): void => {
@@ -240,17 +222,14 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       }
     });
   }
-
   async close(): Promise<void> {
     await this.abort(ArkDbError.network('PostgreSQL transport closed'));
   }
-
   async abort(error: ArkDbError): Promise<void> {
     this.fail(error);
     await this.closeTask;
     if (this.closeFailure !== null) throw this.closeFailure;
   }
-
   private onData(data: Uint8Array): void {
     if (this.fatal !== null || data.length === 0) return;
     let offset = 0;
@@ -269,22 +248,18 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     this.append(data, offset, remaining);
     this.tryResolve();
   }
-
   private onClose(): void {
     this.fail(ArkDbError.network('PostgreSQL socket closed by server'), true);
   }
-
   private onError(error: Object): void {
     this.fail(ArkDbError.network('PostgreSQL socket error: ' + asMessage(error)));
   }
-
   private tryResolve(): void {
     const pending = this.pending;
     if (pending === null || this.buffered < pending.need) return;
     this.pending = null;
     pending.resolve(this.take(pending.need));
   }
-
   private take(length: number): Uint8Array {
     const result = new Uint8Array(length);
     let offset = 0;
@@ -305,7 +280,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     this.compactChunks();
     return result;
   }
-
   private append(data: Uint8Array, start: number, length: number): void {
     let offset = start;
     const end = start + length;
@@ -324,7 +298,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     }
     this.buffered += length;
   }
-
   private compactChunks(): void {
     if (this.headIndex === this.chunks.length) {
       this.chunks = [];
@@ -335,7 +308,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       this.headIndex = 0;
     }
   }
-
   private fail(error: ArkDbError, alreadyClosed: boolean = false): void {
     if (this.fatal !== null) return;
     this.fatal = error;
@@ -354,7 +326,6 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     this.active = null;
     if (current !== null) this.closeTask = this.releaseSocket(current, alreadyClosed);
   }
-
   private async releaseSocket(current: PostgresTcpSocket,
     alreadyClosed: boolean): Promise<void> {
     let cleanupFailure: ArkDbError | null = null;
@@ -391,18 +362,18 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       }
     });
   }
-
   private removeOperationFailure(listener: (error: ArkDbError) => void): void {
     const index = this.operationFailures.indexOf(listener);
     if (index >= 0) this.operationFailures.splice(index, 1);
   }
-
   private throwIfFailed(): void {
     if (this.fatal !== null) throw this.fatal;
   }
 }
-
 function asMessage(error: Object): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
+  const failure = error as BusinessError;
+  if (failure !== null && failure !== undefined &&
+    typeof failure.message === 'string' && failure.message.length > 0) return failure.message;
   return String(error);
 }

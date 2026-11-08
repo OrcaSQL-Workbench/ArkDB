@@ -5,7 +5,9 @@ import {
 import {
   PostgresTcpSocket, PostgresTcpSocketFactory, PostgresTcpTransport
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
-
+interface MessageFailure {
+  message: string;
+}
 export default function postgresTcpTransportTest(): void {
   describe('PostgresTcpTransport', () => {
     it('readsExactBytesAcrossFragmentedAndCoalescedDeliveries', 0, async () => {
@@ -36,7 +38,6 @@ export default function postgresTcpTransportTest(): void {
           new PostgresTcpTransport(factory, limit, new MockTimers());
         });
       }
-
       const peer = new MockTcpSocket();
       const transport = createTransport(peer, 8);
       await transport.connect('db.invalid', 5432, 1000);
@@ -53,7 +54,6 @@ export default function postgresTcpTransportTest(): void {
         .assertEqual(ArkDbErrorKind.Protocol);
       peer.emitMessage(new Uint8Array([1, 2]));
       assertBytes(await first, [1, 2]);
-
       const boundary = transport.read(8);
       peer.emitMessage(new Uint8Array([3, 4, 5, 6, 7, 8, 9, 10, 11]));
       assertBytes(await boundary, [3, 4, 5, 6, 7, 8, 9, 10]);
@@ -142,6 +142,8 @@ export default function postgresTcpTransportTest(): void {
         const terminal = await read;
         expect(terminal.kind).assertEqual(
           mode === 2 ? ArkDbErrorKind.Protocol : ArkDbErrorKind.Network);
+        if (mode === 1) expect(terminal.message)
+          .assertEqual('PostgreSQL socket error: Synthetic socket failure');
         if (expected !== null) expect(terminal).assertEqual(expected);
         expect(await consumer).assertEqual(terminal);
         expect(await failure(async (): Promise<void> => {
@@ -166,7 +168,6 @@ export default function postgresTcpTransportTest(): void {
       })).kind)
         .assertEqual(ArkDbErrorKind.Validation);
       expect(peer.sendCalls).assertEqual(sendCalls);
-
       const read = failure(async (): Promise<void> => {
         await transport.read(1);
       });
@@ -186,22 +187,51 @@ export default function postgresTcpTransportTest(): void {
       expect(peer.closeCalls).assertEqual(1);
       expect(peer.listenerCount).assertEqual(0);
     });
-    it('cleansPartiallyRegisteredListenersWhenConnectSetupThrows', 0, async () => {
-      const peer = new MockTcpSocket();
-      peer.listenFailure = new Error('Synthetic listener registration failure');
-      const transport = createTransport(peer, 8);
-      const terminal = await failure((): Promise<void> =>
-        transport.connect('db.invalid', 5432, 1000));
-      expect(terminal.kind).assertEqual(ArkDbErrorKind.Network);
-      expect(terminal.message).assertEqual(
-        'PostgreSQL TCP connect failed: Synthetic listener registration failure');
-      expect(await failure(async (): Promise<void> => {
-        await transport.read(1);
-      })).assertEqual(terminal);
-      expect(peer.closeCalls).assertEqual(1);
-      expect(peer.listenerCount).assertEqual(0);
-      await transport.close();
-      expect(peer.closeCalls).assertEqual(1);
+    it('cleansSocketWhenConnectSetupOrConnectionFails', 0, async () => {
+      for (let mode = 0; mode < 3; mode += 1) {
+        const peer = new MockTcpSocket();
+        const message = mode === 0 ? 'Synthetic listener registration failure' :
+          mode === 1 ? 'Synthetic connect failure' : 'undefined';
+        if (mode === 0) peer.listenFailure = new Error(message);
+        else if (mode === 1) peer.connectFailure = new Error(message);
+        else peer.connectWithoutReason = true;
+        const transport = createTransport(peer, 8);
+        const terminal = await failure((): Promise<void> =>
+          transport.connect('db.invalid', 5432, 1000));
+        expect(terminal.kind).assertEqual(ArkDbErrorKind.Network);
+        expect(terminal.message).assertEqual('PostgreSQL TCP connect failed: ' + message);
+        expect(await failure(async (): Promise<void> => {
+          await transport.read(1);
+        })).assertEqual(terminal);
+        expect(peer.closeCalls).assertEqual(1);
+        expect(peer.listenerCount).assertEqual(0);
+        await transport.close();
+        expect(peer.closeCalls).assertEqual(1);
+      }
+    });
+    it('cancelsInFlightConnectWithoutAcceptingLateSettlement', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const peer = new MockTcpSocket();
+        const deferred = new Deferred();
+        peer.connectResult = deferred.wait();
+        const transport = createTransport(peer, 8);
+        const connecting = failure((): Promise<void> =>
+          transport.connect('db.invalid', 5432, 1000));
+        await nextTask();
+        if (mode === 0) await transport.close();
+        else await transport.abort(ArkDbError.protocol('Synthetic connect abort'));
+        const terminal = await connecting;
+        expect(terminal.kind).assertEqual(
+          mode === 0 ? ArkDbErrorKind.Network : ArkDbErrorKind.Protocol);
+        if (mode === 0) deferred.complete();
+        else deferred.fail();
+        await nextTask();
+        expect(await failure(async (): Promise<void> => {
+          await transport.read(1);
+        })).assertEqual(terminal);
+        expect(peer.closeCalls).assertEqual(1);
+        expect(peer.listenerCount).assertEqual(0);
+      }
     });
     it('boundsHangingCloseAndKeepsCloseIdempotent', 0, async () => {
       const peer = new MockTcpSocket();
@@ -240,11 +270,12 @@ class MockTcpSocketFactory implements PostgresTcpSocketFactory {
     return this.peer;
   }
 }
-
 class MockTcpSocket implements PostgresTcpSocket {
   closeCalls: number = 0;
   sendCalls: number = 0;
   connectFailure: Error | null = null;
+  connectWithoutReason: boolean = false;
+  connectResult: Promise<void> | null = null;
   listenFailure: Error | null = null;
   sendFailure: Error | null = null;
   closeResult: Promise<void> | null = null;
@@ -270,6 +301,11 @@ class MockTcpSocket implements PostgresTcpSocket {
   }
   async connect(host: string, port: number, timeoutMs: number): Promise<void> {
     if (this.connectFailure !== null) throw this.connectFailure;
+    if (this.connectWithoutReason) {
+      await new Promise<void>((resolve: () => void,
+        reject: (reason?: Object) => void): void => { reject(); });
+    }
+    if (this.connectResult !== null) await this.connectResult;
   }
   async send(data: Uint8Array): Promise<void> {
     this.sendCalls += 1;
@@ -289,63 +325,60 @@ class MockTcpSocket implements PostgresTcpSocket {
     const listener = late ? this.lastMessageListener : this.messageListener;
     if (listener !== null) listener(data.slice());
   }
-
   emitClose(): void {
     if (this.closeListener !== null) this.closeListener();
   }
-
   emitError(late: boolean = false): void {
     const listener = late ? this.lastErrorListener : this.errorListener;
-    if (listener !== null) listener(new Error('Synthetic socket failure'));
+    const failure: MessageFailure = { message: 'Synthetic socket failure' };
+    if (listener !== null) listener(failure);
   }
 }
-
 class MockTimers implements ConnectionTimerPort {
   lastTimeoutMs: number = 0;
   private handler: (() => void) | null = null;
-
   nowMs(): number {
     return 0;
   }
-
   schedule(handler: () => void, timeoutMs: number): number {
     this.handler = handler;
     this.lastTimeoutMs = timeoutMs;
     return 1;
   }
-
   cancel(timerId: number): void {
     if (timerId === 1) this.handler = null;
   }
-
   fire(): void {
     const handler = this.handler;
     this.handler = null;
     if (handler !== null) handler();
   }
 }
-
 class Deferred {
   private resolve: (() => void) | null = null;
-
+  private reject: ((reason?: Object) => void) | null = null;
   wait(): Promise<void> {
-    return new Promise<void>((resolve: () => void): void => {
+    return new Promise<void>((resolve: () => void,
+      reject: (reason?: Object) => void): void => {
       this.resolve = resolve;
+      this.reject = reject;
     });
   }
-
   complete(): void {
     const resolve = this.resolve;
     this.resolve = null;
     if (resolve !== null) resolve();
   }
+  fail(): void {
+    const reject = this.reject;
+    this.reject = null;
+    if (reject !== null) reject(new Error('Synthetic late connect failure'));
+  }
 }
-
 function createTransport(peer: MockTcpSocket, maximumReceiveBytes: number): PostgresTcpTransport {
   return new PostgresTcpTransport(
     new MockTcpSocketFactory(peer), maximumReceiveBytes, new MockTimers());
 }
-
 async function failure(operation: () => Promise<void>): Promise<ArkDbError> {
   let failure: ArkDbError | null = null;
   try {
@@ -356,7 +389,6 @@ async function failure(operation: () => Promise<void>): Promise<ArkDbError> {
   expect(failure instanceof ArkDbError).assertTrue();
   return failure!;
 }
-
 function assertValidation(action: () => void): void {
   let failure: ArkDbError | null = null;
   try {
@@ -367,7 +399,6 @@ function assertValidation(action: () => void): void {
   expect(failure instanceof ArkDbError).assertTrue();
   expect(failure!.kind).assertEqual(ArkDbErrorKind.Validation);
 }
-
 function assertBytes(actual: Uint8Array | null, expected: number[]): void {
   expect(actual !== null).assertTrue();
   expect(actual!.length).assertEqual(expected.length);
@@ -375,7 +406,6 @@ function assertBytes(actual: Uint8Array | null, expected: number[]): void {
     expect(actual![index]).assertEqual(expected[index]);
   }
 }
-
 async function nextTask(): Promise<void> {
   await Promise.resolve();
 }

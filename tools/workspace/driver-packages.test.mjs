@@ -8,11 +8,12 @@ import {
   resolveDriver, tagOutputPaths, ROOT
 } from './driver-packages.mjs';
 
-test('only the implemented MySQL driver is discoverable in this repository', () => {
-  assert.deepEqual(discoverDrivers().map((driver) => driver.id), ['mysql']);
+test('registered drivers are discoverable from their canonical source paths', () => {
+  assert.deepEqual(discoverDrivers().map((driver) => driver.id), ['mysql', 'pgsql']);
   assert.equal(resolveDriver().sourcePath, 'mysql');
   assert.equal(resolveDriver(ROOT, 'mysql').directory, join(ROOT, 'mysql'));
-  assert.throws(() => resolveDriver(ROOT, 'pgsql'), /not implemented\/registered/);
+  assert.equal(resolveDriver(ROOT, 'pgsql').sourcePath, 'pgsql');
+  assert.equal(resolveDriver(ROOT, 'pgsql').directory, join(ROOT, 'pgsql'));
 });
 
 test('future registered HARs are selected by their actual source path, not MySQL assumptions', async (t) => {

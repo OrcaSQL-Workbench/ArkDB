@@ -18,5 +18,30 @@ HAR.
 10-second connection timeout, and `PostgresSslMode.VERIFY_FULL`. Passwords are
 passed separately through transient `PostgresConnectionOptions`.
 
-The module is intentionally not registered in the root workspace until its
-consumer and verification declaration are added.
+## Compile-only skeleton usage
+
+The current factory can construct and close an idle skeleton connection. Calling
+`connect()`, querying, streaming, health checks, context changes, transactions or
+cancellation rejects with `ArkDbErrorKind.Unsupported`.
+
+<!-- arkts-example: skeleton -->
+```typescript
+import {
+  PostgresConnection, PostgresConnectionConfig, PostgresConnectionOptions,
+  PostgresDriverFactory
+} from '@arkdb/postgres';
+
+export function createPostgresSkeleton(host: string, user: string,
+  password: string): PostgresConnection {
+  const config = new PostgresConnectionConfig();
+  config.host = host;
+  config.user = user;
+  return new PostgresDriverFactory().create(
+    new PostgresConnectionOptions(config, password));
+}
+```
+
+The module is registered in the root workspace with an independent
+`examples/postgres-client` consumer. That consumer verifies package compilation,
+the shared `ArkDbError` identity and the canonical Unsupported result without
+performing network I/O.

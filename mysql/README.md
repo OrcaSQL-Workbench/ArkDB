@@ -74,7 +74,8 @@ data shapes are optional.
 Use `CoreDbConnection`, `CoreDbDriverFactory`, `CoreQueryResultSink` and the other
 `Core...` exports when writing portable integrations. Core remains engine-neutral.
 The reserved `ServerFamily.PostgreSQL` value is retained only for source
-compatibility; it does not mean a PostgreSQL driver exists.
+compatibility; it does not imply that the registered PostgreSQL skeleton has
+runtime protocol support.
 `DriverCapabilities.supportsExplain` is deprecated as a feature discovery
 signal; its field and current values remain source-compatible.
 

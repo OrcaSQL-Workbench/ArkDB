@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { consumerMode, REGISTRY, registryIdentity } from '../test-consumer.mjs';
+import * as consumerTools from '../test-consumer.mjs';
 import { releaseFixture } from '../test-fixtures/har-release.mjs';
 
 const integrity = `sha512-${Buffer.alloc(64, 1).toString('base64')}`;
@@ -36,6 +37,19 @@ test('compile-only hosted checks are explicit and cannot be mixed with registry/
   assert.equal(consumerMode(['--compile-only']), '--compile-only');
   assert.throws(() => consumerMode(['--compile-only', '--registry']), /Usage/);
   assert.throws(() => consumerMode(['--no-tests']), /Usage/);
+});
+
+test('merged INTERNET permission must match the driver verification declaration', () => {
+  assert.equal(typeof consumerTools.assertInternetPermission, 'function');
+  const check = consumerTools.assertInternetPermission;
+  assert.doesNotThrow(() => check({}, false));
+  assert.doesNotThrow(() => check({
+    requestPermissions: [{ name: 'ohos.permission.INTERNET' }]
+  }, true));
+  assert.throws(() => check({}, true), /missing INTERNET/);
+  assert.throws(() => check({
+    requestPermissions: [{ name: 'ohos.permission.INTERNET' }]
+  }, false), /unexpectedly includes INTERNET/);
 });
 
 test('device acceptance UI changes do not change the ordinary consumer fingerprint', async (t) => {

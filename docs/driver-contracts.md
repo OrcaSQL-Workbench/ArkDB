@@ -5,12 +5,14 @@
 This is the engineering-preview source architecture for `@arkdb/mysql` 1.1.0 with
 `@arkdb/core` 1.1.0. The published `mysql-v1.0.1` and `mysql-v1.0.2` previews
 remain immutable standalone HARs; their tags and bytes are not changed by this
-release. PostgreSQL is not implemented.
+release. `@arkdb/postgres` 1.0.0 is registered as a compile-verified skeleton;
+its runtime capabilities remain false and its operations remain unsupported.
 
 | Module | Owns |
 | --- | --- |
 | `core` / `@arkdb/core` | One runtime error identity, portable results and server information, minimal connections, optional capability interfaces, deadlines and HarmonyOS diagnostics |
 | `mysql` / `@arkdb/mysql` | MySQL options/TLS posture, wire protocol, authentication, native columns/server information, SQL, context aliases, control-session cancellation, opt-in statement deadlines, bounded prepared long-data upload and vendor metrics |
+| `pgsql` / `@arkdb/postgres` | PostgreSQL public configuration/result/error/factory skeleton, all-false capabilities and canonical Unsupported runtime behavior; no protocol or networking implementation |
 | Driver-local `arkdb-package.json` | Tooling-only shared/driver classification and driver-owned verification declaration; not an OHPM schema extension |
 | `tools` | Dependency discovery, source/import constraints and exact-archive verification/distribution |
 

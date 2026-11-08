@@ -1,0 +1,11 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    "removePermissions": [
+      { "name": "ohos.permission.INTERNET" }
+    ]
+  },
+  "targets": [
+    { "name": "default" }
+  ]
+}

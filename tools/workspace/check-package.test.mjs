@@ -329,15 +329,11 @@ test('rejects an empty public entry without freezing a historical export list', 
   assert.throws(() => checkPackage(root), /Public entry must expose named exports/);
 });
 
-test('validates a synthetic second driver without forcing the MySQL package or directory name', async (t) => {
+test('validates registered PostgreSQL without forcing MySQL package assumptions', async (t) => {
   const root = await workspaceFixture(t);
-  await independentModule(root, 'drivers\\pgsql', 'pgsql', '@arkdb/postgres');
-  const profile = JSON5.parse(readFileSync(join(root, 'build-profile.json5'), 'utf8'));
-  profile.modules.push({ name: 'pgsql', srcPath: './drivers/pgsql' });
-  await writeFile(join(root, 'build-profile.json5'), JSON.stringify(profile));
   const result = checkPackage(root, 'pgsql');
   assert.equal(result.manifest.name, '@arkdb/postgres');
-  assert.equal(result.driver.sourcePath, 'drivers/pgsql');
+  assert.equal(result.driver.sourcePath, 'pgsql');
 });
 
 test('public export parsing handles type-only exports, multiline groups and aliases', () => {
@@ -359,7 +355,7 @@ async function workspaceFixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'arkdb-package-check-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const generated = new Set(['build', '.test', 'oh_modules', 'BuildProfile.ets', 'oh-package-lock.json5']);
-  for (const name of ['core', 'mysql']) {
+  for (const name of ['core', 'mysql', 'pgsql']) {
     await cp(join(ROOT, name), join(root, name), {
       recursive: true, filter: (file) => !generated.has(basename(file))
     });

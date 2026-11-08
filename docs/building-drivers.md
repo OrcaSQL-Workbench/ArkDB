@@ -10,7 +10,7 @@ Root `build-profile.json5`, each module's `module.json5`, and its tooling-only `
 npm run drivers
 ```
 
-The driver list contains only `mysql` / `@arkdb/mysql`; `core` / `@arkdb/core` is a shared dependency, not a driver. PostgreSQL is not implemented. Selecting `pgsql` or selecting `core` as a driver fails before compilation.
+The driver list contains `mysql` / `@arkdb/mysql` and the compile-verified `pgsql` / `@arkdb/postgres` skeleton; `core` / `@arkdb/core` is a shared dependency, not a driver. PostgreSQL protocol and networking are not implemented, so a successful `pgsql` package/consumer build is not runtime or release evidence. Selecting `core` or an unknown module as a driver fails before compilation.
 
 ## Select a driver
 
@@ -114,7 +114,7 @@ The API24 pipeline deliberately uses standard compilation of one generated SDK m
 
 The delivery route prepares one selected driver with shared code inside its HAR, then separately authorizes upload of the same bytes. The next tag, `mysql-v1.1.0`, must match clean reviewed source. This source does not recreate, move or overwrite `mysql-v1.0.1` or `mysql-v1.0.2`. Pushing a tag does not compile a HAR in Actions.
 
-Package identity and directory identity need not be identical. For example, a future real module named `pgsql` could live under `drivers/pgsql` and publish a package named `@arkdb/postgres`; its artifact name would follow the package identity. There is no placeholder PostgreSQL package in this repository.
+Package identity and directory identity need not be identical. The current module named `pgsql` lives under `pgsql` and publishes the package identity `@arkdb/postgres`; its artifact name follows that package identity. It remains a compile-verified skeleton rather than a PostgreSQL protocol implementation.
 
 To add a driver, implement its HAR/public entry, package/legal/usage files and contract suites, depend on core, and add its build registration and `arkdb-package.json` declaration. Its own consumer path, native dependency modules and Internet requirement drive verification; no MySQL-specific tool branch or MySQL implementation edit is required. See [driver contracts](driver-contracts.md). Generic packaging and the MySQL sample are not proof of another driver.
 

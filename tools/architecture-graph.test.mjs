@@ -173,6 +173,20 @@ const OWNED_SOURCE_ROOTS = [
     directories: MYSQL_FEATURE_DIRECTORIES
   },
   {
+    root: 'pgsql',
+    files: ['Index.ets', 'hvigorfile.ts'],
+    directories: ['src']
+  },
+  {
+    root: 'pgsql/src/main/ets',
+    directories: ['pgsql']
+  },
+  {
+    root: 'pgsql/src/main/ets/pgsql',
+    files: ['PostgresConnection.ets'],
+    directories: ['api', 'driver', 'model']
+  },
+  {
     root: 'tools',
     files: ROOT_TOOL_FILES.map((file) => file.slice('tools/'.length)),
     directories: OWNED_TOOL_DIRECTORIES
@@ -296,6 +310,23 @@ const ARCHITECTURE_POLICY = {
       message: 'Shared core must not depend on the MySQL driver.'
     },
     {
+      from: /^core\//,
+      to: /^pgsql\//,
+      message: 'Shared core must not depend on database drivers.'
+    },
+    {
+      from: /^mysql\//,
+      to: /^pgsql\//,
+      transitive: true,
+      message: 'Database drivers must not depend on sibling drivers.'
+    },
+    {
+      from: /^pgsql\//,
+      to: /^mysql\//,
+      transitive: true,
+      message: 'Database drivers must not depend on sibling drivers.'
+    },
+    {
       from: /^mysql\/src\/main\/ets\/mysql\/api\//,
       to: new RegExp(
         '^mysql/src/main/ets/mysql/' +
@@ -379,10 +410,25 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   for (const file of [
     'hvigorfile.ts',
     'core/hvigorfile.ts',
-    'mysql/hvigorfile.ts'
+    'mysql/hvigorfile.ts',
+    'pgsql/hvigorfile.ts'
   ]) {
     assert.equal(graph.files.includes(file), true, `Missing build tooling source: ${file}`);
   }
+});
+
+test('P03 owns exactly the registered PostgreSQL skeleton sources', () => {
+  const graph = readArkTsGraph(ROOT);
+
+  assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
+    'pgsql/Index.ets',
+    'pgsql/hvigorfile.ts',
+    'pgsql/src/main/ets/pgsql/PostgresConnection.ets',
+    'pgsql/src/main/ets/pgsql/api/PostgresContracts.ets',
+    'pgsql/src/main/ets/pgsql/driver/PostgresDriverFactory.ets',
+    'pgsql/src/main/ets/pgsql/model/PostgresConnectionConfig.ets',
+    'pgsql/src/main/ets/pgsql/model/PostgresModels.ets'
+  ]);
 });
 
 test('R08 session feature owns its vertical production and test files', () => {
@@ -651,7 +697,8 @@ test('R12 tests use explicit production, fixture, consumer and acceptance owners
     'examples/mysql-client/entry/src/test/sample/SampleRunner.test.ets',
     'examples/mysql-device-acceptance/entry/src/test/acceptance/DeviceAcceptanceRunner.test.ets',
     'examples/mysql-device-acceptance/entry/src/test/evidence/DeviceReceiptClipboard.test.ets',
-    'examples/mysql-device-acceptance/entry/src/test/evidence/DeviceReceiptSigner.test.ets'
+    'examples/mysql-device-acceptance/entry/src/test/evidence/DeviceReceiptSigner.test.ets',
+    'examples/postgres-client/entry/src/test/consumer/PublicInterface.test.ets'
   ];
   const forbidden = [
     'core/src/test/ReferenceAdapter.ets',
@@ -1370,6 +1417,32 @@ test('rejects prohibited dependencies even when the graph is acyclic', () => {
     () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
     /Shared core must not depend on the MySQL driver.*core\/Index\.ets -> mysql\/Index\.ets/
   );
+});
+
+test('rejects core-to-PostgreSQL and cross-driver dependencies', () => {
+  for (const [source, target, message] of [
+    ['core/Index.ets', 'pgsql/Index.ets',
+      'Shared core must not depend on database drivers.'],
+    ['mysql/Index.ets', 'pgsql/Index.ets',
+      'Database drivers must not depend on sibling drivers.'],
+    ['pgsql/Index.ets', 'mysql/Index.ets',
+      'Database drivers must not depend on sibling drivers.']
+  ]) {
+    const graph = {
+      files: ['core/Index.ets', 'mysql/Index.ets', 'pgsql/Index.ets'],
+      dependencies: {
+        'core/Index.ets': [],
+        'mysql/Index.ets': [],
+        'pgsql/Index.ets': [],
+        [source]: [target]
+      }
+    };
+
+    assert.throws(
+      () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+      new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    );
+  }
 });
 
 test('rejects reverse tooling ownership imports', () => {

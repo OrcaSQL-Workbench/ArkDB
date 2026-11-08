@@ -200,6 +200,7 @@ export class PostgresByteWriter {
   }
 
   private store(value: Uint8Array): void {
+    if (value.length === 0) return;
     this.chunks.push(value);
     this.total += value.length;
   }

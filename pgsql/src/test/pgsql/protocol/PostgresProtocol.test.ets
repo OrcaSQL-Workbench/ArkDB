@@ -63,8 +63,8 @@ export default function postgresProtocolTest(): void {
         new PostgresByteReader(new Uint8Array(2), 1);
       });
       assertRejectedWrite((writer: PostgresByteWriter): void => {
-        new PostgresByteWriter(1).writeUInt16(1);
-      });
+        writer.writeUInt16(1);
+      }, 1);
     });
 
     it('keepsUtf8AndCStringParsingStrictAndAtomic', 0, () => {

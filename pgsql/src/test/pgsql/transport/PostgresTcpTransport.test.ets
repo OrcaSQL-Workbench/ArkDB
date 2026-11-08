@@ -258,17 +258,33 @@ export default function postgresTcpTransportTest(): void {
       expect(peer.closeCalls).assertEqual(1);
       expect(peer.listenerCount).assertEqual(0);
     });
+    it('preservesOperationFailureWhenListenerCleanupFails', 0, async () => {
+      const peer = new MockTcpSocket();
+      peer.clearListenersFailure = new Error('Synthetic listener cleanup failure');
+      const transport = createTransport(peer, 8);
+      await transport.connect('db.invalid', 5432, 1000);
+      const pending = failure(async (): Promise<void> => { await transport.read(1); });
+      const firstClose = failure((): Promise<void> => transport.close());
+      const operationFailure = await pending;
+      const cleanupFailure = await firstClose;
+      expect(operationFailure.message).assertEqual('PostgreSQL transport closed');
+      expect(cleanupFailure.message).assertEqual(
+        'PostgreSQL socket listener cleanup failed: Synthetic listener cleanup failure');
+      expect(peer.closeCalls).assertEqual(1);
+      expect(peer.listenerCount).assertEqual(0);
+      expect(await failure((): Promise<void> => transport.close())).assertEqual(cleanupFailure);
+      expect(await failure(async (): Promise<void> => {
+        await transport.read(1);
+      })).assertEqual(operationFailure);
+      expect(peer.closeCalls).assertEqual(1);
+    });
   });
 }
 
 class MockTcpSocketFactory implements PostgresTcpSocketFactory {
   private readonly peer: PostgresTcpSocket;
-  constructor(peer: PostgresTcpSocket) {
-    this.peer = peer;
-  }
-  create(): PostgresTcpSocket {
-    return this.peer;
-  }
+  constructor(peer: PostgresTcpSocket) { this.peer = peer; }
+  create(): PostgresTcpSocket { return this.peer; }
 }
 class MockTcpSocket implements PostgresTcpSocket {
   closeCalls: number = 0;
@@ -276,6 +292,7 @@ class MockTcpSocket implements PostgresTcpSocket {
   connectFailure: Error | null = null;
   connectWithoutReason: boolean = false;
   connectResult: Promise<void> | null = null;
+  clearListenersFailure: Error | null = null;
   listenFailure: Error | null = null;
   sendFailure: Error | null = null;
   closeResult: Promise<void> | null = null;
@@ -298,6 +315,7 @@ class MockTcpSocket implements PostgresTcpSocket {
     this.messageListener = null;
     this.closeListener = null;
     this.errorListener = null;
+    if (this.clearListenersFailure !== null) throw this.clearListenersFailure;
   }
   async connect(host: string, port: number, timeoutMs: number): Promise<void> {
     if (this.connectFailure !== null) throw this.connectFailure;
@@ -312,10 +330,7 @@ class MockTcpSocket implements PostgresTcpSocket {
     if (this.sendFailure !== null) throw this.sendFailure;
     this.lastWrite = data.slice();
   }
-  close(): Promise<void> {
-    this.closeCalls += 1;
-    return this.closeResult === null ? Promise.resolve() : this.closeResult;
-  }
+  close(): Promise<void> { this.closeCalls += 1; return this.closeResult === null ? Promise.resolve() : this.closeResult; }
   get listenerCount(): number {
     return (this.messageListener === null ? 0 : 1) +
       (this.closeListener === null ? 0 : 1) +
@@ -325,9 +340,7 @@ class MockTcpSocket implements PostgresTcpSocket {
     const listener = late ? this.lastMessageListener : this.messageListener;
     if (listener !== null) listener(data.slice());
   }
-  emitClose(): void {
-    if (this.closeListener !== null) this.closeListener();
-  }
+  emitClose(): void { if (this.closeListener !== null) this.closeListener(); }
   emitError(late: boolean = false): void {
     const listener = late ? this.lastErrorListener : this.errorListener;
     const failure: MessageFailure = { message: 'Synthetic socket failure' };
@@ -337,22 +350,14 @@ class MockTcpSocket implements PostgresTcpSocket {
 class MockTimers implements ConnectionTimerPort {
   lastTimeoutMs: number = 0;
   private handler: (() => void) | null = null;
-  nowMs(): number {
-    return 0;
-  }
+  nowMs(): number { return 0; }
   schedule(handler: () => void, timeoutMs: number): number {
     this.handler = handler;
     this.lastTimeoutMs = timeoutMs;
     return 1;
   }
-  cancel(timerId: number): void {
-    if (timerId === 1) this.handler = null;
-  }
-  fire(): void {
-    const handler = this.handler;
-    this.handler = null;
-    if (handler !== null) handler();
-  }
+  cancel(timerId: number): void { if (timerId === 1) this.handler = null; }
+  fire(): void { const handler = this.handler; this.handler = null; if (handler !== null) handler(); }
 }
 class Deferred {
   private resolve: (() => void) | null = null;
@@ -365,19 +370,16 @@ class Deferred {
     });
   }
   complete(): void {
-    const resolve = this.resolve;
-    this.resolve = null;
-    if (resolve !== null) resolve();
+    const resolve = this.resolve; this.resolve = null; if (resolve !== null) resolve();
   }
   fail(): void {
-    const reject = this.reject;
-    this.reject = null;
+    const reject = this.reject; this.reject = null;
     if (reject !== null) reject(new Error('Synthetic late connect failure'));
   }
 }
 function createTransport(peer: MockTcpSocket, maximumReceiveBytes: number): PostgresTcpTransport {
-  return new PostgresTcpTransport(
-    new MockTcpSocketFactory(peer), maximumReceiveBytes, new MockTimers());
+  return new PostgresTcpTransport(new MockTcpSocketFactory(peer),
+    maximumReceiveBytes, new MockTimers());
 }
 async function failure(operation: () => Promise<void>): Promise<ArkDbError> {
   let failure: ArkDbError | null = null;
@@ -406,6 +408,4 @@ function assertBytes(actual: Uint8Array | null, expected: number[]): void {
     expect(actual![index]).assertEqual(expected[index]);
   }
 }
-async function nextTask(): Promise<void> {
-  await Promise.resolve();
-}
+async function nextTask(): Promise<void> { await Promise.resolve(); }

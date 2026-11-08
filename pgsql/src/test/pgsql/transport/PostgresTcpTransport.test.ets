@@ -28,7 +28,6 @@ export default function postgresTcpTransportTest(): void {
       expect(peer.closeCalls).assertEqual(1);
       expect(peer.listenerCount).assertEqual(0);
     });
-
     it('rejectsUnsafeLengthsConcurrentReadsAndReceiveOverflow', 0, async () => {
       const factory = new MockTcpSocketFactory(new MockTcpSocket());
       new PostgresTcpTransport(factory, 33554432, new MockTimers());
@@ -76,7 +75,6 @@ export default function postgresTcpTransportTest(): void {
       expect(peer.closeCalls).assertEqual(1);
       expect(peer.listenerCount).assertEqual(0);
     });
-
     it('coalescesManyOneByteDeliveriesWithoutUnboundedChunkMetadata', 0, async () => {
       const peer = new MockTcpSocket();
       const transport = createTransport(peer, 131072);
@@ -96,7 +94,34 @@ export default function postgresTcpTransportTest(): void {
       }
       expect(peer.listenerCount).assertEqual(0);
     });
-
+    it('preservesByteOrderAcrossReceivePrefixCompaction', 0, async () => {
+      const blockBytes = 64 * 1024;
+      const initial = new Uint8Array(blockBytes * 65 + 3);
+      for (let index = 0; index < initial.length; index += 1) {
+        initial[index] = index & 0xff;
+      }
+      const peer = new MockTcpSocket();
+      const transport = createTransport(peer, initial.length);
+      await transport.connect('db.invalid', 5432, 1000);
+      try {
+        peer.emitMessage(initial);
+        const consumed = blockBytes * 64 + 1;
+        const prefix = await transport.read(consumed);
+        expect(prefix![0]).assertEqual(0);
+        expect(prefix![consumed - 1]).assertEqual((consumed - 1) & 0xff);
+        peer.emitMessage(new Uint8Array([201, 202, 203]));
+        const remaining = initial.length - consumed;
+        const tail = await transport.read(remaining + 3);
+        for (let index = 0; index < remaining; index += 1) {
+          if (tail![index] !== ((consumed + index) & 0xff)) {
+            throw new Error('Compacted PostgreSQL bytes changed order');
+          }
+        }
+        assertBytes(tail!.subarray(remaining), [201, 202, 203]);
+      } finally {
+        await transport.close();
+      }
+    });
     it('fansOutSocketCloseErrorAndAbortToEveryPendingOperation', 0, async () => {
       for (let mode = 0; mode < 3; mode += 1) {
         const peer = new MockTcpSocket();
@@ -129,7 +154,6 @@ export default function postgresTcpTransportTest(): void {
         expect(peer.listenerCount).assertEqual(0);
       }
     });
-
     it('boundsWritesAndFailsEveryOperationAfterSendFailure', 0, async () => {
       const peer = new MockTcpSocket();
       const transport = createTransport(peer, 8);
@@ -162,7 +186,6 @@ export default function postgresTcpTransportTest(): void {
       expect(peer.closeCalls).assertEqual(1);
       expect(peer.listenerCount).assertEqual(0);
     });
-
     it('cleansPartiallyRegisteredListenersWhenConnectSetupThrows', 0, async () => {
       const peer = new MockTcpSocket();
       peer.listenFailure = new Error('Synthetic listener registration failure');
@@ -180,7 +203,6 @@ export default function postgresTcpTransportTest(): void {
       await transport.close();
       expect(peer.closeCalls).assertEqual(1);
     });
-
     it('boundsHangingCloseAndKeepsCloseIdempotent', 0, async () => {
       const peer = new MockTcpSocket();
       const deferred = new Deferred();
@@ -211,11 +233,9 @@ export default function postgresTcpTransportTest(): void {
 
 class MockTcpSocketFactory implements PostgresTcpSocketFactory {
   private readonly peer: PostgresTcpSocket;
-
   constructor(peer: PostgresTcpSocket) {
     this.peer = peer;
   }
-
   create(): PostgresTcpSocket {
     return this.peer;
   }
@@ -234,7 +254,6 @@ class MockTcpSocket implements PostgresTcpSocket {
   private errorListener: ((error: Object) => void) | null = null;
   private lastMessageListener: ((data: Uint8Array) => void) | null = null;
   private lastErrorListener: ((error: Object) => void) | null = null;
-
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void {
     this.messageListener = message;
@@ -244,34 +263,28 @@ class MockTcpSocket implements PostgresTcpSocket {
     this.lastErrorListener = error;
     if (this.listenFailure !== null) throw this.listenFailure;
   }
-
   clearListeners(): void {
     this.messageListener = null;
     this.closeListener = null;
     this.errorListener = null;
   }
-
   async connect(host: string, port: number, timeoutMs: number): Promise<void> {
     if (this.connectFailure !== null) throw this.connectFailure;
   }
-
   async send(data: Uint8Array): Promise<void> {
     this.sendCalls += 1;
     if (this.sendFailure !== null) throw this.sendFailure;
     this.lastWrite = data.slice();
   }
-
   close(): Promise<void> {
     this.closeCalls += 1;
     return this.closeResult === null ? Promise.resolve() : this.closeResult;
   }
-
   get listenerCount(): number {
     return (this.messageListener === null ? 0 : 1) +
       (this.closeListener === null ? 0 : 1) +
       (this.errorListener === null ? 0 : 1);
   }
-
   emitMessage(data: Uint8Array, late: boolean = false): void {
     const listener = late ? this.lastMessageListener : this.messageListener;
     if (listener !== null) listener(data.slice());

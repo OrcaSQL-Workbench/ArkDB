@@ -184,7 +184,7 @@ const OWNED_SOURCE_ROOTS = [
   {
     root: 'pgsql/src/main/ets/pgsql',
     files: ['PostgresConnection.ets'],
-    directories: ['api', 'driver', 'model', 'protocol', 'transport']
+    directories: ['api', 'auth', 'driver', 'model', 'protocol', 'transport']
   },
   {
     root: 'tools',
@@ -417,7 +417,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04 and P07 own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, and P08 own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -425,6 +425,8 @@ test('P04 and P07 own exactly the registered PostgreSQL primitive sources', () =
     'pgsql/hvigorfile.ts',
     'pgsql/src/main/ets/pgsql/PostgresConnection.ets',
     'pgsql/src/main/ets/pgsql/api/PostgresContracts.ets',
+    'pgsql/src/main/ets/pgsql/auth/PostgresAuthCrypto.ets',
+    'pgsql/src/main/ets/pgsql/auth/PostgresSaslPrep.ets',
     'pgsql/src/main/ets/pgsql/driver/PostgresDriverFactory.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresConnectionConfig.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresModels.ets',

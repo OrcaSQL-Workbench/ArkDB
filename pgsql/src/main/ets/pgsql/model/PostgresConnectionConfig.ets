@@ -39,6 +39,7 @@ export class PostgresConnectionConfig {
   applicationName: string = 'arkdb';
   ssl: PostgresSslConfig = new PostgresSslConfig();
   connectTimeoutMs: number = 10000;
+  /** Allows cleartext-password responses only over active VERIFY_FULL TLS. */
   allowCleartextPassword: boolean = false;
 
   validate(): ArkDbError[] {

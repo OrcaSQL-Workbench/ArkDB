@@ -15,6 +15,250 @@ export interface PostgresMessage {
   payload: Uint8Array;
 }
 
+export interface PostgresBackendMessage {
+  readonly type: number;
+}
+
+export class PostgresAuthenticationRequest implements PostgresBackendMessage {
+  readonly type: number = 0x52;
+  readonly code: number;
+
+  constructor(code: number) {
+    this.code = code;
+  }
+}
+
+export class PostgresAuthenticationOk extends PostgresAuthenticationRequest {
+  constructor() { super(0); }
+}
+
+export class PostgresAuthenticationKerberosV5 extends PostgresAuthenticationRequest {
+  constructor() { super(2); }
+}
+
+export class PostgresAuthenticationCleartextPassword extends PostgresAuthenticationRequest {
+  constructor() { super(3); }
+}
+
+export class PostgresAuthenticationMd5Password extends PostgresAuthenticationRequest {
+  readonly salt: Uint8Array;
+
+  constructor(salt: Uint8Array) {
+    super(5);
+    this.salt = salt;
+  }
+}
+
+export class PostgresAuthenticationGss extends PostgresAuthenticationRequest {
+  constructor() { super(7); }
+}
+
+export class PostgresAuthenticationGssContinue extends PostgresAuthenticationRequest {
+  readonly data: Uint8Array;
+
+  constructor(data: Uint8Array) {
+    super(8);
+    this.data = data;
+  }
+}
+
+export class PostgresAuthenticationSspi extends PostgresAuthenticationRequest {
+  constructor() { super(9); }
+}
+
+export class PostgresAuthenticationSasl extends PostgresAuthenticationRequest {
+  readonly mechanisms: string[];
+
+  constructor(mechanisms: string[]) {
+    super(10);
+    this.mechanisms = mechanisms;
+  }
+}
+
+export class PostgresAuthenticationSaslContinue extends PostgresAuthenticationRequest {
+  readonly data: Uint8Array;
+
+  constructor(data: Uint8Array) {
+    super(11);
+    this.data = data;
+  }
+}
+
+export class PostgresAuthenticationSaslFinal extends PostgresAuthenticationRequest {
+  readonly data: Uint8Array;
+
+  constructor(data: Uint8Array) {
+    super(12);
+    this.data = data;
+  }
+}
+
+export class PostgresAuthenticationUnsupported extends PostgresAuthenticationRequest {
+  readonly data: Uint8Array;
+
+  constructor(code: number, data: Uint8Array) {
+    super(code);
+    this.data = data;
+  }
+}
+
+export class PostgresDiagnosticFields {
+  localizedSeverity: string = '';
+  severity?: string;
+  sqlState: string = '';
+  message: string = '';
+  detail?: string;
+  hint?: string;
+  position?: string;
+  internalPosition?: string;
+  internalQuery?: string;
+  where?: string;
+  schemaName?: string;
+  tableName?: string;
+  columnName?: string;
+  dataTypeName?: string;
+  constraintName?: string;
+  sourceFile?: string;
+  sourceLine?: string;
+  sourceRoutine?: string;
+}
+
+export class PostgresErrorResponse implements PostgresBackendMessage {
+  readonly type: number = 0x45;
+  readonly fields: PostgresDiagnosticFields;
+
+  constructor(fields: PostgresDiagnosticFields) {
+    this.fields = fields;
+  }
+}
+
+export class PostgresNoticeResponse implements PostgresBackendMessage {
+  readonly type: number = 0x4e;
+  readonly fields: PostgresDiagnosticFields;
+
+  constructor(fields: PostgresDiagnosticFields) {
+    this.fields = fields;
+  }
+}
+
+export class PostgresParameterStatus implements PostgresBackendMessage {
+  readonly type: number = 0x53;
+  readonly name: string;
+  readonly value: string;
+
+  constructor(name: string, value: string) {
+    this.name = name;
+    this.value = value;
+  }
+}
+
+export class PostgresBackendKeyData implements PostgresBackendMessage {
+  readonly type: number = 0x4b;
+  readonly processId: number;
+  readonly secretKey: Uint8Array;
+
+  constructor(processId: number, secretKey: Uint8Array) {
+    this.processId = processId;
+    this.secretKey = secretKey;
+  }
+}
+
+export enum PostgresReadyStatus {
+  Idle = 0x49,
+  InTransaction = 0x54,
+  FailedTransaction = 0x45
+}
+
+export class PostgresReadyForQuery implements PostgresBackendMessage {
+  readonly type: number = 0x5a;
+  readonly status: PostgresReadyStatus;
+
+  constructor(status: PostgresReadyStatus) {
+    this.status = status;
+  }
+}
+
+class PostgresEmptyBackendMessage implements PostgresBackendMessage {
+  readonly type: number;
+
+  constructor(type: number) {
+    this.type = type;
+  }
+}
+
+export class PostgresParseComplete extends PostgresEmptyBackendMessage {
+  constructor() { super(0x31); }
+}
+
+export class PostgresBindComplete extends PostgresEmptyBackendMessage {
+  constructor() { super(0x32); }
+}
+
+export class PostgresCloseComplete extends PostgresEmptyBackendMessage {
+  constructor() { super(0x33); }
+}
+
+export class PostgresNoData extends PostgresEmptyBackendMessage {
+  constructor() { super(0x6e); }
+}
+
+export class PostgresEmptyQueryResponse extends PostgresEmptyBackendMessage {
+  constructor() { super(0x49); }
+}
+
+export class PostgresNotificationResponse implements PostgresBackendMessage {
+  readonly type: number = 0x41;
+  readonly processId: number;
+  readonly channel: string;
+  readonly payload: string;
+
+  constructor(processId: number, channel: string, payload: string) {
+    this.processId = processId;
+    this.channel = channel;
+    this.payload = payload;
+  }
+}
+
+export class PostgresNegotiateProtocolVersion implements PostgresBackendMessage {
+  readonly type: number = 0x76;
+  readonly newestMinorVersion: number;
+  readonly unsupportedOptions: string[];
+
+  constructor(newestMinorVersion: number, unsupportedOptions: string[]) {
+    this.newestMinorVersion = newestMinorVersion;
+    this.unsupportedOptions = unsupportedOptions;
+  }
+}
+
+const MAX_NEGOTIATION_OPTIONS: number = 65535;
+const MAX_SASL_MECHANISMS: number = 64;
+const MAX_SASL_MECHANISM_LENGTH: number = 20;
+
+export class PostgresBackendParser {
+  static parse(message: PostgresMessage): PostgresBackendMessage {
+    switch (message.type) {
+      case 0x52: return parseAuthentication(message.payload);
+      case 0x45: return new PostgresErrorResponse(parseDiagnostics(message.payload, false));
+      case 0x4e: return new PostgresNoticeResponse(parseDiagnostics(message.payload, true));
+      case 0x53: return parseParameterStatus(message.payload);
+      case 0x4b: return parseBackendKeyData(message.payload);
+      case 0x5a: return parseReadyForQuery(message.payload);
+      case 0x31: requireEmpty(message.payload, 'ParseComplete'); return new PostgresParseComplete();
+      case 0x32: requireEmpty(message.payload, 'BindComplete'); return new PostgresBindComplete();
+      case 0x33: requireEmpty(message.payload, 'CloseComplete'); return new PostgresCloseComplete();
+      case 0x6e: requireEmpty(message.payload, 'NoData'); return new PostgresNoData();
+      case 0x49:
+        requireEmpty(message.payload, 'EmptyQueryResponse');
+        return new PostgresEmptyQueryResponse();
+      case 0x41: return parseNotification(message.payload);
+      case 0x76: return parseNegotiation(message.payload);
+      default:
+        throw ArkDbError.protocol(
+          'Unsupported PostgreSQL backend message type ' + message.type);
+    }
+  }
+}
+
 export class PostgresMessageChannel {
   private readonly transport: PostgresByteTransport;
   private synchronized: boolean = true;
@@ -123,4 +367,203 @@ export class PostgresMessageChannel {
     this.synchronized = false;
     return ArkDbError.protocol(message);
   }
+}
+
+function parseAuthentication(payload: Uint8Array): PostgresBackendMessage {
+  const reader = new PostgresByteReader(payload);
+  const code = reader.readInt32();
+  switch (code) {
+    case 0: requireReaderEmpty(reader, 'AuthenticationOk'); return new PostgresAuthenticationOk();
+    case 2:
+      requireReaderEmpty(reader, 'AuthenticationKerberosV5');
+      return new PostgresAuthenticationKerberosV5();
+    case 3:
+      requireReaderEmpty(reader, 'AuthenticationCleartextPassword');
+      return new PostgresAuthenticationCleartextPassword();
+    case 5: {
+      const salt = copyBytes(reader.readBytes(4));
+      requireReaderEmpty(reader, 'AuthenticationMD5Password');
+      return new PostgresAuthenticationMd5Password(salt);
+    }
+    case 7: requireReaderEmpty(reader, 'AuthenticationGSS'); return new PostgresAuthenticationGss();
+    case 8: return new PostgresAuthenticationGssContinue(readRemaining(reader));
+    case 9:
+      requireReaderEmpty(reader, 'AuthenticationSSPI');
+      return new PostgresAuthenticationSspi();
+    case 10: return parseAuthenticationSasl(reader);
+    case 11: return new PostgresAuthenticationSaslContinue(readRemaining(reader));
+    case 12: return new PostgresAuthenticationSaslFinal(readRemaining(reader));
+    default: return new PostgresAuthenticationUnsupported(code, readRemaining(reader));
+  }
+}
+
+function parseAuthenticationSasl(reader: PostgresByteReader): PostgresAuthenticationSasl {
+  const mechanisms: string[] = [];
+  while (reader.remaining > 0) {
+    const mechanism = reader.readCString();
+    if (mechanism.length === 0) {
+      if (mechanisms.length === 0 || reader.remaining !== 0) {
+        throw malformed('AuthenticationSASL');
+      }
+      return new PostgresAuthenticationSasl(mechanisms);
+    }
+    if (mechanisms.length >= MAX_SASL_MECHANISMS || !isSaslMechanism(mechanism)) {
+      throw malformed('AuthenticationSASL');
+    }
+    mechanisms.push(mechanism);
+  }
+  throw malformed('AuthenticationSASL');
+}
+
+function parseDiagnostics(payload: Uint8Array, notice: boolean): PostgresDiagnosticFields {
+  const reader = new PostgresByteReader(payload);
+  const fields = new PostgresDiagnosticFields();
+  const seen: boolean[] = [];
+  while (reader.remaining > 0) {
+    const code = reader.readUInt8();
+    if (code === 0) {
+      requireReaderEmpty(reader, notice ? 'NoticeResponse' : 'ErrorResponse');
+      validateDiagnostics(fields, seen, notice);
+      return fields;
+    }
+    if (seen[code] === true) throw malformed('diagnostic field');
+    seen[code] = true;
+    const value = reader.readCString();
+    switch (code) {
+      case 0x53: fields.localizedSeverity = value; break;
+      case 0x56: fields.severity = value; break;
+      case 0x43: fields.sqlState = value; break;
+      case 0x4d: fields.message = value; break;
+      case 0x44: fields.detail = value; break;
+      case 0x48: fields.hint = value; break;
+      case 0x50: fields.position = value; break;
+      case 0x70: fields.internalPosition = value; break;
+      case 0x71: fields.internalQuery = value; break;
+      case 0x57: fields.where = value; break;
+      case 0x73: fields.schemaName = value; break;
+      case 0x74: fields.tableName = value; break;
+      case 0x63: fields.columnName = value; break;
+      case 0x64: fields.dataTypeName = value; break;
+      case 0x6e: fields.constraintName = value; break;
+      case 0x46: fields.sourceFile = value; break;
+      case 0x4c: fields.sourceLine = value; break;
+      case 0x52: fields.sourceRoutine = value; break;
+      default: break;
+    }
+  }
+  throw malformed(notice ? 'NoticeResponse' : 'ErrorResponse');
+}
+
+function validateDiagnostics(fields: PostgresDiagnosticFields,
+  seen: boolean[], notice: boolean): void {
+  if (seen[0x53] !== true || fields.localizedSeverity.length === 0 ||
+    seen[0x43] !== true || !isSqlState(fields.sqlState) ||
+    seen[0x4d] !== true) {
+    throw malformed(notice ? 'NoticeResponse' : 'ErrorResponse');
+  }
+  if (fields.internalPosition !== undefined && fields.internalQuery === undefined) {
+    throw malformed('diagnostic internal position');
+  }
+}
+
+function parseParameterStatus(payload: Uint8Array): PostgresParameterStatus {
+  const reader = new PostgresByteReader(payload);
+  const name = reader.readCString();
+  const value = reader.readCString();
+  if (name.length === 0) throw malformed('ParameterStatus');
+  requireReaderEmpty(reader, 'ParameterStatus');
+  return new PostgresParameterStatus(name, value);
+}
+
+function parseBackendKeyData(payload: Uint8Array): PostgresBackendKeyData {
+  const reader = new PostgresByteReader(payload);
+  const processId = reader.readInt32();
+  const secretKey = copyBytes(reader.readBytes(4));
+  requireReaderEmpty(reader, 'BackendKeyData');
+  return new PostgresBackendKeyData(processId, secretKey);
+}
+
+function parseReadyForQuery(payload: Uint8Array): PostgresReadyForQuery {
+  const reader = new PostgresByteReader(payload);
+  const status = reader.readUInt8();
+  requireReaderEmpty(reader, 'ReadyForQuery');
+  if (status !== PostgresReadyStatus.Idle &&
+    status !== PostgresReadyStatus.InTransaction &&
+    status !== PostgresReadyStatus.FailedTransaction) {
+    throw malformed('ReadyForQuery');
+  }
+  return new PostgresReadyForQuery(status);
+}
+
+function parseNotification(payload: Uint8Array): PostgresNotificationResponse {
+  const reader = new PostgresByteReader(payload);
+  const processId = reader.readInt32();
+  const channel = reader.readCString();
+  const value = reader.readCString();
+  if (channel.length === 0) throw malformed('NotificationResponse');
+  requireReaderEmpty(reader, 'NotificationResponse');
+  return new PostgresNotificationResponse(processId, channel, value);
+}
+
+function parseNegotiation(payload: Uint8Array): PostgresNegotiateProtocolVersion {
+  const reader = new PostgresByteReader(payload);
+  const newestMinorVersion = reader.readInt32();
+  const optionCount = reader.readInt32();
+  if (newestMinorVersion < 0 || optionCount < 0 ||
+    optionCount > MAX_NEGOTIATION_OPTIONS || optionCount > reader.remaining) {
+    throw malformed('NegotiateProtocolVersion');
+  }
+  const unsupportedOptions: string[] = [];
+  for (let index = 0; index < optionCount; index += 1) {
+    const option = reader.readCString();
+    if (option.length === 0) throw malformed('NegotiateProtocolVersion');
+    unsupportedOptions.push(option);
+  }
+  requireReaderEmpty(reader, 'NegotiateProtocolVersion');
+  return new PostgresNegotiateProtocolVersion(newestMinorVersion, unsupportedOptions);
+}
+
+function requireEmpty(payload: Uint8Array, name: string): void {
+  if (payload.length !== 0) throw malformed(name);
+}
+
+function requireReaderEmpty(reader: PostgresByteReader, name: string): void {
+  if (reader.remaining !== 0) throw malformed(name);
+}
+
+function readRemaining(reader: PostgresByteReader): Uint8Array {
+  return copyBytes(reader.readBytes(reader.remaining));
+}
+
+function copyBytes(value: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(value.length);
+  copy.set(value);
+  return copy;
+}
+
+function isSqlState(value: string): boolean {
+  if (value.length !== 5) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (!((code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5a))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isSaslMechanism(value: string): boolean {
+  if (value.length > MAX_SASL_MECHANISM_LENGTH) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (!((code >= 0x41 && code <= 0x5a) || (code >= 0x30 && code <= 0x39) ||
+      code === 0x2d || code === 0x5f)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function malformed(name: string): ArkDbError {
+  return ArkDbError.protocol('Malformed PostgreSQL ' + name + ' message');
 }

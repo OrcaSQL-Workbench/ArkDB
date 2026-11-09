@@ -3,8 +3,12 @@ import {
   ArkDbError, ArkDbErrorKind, ConnectionTimerPort
 } from '@arkdb/core';
 import {
-  PostgresTcpSocket, PostgresTcpSocketFactory, PostgresTcpTransport
+  PostgresTcpSocket, PostgresTcpSocketFactory, PostgresTcpTransport,
+  PostgresTlsSocket
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
+import {
+  PostgresSslConfig, PostgresSslMode
+} from '../../../main/ets/pgsql/model/PostgresConnectionConfig';
 interface MessageFailure {
   message: string;
 }
@@ -233,6 +237,213 @@ export default function postgresTcpTransportTest(): void {
         expect(peer.listenerCount).assertEqual(0);
       }
     });
+    it('requiresAnEmptyIdlePlaintextStreamBeforeTlsHandoff', 0, async () => {
+      const pendingPeer = new MockTcpSocket();
+      const pendingTransport = createTransport(pendingPeer, 8);
+      await pendingTransport.connect('db.invalid', 5432, 1000);
+      const pending = pendingTransport.read(1);
+      expect(syncFailure((): void => pendingTransport.prepareTlsUpgrade()).kind)
+        .assertEqual(ArkDbErrorKind.Protocol);
+      expect(pendingPeer.listenerCount).assertEqual(3);
+      pendingPeer.emitMessage(new Uint8Array([1]));
+      assertBytes(await pending, [1]);
+      const pendingTls = new MockTcpSocket();
+      pendingPeer.upgradeResult = pendingTls;
+      pendingTransport.prepareTlsUpgrade();
+      expect(pendingPeer.listenerCount).assertEqual(2);
+      pendingPeer.emitMessage(new Uint8Array([99]), true);
+      await pendingTransport.upgradeToTls(
+        'db.example.com', 5432, verifiedTls(), 1000);
+      pendingTls.emitMessage(new Uint8Array([3]));
+      assertBytes(await pendingTransport.read(1), [3]);
+      await pendingTransport.close();
+      const bufferedPeer = new MockTcpSocket();
+      const bufferedTransport = createTransport(bufferedPeer, 8);
+      await bufferedTransport.connect('db.invalid', 5432, 1000);
+      bufferedPeer.emitMessage(new Uint8Array([2]));
+      expect(syncFailure((): void => bufferedTransport.prepareTlsUpgrade()).kind)
+        .assertEqual(ArkDbErrorKind.Protocol);
+      expect(bufferedPeer.listenerCount).assertEqual(3);
+      assertBytes(await bufferedTransport.read(1), [2]);
+      bufferedTransport.prepareTlsUpgrade();
+      await bufferedTransport.close();
+    });
+    it('transfersListenersAndClassifiesTlsTrafficFailures', 0, async () => {
+      for (let mode = 0; mode < 3; mode += 1) {
+        const tcp = new MockTcpSocket(); const tls = new MockTcpSocket();
+        tcp.upgradeResult = tls;
+        const transport = createTransport(tcp, 8);
+        await transport.connect('db.invalid', 5432, 1000);
+        transport.prepareTlsUpgrade();
+        await transport.upgradeToTls('db.example.com', 5432, verifiedTls(), 1750);
+        expect(tcp.listenersAtUpgrade).assertEqual(2);
+        expect(tcp.listenerCount).assertEqual(0);
+        expect(tls.listenerCount).assertEqual(3);
+        expect(tls.tlsVerifyCalls).assertEqual(1);
+        expect(tls.lastTlsTimeoutMs).assertEqual(1750);
+        tls.emitMessage(new Uint8Array([7]));
+        assertBytes(await transport.read(1), [7]);
+        let terminal: ArkDbError;
+        if (mode === 0) {
+          tls.sendFailure = new Error('Synthetic TLS send failure');
+          terminal = await failure(async (): Promise<void> =>
+            { await transport.write(new Uint8Array([8])); });
+          expect(terminal.message).assertEqual(
+            'PostgreSQL TLS send failed: Synthetic TLS send failure');
+        } else if (mode === 1) {
+          tls.emitError();
+          terminal = await failure(async (): Promise<void> =>
+            { await transport.read(1); });
+          expect(terminal.message).assertEqual(
+            'PostgreSQL TLS socket error: Synthetic socket failure');
+        } else {
+          tls.emitClose();
+          terminal = await failure(async (): Promise<void> =>
+            { await transport.read(1); });
+          expect(terminal.message)
+            .assertEqual('PostgreSQL TLS socket closed by server');
+        }
+        expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+        expect(tcp.closeCalls).assertEqual(0);
+        expect(tls.closeCalls).assertEqual(mode === 2 ? 0 : 1);
+        expect(tls.listenerCount).assertEqual(0);
+      }
+    });
+    it('failsClosedAcrossTlsConstructionConnectAndVerification', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const preparePeer = new MockTcpSocket();
+        const original = ArkDbError.tls('Synthetic exact handoff failure', 'PREPARE');
+        if (mode === 0) {
+          preparePeer.prepareUpgradeFailure =
+            new Error('Synthetic TLS handoff failure');
+        } else preparePeer.prepareUpgradeTypedFailure = original;
+        const prepareTransport = createTransport(preparePeer, 8);
+        await prepareTransport.connect('db.invalid', 5432, 1000);
+        const terminal = syncFailure((): void => prepareTransport.prepareTlsUpgrade());
+        if (mode === 0) expect(terminal.message).assertEqual(
+          'PostgreSQL TLS listener handoff failed: Synthetic TLS handoff failure');
+        else expect(terminal).assertEqual(original);
+        expect(preparePeer.closeCalls).assertEqual(1);
+      }
+      for (let mode = 0; mode < 5; mode += 1) {
+        const tcp = new MockTcpSocket(); const tls = new MockTcpSocket();
+        tcp.upgradeResult = tls;
+        const original = ArkDbError.tls('Synthetic exact TLS failure', 'VERIFY');
+        if (mode === 0) {
+          tcp.upgradeFailure = new Error('Synthetic TLS construction failure');
+        } else if (mode === 1) tcp.upgradeTypedFailure = original;
+        else if (mode === 2) {
+          tls.listenFailure = new Error('Synthetic TLS listener failure');
+        } else if (mode === 3) {
+          tls.tlsConnectFailure = new Error('Synthetic TLS connect failure');
+        } else tls.tlsVerifyFailure = original;
+        const transport = createTransport(tcp, 8);
+        await transport.connect('db.invalid', 5432, 1000);
+        transport.prepareTlsUpgrade();
+        const terminal = await failure((): Promise<void> =>
+          transport.upgradeToTls('db.example.com', 5432, verifiedTls(), 1000));
+        expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+        if (mode <= 1) {
+          if (mode === 1) expect(terminal).assertEqual(original);
+          if (mode === 0) expect(terminal.message).assertEqual(
+            'PostgreSQL TLS socket construction failed: Synthetic TLS construction failure');
+          expect(tcp.closeCalls).assertEqual(1);
+        } else {
+          expect(tcp.closeCalls).assertEqual(0);
+          expect(tls.closeCalls).assertEqual(1);
+        }
+        if (mode === 4) expect(terminal).assertEqual(original);
+      }
+    });
+    it('preservesCloseAndAbortFailuresDuringTlsUpgrade', 0, async () => {
+      for (let mode = 0; mode < 2; mode += 1) {
+        const tcp = new MockTcpSocket();
+        const prepared = createTransport(tcp, 8);
+        await prepared.connect('db.invalid', 5432, 1000);
+        prepared.prepareTlsUpgrade();
+        let expected: ArkDbError | null = null;
+        if (mode === 0) await prepared.close();
+        else {
+          expected = ArkDbError.protocol('Synthetic prepared abort');
+          await prepared.abort(expected);
+        }
+        const terminal = await failure((): Promise<void> =>
+          prepared.upgradeToTls('db.example.com', 5432, verifiedTls(), 1000));
+        if (expected !== null) expect(terminal).assertEqual(expected);
+        expect(await failure(async (): Promise<void> =>
+          { await prepared.read(1); })).assertEqual(terminal);
+        expect(tcp.closeCalls).assertEqual(1);
+      }
+      for (let mode = 0; mode < 2; mode += 1) {
+        const tcp = new MockTcpSocket(); const tls = new MockTcpSocket();
+        const deferred = new Deferred();
+        tls.tlsConnectResult = deferred.wait();
+        tcp.upgradeResult = tls;
+        const transport = createTransport(tcp, 8);
+        await transport.connect('db.invalid', 5432, 1000);
+        transport.prepareTlsUpgrade();
+        const upgrading = failure((): Promise<void> =>
+          transport.upgradeToTls('db.example.com', 5432, verifiedTls(), 1000));
+        await nextTask();
+        let expected: ArkDbError | null = null;
+        if (mode === 0) await transport.close();
+        else {
+          expected = ArkDbError.protocol('Synthetic upgrade abort');
+          await transport.abort(expected);
+        }
+        const terminal = await upgrading;
+        if (expected !== null) expect(terminal).assertEqual(expected);
+        else expect(terminal.message)
+          .assertEqual('PostgreSQL transport closed');
+        deferred.complete();
+        await nextTask();
+        expect(await failure(async (): Promise<void> =>
+          { await transport.read(1); })).assertEqual(terminal);
+        expect(tcp.closeCalls).assertEqual(0);
+        expect(tls.closeCalls).assertEqual(1);
+        expect(tls.listenerCount).assertEqual(0);
+      }
+    });
+    it('keepsConnectWritesAndVerificationOutsideTheTlsHandoff', 0, async () => {
+      const tcp = new MockTcpSocket();
+      const connectDeferred = new Deferred(); const sendDeferred = new Deferred();
+      tcp.connectResult = connectDeferred.wait();
+      const transport = createTransport(tcp, 8);
+      const connecting = transport.connect('db.invalid', 5432, 1000);
+      await nextTask();
+      expect(syncFailure((): void => transport.prepareTlsUpgrade()).kind)
+        .assertEqual(ArkDbErrorKind.Protocol);
+      connectDeferred.complete();
+      await connecting;
+      tcp.sendResult = sendDeferred.wait();
+      const writing = transport.write(new Uint8Array([1]));
+      await nextTask();
+      expect(syncFailure((): void => transport.prepareTlsUpgrade()).kind)
+        .assertEqual(ArkDbErrorKind.Protocol);
+      sendDeferred.complete();
+      await writing;
+      const tls = new MockTcpSocket();
+      const tlsConnectDeferred = new Deferred(); const verifyDeferred = new Deferred();
+      tls.tlsConnectResult = tlsConnectDeferred.wait();
+      tls.tlsVerifyResult = verifyDeferred.wait();
+      tcp.upgradeResult = tls;
+      transport.prepareTlsUpgrade();
+      const config = verifiedTls();
+      const upgrading = transport.upgradeToTls('db.example.com', 5432, config, 1000);
+      await nextTask();
+      config.mode = PostgresSslMode.VERIFY_CA;
+      expect((await failure(async (): Promise<void> =>
+        { await transport.read(1); })).kind).assertEqual(ArkDbErrorKind.Protocol);
+      expect((await failure(async (): Promise<void> =>
+        { await transport.write(new Uint8Array([2])); })).kind)
+        .assertEqual(ArkDbErrorKind.Protocol);
+      tlsConnectDeferred.complete();
+      await nextTask(); await nextTask(); await nextTask();
+      expect(tls.tlsVerifyCalls).assertEqual(1);
+      verifyDeferred.complete();
+      await upgrading;
+      await transport.close();
+    });
     it('boundsHangingCloseAndKeepsCloseIdempotent', 0, async () => {
       const peer = new MockTcpSocket();
       const deferred = new Deferred();
@@ -286,7 +497,7 @@ class MockTcpSocketFactory implements PostgresTcpSocketFactory {
   constructor(peer: PostgresTcpSocket) { this.peer = peer; }
   create(): PostgresTcpSocket { return this.peer; }
 }
-class MockTcpSocket implements PostgresTcpSocket {
+class MockTcpSocket implements PostgresTcpSocket, PostgresTlsSocket {
   closeCalls: number = 0;
   sendCalls: number = 0;
   connectFailure: Error | null = null;
@@ -295,7 +506,20 @@ class MockTcpSocket implements PostgresTcpSocket {
   clearListenersFailure: Error | null = null;
   listenFailure: Error | null = null;
   sendFailure: Error | null = null;
+  sendResult: Promise<void> | null = null;
   closeResult: Promise<void> | null = null;
+  prepareUpgradeFailure: Error | null = null;
+  prepareUpgradeTypedFailure: ArkDbError | null = null;
+  upgradeResult: PostgresTlsSocket | null = null;
+  upgradeFailure: Error | null = null;
+  upgradeTypedFailure: ArkDbError | null = null;
+  tlsConnectResult: Promise<void> | null = null;
+  tlsConnectFailure: Error | null = null;
+  tlsVerifyFailure: ArkDbError | null = null;
+  tlsVerifyResult: Promise<void> | null = null;
+  listenersAtUpgrade: number = -1;
+  tlsVerifyCalls: number = 0;
+  lastTlsTimeoutMs: number = 0;
   lastWrite: Uint8Array = new Uint8Array(0);
   private messageListener: ((data: Uint8Array) => void) | null = null;
   private closeListener: (() => void) | null = null;
@@ -317,6 +541,15 @@ class MockTcpSocket implements PostgresTcpSocket {
     this.errorListener = null;
     if (this.clearListenersFailure !== null) throw this.clearListenersFailure;
   }
+  prepareUpgrade(): void {
+    if (this.prepareUpgradeTypedFailure !== null) {
+      throw this.prepareUpgradeTypedFailure;
+    }
+    if (this.prepareUpgradeFailure !== null) {
+      throw this.prepareUpgradeFailure;
+    }
+    this.messageListener = null;
+  }
   async connect(host: string, port: number, timeoutMs: number): Promise<void> {
     if (this.connectFailure !== null) throw this.connectFailure;
     if (this.connectWithoutReason) {
@@ -325,9 +558,31 @@ class MockTcpSocket implements PostgresTcpSocket {
     }
     if (this.connectResult !== null) await this.connectResult;
   }
+  upgrade(): PostgresTlsSocket {
+    this.listenersAtUpgrade = this.listenerCount;
+    if (this.upgradeTypedFailure !== null) throw this.upgradeTypedFailure;
+    if (this.upgradeFailure !== null) throw this.upgradeFailure;
+    if (this.upgradeResult === null) {
+      throw new Error('Synthetic TLS socket is not configured');
+    }
+    this.clearListeners();
+    return this.upgradeResult;
+  }
+  async connectTls(host: string, port: number, config: PostgresSslConfig,
+    timeoutMs: number): Promise<void> {
+    this.lastTlsTimeoutMs = timeoutMs;
+    if (this.tlsConnectFailure !== null) throw this.tlsConnectFailure;
+    if (this.tlsConnectResult !== null) await this.tlsConnectResult;
+  }
+  async verifyPeerIdentity(host: string): Promise<void> {
+    this.tlsVerifyCalls += 1;
+    if (this.tlsVerifyFailure !== null) throw this.tlsVerifyFailure;
+    if (this.tlsVerifyResult !== null) await this.tlsVerifyResult;
+  }
   async send(data: Uint8Array): Promise<void> {
     this.sendCalls += 1;
     if (this.sendFailure !== null) throw this.sendFailure;
+    if (this.sendResult !== null) await this.sendResult;
     this.lastWrite = data.slice();
   }
   close(): Promise<void> { this.closeCalls += 1; return this.closeResult === null ? Promise.resolve() : this.closeResult; }
@@ -400,6 +655,21 @@ function assertValidation(action: () => void): void {
   }
   expect(failure instanceof ArkDbError).assertTrue();
   expect(failure!.kind).assertEqual(ArkDbErrorKind.Validation);
+}
+function syncFailure(action: () => void): ArkDbError {
+  let terminal: ArkDbError | null = null;
+  try {
+    action();
+  } catch (error) {
+    terminal = error as ArkDbError;
+  }
+  expect(terminal instanceof ArkDbError).assertTrue();
+  return terminal!;
+}
+function verifiedTls(): PostgresSslConfig {
+  const config = new PostgresSslConfig();
+  config.mode = PostgresSslMode.VERIFY_FULL;
+  return config;
 }
 function assertBytes(actual: Uint8Array | null, expected: number[]): void {
   expect(actual !== null).assertTrue();

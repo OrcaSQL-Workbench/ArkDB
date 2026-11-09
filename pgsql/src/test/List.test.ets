@@ -5,6 +5,7 @@ import postgresBackendParserTest from './pgsql/protocol/PostgresBackendParser.te
 import postgresFrontendSerializerTest from './pgsql/protocol/PostgresFrontendSerializer.test';
 import postgresProtocolTest from './pgsql/protocol/PostgresProtocol.test';
 import postgresTcpTransportTest from './pgsql/transport/PostgresTcpTransport.test';
+import postgresTlsTest from './pgsql/transport/PostgresTls.test';
 
 export default function testsuite(): void {
   publicInterfaceTest();
@@ -14,4 +15,5 @@ export default function testsuite(): void {
   postgresFrontendSerializerTest();
   postgresProtocolTest();
   postgresTcpTransportTest();
+  postgresTlsTest();
 }

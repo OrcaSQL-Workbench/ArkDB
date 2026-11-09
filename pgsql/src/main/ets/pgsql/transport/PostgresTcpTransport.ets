@@ -1,33 +1,49 @@
 import { socket } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { fileIo } from '@kit.CoreFileKit';
 import {
   ArkDbError, ConnectionTimerPort, SystemConnectionTimerPort
 } from '@arkdb/core';
 import { PostgresByteTransport } from '../protocol/PostgresMessageChannel';
 import { MAX_POSTGRES_MESSAGE_BYTES } from '../protocol/PostgresProtocolConstants';
+import {
+  PostgresSslConfig, PostgresSslMode
+} from '../model/PostgresConnectionConfig';
 const MAX_POSTGRES_WIRE_BYTES: number = MAX_POSTGRES_MESSAGE_BYTES + 1;
 const RECEIVE_BLOCK_BYTES: number = 64 * 1024;
 const SOCKET_CLOSE_TIMEOUT_MS: number = 1000;
+const MAX_TLS_FILE_BYTES: number = 1024 * 1024;
 interface PendingRead {
   need: number;
   resolve: (value: Uint8Array | null | PromiseLike<Uint8Array | null>) => void;
   reject: (reason?: Object) => void;
 }
-export interface PostgresTcpSocket {
+interface PostgresStreamSocket {
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void;
   clearListeners(): void;
-  connect(host: string, port: number, timeoutMs: number): Promise<void>;
   send(data: Uint8Array): Promise<void>;
   close(): Promise<void>;
+}
+export interface PostgresTcpSocket extends PostgresStreamSocket {
+  connect(host: string, port: number, timeoutMs: number): Promise<void>;
+  prepareUpgrade(): void;
+  upgrade(): PostgresTlsSocket;
+}
+export interface PostgresTlsSocket extends PostgresStreamSocket {
+  connectTls(host: string, port: number, config: PostgresSslConfig,
+    timeoutMs: number): Promise<void>;
+  verifyPeerIdentity(host: string): Promise<void>;
 }
 export interface PostgresTcpSocketFactory {
   create(): PostgresTcpSocket;
 }
 class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
   private readonly tcp: socket.TCPSocket;
-  constructor() {
+  private readonly verifier: PostgresTlsIdentityVerifier;
+  constructor(verifier: PostgresTlsIdentityVerifier) {
     this.tcp = socket.constructTCPSocketInstance();
+    this.verifier = verifier;
   }
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void {
@@ -40,23 +56,7 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
     });
   }
   clearListeners(): void {
-    let firstFailure: Object | null = null;
-    try {
-      this.tcp.off('message');
-    } catch (error) {
-      firstFailure = error as Object;
-    }
-    try {
-      this.tcp.off('close');
-    } catch (error) {
-      if (firstFailure === null) firstFailure = error as Object;
-    }
-    try {
-      this.tcp.off('error');
-    } catch (error) {
-      if (firstFailure === null) firstFailure = error as Object;
-    }
-    if (firstFailure !== null) throw new Error(asMessage(firstFailure));
+    clearNetworkKitListeners(this.tcp);
   }
   async connect(host: string, port: number, timeoutMs: number): Promise<void> {
     const address: socket.NetAddress = { address: host, port: port };
@@ -87,17 +87,89 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
       throw new Error(asMessage(error as Object));
     }
   }
+  prepareUpgrade(): void {
+    this.tcp.off('message');
+  }
+  upgrade(): PostgresTlsSocket {
+    try {
+      clearNetworkKitListeners(this.tcp);
+      return new NetworkKitPostgresTlsSocket(
+        socket.constructTLSSocketInstance(this.tcp), this.verifier);
+    } catch (error) {
+      if (error instanceof ArkDbError) throw error;
+      throw new Error(asMessage(error as Object));
+    }
+  }
+}
+class NetworkKitPostgresTlsSocket implements PostgresTlsSocket {
+  private readonly tls: socket.TLSSocket;
+  private readonly verifier: PostgresTlsIdentityVerifier;
+  constructor(tls: socket.TLSSocket, verifier: PostgresTlsIdentityVerifier) {
+    this.tls = tls;
+    this.verifier = verifier;
+  }
+  listen(message: (data: Uint8Array) => void, close: () => void,
+    error: (failure: Object) => void): void {
+    this.tls.on('message', (info: socket.SocketMessageInfo): void => {
+      message(new Uint8Array(info.message));
+    });
+    this.tls.on('close', close);
+    this.tls.on('error', (failure: BusinessError): void => error(failure));
+  }
+  clearListeners(): void {
+    clearNetworkKitListeners(this.tls);
+  }
+  async connectTls(host: string, port: number, config: PostgresSslConfig,
+    timeoutMs: number): Promise<void> {
+    try {
+      await this.tls.connect(
+        buildPostgresTlsConnectOptions(host, port, config, timeoutMs));
+    } catch (error) {
+      if (error instanceof ArkDbError) throw error;
+      throw new Error(asMessage(error as Object));
+    }
+  }
+  async verifyPeerIdentity(host: string): Promise<void> {
+    try {
+      await this.verifier.verify(
+        await this.tls.getRemoteCertificate(), host);
+    } catch (error) {
+      if (error instanceof ArkDbError) throw error;
+      throw new Error(asMessage(error as Object));
+    }
+  }
+  async send(data: Uint8Array): Promise<void> {
+    const copy = new ArrayBuffer(data.length);
+    new Uint8Array(copy).set(data);
+    try {
+      await this.tls.send(copy);
+    } catch (error) {
+      throw new Error(asMessage(error as Object));
+    }
+  }
+  async close(): Promise<void> {
+    try {
+      await this.tls.close();
+    } catch (error) {
+      throw new Error(asMessage(error as Object));
+    }
+  }
 }
 class NetworkKitPostgresTcpSocketFactory implements PostgresTcpSocketFactory {
+  private readonly verifier: PostgresTlsIdentityVerifier =
+    createDefaultPostgresTlsIdentityVerifier();
   create(): PostgresTcpSocket {
-    return new NetworkKitPostgresTcpSocket();
+    return new NetworkKitPostgresTcpSocket(this.verifier);
   }
 }
 export class PostgresTcpTransport implements PostgresByteTransport {
   private readonly factory: PostgresTcpSocketFactory;
   private readonly maximumReceiveBytes: number;
   private readonly timers: ConnectionTimerPort;
-  private active: PostgresTcpSocket | null = null;
+  private active: PostgresStreamSocket | null = null;
+  private tcp: PostgresTcpSocket | null = null;
+  private tlsPrepared: boolean = false;
+  private tlsActive: boolean = false;
   private chunks: Uint8Array[] = [];
   private buffered: number = 0;
   private headIndex: number = 0;
@@ -128,15 +200,18 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     try {
       const current = this.factory.create();
       this.active = current;
+      this.tcp = current;
       current.listen(
         (data: Uint8Array): void => {
-          if (this.active === current) this.onData(data);
+          if (this.active === current && !this.tlsPrepared) {
+            this.onData(data);
+          }
         },
         (): void => {
-          if (this.active === current) this.onClose();
+          if (this.active === current) this.onClose(false);
         },
         (error: Object): void => {
-          if (this.active === current) this.onError(error);
+          if (this.active === current) this.onError(error, false);
         }
       );
       await this.runWhileOpen((): Promise<void> =>
@@ -145,6 +220,96 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     } catch (error) {
       const failure = error instanceof ArkDbError ? error :
         ArkDbError.network('PostgreSQL TCP connect failed: ' + asMessage(error));
+      this.fail(failure);
+      await this.closeTask;
+      throw this.fatal!;
+    }
+  }
+  prepareTlsUpgrade(): void {
+    this.throwIfFailed();
+    const current = this.tcp;
+    if (current === null || this.active !== current || this.tlsActive) {
+      throw ArkDbError.tls(
+        'PostgreSQL TCP socket is not available for TLS upgrade');
+    }
+    if (this.pending !== null || this.buffered !== 0 ||
+      this.operationFailures.length !== 0) {
+      throw ArkDbError.protocol(
+        'PostgreSQL TLS upgrade requires an idle empty plaintext stream');
+    }
+    try {
+      current.prepareUpgrade();
+      this.tlsPrepared = true;
+    } catch (error) {
+      const failure = error instanceof ArkDbError ? error :
+        ArkDbError.tls('PostgreSQL TLS listener handoff failed: ' +
+          asMessage(error as Object));
+      this.fail(failure);
+      throw failure;
+    }
+  }
+  async upgradeToTls(host: string, port: number, config: PostgresSslConfig,
+    timeoutMs: number): Promise<void> {
+    this.throwIfFailed();
+    const current = this.tcp;
+    if (current === null || this.active !== current || !this.tlsPrepared) {
+      throw ArkDbError.protocol('PostgreSQL TLS upgrade was not prepared');
+    }
+    if (this.pending !== null || this.buffered !== 0 ||
+      this.operationFailures.length !== 0) {
+      throw ArkDbError.protocol(
+        'PostgreSQL TLS upgrade requires an idle empty plaintext stream');
+    }
+    const tlsConfig = config.clone();
+    if (tlsConfig.mode === PostgresSslMode.DISABLED) {
+      const failure = ArkDbError.tls('PostgreSQL TLS is disabled');
+      this.fail(failure);
+      await this.closeTask;
+      throw this.fatal!;
+    }
+
+    let tls: PostgresTlsSocket;
+    try {
+      tls = current.upgrade();
+    } catch (error) {
+      const failure = error instanceof ArkDbError ? error :
+        ArkDbError.tls('PostgreSQL TLS socket construction failed: ' +
+          asMessage(error as Object));
+      this.fail(failure);
+      await this.closeTask;
+      throw this.fatal!;
+    }
+    this.tcp = null;
+    this.active = tls;
+    this.tlsActive = true;
+
+    let phase = 'listener setup';
+    try {
+      tls.listen(
+        (data: Uint8Array): void => {
+          if (this.active === tls) this.onData(data);
+        },
+        (): void => {
+          if (this.active === tls) this.onClose(true);
+        },
+        (error: Object): void => {
+          if (this.active === tls) this.onError(error, true);
+        }
+      );
+      phase = 'connect';
+      await this.runWhileOpen((): Promise<void> =>
+        tls.connectTls(host, port, tlsConfig, timeoutMs));
+      if (tlsConfig.mode === PostgresSslMode.VERIFY_FULL) {
+        phase = 'verification';
+        await this.runWhileOpen((): Promise<void> =>
+          tls.verifyPeerIdentity(host));
+      }
+      this.throwIfFailed();
+      this.tlsPrepared = false;
+    } catch (error) {
+      const failure = error instanceof ArkDbError ? error :
+        ArkDbError.tls('PostgreSQL TLS ' + phase + ' failed: ' +
+          asMessage(error as Object));
       this.fail(failure);
       await this.closeTask;
       throw this.fatal!;
@@ -168,6 +333,11 @@ export class PostgresTcpTransport implements PostgresByteTransport {
           reject(ArkDbError.protocol('Concurrent PostgreSQL transport reads are not supported'));
           return;
         }
+        if (this.tlsPrepared) {
+          reject(ArkDbError.protocol(
+            'PostgreSQL TLS upgrade is prepared'));
+          return;
+        }
         if (this.active === null) {
           reject(ArkDbError.network('PostgreSQL socket is not connected'));
           return;
@@ -178,10 +348,14 @@ export class PostgresTcpTransport implements PostgresByteTransport {
   }
   async write(data: Uint8Array): Promise<number> {
     this.throwIfFailed();
+    if (this.tlsPrepared) {
+      throw ArkDbError.protocol('PostgreSQL TLS upgrade is prepared');
+    }
     if (data.length > MAX_POSTGRES_WIRE_BYTES) {
       throw ArkDbError.validation('PostgreSQL transport write exceeds the message limit');
     }
     const current = this.active;
+    const isTls = this.tlsActive;
     try {
       if (current === null) throw ArkDbError.network('PostgreSQL socket is not connected');
       await this.runWhileOpen((): Promise<void> => current.send(data));
@@ -189,7 +363,11 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       return data.length;
     } catch (error) {
       const failure = error instanceof ArkDbError ? error :
-        ArkDbError.network('PostgreSQL socket send failed: ' + asMessage(error));
+        isTls ?
+          ArkDbError.tls(
+            'PostgreSQL TLS send failed: ' + asMessage(error)) :
+          ArkDbError.network(
+            'PostgreSQL socket send failed: ' + asMessage(error));
       this.fail(failure);
       await this.closeTask;
       throw this.fatal!;
@@ -248,11 +426,17 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     this.append(data, offset, remaining);
     this.tryResolve();
   }
-  private onClose(): void {
-    this.fail(ArkDbError.network('PostgreSQL socket closed by server'), true);
+  private onClose(tls: boolean): void {
+    this.fail(tls ?
+      ArkDbError.tls('PostgreSQL TLS socket closed by server') :
+      ArkDbError.network('PostgreSQL socket closed by server'), true);
   }
-  private onError(error: Object): void {
-    this.fail(ArkDbError.network('PostgreSQL socket error: ' + asMessage(error)));
+  private onError(error: Object, tls: boolean): void {
+    this.fail(tls ?
+      ArkDbError.tls(
+        'PostgreSQL TLS socket error: ' + asMessage(error)) :
+      ArkDbError.network(
+        'PostgreSQL socket error: ' + asMessage(error)));
   }
   private tryResolve(): void {
     const pending = this.pending;
@@ -324,9 +508,12 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     for (const reject of operations) reject(error);
     const current = this.active;
     this.active = null;
+    this.tcp = null;
+    this.tlsPrepared = false;
+    this.tlsActive = false;
     if (current !== null) this.closeTask = this.releaseSocket(current, alreadyClosed);
   }
-  private async releaseSocket(current: PostgresTcpSocket,
+  private async releaseSocket(current: PostgresStreamSocket,
     alreadyClosed: boolean): Promise<void> {
     let cleanupFailure: ArkDbError | null = null;
     try {
@@ -370,10 +557,145 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     if (this.fatal !== null) throw this.fatal;
   }
 }
+function clearNetworkKitListeners(
+  active: socket.TCPSocket | socket.TLSSocket): void {
+  let firstFailure: Object | null = null;
+  try {
+    active.off('message');
+  } catch (error) {
+    firstFailure = error as Object;
+  }
+  try {
+    active.off('close');
+  } catch (error) {
+    if (firstFailure === null) firstFailure = error as Object;
+  }
+  try {
+    active.off('error');
+  } catch (error) {
+    if (firstFailure === null) firstFailure = error as Object;
+  }
+  if (firstFailure !== null) throw new Error(asMessage(firstFailure));
+}
 function asMessage(error: Object): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
   const failure = error as BusinessError;
   if (failure !== null && failure !== undefined &&
     typeof failure.message === 'string' && failure.message.length > 0) return failure.message;
   return String(error);
+}
+export interface PostgresTlsFilePort {
+  read(path: string, maximumBytes: number, label: string): string;
+}
+export interface PostgresTlsIdentityVerifier {
+  verify(certificate: socket.X509CertRawData, host: string): Promise<void>;
+}
+class UnsupportedPostgresTlsIdentityVerifier
+implements PostgresTlsIdentityVerifier {
+  async verify(certificate: socket.X509CertRawData, host: string): Promise<void> {
+    throw ArkDbError.tls(
+      'PostgreSQL VERIFY_FULL identity verification is not available in this build',
+      'TLS_IDENTITY_VERIFIER_UNAVAILABLE');
+  }
+}
+export function createDefaultPostgresTlsIdentityVerifier(): PostgresTlsIdentityVerifier {
+  return new UnsupportedPostgresTlsIdentityVerifier();
+}
+class SystemPostgresTlsFilePort implements PostgresTlsFilePort {
+  read(path: string, maximumBytes: number, label: string): string {
+    try {
+      const size = fileIo.statSync(path).size;
+      if (!Number.isSafeInteger(size) || size < 1 || size > maximumBytes) {
+        throw new Error(label + ' file must be between 1 byte and 1 MiB');
+      }
+      return fileIo.readTextSync(path, {
+        offset: 0,
+        length: size,
+        encoding: 'utf-8'
+      });
+    } catch (error) {
+      if (error instanceof Error) throw error;
+      throw new Error(asMessage(error as Object));
+    }
+  }
+}
+export function buildPostgresTlsConnectOptions(host: string, port: number,
+  config: PostgresSslConfig, timeoutMs: number,
+  files: PostgresTlsFilePort = new SystemPostgresTlsFilePort()): socket.TLSConnectOptions {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
+    timeoutMs > 0xFFFFFFFF) {
+    throw ArkDbError.tls(
+      'PostgreSQL TLS timeout must be between 1 and 4294967295 milliseconds');
+  }
+  if (config.mode !== PostgresSslMode.DISABLED &&
+    config.mode !== PostgresSslMode.REQUIRED &&
+    config.mode !== PostgresSslMode.VERIFY_CA &&
+    config.mode !== PostgresSslMode.VERIFY_FULL) {
+    throw ArkDbError.tls('Unsupported PostgreSQL TLS mode: ' + config.mode);
+  }
+  if (config.mode === PostgresSslMode.DISABLED) {
+    throw ArkDbError.tls('PostgreSQL TLS is disabled');
+  }
+  const secureOptions: socket.TLSSecureOptions = {};
+  if (config.mode === PostgresSslMode.VERIFY_CA ||
+    config.mode === PostgresSslMode.VERIFY_FULL) {
+    const caPath = configuredPath(config.caCertPath);
+    if (caPath.length > 0) {
+      secureOptions.ca = readTlsText(files, caPath, 'CA certificate');
+    }
+  }
+  const certPath = configuredPath(config.clientCertPath);
+  const keyPath = configuredPath(config.clientKeyPath);
+  if ((certPath.length > 0) !== (keyPath.length > 0)) {
+    throw ArkDbError.tls(
+      'Client certificate and private key must be configured together');
+  }
+  if (certPath.length > 0) {
+    secureOptions.cert =
+      readTlsText(files, certPath, 'client certificate');
+    secureOptions.key =
+      readTlsText(files, keyPath, 'client private key');
+    secureOptions.isBidirectionalAuthentication = true;
+  }
+  const protocols = tlsProtocols(config.tlsVersions);
+  if (protocols.length > 0) secureOptions.protocols = protocols;
+  const cipherSuite = config.cipherSuites?.trim();
+  if (cipherSuite !== undefined && cipherSuite.length > 0) {
+    secureOptions.cipherSuite = cipherSuite;
+  }
+  return {
+    address: { address: host, port: port },
+    secureOptions: secureOptions,
+    skipRemoteValidation: config.mode === PostgresSslMode.REQUIRED,
+    timeout: timeoutMs
+  };
+}
+function configuredPath(path: string | undefined): string {
+  return path === undefined ? '' : path.trim();
+}
+function readTlsText(files: PostgresTlsFilePort, path: string,
+  label: string): string {
+  try {
+    return files.read(path, MAX_TLS_FILE_BYTES, label);
+  } catch (error) {
+    if (error instanceof ArkDbError) throw error;
+    throw ArkDbError.tls('Could not read ' + label + ' file: ' +
+      asMessage(error as Object));
+  }
+}
+
+function tlsProtocols(versions: string[] | undefined):
+Array<socket.Protocol> {
+  const protocols: Array<socket.Protocol> = [];
+  if (versions === undefined) return protocols;
+  for (const version of versions) {
+    if (version === 'TLSv1.2') {
+      protocols.push(socket.Protocol.TLSv12);
+    } else if (version === 'TLSv1.3') {
+      protocols.push(socket.Protocol.TLSv13);
+    } else {
+      throw ArkDbError.tls('Unsupported TLS version: ' + version);
+    }
+  }
+  return protocols;
 }

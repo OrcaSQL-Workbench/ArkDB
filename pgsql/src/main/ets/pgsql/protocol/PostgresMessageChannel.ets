@@ -206,6 +206,112 @@ export class PostgresEmptyQueryResponse extends PostgresEmptyBackendMessage {
   constructor() { super(0x49); }
 }
 
+export class PostgresRowDescriptionColumn {
+  readonly name: string;
+  readonly tableOid: number;
+  readonly columnAttributeNumber: number;
+  readonly typeOid: number;
+  readonly typeSize: number;
+  readonly typeModifier: number;
+  readonly formatCode: number;
+
+  constructor(name: string, tableOid: number, columnAttributeNumber: number,
+    typeOid: number, typeSize: number, typeModifier: number, formatCode: number) {
+    this.name = name;
+    this.tableOid = tableOid;
+    this.columnAttributeNumber = columnAttributeNumber;
+    this.typeOid = typeOid;
+    this.typeSize = typeSize;
+    this.typeModifier = typeModifier;
+    this.formatCode = formatCode;
+  }
+}
+
+export class PostgresRowDescription implements PostgresBackendMessage {
+  readonly type: number = 0x54;
+  readonly columns: PostgresRowDescriptionColumn[];
+
+  constructor(columns: PostgresRowDescriptionColumn[]) {
+    this.columns = [];
+    for (const column of columns) this.columns.push(column);
+  }
+}
+
+export class PostgresDataRow implements PostgresBackendMessage {
+  readonly type: number = 0x44;
+  readonly fields: Array<Uint8Array | null>;
+
+  constructor(fields: Array<Uint8Array | null>) {
+    this.fields = [];
+    for (const field of fields) {
+      this.fields.push(field === null ? null : copyBytes(field));
+    }
+  }
+}
+
+export class PostgresCommandComplete implements PostgresBackendMessage {
+  readonly type: number = 0x43;
+  readonly tag: string;
+
+  constructor(tag: string) { this.tag = tag; }
+}
+
+export class PostgresParameterDescription implements PostgresBackendMessage {
+  readonly type: number = 0x74;
+  readonly typeOids: number[];
+
+  constructor(typeOids: number[]) {
+    this.typeOids = [];
+    for (const typeOid of typeOids) this.typeOids.push(typeOid);
+  }
+}
+
+export class PostgresPortalSuspended extends PostgresEmptyBackendMessage {
+  constructor() { super(0x73); }
+}
+
+class PostgresCopyResponse implements PostgresBackendMessage {
+  readonly type: number;
+  readonly overallFormat: number;
+  readonly columnFormats: number[];
+
+  constructor(type: number, overallFormat: number, columnFormats: number[]) {
+    this.type = type;
+    this.overallFormat = overallFormat;
+    this.columnFormats = [];
+    for (const format of columnFormats) this.columnFormats.push(format);
+  }
+}
+
+export class PostgresCopyInResponse extends PostgresCopyResponse {
+  constructor(overallFormat: number, columnFormats: number[]) {
+    super(0x47, overallFormat, columnFormats);
+  }
+}
+
+export class PostgresCopyOutResponse extends PostgresCopyResponse {
+  constructor(overallFormat: number, columnFormats: number[]) {
+    super(0x48, overallFormat, columnFormats);
+  }
+}
+
+export class PostgresCopyBothResponse extends PostgresCopyResponse {
+  constructor(overallFormat: number, columnFormats: number[]) {
+    super(0x57, overallFormat, columnFormats);
+  }
+}
+
+export class PostgresCopyData implements PostgresBackendMessage {
+  readonly type: number = 0x64;
+  readonly data: Uint8Array;
+
+  constructor(data: Uint8Array) { this.data = copyBytes(data); }
+}
+
+export class PostgresCopyDone extends PostgresEmptyBackendMessage {
+  constructor() { super(0x63); }
+}
+
 export class PostgresNotificationResponse implements PostgresBackendMessage {
   readonly type: number = 0x41;
   readonly processId: number;
@@ -252,6 +358,20 @@ export class PostgresBackendParser {
       case 0x49:
         requireEmpty(message.payload, 'EmptyQueryResponse');
         return new PostgresEmptyQueryResponse();
+      case 0x54: return parseRowDescription(message.payload);
+      case 0x44: return parseDataRow(message.payload);
+      case 0x43: return parseCommandComplete(message.payload);
+      case 0x74: return parseParameterDescription(message.payload);
+      case 0x73:
+        requireEmpty(message.payload, 'PortalSuspended');
+        return new PostgresPortalSuspended();
+      case 0x47: return parseCopyResponse(message.payload, 0x47);
+      case 0x48: return parseCopyResponse(message.payload, 0x48);
+      case 0x57: return parseCopyResponse(message.payload, 0x57);
+      case 0x64: return parseCopyData(message.payload);
+      case 0x63:
+        requireEmpty(message.payload, 'CopyDone');
+        return new PostgresCopyDone();
       case 0x41: return parseNotification(message.payload);
       case 0x76: return parseNegotiation(message.payload);
       default:
@@ -500,6 +620,87 @@ function parseReadyForQuery(payload: Uint8Array): PostgresReadyForQuery {
   return new PostgresReadyForQuery(status);
 }
 
+function parseRowDescription(payload: Uint8Array): PostgresRowDescription {
+  const reader = new PostgresByteReader(payload);
+  const columnCount = reader.readUInt16();
+  requireCountFits(columnCount, reader.remaining, 19, 'RowDescription');
+  const columns: PostgresRowDescriptionColumn[] = [];
+  for (let index = 0; index < columnCount; index += 1) {
+    const name = reader.readCString();
+    const tableOid = reader.readUInt32();
+    const columnAttributeNumber = reader.readInt16();
+    const typeOid = reader.readUInt32();
+    const typeSize = reader.readInt16();
+    const typeModifier = reader.readInt32();
+    const formatCode = requireFormatCode(reader.readInt16(), 'RowDescription');
+    columns.push(new PostgresRowDescriptionColumn(name, tableOid, columnAttributeNumber,
+      typeOid, typeSize, typeModifier, formatCode));
+  }
+  requireReaderEmpty(reader, 'RowDescription');
+  return new PostgresRowDescription(columns);
+}
+
+function parseDataRow(payload: Uint8Array): PostgresDataRow {
+  const reader = new PostgresByteReader(payload);
+  const fieldCount = reader.readUInt16();
+  requireCountFits(fieldCount, reader.remaining, 4, 'DataRow');
+  const fields: Array<Uint8Array | null> = [];
+  for (let index = 0; index < fieldCount; index += 1) {
+    const length = reader.readInt32();
+    if (length === -1) {
+      fields.push(null);
+    } else {
+      if (length < 0) throw malformed('DataRow');
+      fields.push(reader.readBytes(length));
+    }
+  }
+  requireReaderEmpty(reader, 'DataRow');
+  return new PostgresDataRow(fields);
+}
+
+function parseCommandComplete(payload: Uint8Array): PostgresCommandComplete {
+  const reader = new PostgresByteReader(payload);
+  const tag = reader.readCString();
+  requireReaderEmpty(reader, 'CommandComplete');
+  return new PostgresCommandComplete(tag);
+}
+
+function parseParameterDescription(payload: Uint8Array): PostgresParameterDescription {
+  const reader = new PostgresByteReader(payload);
+  const typeCount = reader.readUInt16();
+  requireCountFits(typeCount, reader.remaining, 4, 'ParameterDescription');
+  const typeOids: number[] = [];
+  for (let index = 0; index < typeCount; index += 1) {
+    typeOids.push(reader.readUInt32());
+  }
+  requireReaderEmpty(reader, 'ParameterDescription');
+  return new PostgresParameterDescription(typeOids);
+}
+
+function parseCopyResponse(payload: Uint8Array, type: number): PostgresBackendMessage {
+  const reader = new PostgresByteReader(payload);
+  const overallFormat = requireFormatCode(reader.readInt8(), 'CopyResponse');
+  const columnCount = reader.readUInt16();
+  requireCountFits(columnCount, reader.remaining, 2, 'CopyResponse');
+  const columnFormats: number[] = [];
+  for (let index = 0; index < columnCount; index += 1) {
+    const columnFormat = requireFormatCode(reader.readInt16(), 'CopyResponse');
+    if (overallFormat === 0 && columnFormat !== 0) throw malformed('CopyResponse');
+    columnFormats.push(columnFormat);
+  }
+  requireReaderEmpty(reader, 'CopyResponse');
+  if (type === 0x47) return new PostgresCopyInResponse(overallFormat, columnFormats);
+  if (type === 0x48) return new PostgresCopyOutResponse(overallFormat, columnFormats);
+  if (type === 0x57) return new PostgresCopyBothResponse(overallFormat, columnFormats);
+  throw malformed('CopyResponse');
+}
+
+function parseCopyData(payload: Uint8Array): PostgresCopyData {
+  const reader = new PostgresByteReader(
+    payload, MAX_POSTGRES_MESSAGE_BYTES - POSTGRES_LENGTH_BYTES);
+  return new PostgresCopyData(reader.readBytes(reader.remaining));
+}
+
 function parseNotification(payload: Uint8Array): PostgresNotificationResponse {
   const reader = new PostgresByteReader(payload);
   const processId = reader.readInt32();
@@ -534,6 +735,16 @@ function requireEmpty(payload: Uint8Array, name: string): void {
 
 function requireReaderEmpty(reader: PostgresByteReader, name: string): void {
   if (reader.remaining !== 0) throw malformed(name);
+}
+
+function requireCountFits(count: number, remaining: number,
+  bytesPerElement: number, name: string): void {
+  if (count > Math.floor(remaining / bytesPerElement)) throw malformed(name);
+}
+
+function requireFormatCode(value: number, name: string): number {
+  if (value !== 0 && value !== 1) throw malformed(name);
+  return value;
 }
 
 function readRemaining(reader: PostgresByteReader): Uint8Array {

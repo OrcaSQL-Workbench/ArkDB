@@ -8,10 +8,15 @@ import {
   PostgresAuthenticationSaslFinal, PostgresAuthenticationSspi,
   PostgresAuthenticationUnsupported, PostgresBackendKeyData,
   PostgresBackendMessage, PostgresBindComplete, PostgresCloseComplete,
+  PostgresCommandComplete, PostgresCopyBothResponse, PostgresCopyData,
+  PostgresCopyDone, PostgresCopyInResponse, PostgresCopyOutResponse,
+  PostgresDataRow,
   PostgresEmptyQueryResponse, PostgresErrorResponse,
   PostgresNegotiateProtocolVersion, PostgresNoData,
   PostgresNoticeResponse, PostgresNotificationResponse,
-  PostgresParameterStatus, PostgresParseComplete,
+  PostgresParameterDescription, PostgresParameterStatus, PostgresParseComplete,
+  PostgresPortalSuspended, PostgresRowDescription,
+  PostgresRowDescriptionColumn,
   PostgresReadyForQuery, PostgresReadyStatus,
   PostgresBackendParser, PostgresByteTransport, PostgresMessageChannel
 } from '../../../main/ets/pgsql/protocol/PostgresMessageChannel';
@@ -244,6 +249,153 @@ export default function postgresBackendParserTest(): void {
       expect(negotiation.unsupportedOptions.length).assertEqual(2);
       expect(negotiation.unsupportedOptions[0]).assertEqual('_pq_.foo');
       expect(negotiation.unsupportedOptions[1]).assertEqual('_pq_.bar');
+    });
+
+    it('parsesRowDescriptionAndDataRowWithoutDecodingValues', 0, async () => {
+      const description = await parseFrame([
+        0x54, 0, 0, 0, 27, 0, 1, 105, 100, 0,
+        0x89, 0xab, 0xcd, 0xef, 0xff, 0xfe,
+        0xfe, 0xdc, 0xba, 0x98, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0, 1
+      ]) as PostgresRowDescription;
+      expect(description.columns.length).assertEqual(1);
+      expect(description.columns[0].name).assertEqual('id');
+      expect(description.columns[0].tableOid).assertEqual(2309737967);
+      expect(description.columns[0].columnAttributeNumber).assertEqual(-2);
+      expect(description.columns[0].typeOid).assertEqual(4275878552);
+      expect(description.columns[0].typeSize).assertEqual(-1);
+      expect(description.columns[0].typeModifier).assertEqual(-1);
+      expect(description.columns[0].formatCode).assertEqual(1);
+
+      const row = await parseFrame([
+        0x44, 0, 0, 0, 21, 0, 3,
+        0xff, 0xff, 0xff, 0xff,
+        0, 0, 0, 0,
+        0, 0, 0, 3, 0, 0xff, 1
+      ]) as PostgresDataRow;
+      expect(row.fields.length).assertEqual(3);
+      expect(row.fields[0] === null).assertTrue();
+      assertBytes(row.fields[1]!, []);
+      assertBytes(row.fields[2]!, [0, 0xff, 1]);
+    });
+
+    it('parsesCommandParameterAndPortalMessagesWithoutInterpretation', 0, async () => {
+      const command = await parseFrame([
+        0x43, 0, 0, 0, 13, 85, 80, 68, 65, 84, 69, 32, 51, 0
+      ]) as PostgresCommandComplete;
+      expect(command.tag).assertEqual('UPDATE 3');
+
+      const parameters = await parseFrame([
+        0x74, 0, 0, 0, 18, 0, 3,
+        0, 0, 0, 0, 0, 0, 0, 23, 0xff, 0xff, 0xff, 0xff
+      ]) as PostgresParameterDescription;
+      expect(parameters.typeOids.length).assertEqual(3);
+      expect(parameters.typeOids[0]).assertEqual(0);
+      expect(parameters.typeOids[1]).assertEqual(23);
+      expect(parameters.typeOids[2]).assertEqual(4294967295);
+      expect((await parseFrame([0x73, 0, 0, 0, 4])) instanceof
+        PostgresPortalSuspended).assertTrue();
+    });
+
+    it('parsesEveryCopyDataMessageAndPreservesWireFormats', 0, async () => {
+      const input = await parseFrame([
+        0x47, 0, 0, 0, 11, 0, 0, 2, 0, 0, 0, 0
+      ]) as PostgresCopyInResponse;
+      expect(input.overallFormat).assertEqual(0);
+      expect(input.columnFormats.length).assertEqual(2);
+      expect(input.columnFormats[0]).assertEqual(0);
+      expect(input.columnFormats[1]).assertEqual(0);
+
+      const output = await parseFrame([
+        0x48, 0, 0, 0, 7, 1, 0, 0
+      ]) as PostgresCopyOutResponse;
+      expect(output.overallFormat).assertEqual(1);
+      expect(output.columnFormats.length).assertEqual(0);
+
+      const both = await parseFrame([
+        0x57, 0, 0, 0, 9, 1, 0, 1, 0, 1
+      ]) as PostgresCopyBothResponse;
+      expect(both.overallFormat).assertEqual(1);
+      expect(both.columnFormats[0]).assertEqual(1);
+
+      const data = await parseFrame([
+        0x64, 0, 0, 0, 8, 0, 0xff, 1, 2
+      ]) as PostgresCopyData;
+      assertBytes(data.data, [0, 0xff, 1, 2]);
+      expect((await parseFrame([0x63, 0, 0, 0, 4])) instanceof
+        PostgresCopyDone).assertTrue();
+    });
+
+    it('rejectsMalformedDataQueryAndCopyMessages', 0, async () => {
+      for (const frame of [
+        [0x54, 0, 0, 0, 5, 0],
+        [0x54, 0, 0, 0, 6, 0xff, 0xff],
+        [0x54, 0, 0, 0, 7, 0, 1, 120],
+        [0x54, 0, 0, 0, 27, 0, 1, 105, 100, 0,
+          0x89, 0xab, 0xcd, 0xef, 0xff, 0xfe,
+          0xfe, 0xdc, 0xba, 0x98, 0xff, 0xff,
+          0xff, 0xff, 0xff, 0xff, 0, 2],
+        [0x54, 0, 0, 0, 7, 0, 0, 1],
+        [0x44, 0, 0, 0, 5, 0],
+        [0x44, 0, 0, 0, 6, 0xff, 0xff],
+        [0x44, 0, 0, 0, 10, 0, 1, 0xff, 0xff, 0xff, 0xfe],
+        [0x44, 0, 0, 0, 11, 0, 1, 0, 0, 0, 2, 1],
+        [0x44, 0, 0, 0, 7, 0, 0, 1],
+        [0x43, 0, 0, 0, 4],
+        [0x43, 0, 0, 0, 5, 120],
+        [0x43, 0, 0, 0, 7, 0xc0, 0xaf, 0],
+        [0x43, 0, 0, 0, 7, 120, 0, 1],
+        [0x74, 0, 0, 0, 5, 0],
+        [0x74, 0, 0, 0, 6, 0xff, 0xff],
+        [0x74, 0, 0, 0, 9, 0, 1, 0, 0, 0],
+        [0x74, 0, 0, 0, 7, 0, 0, 1],
+        [0x73, 0, 0, 0, 5, 0],
+        [0x63, 0, 0, 0, 5, 0],
+        [0x47, 0, 0, 0, 7, 2, 0, 0],
+        [0x48, 0, 0, 0, 6, 0, 0],
+        [0x57, 0, 0, 0, 7, 0, 0xff, 0xff],
+        [0x47, 0, 0, 0, 9, 0, 0, 1, 0, 2],
+        [0x47, 0, 0, 0, 9, 0, 0, 1, 0, 1],
+        [0x48, 0, 0, 0, 9, 0, 0, 0, 0, 0],
+        [0x42, 0, 0, 0, 4]
+      ]) {
+        await assertProtocolFrame(frame);
+      }
+    });
+
+    it('defensivelyCopiesRowColumnsAndRawDataBytes', 0, () => {
+      const columns: PostgresRowDescriptionColumn[] = [
+        new PostgresRowDescriptionColumn('id', 1, 2, 3, 4, 5, 0)
+      ];
+      const description = new PostgresRowDescription(columns);
+      columns[0] = new PostgresRowDescriptionColumn('changed', 0, 0, 0, 0, 0, 0);
+      expect(description.columns[0].name).assertEqual('id');
+
+      const field = new Uint8Array([1, 2]);
+      const fields: Array<Uint8Array | null> = [field];
+      const row = new PostgresDataRow(fields);
+      field[0] = 9;
+      fields[0] = null;
+      assertBytes(row.fields[0]!, [1, 2]);
+
+      const copyBytes = new Uint8Array([3, 4]);
+      const copy = new PostgresCopyData(copyBytes);
+      copyBytes[0] = 9;
+      assertBytes(copy.data, [3, 4]);
+    });
+
+    it('rejectsCopyDataAboveTheMaximumPayloadSize', 0, () => {
+      let failure: ArkDbError | null = null;
+      try {
+        PostgresBackendParser.parse({
+          type: 0x64,
+          payload: new Uint8Array(33554429)
+        });
+      } catch (error) {
+        failure = error as ArkDbError;
+      }
+      expect(failure instanceof ArkDbError).assertTrue();
+      expect(failure!.kind).assertEqual(ArkDbErrorKind.Protocol);
     });
 
     it('rejectsMalformedControlAsyncAndUnknownMessageFrames', 0, async () => {

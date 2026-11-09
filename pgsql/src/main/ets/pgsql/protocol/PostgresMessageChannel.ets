@@ -621,7 +621,7 @@ function parseReadyForQuery(payload: Uint8Array): PostgresReadyForQuery {
 }
 
 function parseRowDescription(payload: Uint8Array): PostgresRowDescription {
-  const reader = new PostgresByteReader(payload);
+  const reader = dataMessageReader(payload);
   const columnCount = reader.readUInt16();
   requireCountFits(columnCount, reader.remaining, 19, 'RowDescription');
   const columns: PostgresRowDescriptionColumn[] = [];
@@ -641,7 +641,7 @@ function parseRowDescription(payload: Uint8Array): PostgresRowDescription {
 }
 
 function parseDataRow(payload: Uint8Array): PostgresDataRow {
-  const reader = new PostgresByteReader(payload);
+  const reader = dataMessageReader(payload);
   const fieldCount = reader.readUInt16();
   requireCountFits(fieldCount, reader.remaining, 4, 'DataRow');
   const fields: Array<Uint8Array | null> = [];
@@ -659,14 +659,14 @@ function parseDataRow(payload: Uint8Array): PostgresDataRow {
 }
 
 function parseCommandComplete(payload: Uint8Array): PostgresCommandComplete {
-  const reader = new PostgresByteReader(payload);
+  const reader = dataMessageReader(payload);
   const tag = reader.readCString();
   requireReaderEmpty(reader, 'CommandComplete');
   return new PostgresCommandComplete(tag);
 }
 
 function parseParameterDescription(payload: Uint8Array): PostgresParameterDescription {
-  const reader = new PostgresByteReader(payload);
+  const reader = dataMessageReader(payload);
   const typeCount = reader.readUInt16();
   requireCountFits(typeCount, reader.remaining, 4, 'ParameterDescription');
   const typeOids: number[] = [];
@@ -678,7 +678,7 @@ function parseParameterDescription(payload: Uint8Array): PostgresParameterDescri
 }
 
 function parseCopyResponse(payload: Uint8Array, type: number): PostgresBackendMessage {
-  const reader = new PostgresByteReader(payload);
+  const reader = dataMessageReader(payload);
   const overallFormat = requireFormatCode(reader.readInt8(), 'CopyResponse');
   const columnCount = reader.readUInt16();
   requireCountFits(columnCount, reader.remaining, 2, 'CopyResponse');
@@ -696,9 +696,13 @@ function parseCopyResponse(payload: Uint8Array, type: number): PostgresBackendMe
 }
 
 function parseCopyData(payload: Uint8Array): PostgresCopyData {
-  const reader = new PostgresByteReader(
-    payload, MAX_POSTGRES_MESSAGE_BYTES - POSTGRES_LENGTH_BYTES);
+  const reader = dataMessageReader(payload);
   return new PostgresCopyData(reader.readBytes(reader.remaining));
+}
+
+function dataMessageReader(payload: Uint8Array): PostgresByteReader {
+  return new PostgresByteReader(
+    payload, MAX_POSTGRES_MESSAGE_BYTES - POSTGRES_LENGTH_BYTES);
 }
 
 function parseNotification(payload: Uint8Array): PostgresNotificationResponse {

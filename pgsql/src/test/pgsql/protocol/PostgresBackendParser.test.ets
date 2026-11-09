@@ -384,18 +384,23 @@ export default function postgresBackendParserTest(): void {
       assertBytes(copy.data, [3, 4]);
     });
 
-    it('rejectsCopyDataAboveTheMaximumPayloadSize', 0, () => {
-      let failure: ArkDbError | null = null;
-      try {
-        PostgresBackendParser.parse({
-          type: 0x64,
-          payload: new Uint8Array(33554429)
-        });
-      } catch (error) {
-        failure = error as ArkDbError;
+    it('rejectsOversizedDataMessagePayloadsBeforeDecoding', 0, () => {
+      const payload = new Uint8Array(33554429);
+      payload[1] = 1;
+      payload[2] = 1;
+      payload[3] = 0xff;
+      payload[4] = 0xff;
+      payload[5] = 0xf7;
+      for (const type of [0x54, 0x44, 0x43, 0x74, 0x47, 0x48, 0x57, 0x64]) {
+        let failure: ArkDbError | null = null;
+        try {
+          PostgresBackendParser.parse({ type: type, payload: payload });
+        } catch (error) {
+          failure = error as ArkDbError;
+        }
+        expect(failure instanceof ArkDbError).assertTrue();
+        expect(failure!.kind).assertEqual(ArkDbErrorKind.Protocol);
       }
-      expect(failure instanceof ArkDbError).assertTrue();
-      expect(failure!.kind).assertEqual(ArkDbErrorKind.Protocol);
     });
 
     it('rejectsMalformedControlAsyncAndUnknownMessageFrames', 0, async () => {

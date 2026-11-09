@@ -233,6 +233,8 @@ export class PostgresNegotiateProtocolVersion implements PostgresBackendMessage 
 const MAX_NEGOTIATION_OPTIONS: number = 65535;
 const MAX_SASL_MECHANISMS: number = 64;
 const MAX_SASL_MECHANISM_LENGTH: number = 20;
+const MAX_SASL_MECHANISM_LIST_BYTES: number =
+  MAX_SASL_MECHANISMS * (MAX_SASL_MECHANISM_LENGTH + 1) + 1;
 
 export class PostgresBackendParser {
   static parse(message: PostgresMessage): PostgresBackendMessage {
@@ -398,6 +400,9 @@ function parseAuthentication(payload: Uint8Array): PostgresBackendMessage {
 }
 
 function parseAuthenticationSasl(reader: PostgresByteReader): PostgresAuthenticationSasl {
+  if (reader.remaining > MAX_SASL_MECHANISM_LIST_BYTES) {
+    throw malformed('AuthenticationSASL');
+  }
   const mechanisms: string[] = [];
   while (reader.remaining > 0) {
     const mechanism = reader.readCString();

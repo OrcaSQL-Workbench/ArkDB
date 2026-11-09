@@ -1,17 +1,16 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import {
-  PostgresAuthPlatform, strictUtf8Decode, strictUtf8Encode
+  PostgresAuthPlatform, PostgresScramClient, PostgresScramClientState,
+  PostgresScramPort, strictUtf8Decode, strictUtf8Encode
 } from '../../../main/ets/pgsql/auth/PostgresAuthCrypto';
 import {
-  DefaultPostgresScramPort, PostgresScramClient, PostgresScramClientState,
-  PostgresScramPort
-} from '../../../main/ets/pgsql/auth/PostgresScramClient';
+  DefaultPostgresScramPort
+} from '../../../main/ets/pgsql/auth/PostgresSaslPrep';
 import {
   PostgresAuthenticationSasl, PostgresAuthenticationSaslContinue,
   PostgresAuthenticationSaslFinal
 } from '../../../main/ets/pgsql/protocol/PostgresMessageChannel';
-
 const RFC_NONCE: string = 'rOprNGfwEbeRWgbNEkqO';
 const RFC_SERVER_NONCE: string =
   'rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0';
@@ -22,7 +21,6 @@ const RFC_CLIENT_FINAL: string =
   ',p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=';
 const RFC_SERVER_FINAL: string =
   'v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=';
-
 export default function postgresScramClientTest(): void {
   describe('PostgresScramClient', () => {
     it('matchesRfc7677AndSerializesPostgresSaslFrames', 0, async () => {
@@ -39,7 +37,6 @@ export default function postgresScramClientTest(): void {
         strictUtf8Encode(RFC_SERVER_FINAL)));
       expect(client.state).assertEqual(PostgresScramClientState.Finalized);
     });
-
     it('generatesEighteenRandomBytesAsCanonicalBase64Nonce', 0, async () => {
       const platform = new NoncePlatform();
       const client = new PostgresScramClient(
@@ -212,7 +209,6 @@ export default function postgresScramClientTest(): void {
     });
   });
 }
-
 class RfcScramPort implements PostgresScramPort {
   async createNonce(): Promise<string> { return RFC_NONCE; }
   preparePassword(value: string): Uint8Array {
@@ -250,7 +246,6 @@ class RfcScramPort implements PostgresScramPort {
     return hexBytes('eabae24d1062db75a9451ff0b6ea7e98c8546549ff741e672d3251b2397de46e');
   }
 }
-
 class NoncePlatform implements PostgresAuthPlatform {
   requestedRandomBytes: number = 0;
   async randomBytes(length: number): Promise<Uint8Array> {
@@ -267,7 +262,6 @@ class NoncePlatform implements PostgresAuthPlatform {
     return value;
   }
 }
-
 class ZeroScramPort implements PostgresScramPort {
   private readonly nonce: string;
   private hmacCalls: number = 0;
@@ -290,7 +284,6 @@ class ZeroScramPort implements PostgresScramPort {
       this.serverSignature : new Uint8Array(32);
   }
 }
-
 class DeferredScramPort extends ZeroScramPort {
   private readonly startGate: Gate = new Gate();
   private readonly continueGate: Gate = new Gate();
@@ -315,7 +308,6 @@ class Gate {
     this.waiters = [];
   }
 }
-
 async function startedClient(port: PostgresScramPort): Promise<PostgresScramClient> {
   const client = new PostgresScramClient('user', 'secret', port);
   await client.start(new PostgresAuthenticationSasl(['SCRAM-SHA-256']));
@@ -328,7 +320,6 @@ async function continuedClient(port: PostgresScramPort): Promise<PostgresScramCl
   return client;
 }
 function validServerFirst(): string { return 'r=clientnonceserver,s=c2FsdA==,i=4096'; }
-
 function assertInitialFrame(frame: Uint8Array, mechanism: string, response: string): void {
   expect(frame[0]).assertEqual(0x70);
   let end = 5;

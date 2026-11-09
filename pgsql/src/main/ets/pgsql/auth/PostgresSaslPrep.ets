@@ -1,6 +1,8 @@
 import { ArkDbError } from '@arkdb/core';
 import {
-  HarmonyPostgresAuthPlatform, PostgresAuthPlatform, postgresAuthByteLimit, strictUtf8Encode
+  HarmonyPostgresAuthPlatform, PostgresAuthPlatform, PostgresScramPort, base64Encode,
+  hmacSha256, pbkdf2HmacSha256, postgresAuthByteLimit, secureRandomBytes, sha256,
+  strictUtf8Encode
 } from './PostgresAuthCrypto';
 export class PostgresPreparedPassword {
   readonly value: string;
@@ -62,6 +64,27 @@ export function preparePostgresPassword(value: string,
     }
   }
   return new PostgresPreparedPassword(normalized, true);
+}
+export class DefaultPostgresScramPort implements PostgresScramPort {
+  private readonly platform: PostgresAuthPlatform;
+
+  constructor(platform: PostgresAuthPlatform = new HarmonyPostgresAuthPlatform()) {
+    this.platform = platform;
+  }
+  async createNonce(): Promise<string> {
+    return base64Encode(await secureRandomBytes(18, this.platform));
+  }
+  preparePassword(value: string): Uint8Array {
+    return strictUtf8Encode(preparePostgresPassword(value, this.platform).value);
+  }
+  async deriveSaltedPassword(password: Uint8Array, salt: Uint8Array,
+    iterations: number): Promise<Uint8Array> {
+    return pbkdf2HmacSha256(password, salt, iterations, 32, this.platform);
+  }
+  async sha256(data: Uint8Array): Promise<Uint8Array> { return sha256(data, this.platform); }
+  async hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+    return hmacSha256(key, data, this.platform);
+  }
 }
 function fallback(value: string): PostgresPreparedPassword {
   return new PostgresPreparedPassword(value, false);

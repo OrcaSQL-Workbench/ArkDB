@@ -254,6 +254,7 @@ class NoncePlatform implements PostgresAuthPlatform {
     for (let index = 0; index < result.length; index += 1) result[index] = index;
     return result;
   }
+  async md5(_data: Uint8Array): Promise<Uint8Array> { throw new Error('not used'); }
   async sha256(_data: Uint8Array): Promise<Uint8Array> { throw new Error('not used'); }
   async hmacSha256(_key: Uint8Array, _data: Uint8Array): Promise<Uint8Array> {
     throw new Error('not used');

@@ -7,24 +7,47 @@ import {
   PostgresAuthenticationSaslFinal
 } from '../protocol/PostgresMessageChannel';
 import { PostgresFrontendSerializer } from '../protocol/PostgresByteCodec';
+import { PostgresSslMode } from '../model/PostgresConnectionConfig';
 
 const MAX_INPUT_BYTES: number = 1048576;
 const MAX_RANDOM_BYTES: number = 1024;
 const MAX_PBKDF2_ITERATIONS: number = 1000000;
 const MAX_DERIVED_KEY_BYTES: number = 1024;
+const MAX_PASSWORD_BYTES: number = 4096;
+const MAX_MD5_USERNAME_BYTES: number = 1024;
+const MD5_BYTES: number = 16;
+const POSTGRES_MD5_SALT_BYTES: number = 4;
+const POSTGRES_MD5_RESPONSE_BYTES: number = 36;
 const SHA256_BYTES: number = 32;
 const HMAC_BLOCK_BYTES: number = 64;
 
 export interface PostgresAuthPlatform {
   randomBytes(length: number): Promise<Uint8Array>;
+  /** @deprecated Used only for legacy PostgreSQL MD5 password authentication. */
+  md5(data: Uint8Array): Promise<Uint8Array>;
   sha256(data: Uint8Array): Promise<Uint8Array>;
   hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array>;
   normalizeNfkc(value: string): string;
 }
 
+export interface PostgresUtf8Encoder {
+  encode(value: string): buffer.Buffer;
+}
+
+class HarmonyPostgresUtf8Encoder implements PostgresUtf8Encoder {
+  encode(value: string): buffer.Buffer {
+    return buffer.from(value, 'utf8');
+  }
+}
+
 export class HarmonyPostgresAuthPlatform implements PostgresAuthPlatform {
   async randomBytes(length: number): Promise<Uint8Array> {
     return cryptoFramework.createRandom().generateRandomSync(length).data;
+  }
+  async md5(data: Uint8Array): Promise<Uint8Array> {
+    const digest = cryptoFramework.createMd('MD5');
+    await digest.update({ data: data });
+    return (await digest.digest()).data;
   }
   async sha256(data: Uint8Array): Promise<Uint8Array> {
     const digest = cryptoFramework.createMd('SHA256');
@@ -45,6 +68,7 @@ export class HarmonyPostgresAuthPlatform implements PostgresAuthPlatform {
 }
 
 const SYSTEM_PLATFORM: PostgresAuthPlatform = new HarmonyPostgresAuthPlatform();
+const SYSTEM_UTF8_ENCODER: PostgresUtf8Encoder = new HarmonyPostgresUtf8Encoder();
 export async function secureRandomBytes(length: number,
   platform: PostgresAuthPlatform = SYSTEM_PLATFORM): Promise<Uint8Array> {
   requireIntegerRange(length, 1, MAX_RANDOM_BYTES, 'PostgreSQL random byte length');
@@ -66,6 +90,81 @@ export async function sha256(data: Uint8Array,
     throw ArkDbError.auth('PostgreSQL SHA-256 is unavailable.');
   }
   return requirePlatformBytes(result, SHA256_BYTES, 'PostgreSQL SHA-256');
+}
+/**
+ * Builds the NUL-terminated password payload for legacy PostgreSQL MD5 authentication.
+ *
+ * @deprecated Retained for compatibility with legacy servers. Prefer SCRAM-SHA-256.
+ */
+export async function buildPostgresMd5PasswordResponse(password: string,
+  username: string, salt: Uint8Array,
+  platform: PostgresAuthPlatform = SYSTEM_PLATFORM): Promise<Uint8Array> {
+  if (salt.length !== POSTGRES_MD5_SALT_BYTES) {
+    throw ArkDbError.validation('PostgreSQL MD5 authentication salt must contain exactly 4 bytes.');
+  }
+  let passwordBytes = new Uint8Array(0);
+  let usernameBytes = new Uint8Array(0);
+  let saltSnapshot = new Uint8Array(0);
+  let firstInput = new Uint8Array(0);
+  let innerDigest = new Uint8Array(0);
+  let innerHex = new Uint8Array(0);
+  let secondInput = new Uint8Array(0);
+  let outerDigest = new Uint8Array(0);
+  let outerHex = new Uint8Array(0);
+  try {
+    passwordBytes = encodeBoundedAuthText(password, MAX_PASSWORD_BYTES,
+      true, 'PostgreSQL MD5 password');
+    usernameBytes = encodeBoundedAuthText(username, MAX_MD5_USERNAME_BYTES,
+      false, 'PostgreSQL MD5 username');
+    saltSnapshot = copyBytes(salt);
+    firstInput = new Uint8Array(passwordBytes.length + usernameBytes.length);
+    firstInput.set(passwordBytes);
+    firstInput.set(usernameBytes, passwordBytes.length);
+    innerDigest = await md5Digest(firstInput, platform);
+    innerHex = lowercaseHex(innerDigest);
+    secondInput = new Uint8Array(innerHex.length + POSTGRES_MD5_SALT_BYTES);
+    secondInput.set(innerHex);
+    secondInput.set(saltSnapshot, innerHex.length);
+    outerDigest = await md5Digest(secondInput, platform);
+    outerHex = lowercaseHex(outerDigest);
+    const response = new Uint8Array(POSTGRES_MD5_RESPONSE_BYTES);
+    response[0] = 0x6d;
+    response[1] = 0x64;
+    response[2] = 0x35;
+    response.set(outerHex, 3);
+    return response;
+  } finally {
+    clearAuthBytes([
+      passwordBytes, usernameBytes, saltSnapshot, firstInput, innerDigest,
+      innerHex, secondInput, outerDigest, outerHex
+    ]);
+  }
+}
+export function buildPostgresCleartextPasswordResponse(password: string,
+  allowCleartextPassword: boolean, tlsActive: boolean,
+  effectiveSslMode: PostgresSslMode): Uint8Array {
+  if (!allowCleartextPassword) {
+    throw ArkDbError.unsupported(
+      'PostgreSQL cleartext password authentication is not explicitly enabled.');
+  }
+  if (!tlsActive) {
+    throw ArkDbError.auth(
+      'PostgreSQL cleartext password authentication requires active TLS.');
+  }
+  if (effectiveSslMode !== PostgresSslMode.VERIFY_FULL) {
+    throw ArkDbError.unsupported(
+      'PostgreSQL cleartext password authentication requires VERIFY_FULL TLS.');
+  }
+  let passwordBytes = new Uint8Array(0);
+  try {
+    passwordBytes = encodeBoundedAuthText(password, MAX_PASSWORD_BYTES,
+      true, 'PostgreSQL cleartext password');
+    const response = new Uint8Array(passwordBytes.length + 1);
+    response.set(passwordBytes);
+    return response;
+  } finally {
+    passwordBytes.fill(0);
+  }
 }
 export async function hmacSha256(key: Uint8Array, data: Uint8Array,
   platform: PostgresAuthPlatform = SYSTEM_PLATFORM): Promise<Uint8Array> {
@@ -169,22 +268,26 @@ export function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean 
   }
   return difference === 0;
 }
-export function strictUtf8Encode(value: string): Uint8Array {
+export function strictUtf8Encode(value: string,
+  encoder: PostgresUtf8Encoder = SYSTEM_UTF8_ENCODER): Uint8Array {
   const expectedLength = utf8Length(value);
   if (expectedLength < 0 || expectedLength > MAX_INPUT_BYTES) {
     throw ArkDbError.validation('PostgreSQL text is malformed or exceeds the UTF-8 byte limit.');
   }
+  let encoded: buffer.Buffer | null = null;
   try {
-    const encoded = buffer.from(value, 'utf8');
-    const result = new Uint8Array(encoded.length);
-    encoded.copy(result);
-    if (result.length !== expectedLength) {
+    encoded = encoder.encode(value);
+    if (encoded.length !== expectedLength) {
       throw ArkDbError.validation('PostgreSQL UTF-8 encoder returned an invalid length.');
     }
+    const result = new Uint8Array(encoded.length);
+    encoded.copy(result);
     return result;
   } catch (error) {
     if (error instanceof ArkDbError) throw error;
     throw ArkDbError.validation('PostgreSQL UTF-8 encoding failed.');
+  } finally {
+    if (encoded !== null) encoded.fill(0);
   }
 }
 export function strictUtf8Decode(value: Uint8Array): string {
@@ -203,6 +306,23 @@ export function strictUtf8Decode(value: Uint8Array): string {
 export function postgresAuthByteLimit(): number {
   return MAX_INPUT_BYTES;
 }
+async function md5Digest(data: Uint8Array,
+  platform: PostgresAuthPlatform): Promise<Uint8Array> {
+  requireBytes(data, MAX_INPUT_BYTES, 'PostgreSQL MD5 input');
+  const input = copyBytes(data);
+  let result: Uint8Array | null = null;
+  try {
+    try {
+      result = await platform.md5(input);
+    } catch (_error) {
+      throw ArkDbError.auth('PostgreSQL MD5 is unavailable.');
+    }
+    return requirePlatformBytes(result, MD5_BYTES, 'PostgreSQL MD5');
+  } finally {
+    input.fill(0);
+    if (result instanceof Uint8Array) result.fill(0);
+  }
+}
 async function invokeHmac(key: Uint8Array, data: Uint8Array,
   platform: PostgresAuthPlatform): Promise<Uint8Array> {
   let result: Uint8Array;
@@ -220,9 +340,9 @@ async function hmacKeyBlock(key: Uint8Array,
   block.set(source);
   return block;
 }
-function requirePlatformBytes(value: Uint8Array, expectedLength: number,
+function requirePlatformBytes(value: Uint8Array | null, expectedLength: number,
   label: string): Uint8Array {
-  if (value.length !== expectedLength) {
+  if (!(value instanceof Uint8Array) || value.length !== expectedLength) {
     throw ArkDbError.auth(label + ' returned an invalid result.');
   }
   return copyBytes(value);
@@ -242,6 +362,36 @@ function copyBytes(value: Uint8Array): Uint8Array {
   const result = new Uint8Array(value.length);
   result.set(value);
   return result;
+}
+function encodeBoundedAuthText(value: string, maximumBytes: number,
+  allowEmpty: boolean, label: string): Uint8Array {
+  const length = utf8Length(value);
+  if ((!allowEmpty && length === 0) || length < 0 || length > maximumBytes ||
+    containsNul(value)) {
+    throw ArkDbError.validation(
+      label + ' is empty, malformed, contains NUL, or exceeds its UTF-8 byte limit.');
+  }
+  return strictUtf8Encode(value);
+}
+function containsNul(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === 0) return true;
+  }
+  return false;
+}
+function lowercaseHex(value: Uint8Array): Uint8Array {
+  const output = new Uint8Array(value.length * 2);
+  for (let index = 0; index < value.length; index += 1) {
+    output[index * 2] = lowercaseHexCode(value[index] >>> 4);
+    output[index * 2 + 1] = lowercaseHexCode(value[index] & 0x0f);
+  }
+  return output;
+}
+function lowercaseHexCode(value: number): number {
+  return value < 10 ? 0x30 + value : 0x61 + value - 10;
+}
+function clearAuthBytes(values: Uint8Array[]): void {
+  for (const value of values) value.fill(0);
 }
 function utf8Length(value: string): number {
   let length = 0;

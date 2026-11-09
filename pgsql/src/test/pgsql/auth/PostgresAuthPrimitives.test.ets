@@ -1,10 +1,15 @@
+import { buffer } from '@kit.ArkTS';
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import {
-  PostgresAuthPlatform, base64Decode, base64Encode, constantTimeEqual,
-  hmacSha256, pbkdf2HmacSha256, secureRandomBytes, sha256, strictUtf8Decode,
-  strictUtf8Encode, xorBytes
+  PostgresAuthPlatform, PostgresUtf8Encoder, base64Decode, base64Encode,
+  buildPostgresCleartextPasswordResponse, buildPostgresMd5PasswordResponse,
+  constantTimeEqual, hmacSha256, pbkdf2HmacSha256, secureRandomBytes, sha256,
+  strictUtf8Decode, strictUtf8Encode, xorBytes
 } from '../../../main/ets/pgsql/auth/PostgresAuthCrypto';
+import {
+  PostgresSslMode
+} from '../../../main/ets/pgsql/model/PostgresConnectionConfig';
 import {
   PostgresPreparedPassword, preparePostgresPassword
 } from '../../../main/ets/pgsql/auth/PostgresSaslPrep';
@@ -56,6 +61,244 @@ export default function postgresAuthPrimitivesTest(): void {
       await assertAsyncFailure((): Promise<Uint8Array> =>
         secureRandomBytes(4, platform), ArkDbErrorKind.Auth);
     });
+    it('buildsLegacyMd5PayloadsFromIndependentTwoStageVectors', 0, async () => {
+      await assertMd5Vector(
+        'password', 'user', '12345678',
+        '70617373776f726475736572',
+        '4d45974e13472b5a0be3533de4666414',
+        '346434353937346531333437326235613062653335333364653436363634313412345678',
+        'd6f407104ca5ba8553d598fed7df90e0',
+        '6d6435643666343037313034636135626138353533643539386665643764663930653000');
+      await assertMd5Vector(
+        'PASSWORD', 'USER', '12345678',
+        '50415353574f524455534552',
+        '4765353553d74c40fcd7ca5f55ad1e15',
+        '343736353335333535336437346334306663643763613566353561643165313512345678',
+        'a6934f52c737c39d4575ef2ab3e0935d',
+        '6d6435613639333466353263373337633339643435373565663261623365303933356400');
+      await assertMd5Vector(
+        'päss🔒', 'Üser', '007f80ff',
+        '70c3a47373f09f9492c39c736572',
+        'c227ed29babcc949a681c0c9f183f2c7',
+        '6332323765643239626162636339343961363831633063396631383366326337007f80ff',
+        'e28f3473c9a9d4c3cf066e0834f98c40',
+        '6d6435653238663334373363396139643463336366303636653038333466393863343000');
+    });
+    it('snapshotsMd5SaltAndClearsDigestWorkingBytes', 0, async () => {
+      const salt = hexBytes('12345678');
+      const platform = new ReferencePlatform();
+      platform.queueMd5('70617373776f726475736572',
+        '4d45974e13472b5a0be3533de4666414');
+      platform.queueMd5(
+        '346434353937346531333437326235613062653335333364653436363634313412345678',
+        'd6f407104ca5ba8553d598fed7df90e0');
+      platform.afterFirstMd5 = (): void => { salt.fill(0); };
+      const response: Uint8Array = await buildPostgresMd5PasswordResponse(
+        'password', 'user', salt, platform);
+      assertHex(response,
+        '6d6435643666343037313034636135626138353533643539386665643764663930653000');
+      assertAllCleared(platform.md5Inputs);
+      assertAllCleared(platform.md5Outputs);
+    });
+    it('rejectsMalformedOrOversizedMd5InputsBeforeDigestDispatch', 0, async () => {
+      const platform = new ReferencePlatform();
+      platform.failCrypto = true;
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('secret', 'user',
+          new Uint8Array(3), platform), ArkDbErrorKind.Validation);
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('secret', 'user',
+          new Uint8Array(5), platform), ArkDbErrorKind.Validation);
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('sec\u0000ret', 'user',
+          new Uint8Array(4), platform), ArkDbErrorKind.Validation);
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('secret', 'us\u0000er',
+          new Uint8Array(4), platform), ArkDbErrorKind.Validation);
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse(String.fromCharCode(0xd800), 'user',
+          new Uint8Array(4), platform), ArkDbErrorKind.Validation);
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('secret', String.fromCharCode(0xdc00),
+          new Uint8Array(4), platform), ArkDbErrorKind.Validation);
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('a'.repeat(4097), 'user',
+          new Uint8Array(4), platform), ArkDbErrorKind.Validation);
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('secret', 'u'.repeat(1025),
+          new Uint8Array(4), platform), ArkDbErrorKind.Validation);
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('secret', '',
+          new Uint8Array(4), platform), ArkDbErrorKind.Validation);
+      expect(platform.md5Calls).assertEqual(0);
+    });
+    it('acceptsExactMd5TextBoundsAndRejectsBadDigestResults', 0, async () => {
+      const maximum = new ReferencePlatform();
+      maximum.md5Result = new Uint8Array(16);
+      const response: Uint8Array = await buildPostgresMd5PasswordResponse(
+        'p'.repeat(4096), 'u'.repeat(1024), new Uint8Array(4), maximum);
+      expect(response.length).assertEqual(36);
+      expect(response[35]).assertEqual(0);
+      expect(maximum.md5Calls).assertEqual(2);
+
+      const empty = new ReferencePlatform();
+      empty.queueMd5('70617373776f726475736572', '');
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('password', 'user',
+          hexBytes('12345678'), empty), ArkDbErrorKind.Auth);
+      const short = new ReferencePlatform();
+      short.queueMd5('70617373776f726475736572',
+        '0102030405060708090a0b0c0d0e0f');
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('password', 'user',
+          hexBytes('12345678'), short), ArkDbErrorKind.Auth);
+      assertCleared(short.md5Inputs[0]);
+      assertCleared(short.md5Outputs[0]);
+      const badOuter = new ReferencePlatform();
+      badOuter.queueMd5('70617373776f726475736572',
+        '4d45974e13472b5a0be3533de4666414');
+      badOuter.queueMd5(
+        '346434353937346531333437326235613062653335333364653436363634313412345678',
+        '0102030405060708090a0b0c0d0e0f');
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('password', 'user',
+          hexBytes('12345678'), badOuter), ArkDbErrorKind.Auth);
+      assertAllCleared(badOuter.md5Inputs);
+      assertAllCleared(badOuter.md5Outputs);
+      const emptyOuter = new ReferencePlatform();
+      emptyOuter.queueMd5('70617373776f726475736572',
+        '4d45974e13472b5a0be3533de4666414');
+      emptyOuter.queueMd5(
+        '346434353937346531333437326235613062653335333364653436363634313412345678',
+        '');
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('password', 'user',
+          hexBytes('12345678'), emptyOuter), ArkDbErrorKind.Auth);
+      assertAllCleared(emptyOuter.md5Inputs);
+      assertAllCleared(emptyOuter.md5Outputs);
+      for (const failAfterFirst of [false, true]) {
+        const unavailable = new ReferencePlatform();
+        if (failAfterFirst) {
+          unavailable.queueMd5('70617373776f726475736572',
+            '4d45974e13472b5a0be3533de4666414');
+          unavailable.afterFirstMd5 = (): void => { unavailable.failCrypto = true; };
+        } else unavailable.failCrypto = true;
+        await assertAsyncFailure((): Promise<Uint8Array> =>
+          buildPostgresMd5PasswordResponse('password', 'user',
+            hexBytes('12345678'), unavailable), ArkDbErrorKind.Auth);
+        assertAllCleared(unavailable.md5Inputs);
+        assertAllCleared(unavailable.md5Outputs);
+      }
+      const missingFirst = new ReferencePlatform();
+      missingFirst.missingMd5Call = 1;
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('password', 'user',
+          hexBytes('12345678'), missingFirst), ArkDbErrorKind.Auth);
+      assertCleared(missingFirst.md5Inputs[0]);
+      const missingSecond = new ReferencePlatform();
+      missingSecond.queueMd5('70617373776f726475736572',
+        '4d45974e13472b5a0be3533de4666414');
+      missingSecond.missingMd5Call = 2;
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse('password', 'user',
+          hexBytes('12345678'), missingSecond), ArkDbErrorKind.Auth);
+      assertAllCleared(missingSecond.md5Inputs);
+      assertAllCleared(missingSecond.md5Outputs);
+    });
+    it('enforcesMd5TextBoundsInUtf8Bytes', 0, async () => {
+      const exactPassword = new ReferencePlatform();
+      exactPassword.md5Result = new Uint8Array(16);
+      const passwordResponse: Uint8Array = await buildPostgresMd5PasswordResponse(
+        '€'.repeat(1365) + 'a', 'user', new Uint8Array(4), exactPassword);
+      expect(passwordResponse.length).assertEqual(36);
+      expect(exactPassword.md5Calls).assertEqual(2);
+      const longPassword = new ReferencePlatform();
+      longPassword.failCrypto = true;
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse(
+          '€'.repeat(1365) + 'ab', 'user', new Uint8Array(4), longPassword),
+      ArkDbErrorKind.Validation);
+      expect(longPassword.md5Calls).assertEqual(0);
+
+      const exactUsername = new ReferencePlatform();
+      exactUsername.md5Result = new Uint8Array(16);
+      const usernameResponse: Uint8Array = await buildPostgresMd5PasswordResponse(
+        'secret', '€'.repeat(341) + 'a', new Uint8Array(4), exactUsername);
+      expect(usernameResponse.length).assertEqual(36);
+      expect(exactUsername.md5Calls).assertEqual(2);
+      const longUsername = new ReferencePlatform();
+      longUsername.failCrypto = true;
+      await assertAsyncFailure((): Promise<Uint8Array> =>
+        buildPostgresMd5PasswordResponse(
+          'secret', '€'.repeat(341) + 'ab', new Uint8Array(4), longUsername),
+      ArkDbErrorKind.Validation);
+      expect(longUsername.md5Calls).assertEqual(0);
+    });
+    it('permitsCleartextOnlyForExplicitActiveVerifyFullTls', 0, () => {
+      const modes: PostgresSslMode[] = [
+        PostgresSslMode.DISABLED, PostgresSslMode.REQUIRED,
+        PostgresSslMode.VERIFY_CA, PostgresSslMode.VERIFY_FULL
+      ];
+      for (const mode of modes) {
+        assertSyncFailure((): void => {
+          buildPostgresCleartextPasswordResponse('secret', false, false, mode);
+        }, ArkDbErrorKind.Unsupported);
+        assertSyncFailure((): void => {
+          buildPostgresCleartextPasswordResponse('secret', false, true, mode);
+        }, ArkDbErrorKind.Unsupported);
+        assertSyncFailure((): void => {
+          buildPostgresCleartextPasswordResponse('secret', true, false, mode);
+        }, ArkDbErrorKind.Auth);
+        if (mode !== PostgresSslMode.VERIFY_FULL) {
+          assertSyncFailure((): void => {
+            buildPostgresCleartextPasswordResponse('secret', true, true, mode);
+          }, ArkDbErrorKind.Unsupported);
+        }
+      }
+      const response: Uint8Array = buildPostgresCleartextPasswordResponse(
+        'secret', true, true, PostgresSslMode.VERIFY_FULL);
+      assertHex(response, '73656372657400');
+    });
+    it('returnsIndependentBoundedCleartextPasswordSnapshots', 0, () => {
+      const first: Uint8Array = buildPostgresCleartextPasswordResponse(
+        'päss🔒', true, true, PostgresSslMode.VERIFY_FULL);
+      const second: Uint8Array = buildPostgresCleartextPasswordResponse(
+        'päss🔒', true, true, PostgresSslMode.VERIFY_FULL);
+      assertHex(first, '70c3a47373f09f949200');
+      assertHex(second, '70c3a47373f09f949200');
+      first.fill(0);
+      assertHex(second, '70c3a47373f09f949200');
+      assertHex(buildPostgresCleartextPasswordResponse(
+        '', true, true, PostgresSslMode.VERIFY_FULL), '00');
+      const maximum: Uint8Array = buildPostgresCleartextPasswordResponse(
+        'p'.repeat(4096), true, true, PostgresSslMode.VERIFY_FULL);
+      expect(maximum.length).assertEqual(4097);
+      expect(maximum[4096]).assertEqual(0);
+      const multibyteMaximum: Uint8Array = buildPostgresCleartextPasswordResponse(
+        '€'.repeat(1365) + 'a', true, true, PostgresSslMode.VERIFY_FULL);
+      expect(multibyteMaximum.length).assertEqual(4097);
+      expect(multibyteMaximum[4096]).assertEqual(0);
+      assertSyncFailure((): void => {
+        buildPostgresCleartextPasswordResponse(
+          'p'.repeat(4097), true, true, PostgresSslMode.VERIFY_FULL);
+      }, ArkDbErrorKind.Validation);
+      assertSyncFailure((): void => {
+        buildPostgresCleartextPasswordResponse(
+          '€'.repeat(1365) + 'ab', true, true, PostgresSslMode.VERIFY_FULL);
+      }, ArkDbErrorKind.Validation);
+      assertSyncFailure((): void => {
+        buildPostgresCleartextPasswordResponse(
+          'sec\u0000ret', true, true, PostgresSslMode.VERIFY_FULL);
+      }, ArkDbErrorKind.Validation);
+      assertSyncFailure((): void => {
+        buildPostgresCleartextPasswordResponse(
+          String.fromCharCode(0xd800), true, true, PostgresSslMode.VERIFY_FULL);
+      }, ArkDbErrorKind.Validation);
+      assertSyncFailure((): void => {
+        buildPostgresCleartextPasswordResponse(
+          String.fromCharCode(0xd800), false, true, PostgresSslMode.VERIFY_FULL);
+      }, ArkDbErrorKind.Unsupported);
+    });
     it('usesCanonicalBoundedBase64', 0, () => {
       const bytes = strictUtf8Encode('hello');
       expect(base64Encode(bytes)).assertEqual('aGVsbG8=');
@@ -82,6 +325,16 @@ export default function postgresAuthPrimitivesTest(): void {
       assertSyncFailure((): void => {
         strictUtf8Decode(new Uint8Array([0xc0, 0xaf]));
       }, ArkDbErrorKind.Validation);
+    });
+    it('clearsUtf8EncoderBuffersOnSuccessAndFailure', 0, () => {
+      const success = new TrackingUtf8Encoder('736563726574');
+      assertHex(strictUtf8Encode('secret', success), '736563726574');
+      assertBufferCleared(success.output);
+      const invalid = new TrackingUtf8Encoder('0102');
+      assertSyncFailure((): void => {
+        strictUtf8Encode('secret', invalid);
+      }, ArkDbErrorKind.Validation);
+      assertBufferCleared(invalid.output);
     });
     it('rejectsWorkBoundsBeforeCryptoDispatch', 0, async () => {
       const platform = new ReferencePlatform();
@@ -150,10 +403,21 @@ class ReferencePlatform implements PostgresAuthPlatform {
   randomResult: Uint8Array | null = null;
   shaResult: Uint8Array | null = null;
   hmacResult: Uint8Array | null = null;
+  md5Result: Uint8Array | null = null;
+  md5Inputs: Uint8Array[] = [];
+  md5Outputs: Uint8Array[] = [];
+  md5Steps: Md5Step[] = [];
   normalizedOverride: string | null = null;
   afterFirstHmac: (() => void) | null = null;
+  afterFirstMd5: (() => void) | null = null;
   failCrypto: boolean = false;
   failNormalization: boolean = false;
+  md5Calls: number = 0;
+  missingMd5Call: number = 0;
+  private readonly missingMd5Result: Uint8Array | null = null;
+  queueMd5(inputHex: string, outputHex: string): void {
+    this.md5Steps.push(new Md5Step(inputHex, outputHex));
+  }
   async randomBytes(length: number): Promise<Uint8Array> {
     if (this.failCrypto) throw new Error('random unavailable');
     if (this.randomResult !== null) return this.randomResult;
@@ -176,6 +440,32 @@ class ReferencePlatform implements PostgresAuthPlatform {
     }
     return result;
   }
+  async md5(data: Uint8Array): Promise<Uint8Array> {
+    this.md5Inputs.push(data);
+    if (this.failCrypto) throw ArkDbError.unsupported('MD5 unavailable');
+    if (this.missingMd5Call === this.md5Calls + 1) {
+      this.md5Calls += 1;
+      return this.missingMd5Result!;
+    }
+    let result: Uint8Array;
+    if (this.md5Steps.length > this.md5Calls) {
+      const step = this.md5Steps[this.md5Calls];
+      assertHex(data, step.inputHex);
+      result = hexBytes(step.outputHex);
+    } else if (this.md5Result !== null) {
+      result = this.md5Result;
+    } else {
+      throw new Error('unexpected MD5 call');
+    }
+    this.md5Calls += 1;
+    this.md5Outputs.push(result);
+    if (this.md5Calls === 1 && this.afterFirstMd5 !== null) {
+      const callback = this.afterFirstMd5;
+      this.afterFirstMd5 = null;
+      callback();
+    }
+    return result;
+  }
   normalizeNfkc(value: string): string {
     if (this.failNormalization) throw new Error('normalizer unavailable');
     if (this.normalizedOverride !== null) return this.normalizedOverride;
@@ -183,6 +473,23 @@ class ReferencePlatform implements PostgresAuthPlatform {
     if (value === '\u2168') return 'IX';
     if (value === '\u03F9') return '\u03A3';
     return value;
+  }
+}
+class Md5Step {
+  readonly inputHex: string;
+  readonly outputHex: string;
+  constructor(inputHex: string, outputHex: string) {
+    this.inputHex = inputHex;
+    this.outputHex = outputHex;
+  }
+}
+class TrackingUtf8Encoder implements PostgresUtf8Encoder {
+  readonly output: buffer.Buffer;
+  constructor(outputHex: string) {
+    this.output = buffer.from(outputHex, 'hex');
+  }
+  encode(_value: string): buffer.Buffer {
+    return this.output;
   }
 }
 function referenceHmacSha256(key: Uint8Array, data: Uint8Array): Uint8Array {
@@ -268,6 +575,18 @@ function assertFallback(result: PostgresPreparedPassword, expected: string): voi
   expect(result.prepared).assertFalse();
   expect(result.value).assertEqual(expected);
 }
+async function assertMd5Vector(password: string, username: string, saltHex: string,
+  firstInputHex: string, innerDigestHex: string, secondInputHex: string,
+  outerDigestHex: string, responseHex: string): Promise<void> {
+  const platform = new ReferencePlatform();
+  platform.queueMd5(firstInputHex, innerDigestHex);
+  platform.queueMd5(secondInputHex, outerDigestHex);
+  assertHex(await buildPostgresMd5PasswordResponse(
+    password, username, hexBytes(saltHex), platform), responseHex);
+  expect(platform.md5Calls).assertEqual(2);
+  assertAllCleared(platform.md5Inputs);
+  assertAllCleared(platform.md5Outputs);
+}
 async function assertAsyncFailure(operation: () => Promise<Uint8Array>,
   kind: ArkDbErrorKind): Promise<void> {
   let failure: ArkDbError | null = null;
@@ -301,4 +620,13 @@ function assertBytes(actual: Uint8Array, expected: Uint8Array): void {
   for (let index = 0; index < expected.length; index += 1) {
     expect(actual[index]).assertEqual(expected[index]);
   }
+}
+function assertCleared(value: Uint8Array): void {
+  for (let index = 0; index < value.length; index += 1) {
+    expect(value[index]).assertEqual(0);
+  }
+}
+function assertAllCleared(values: Uint8Array[]): void { for (const value of values) assertCleared(value); }
+function assertBufferCleared(value: buffer.Buffer): void {
+  expect(value.toString('hex')).assertEqual('0'.repeat(value.length * 2));
 }

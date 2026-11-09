@@ -8,7 +8,6 @@ import {
 import {
   PostgresPreparedPassword, preparePostgresPassword
 } from '../../../main/ets/pgsql/auth/PostgresSaslPrep';
-
 export default function postgresAuthPrimitivesTest(): void {
   describe('PostgresAuthPrimitives', () => {
     it('matchesIndependentVectorsAndSnapshotsAsyncInputs', 0, async () => {
@@ -102,8 +101,12 @@ export default function postgresAuthPrimitivesTest(): void {
       await assertAsyncFailure((): Promise<Uint8Array> =>
         pbkdf2HmacSha256(new Uint8Array(0), new Uint8Array(0), 1, 1025, platform),
       ArkDbErrorKind.Validation);
+      const malformed = String.fromCharCode(0xd800);
       assertSyncFailure((): void => {
-        preparePostgresPassword('a'.repeat(1048577) + String.fromCharCode(0xd800), platform);
+        preparePostgresPassword(malformed + 'a'.repeat(1048577), platform);
+      }, ArkDbErrorKind.Validation);
+      assertSyncFailure((): void => {
+        preparePostgresPassword(malformed + '€'.repeat(349526), platform);
       }, ArkDbErrorKind.Validation);
     });
     it('appliesSaslprepMappingNormalizationAndBidiRules', 0, () => {
@@ -143,7 +146,6 @@ export default function postgresAuthPrimitivesTest(): void {
     });
   });
 }
-
 class ReferencePlatform implements PostgresAuthPlatform {
   randomResult: Uint8Array | null = null;
   shaResult: Uint8Array | null = null;
@@ -152,7 +154,6 @@ class ReferencePlatform implements PostgresAuthPlatform {
   afterFirstHmac: (() => void) | null = null;
   failCrypto: boolean = false;
   failNormalization: boolean = false;
-
   async randomBytes(length: number): Promise<Uint8Array> {
     if (this.failCrypto) throw new Error('random unavailable');
     if (this.randomResult !== null) return this.randomResult;
@@ -160,12 +161,10 @@ class ReferencePlatform implements PostgresAuthPlatform {
     for (let index = 0; index < length; index += 1) result[index] = index & 0xff;
     return result;
   }
-
   async sha256(data: Uint8Array): Promise<Uint8Array> {
     if (this.failCrypto) throw new Error('digest unavailable');
     return this.shaResult === null ? referenceSha256(data) : this.shaResult;
   }
-
   async hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
     if (this.failCrypto) throw new Error('HMAC unavailable');
     if (key.length !== 64) throw new Error('HMAC key block is not canonical');
@@ -177,7 +176,6 @@ class ReferencePlatform implements PostgresAuthPlatform {
     }
     return result;
   }
-
   normalizeNfkc(value: string): string {
     if (this.failNormalization) throw new Error('normalizer unavailable');
     if (this.normalizedOverride !== null) return this.normalizedOverride;
@@ -266,12 +264,10 @@ function assertPrepared(result: PostgresPreparedPassword, expected: string): voi
   expect(result.prepared).assertTrue();
   expect(result.value).assertEqual(expected);
 }
-
 function assertFallback(result: PostgresPreparedPassword, expected: string): void {
   expect(result.prepared).assertFalse();
   expect(result.value).assertEqual(expected);
 }
-
 async function assertAsyncFailure(operation: () => Promise<Uint8Array>,
   kind: ArkDbErrorKind): Promise<void> {
   let failure: ArkDbError | null = null;
@@ -279,20 +275,17 @@ async function assertAsyncFailure(operation: () => Promise<Uint8Array>,
   expect(failure !== null).assertTrue();
   expect(failure!.kind).assertEqual(kind);
 }
-
 function assertSyncFailure(operation: () => void, kind: ArkDbErrorKind): void {
   let failure: ArkDbError | null = null;
   try { operation(); } catch (error) { failure = error as ArkDbError; }
   expect(failure !== null).assertTrue();
   expect(failure!.kind).assertEqual(kind);
 }
-
 function repeatByte(value: number, length: number): Uint8Array {
   const result = new Uint8Array(length);
   for (let index = 0; index < length; index += 1) result[index] = value;
   return result;
 }
-
 function hexBytes(hex: string): Uint8Array {
   const result = new Uint8Array(hex.length / 2);
   for (let index = 0; index < result.length; index += 1) {
@@ -300,11 +293,9 @@ function hexBytes(hex: string): Uint8Array {
   }
   return result;
 }
-
 function assertHex(actual: Uint8Array, expected: string): void {
   assertBytes(actual, hexBytes(expected));
 }
-
 function assertBytes(actual: Uint8Array, expected: Uint8Array): void {
   expect(actual.length).assertEqual(expected.length);
   for (let index = 0; index < expected.length; index += 1) {

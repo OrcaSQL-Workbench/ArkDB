@@ -2,7 +2,6 @@ import { ArkDbError } from '@arkdb/core';
 import {
   HarmonyPostgresAuthPlatform, PostgresAuthPlatform, postgresAuthByteLimit, strictUtf8Encode
 } from './PostgresAuthCrypto';
-
 export class PostgresPreparedPassword {
   readonly value: string;
   readonly prepared: boolean;
@@ -87,20 +86,28 @@ function codePointText(code: number): string {
 }
 function utf8Length(value: string, maximum: number): number {
   let length = 0;
+  let malformed = false;
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
     if (code <= 0x7f) length += 1;
     else if (code <= 0x7ff) length += 2;
     else if (code >= 0xd800 && code <= 0xdbff) {
-      if (++index >= value.length) return -1;
-      const next = value.charCodeAt(index);
-      if (next < 0xdc00 || next > 0xdfff) return -1;
-      length += 4;
-    } else if (code >= 0xdc00 && code <= 0xdfff) return -1;
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index += 1;
+        length += 4;
+      } else {
+        malformed = true;
+        length += 3;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      malformed = true;
+      length += 3;
+    }
     else length += 3;
     if (length > maximum) return length;
   }
-  return length;
+  return malformed ? -1 : length;
 }
 function inRanges(code: number, ranges: number[]): boolean {
   let low = 0;

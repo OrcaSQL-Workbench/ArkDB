@@ -7,8 +7,10 @@ import {
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 import {
   PostgresCertificateStructure, PostgresCertificateSubjectAlternativeName,
+  PostgresSubjectAlternativeNames,
   postgresParseCertificateStructure,
-  postgresParseCertificateSubjectAlternativeName
+  postgresParseCertificateSubjectAlternativeName,
+  postgresParseSubjectAlternativeNamesEntry
 } from '../../../main/ets/pgsql/transport/PostgresCertificateDer';
 import { PostgresSslConfig, PostgresSslMode } from '../../../main/ets/pgsql/model/PostgresConnectionConfig';
 const SUBJECT_ALTERNATIVE_NAME_OID: number[] = [0x55, 0x1d, 0x11];
@@ -165,6 +167,210 @@ export default function postgresTlsTest(): void {
           element(0x82, bytes([0])),
           extensions(sanExtension)
         ])))).assertTrue();
+    });
+    it('parsesNestedOctetStringGeneralNamesAndTypedCandidates', 0, () => {
+      const dns = ascii('db.example.com');
+      const ipv4 = bytes([127, 0, 0, 1]);
+      const ipv6 = bytes([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 1
+      ]);
+      const entry = sanEntry([
+        generalName(0x86, ascii('postgres://db.example.com')),
+        generalName(0x87, ipv4),
+        generalName(0x82, dns),
+        generalName(0x82, dns),
+        generalName(0x87, ipv6),
+        generalName(0x81, ascii('postgres@example.com')),
+        generalName(0xa0, concatenate([
+          element(0x06, bytes([0x2a, 0x03])),
+          element(0xa0, element(0x0c, ascii('value')))
+        ])),
+        generalName(0xa4, name('directory')),
+        generalName(0xa5, concatenate([
+          element(0xa0, element(0x13, ascii('assigner'))),
+          element(0xa1, element(0x0c, ascii('party')))
+        ])),
+        generalName(0x88, bytes([0x2a, 0x03]))
+      ]);
+      const parsed: PostgresSubjectAlternativeNames =
+        postgresParseSubjectAlternativeNamesEntry(entry);
+      expect(parsed.dnsNames.length).assertEqual(2);
+      assertBytes(parsed.dnsNames[0], dns);
+      assertBytes(parsed.dnsNames[1], dns);
+      expect(parsed.ipAddresses.length).assertEqual(2);
+      assertBytes(parsed.ipAddresses[0], ipv4);
+      assertBytes(parsed.ipAddresses[1], ipv6);
+      assertNumbers(parsed.otherGeneralNameTags,
+        [0x86, 0x81, 0xa0, 0xa4, 0xa5, 0x88]);
+    });
+    it('rejectsMalformedGeneralNamesTagsFormsAsciiAndLengths', 0, () => {
+      const valid = generalName(0x82, ascii('db.example.com'));
+      for (const malformed of [
+        bytes([0x30, 0]),
+        bytes([0x04, 0x80, 0, 0]),
+        bytes([0x04, 0x81, 0x02, 0x30, 0]),
+        bytes([0x04, 0x82, 0, 0x80]),
+        bytes([0x04, 0x85, 0, 0, 0, 0, 0]),
+        bytes([0x04, 0x03, 0x30, 0]),
+        concatenate([sanEntry([valid]), bytes([0])]),
+        element(0x04, concatenate([
+          element(0x30, valid), bytes([0])
+        ])),
+        element(0x04, element(0x31, valid)),
+        sanEntry([]),
+        sanEntry([generalName(0x80, bytes([1]))]),
+        sanEntry([generalName(0xa1, element(0x16, ascii('mail')))]),
+        sanEntry([generalName(0xa2, element(0x16, ascii('dns')))]),
+        sanEntry([generalName(0x83, bytes([1]))]),
+        sanEntry([generalName(0x84, bytes([1]))]),
+        sanEntry([generalName(0x85, bytes([1]))]),
+        sanEntry([generalName(0xa6, element(0x16, ascii('uri')))]),
+        sanEntry([generalName(0xa7,
+          element(0x04, bytes([127, 0, 0, 1])))]),
+        sanEntry([generalName(0xa8,
+          element(0x06, bytes([0x2a, 0x03])))]),
+        sanEntry([generalName(0x89, bytes([1]))]),
+        sanEntry([generalName(0x82, new Uint8Array(0))]),
+        sanEntry([generalName(0x82, bytes([0x80]))]),
+        sanEntry([generalName(0x82, repeatedAscii(0x61, 254))]),
+        sanEntry([generalName(0x81, new Uint8Array(0))]),
+        sanEntry([generalName(0x81, bytes([0x80]))]),
+        sanEntry([generalName(0x86, new Uint8Array(0))]),
+        sanEntry([generalName(0x86, bytes([0x80]))]),
+        sanEntry([generalName(0x87, bytes([127, 0, 0]))]),
+        sanEntry([generalName(0x87, new Uint8Array(5))]),
+        sanEntry([generalName(0x87, new Uint8Array(15))]),
+        sanEntry([generalName(0x87, new Uint8Array(17))]),
+        sanEntry([generalName(0x88, new Uint8Array(0))]),
+        sanEntry([generalName(0x88, bytes([0x80]))]),
+        sanEntry([generalName(0x88, bytes([0x2a, 0x80, 0]))]),
+        sanEntry([generalName(0xa3,
+          element(0x30, element(0x80, ascii('123'))))])
+      ]) {
+        expectSubjectAlternativeNamesEntryFailure(malformed);
+      }
+    });
+    it('validatesConstructedAndNonDnsGeneralNames', 0, () => {
+      const oid = element(0x06, bytes([0x2a, 0x03]));
+      postgresParseSubjectAlternativeNamesEntry(sanEntry([
+        generalName(0xa0, concatenate([
+          oid, element(0xa0, element(0x31, concatenate([
+            element(0x01, bytes([0xff])),
+            element(0x02, bytes([1]))
+          ])))
+        ])),
+        generalName(0xa4, nameValue(element(0x30, element(0x31,
+          concatenate([
+            element(0x01, bytes([0xff])),
+            element(0x02, bytes([1]))
+          ]))))),
+        generalName(0xa5, concatenate([
+          element(0xa0, element(0x13, ascii('assigner'))),
+          element(0xa1, element(0x1c, bytes([0, 0, 0, 0x41])))
+        ])),
+        generalName(0xa5,
+          element(0xa1, element(0x1e, bytes([0, 0x41]))))
+      ]));
+      for (const malformed of [
+        sanEntry([generalName(0xa0, new Uint8Array(0))]),
+        sanEntry([generalName(0xa0, element(0x02, bytes([1])))]),
+        sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, new Uint8Array(0))
+        ]))]),
+        sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, concatenate([
+            element(0x05, new Uint8Array(0)),
+            element(0x05, new Uint8Array(0))
+          ]))
+        ]))]),
+        sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, element(0x30, bytes([0, 0])))
+        ]))]),
+        sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, element(0x30, bytes([0x1f, 1, 0])))
+        ]))]),
+        sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, element(0x31, concatenate([
+            element(0x02, bytes([1])),
+            element(0x01, bytes([0xff]))
+          ])))
+        ]))]),
+        sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, element(0x05, new Uint8Array(0))),
+          element(0x05, new Uint8Array(0))
+        ]))]),
+        sanEntry([generalName(0xa4, element(0x02, bytes([1])))]),
+        sanEntry([generalName(0xa4,
+          element(0x30, new Uint8Array(0)))]),
+        sanEntry([generalName(0xa4,
+          element(0x30, element(0x31, new Uint8Array(0))))]),
+        sanEntry([generalName(0xa4, nameValue(element(0x31, concatenate([
+          element(0x02, bytes([1])),
+          element(0x01, bytes([0xff]))
+        ]))))]),
+        sanEntry([generalName(0xa5, element(0x02, bytes([1])))]),
+        sanEntry([generalName(0xa5,
+          element(0xa0, element(0x0c, ascii('assigner'))))]),
+        sanEntry([generalName(0xa5,
+          element(0xa1, element(0x0c, new Uint8Array(0))))]),
+        sanEntry([generalName(0xa5,
+          element(0xa1, element(0x14, ascii('party'))))]),
+        sanEntry([generalName(0xa5,
+          element(0xa1, element(0x16, ascii('party'))))]),
+        sanEntry([generalName(0xa5, concatenate([
+          element(0xa1, element(0x0c, ascii('party'))),
+          element(0xa0, element(0x0c, ascii('assigner')))
+        ]))]),
+        sanEntry([generalName(0xa5, concatenate([
+          element(0xa1, element(0x0c, ascii('party'))),
+          element(0xa1, element(0x0c, ascii('again')))
+        ]))]),
+        sanEntry([generalName(0xa5,
+          element(0xa1, concatenate([
+            element(0x0c, ascii('party')),
+            element(0x0c, ascii('again'))
+          ])))])
+      ]) {
+        expectSubjectAlternativeNamesEntryFailure(malformed);
+      }
+    });
+    it('enforcesGeneralNamesCapsBoundariesAndDefensiveCopies', 0, () => {
+      const boundaries: PostgresSubjectAlternativeNames =
+        postgresParseSubjectAlternativeNamesEntry(sanEntry([
+          generalName(0x82, repeatedAscii(0x61, 127)),
+          generalName(0x82, repeatedAscii(0x62, 128)),
+          generalName(0x82, repeatedAscii(0x63, 253))
+        ]));
+      expect(boundaries.dnsNames[0].length).assertEqual(127);
+      expect(boundaries.dnsNames[1].length).assertEqual(128);
+      expect(boundaries.dnsNames[2].length).assertEqual(253);
+      const maximumNames: Uint8Array[] = [];
+      for (let index: number = 0; index < 256; index += 1) {
+        maximumNames.push(generalName(0x86, bytes([0x78])));
+      }
+      const maximum: PostgresSubjectAlternativeNames =
+        postgresParseSubjectAlternativeNamesEntry(sanEntry(maximumNames));
+      expect(maximum.otherGeneralNameTags.length).assertEqual(256);
+      maximumNames.push(generalName(0x86, bytes([0x78])));
+      expectSubjectAlternativeNamesEntryFailure(sanEntry(maximumNames));
+      expectSubjectAlternativeNamesEntryFailure(
+        new Uint8Array(64 * 1024 + 1));
+      const encoded = sanEntry([
+        generalName(0x82, ascii('copy.example.com')),
+        generalName(0x87, bytes([127, 0, 0, 1]))
+      ]);
+      const original = copyBytes(encoded);
+      const parsed: PostgresSubjectAlternativeNames =
+        postgresParseSubjectAlternativeNamesEntry(encoded);
+      encoded[encoded.length - 1] = 2;
+      assertBytes(parsed.ipAddresses[0], bytes([127, 0, 0, 1]));
+      parsed.dnsNames[0][0] = 0;
+      parsed.ipAddresses[0][0] = 0;
+      const reparsed: PostgresSubjectAlternativeNames =
+        postgresParseSubjectAlternativeNamesEntry(original);
+      assertBytes(reparsed.dnsNames[0], ascii('copy.example.com'));
+      assertBytes(reparsed.ipAddresses[0], bytes([127, 0, 0, 1]));
     });
     it('rejectsMalformedExtensionsAndStructuralDecoys', 0, () => {
       const sanValue = element(0x04, bytes([0x30, 0]));
@@ -471,6 +677,12 @@ function certificateExtension(
   fields.push(value);
   return element(0x30, concatenate(fields));
 }
+function sanEntry(names: Uint8Array[]): Uint8Array {
+  return element(0x04, element(0x30, concatenate(names)));
+}
+function generalName(tag: number, value: Uint8Array): Uint8Array {
+  return element(tag, value);
+}
 function element(tag: number, value: Uint8Array): Uint8Array {
   let length: Uint8Array;
   if (value.length < 0x80) length = bytes([value.length]);
@@ -503,6 +715,18 @@ function ascii(value: string): Uint8Array {
   }
   return result;
 }
+function repeatedAscii(value: number, length: number): Uint8Array {
+  const result = new Uint8Array(length);
+  for (let index: number = 0; index < length; index += 1) {
+    result[index] = value;
+  }
+  return result;
+}
+function copyBytes(value: Uint8Array): Uint8Array {
+  const result = new Uint8Array(value.length);
+  result.set(value);
+  return result;
+}
 function nestedValue(depth: number): Uint8Array {
   let value = element(0x05, new Uint8Array(0));
   for (let index: number = 0; index < depth; index += 1) {
@@ -518,6 +742,12 @@ function bytes(values: number[]): Uint8Array {
   return new Uint8Array(values);
 }
 function assertBytes(actual: Uint8Array, expected: Uint8Array): void {
+  expect(actual.length).assertEqual(expected.length);
+  for (let index: number = 0; index < expected.length; index += 1) {
+    expect(actual[index]).assertEqual(expected[index]);
+  }
+}
+function assertNumbers(actual: number[], expected: number[]): void {
   expect(actual.length).assertEqual(expected.length);
   for (let index: number = 0; index < expected.length; index += 1) {
     expect(actual[index]).assertEqual(expected[index]);
@@ -539,6 +769,18 @@ function expectSubjectAlternativeNameFailure(encoded: Uint8Array): void {
   let terminal: ArkDbError | null = null;
   try {
     postgresCertificateHasSubjectAlternativeName(encoded);
+  } catch (error) {
+    terminal = error as ArkDbError;
+  }
+  expect(terminal instanceof ArkDbError).assertTrue();
+  expect(terminal!.kind).assertEqual(ArkDbErrorKind.Tls);
+  expect(terminal!.nativeCode).assertEqual(
+    'TLS_CERTIFICATE_IDENTITY_INVALID');
+}
+function expectSubjectAlternativeNamesEntryFailure(encoded: Uint8Array): void {
+  let terminal: ArkDbError | null = null;
+  try {
+    postgresParseSubjectAlternativeNamesEntry(encoded);
   } catch (error) {
     terminal = error as ArkDbError;
   }

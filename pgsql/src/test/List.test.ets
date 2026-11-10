@@ -4,6 +4,7 @@ import postgresScramClientTest from './pgsql/auth/PostgresScramClient.test';
 import postgresBackendParserTest from './pgsql/protocol/PostgresBackendParser.test';
 import postgresFrontendSerializerTest from './pgsql/protocol/PostgresFrontendSerializer.test';
 import postgresProtocolTest from './pgsql/protocol/PostgresProtocol.test';
+import postgresDerTest from './pgsql/transport/PostgresDer.test';
 import postgresTcpTransportTest from './pgsql/transport/PostgresTcpTransport.test';
 import postgresTlsTest from './pgsql/transport/PostgresTls.test';
 
@@ -14,6 +15,7 @@ export default function testsuite(): void {
   postgresBackendParserTest();
   postgresFrontendSerializerTest();
   postgresProtocolTest();
+  postgresDerTest();
   postgresTcpTransportTest();
   postgresTlsTest();
 }

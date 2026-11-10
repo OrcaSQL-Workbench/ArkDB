@@ -157,19 +157,25 @@ function validateCanonicalSets(reader: PostgresDerReader,
     throw invalidCertificateIdentity();
   }
   let offset = value.start;
-  let previousOffset = -1;
-  let previousEnd = -1;
+  let previous: PostgresDerElement | null = null;
   while (offset < value.end) {
     const child = reader.read(offset, value.end);
-    if (value.tag === 0x31 && previousOffset >= 0 && reader.compare(
-      previousOffset, previousEnd, offset, child.next) > 0) {
+    if (value.tag === 0x31 && previous !== null &&
+      compareCanonicalSetElements(reader, previous, child) > 0) {
       throw invalidCertificateIdentity();
     }
     validateCanonicalSets(reader, child, depth + 1);
-    previousOffset = offset;
-    previousEnd = child.next;
+    previous = child;
     offset = child.next;
   }
+}
+
+function compareCanonicalSetElements(reader: PostgresDerReader,
+  left: PostgresDerElement, right: PostgresDerElement): number {
+  const leftTag = left.tag & 0xdf;
+  const rightTag = right.tag & 0xdf;
+  if (leftTag !== rightTag) return leftTag - rightTag;
+  return reader.compare(left.offset, left.next, right.offset, right.next);
 }
 
 function validateDirectoryName(reader: PostgresDerReader,

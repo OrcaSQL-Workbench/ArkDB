@@ -253,6 +253,22 @@ export default function postgresTlsTest(): void {
     });
     it('validatesConstructedAndNonDnsGeneralNames', 0, () => {
       const oid = element(0x06, bytes([0x2a, 0x03]));
+      const orderedMixedSet = element(0x31, concatenate([
+        element(0xa0, element(0x02, bytes([1]))),
+        element(0x81, bytes([1]))
+      ]));
+      const reversedMixedSet = element(0x31, concatenate([
+        element(0x81, bytes([1])),
+        element(0xa0, element(0x02, bytes([1])))
+      ]));
+      const orderedSetOf = element(0x31, concatenate([
+        element(0x02, bytes([1])),
+        element(0x02, bytes([2]))
+      ]));
+      const reversedSetOf = element(0x31, concatenate([
+        element(0x02, bytes([2])),
+        element(0x02, bytes([1]))
+      ]));
       postgresParseSubjectAlternativeNamesEntry(sanEntry([
         generalName(0xa0, concatenate([
           oid, element(0xa0, element(0x31, concatenate([
@@ -260,11 +276,18 @@ export default function postgresTlsTest(): void {
             element(0x02, bytes([1]))
           ])))
         ])),
+        generalName(0xa0, concatenate([
+          oid, element(0xa0, orderedMixedSet)
+        ])),
+        generalName(0xa0, concatenate([
+          oid, element(0xa0, orderedSetOf)
+        ])),
         generalName(0xa4, nameValue(element(0x30, element(0x31,
           concatenate([
             element(0x01, bytes([0xff])),
             element(0x02, bytes([1]))
           ]))))),
+        generalName(0xa4, nameValue(orderedMixedSet)),
         generalName(0xa5, concatenate([
           element(0xa0, element(0x13, ascii('assigner'))),
           element(0xa1, element(0x1c, bytes([0, 0, 0, 0x41])))
@@ -297,6 +320,12 @@ export default function postgresTlsTest(): void {
           ])))
         ]))]),
         sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, reversedMixedSet)
+        ]))]),
+        sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, reversedSetOf)
+        ]))]),
+        sanEntry([generalName(0xa0, concatenate([
           oid, element(0xa0, element(0x05, new Uint8Array(0))),
           element(0x05, new Uint8Array(0))
         ]))]),
@@ -309,6 +338,7 @@ export default function postgresTlsTest(): void {
           element(0x02, bytes([1])),
           element(0x01, bytes([0xff]))
         ]))))]),
+        sanEntry([generalName(0xa4, nameValue(reversedMixedSet))]),
         sanEntry([generalName(0xa5, element(0x02, bytes([1])))]),
         sanEntry([generalName(0xa5,
           element(0xa0, element(0x0c, ascii('assigner'))))]),

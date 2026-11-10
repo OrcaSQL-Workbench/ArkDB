@@ -5,10 +5,16 @@ import {
 
 const MAX_POSTGRES_CERTIFICATE_DER_BYTES: number = 1024 * 1024;
 const MAX_POSTGRES_CERTIFICATE_EXTENSION_BYTES: number = 64 * 1024;
+const MAX_POSTGRES_CERTIFICATE_EXTENSIONS: number = 256;
 const MAX_POSTGRES_DER_NESTING: number = 32;
 
 export interface PostgresCertificateStructure {
   extensions: Uint8Array | null;
+}
+
+export interface PostgresCertificateSubjectAlternativeName {
+  present: boolean;
+  entryValue: Uint8Array | null;
 }
 
 export function postgresParseCertificateStructure(
@@ -35,6 +41,74 @@ export function postgresParseCertificateStructure(
   }
   return tbsCertificateStructure(
     reader, tbsCertificate, signatureAlgorithm);
+}
+
+export function postgresParseCertificateSubjectAlternativeName(
+  certificateDer: Uint8Array): PostgresCertificateSubjectAlternativeName {
+  const certificate = postgresParseCertificateStructure(certificateDer);
+  if (certificate.extensions === null) {
+    return { present: false, entryValue: null };
+  }
+  return extensionsSubjectAlternativeName(certificate.extensions);
+}
+
+function extensionsSubjectAlternativeName(
+  extensionsDer: Uint8Array): PostgresCertificateSubjectAlternativeName {
+  const reader = new PostgresDerReader(
+    extensionsDer, MAX_POSTGRES_CERTIFICATE_EXTENSION_BYTES + 5,
+    MAX_POSTGRES_DER_NESTING);
+  const extensions = reader.expected(0, extensionsDer.length, 0x30);
+  if (extensions.next !== extensionsDer.length ||
+    extensions.end - extensions.start >
+      MAX_POSTGRES_CERTIFICATE_EXTENSION_BYTES) {
+    throw invalidCertificateIdentity();
+  }
+  let offset = extensions.start;
+  let entryValue: Uint8Array | null = null;
+  let count = 0;
+  while (offset < extensions.end) {
+    if (count >= MAX_POSTGRES_CERTIFICATE_EXTENSIONS) {
+      throw invalidCertificateIdentity();
+    }
+    count += 1;
+    const extension = reader.expected(offset, extensions.end, 0x30);
+    let child = reader.expected(extension.start, extension.end, 0x06);
+    if (!reader.validOidValue(child)) throw invalidCertificateIdentity();
+    const isSubjectAlternativeName =
+      oidEquals(reader, child, [0x55, 0x1d, 0x11]);
+    let childOffset = child.next;
+    child = reader.read(childOffset, extension.end);
+    if (child.tag === 0x01) {
+      const critical = reader.copy(child.start, child.end);
+      if (critical.length !== 1 || critical[0] !== 0xff) {
+        throw invalidCertificateIdentity();
+      }
+      childOffset = child.next;
+      child = reader.read(childOffset, extension.end);
+    }
+    if (child.tag !== 0x04 || child.next !== extension.end) {
+      throw invalidCertificateIdentity();
+    }
+    if (isSubjectAlternativeName) {
+      if (entryValue !== null) throw invalidCertificateIdentity();
+      entryValue = reader.copy(childOffset, child.next);
+    }
+    offset = extension.next;
+  }
+  return {
+    present: entryValue !== null,
+    entryValue: entryValue
+  };
+}
+
+function oidEquals(reader: PostgresDerReader,
+  oid: PostgresDerElement, expected: number[]): boolean {
+  const value = reader.copy(oid.start, oid.end);
+  if (value.length !== expected.length) return false;
+  for (let index = 0; index < expected.length; index += 1) {
+    if (value[index] !== expected[index]) return false;
+  }
+  return true;
 }
 
 function tbsCertificateStructure(reader: PostgresDerReader,

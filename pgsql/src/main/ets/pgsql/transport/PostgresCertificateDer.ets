@@ -380,7 +380,6 @@ function validateX400PdsParameter(reader: PostgresDerReader,
     previousTag = field.tag;
     offset = field.next;
   }
-  if (previousTag === 0x12) throw invalidCertificateIdentity();
 }
 
 function validateX400UnformattedAddress(reader: PostgresDerReader,
@@ -401,7 +400,6 @@ function validateX400UnformattedAddress(reader: PostgresDerReader,
     previousTag = canonicalTag;
     offset = field.next;
   }
-  if (previousTag < 0) throw invalidCertificateIdentity();
 }
 
 function validateX400PrintableAddress(reader: PostgresDerReader,

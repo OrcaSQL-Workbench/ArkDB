@@ -263,6 +263,20 @@ export default function postgresTlsTest(): void {
         expectSubjectAlternativeNamesEntryFailure(malformed);
       }
     });
+    it('acceptsEmptyOptionalPdsParameterSets', 0, () => {
+      for (const type of [
+        10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21
+      ]) {
+        postgresParseSubjectAlternativeNamesEntry(sanEntry([
+          x400Extension(type, element(0x31, new Uint8Array(0)))
+        ]));
+      }
+    });
+    it('acceptsEmptyOptionalUnformattedPostalAddressSet', 0, () => {
+      postgresParseSubjectAlternativeNamesEntry(sanEntry([
+        x400Extension(16, element(0x31, new Uint8Array(0)))
+      ]));
+    });
     it('validatesConstructedAndNonDnsGeneralNames', 0, () => {
       const oid = element(0x06, bytes([0x2a, 0x03]));
       const tagOrderedAmbiguousSet = element(0x31, concatenate([
@@ -457,8 +471,8 @@ export default function postgresTlsTest(): void {
           element(0x13, repeatedAscii(0x61, 65)))]),
         sanEntry([x400Extension(2,
           element(0x14, bytes([0x1b, 0x28, 0x75])))]),
-        sanEntry([x400Extension(10,
-          element(0x31, new Uint8Array(0)))]),
+        sanEntry([x400Extension(10, element(0x31,
+          element(0x13, new Uint8Array(0))))]),
         sanEntry([x400Extension(10, element(0x31, concatenate([
           element(0x13, ascii('one')), element(0x13, ascii('two'))
         ])))]),
@@ -466,8 +480,8 @@ export default function postgresTlsTest(): void {
           element(0x14, ascii('teletex')),
           element(0x13, ascii('printable'))
         ])))]),
-        sanEntry([x400Extension(16,
-          element(0x31, new Uint8Array(0)))]),
+        sanEntry([x400Extension(16, element(0x31,
+          element(0x30, new Uint8Array(0))))]),
         sanEntry([x400Extension(16, element(0x31, concatenate([
           element(0x14, ascii('teletex')),
           element(0x30, element(0x13, ascii('line')))

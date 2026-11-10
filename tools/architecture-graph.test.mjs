@@ -417,7 +417,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, and P08 own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, and P09 own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -433,6 +433,7 @@ test('P04, P07, and P08 own exactly the registered PostgreSQL primitive sources'
     'pgsql/src/main/ets/pgsql/protocol/PostgresByteCodec.ets',
     'pgsql/src/main/ets/pgsql/protocol/PostgresMessageChannel.ets',
     'pgsql/src/main/ets/pgsql/protocol/PostgresProtocolConstants.ets',
+    'pgsql/src/main/ets/pgsql/transport/PostgresDer.ets',
     'pgsql/src/main/ets/pgsql/transport/PostgresTcpTransport.ets'
   ]);
 });

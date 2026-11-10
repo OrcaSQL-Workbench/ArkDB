@@ -161,7 +161,7 @@ function validateCanonicalSets(reader: PostgresDerReader,
   while (offset < value.end) {
     const child = reader.read(offset, value.end);
     if (value.tag === 0x31 && previous !== null &&
-      compareCanonicalSetElements(reader, previous, child) > 0) {
+      !hasUnambiguousCanonicalSetOrder(reader, previous, child)) {
       throw invalidCertificateIdentity();
     }
     validateCanonicalSets(reader, child, depth + 1);
@@ -170,12 +170,14 @@ function validateCanonicalSets(reader: PostgresDerReader,
   }
 }
 
-function compareCanonicalSetElements(reader: PostgresDerReader,
-  left: PostgresDerElement, right: PostgresDerElement): number {
+function hasUnambiguousCanonicalSetOrder(reader: PostgresDerReader,
+  left: PostgresDerElement, right: PostgresDerElement): boolean {
   const leftTag = left.tag & 0xdf;
   const rightTag = right.tag & 0xdf;
-  if (leftTag !== rightTag) return leftTag - rightTag;
-  return reader.compare(left.offset, left.next, right.offset, right.next);
+  // Without an ASN.1 schema, accept only orderings canonical as both SET
+  // components and SET OF values; conflicting interpretations fail closed.
+  return leftTag <= rightTag &&
+    reader.compare(left.offset, left.next, right.offset, right.next) <= 0;
 }
 
 function validateDirectoryName(reader: PostgresDerReader,

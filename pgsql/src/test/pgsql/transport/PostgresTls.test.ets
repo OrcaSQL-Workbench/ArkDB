@@ -253,11 +253,11 @@ export default function postgresTlsTest(): void {
     });
     it('validatesConstructedAndNonDnsGeneralNames', 0, () => {
       const oid = element(0x06, bytes([0x2a, 0x03]));
-      const orderedMixedSet = element(0x31, concatenate([
+      const tagOrderedAmbiguousSet = element(0x31, concatenate([
         element(0xa0, element(0x02, bytes([1]))),
         element(0x81, bytes([1]))
       ]));
-      const reversedMixedSet = element(0x31, concatenate([
+      const encodingOrderedAmbiguousSet = element(0x31, concatenate([
         element(0x81, bytes([1])),
         element(0xa0, element(0x02, bytes([1])))
       ]));
@@ -277,9 +277,6 @@ export default function postgresTlsTest(): void {
           ])))
         ])),
         generalName(0xa0, concatenate([
-          oid, element(0xa0, orderedMixedSet)
-        ])),
-        generalName(0xa0, concatenate([
           oid, element(0xa0, orderedSetOf)
         ])),
         generalName(0xa4, nameValue(element(0x30, element(0x31,
@@ -287,7 +284,6 @@ export default function postgresTlsTest(): void {
             element(0x01, bytes([0xff])),
             element(0x02, bytes([1]))
           ]))))),
-        generalName(0xa4, nameValue(orderedMixedSet)),
         generalName(0xa5, concatenate([
           element(0xa0, element(0x13, ascii('assigner'))),
           element(0xa1, element(0x1c, bytes([0, 0, 0, 0x41])))
@@ -320,7 +316,10 @@ export default function postgresTlsTest(): void {
           ])))
         ]))]),
         sanEntry([generalName(0xa0, concatenate([
-          oid, element(0xa0, reversedMixedSet)
+          oid, element(0xa0, tagOrderedAmbiguousSet)
+        ]))]),
+        sanEntry([generalName(0xa0, concatenate([
+          oid, element(0xa0, encodingOrderedAmbiguousSet)
         ]))]),
         sanEntry([generalName(0xa0, concatenate([
           oid, element(0xa0, reversedSetOf)
@@ -338,7 +337,10 @@ export default function postgresTlsTest(): void {
           element(0x02, bytes([1])),
           element(0x01, bytes([0xff]))
         ]))))]),
-        sanEntry([generalName(0xa4, nameValue(reversedMixedSet))]),
+        sanEntry([generalName(0xa4,
+          nameValue(tagOrderedAmbiguousSet))]),
+        sanEntry([generalName(0xa4,
+          nameValue(encodingOrderedAmbiguousSet))]),
         sanEntry([generalName(0xa5, element(0x02, bytes([1])))]),
         sanEntry([generalName(0xa5,
           element(0xa0, element(0x0c, ascii('assigner'))))]),
@@ -364,6 +366,23 @@ export default function postgresTlsTest(): void {
       ]) {
         expectSubjectAlternativeNamesEntryFailure(malformed);
       }
+      const kerberos: PostgresSubjectAlternativeNames =
+        postgresParseSubjectAlternativeNamesEntry(sanEntry([
+          generalName(0x82, ascii('db.example.com')),
+          generalName(0xa0, concatenate([
+            element(0x06, bytes([0x2b, 0x06, 0x01, 0x05, 0x02, 0x02])),
+            element(0xa0, element(0x30, concatenate([
+              element(0xa0, element(0x1b, ascii('EXAMPLE.COM'))),
+              element(0xa1, element(0x30, concatenate([
+                element(0xa0, element(0x02, bytes([1]))),
+                element(0xa1, element(0x30,
+                  element(0x1b, ascii('postgres'))))
+              ])))
+            ])))
+          ]))
+        ]));
+      assertBytes(kerberos.dnsNames[0], ascii('db.example.com'));
+      assertNumbers(kerberos.otherGeneralNameTags, [0xa0]);
     });
     it('enforcesGeneralNamesCapsBoundariesAndDefensiveCopies', 0, () => {
       const boundaries: PostgresSubjectAlternativeNames =

@@ -225,7 +225,7 @@ export class PostgresDerReader {
         " '()+,-./0123456789:=?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
     }
     if (value.tag === 0x14) return this.validTeletex(value);
-    if (value.tag === 0x16) {
+    if (value.tag === 0x16 || value.tag === 0x1b) {
       for (let index: number = value.start; index < value.end; index += 1) {
         if (this.data[index] > 0x7f) return false;
       }

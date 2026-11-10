@@ -3,12 +3,16 @@ import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import {
   buildPostgresTlsConnectOptions, createDefaultPostgresTlsIdentityVerifier,
-  PostgresTlsFilePort
+  PostgresTlsFilePort, postgresCertificateHasSubjectAlternativeName
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 import {
-  PostgresCertificateStructure, postgresParseCertificateStructure
+  PostgresCertificateStructure, PostgresCertificateSubjectAlternativeName,
+  postgresParseCertificateStructure,
+  postgresParseCertificateSubjectAlternativeName
 } from '../../../main/ets/pgsql/transport/PostgresCertificateDer';
 import { PostgresSslConfig, PostgresSslMode } from '../../../main/ets/pgsql/model/PostgresConnectionConfig';
+const SUBJECT_ALTERNATIVE_NAME_OID: number[] = [0x55, 0x1d, 0x11];
+const BASIC_CONSTRAINTS_OID: number[] = [0x55, 0x1d, 0x13];
 export default function postgresTlsTest(): void {
   describe('PostgresTls', () => {
     it('buildsModeSpecificTlsOptionsAndLoadsBoundedCredentials', 0, () => {
@@ -117,6 +121,127 @@ export default function postgresTlsTest(): void {
       deepFields[2] = deepAlgorithm;
       postgresParseCertificateStructure(certificate(
         deepFields, deepAlgorithm));
+    });
+    it('distinguishesExtensionlessNonSanAndSanCertificates', 0, () => {
+      const absent: PostgresCertificateSubjectAlternativeName =
+        postgresParseCertificateSubjectAlternativeName(
+          certificate(tbsFields()));
+      expect(absent.present).assertFalse();
+      expect(absent.entryValue === null).assertTrue();
+      const nonSanFields = tbsFields();
+      nonSanFields.push(extensions(certificateExtension()));
+      expect(postgresCertificateHasSubjectAlternativeName(
+        certificate(nonSanFields))).assertFalse();
+      const sanValue = element(0x04, bytes([0x30, 0x02, 0x82, 0]));
+      const sanExtension = certificateExtension(
+        SUBJECT_ALTERNATIVE_NAME_OID, sanValue, 0xff);
+      const sanFields = tbsFields();
+      sanFields.push(extensions(sanExtension));
+      const sanCertificate = certificate(sanFields);
+      const parsed = postgresParseCertificateSubjectAlternativeName(
+        sanCertificate);
+      expect(parsed.present).assertTrue();
+      expect(parsed.entryValue === null).assertFalse();
+      assertBytes(parsed.entryValue!, sanValue);
+      expect(postgresCertificateHasSubjectAlternativeName(
+        sanCertificate)).assertTrue();
+      parsed.entryValue![5] = 1;
+      const reparsed = postgresParseCertificateSubjectAlternativeName(
+        sanCertificate);
+      assertBytes(reparsed.entryValue!, sanValue);
+      expect(parsed.entryValue === reparsed.entryValue).assertFalse();
+      expect(postgresCertificateHasSubjectAlternativeName(certificate(
+        withTail([
+          element(0x81, bytes([0])),
+          element(0x82, bytes([0])),
+          extensions(sanExtension)
+        ])))).assertTrue();
+    });
+    it('rejectsMalformedExtensionsAndStructuralDecoys', 0, () => {
+      const sanValue = element(0x04, bytes([0x30, 0]));
+      const san = certificateExtension(
+        SUBJECT_ALTERNATIVE_NAME_OID, sanValue);
+      const malformedNonSan = element(0x30, concatenate([
+        element(0x06, new Uint8Array(BASIC_CONSTRAINTS_OID)),
+        element(0x02, bytes([1]))
+      ]));
+      const malformed: Uint8Array[] = [
+        certificate(withTail([extensions(concatenate([san, san]))])),
+        certificate(withTail([extensions(new Uint8Array(0))])),
+        certificate(withTail([extensions(element(0x30, concatenate([
+          element(0x06, bytes([0x80])),
+          element(0x04, new Uint8Array(0))
+        ])))])),
+        certificate(withTail([extensions(certificateExtension(
+          SUBJECT_ALTERNATIVE_NAME_OID, sanValue, 0))])),
+        certificate(withTail([extensions(certificateExtension(
+          SUBJECT_ALTERNATIVE_NAME_OID, sanValue, 1))])),
+        certificate(withTail([extensions(element(0x30, concatenate([
+          element(0x06, new Uint8Array(SUBJECT_ALTERNATIVE_NAME_OID)),
+          element(0x01, bytes([0xff, 0xff])), sanValue
+        ])))])),
+        certificate(withTail([extensions(element(0x30,
+          element(0x06, new Uint8Array(SUBJECT_ALTERNATIVE_NAME_OID))))])),
+        certificate(withTail([extensions(element(0x30, concatenate([
+          element(0x06, new Uint8Array(SUBJECT_ALTERNATIVE_NAME_OID)),
+          element(0x02, bytes([1]))
+        ])))])),
+        certificate(withTail([extensions(element(0x30, concatenate([
+          element(0x06, new Uint8Array(SUBJECT_ALTERNATIVE_NAME_OID)),
+          sanValue, element(0x05, new Uint8Array(0))
+        ])))])),
+        certificate(withTail([extensions(concatenate([
+          malformedNonSan, san
+        ]))])),
+        certificate(withTail([extensions(concatenate([
+          san, malformedNonSan
+        ]))]))
+      ];
+      for (const encoded of malformed) {
+        expectSubjectAlternativeNameFailure(encoded);
+      }
+      const decoyFields = tbsFields();
+      decoyFields.push(extensions(certificateExtension(
+        BASIC_CONSTRAINTS_OID,
+        element(0x04, bytes([0x06, 0x03, 0x55, 0x1d, 0x11])))));
+      const signatureDecoy = certificate(
+        decoyFields, algorithmIdentifier(),
+        bytes([0, 0x06, 0x03, 0x55, 0x1d, 0x11]));
+      expect(postgresCertificateHasSubjectAlternativeName(
+        signatureDecoy)).assertFalse();
+      const oidDecoyFields = tbsFields();
+      oidDecoyFields.push(extensions(certificateExtension(
+        [0x2a, 0x55, 0x1d, 0x11], sanValue)));
+      expect(postgresCertificateHasSubjectAlternativeName(
+        certificate(oidDecoyFields))).assertFalse();
+    });
+    it('enforcesExtensionAllocationCapsAndDefensiveCopies', 0, () => {
+      const maximumValue = element(
+        0x04, new Uint8Array(64 * 1024 - 13));
+      const maximumFields = tbsFields();
+      maximumFields.push(extensions(certificateExtension(
+        BASIC_CONSTRAINTS_OID, maximumValue)));
+      expect(postgresCertificateHasSubjectAlternativeName(
+        certificate(maximumFields))).assertFalse();
+      const oversizedFields = tbsFields();
+      oversizedFields.push(extensions(certificateExtension(
+        BASIC_CONSTRAINTS_OID,
+        element(0x04, new Uint8Array(64 * 1024 - 12)))));
+      expectSubjectAlternativeNameFailure(certificate(oversizedFields));
+      const records: Uint8Array[] = [];
+      for (let index: number = 0; index < 256; index += 1) {
+        records.push(certificateExtension(
+          extensionOid(index), element(0x04, new Uint8Array(0))));
+      }
+      const acceptedFields = tbsFields();
+      acceptedFields.push(extensions(concatenate(records)));
+      expect(postgresCertificateHasSubjectAlternativeName(
+        certificate(acceptedFields))).assertFalse();
+      records.push(certificateExtension(
+        extensionOid(256), element(0x04, new Uint8Array(0))));
+      const rejectedFields = tbsFields();
+      rejectedFields.push(extensions(concatenate(records)));
+      expectSubjectAlternativeNameFailure(certificate(rejectedFields));
     });
     it('supportsBoundedCertificateDerLengths', 0, () => {
       const shortCertificate = certificate(tbsFields());
@@ -321,11 +446,17 @@ function nameAttribute(value: Uint8Array): Uint8Array {
 function extensions(content: Uint8Array): Uint8Array {
   return element(0xa3, element(0x30, content));
 }
-function certificateExtension(): Uint8Array {
-  return element(0x30, concatenate([
-    element(0x06, bytes([0x55, 0x1d, 0x13])),
-    element(0x04, element(0x30, new Uint8Array(0)))
-  ]));
+function certificateExtension(
+  oid: number[] = BASIC_CONSTRAINTS_OID,
+  value: Uint8Array =
+    element(0x04, element(0x30, new Uint8Array(0))),
+  critical: number | null = null): Uint8Array {
+  const fields: Uint8Array[] = [element(0x06, new Uint8Array(oid))];
+  if (critical !== null) {
+    fields.push(element(0x01, bytes([critical])));
+  }
+  fields.push(value);
+  return element(0x30, concatenate(fields));
 }
 function element(tag: number, value: Uint8Array): Uint8Array {
   let length: Uint8Array;
@@ -366,6 +497,10 @@ function nestedValue(depth: number): Uint8Array {
   }
   return value;
 }
+function extensionOid(index: number): number[] {
+  if (index < 0x80) return [0x2a, index];
+  return [0x2a, 0x80 | (index >>> 7), index & 0x7f];
+}
 function bytes(values: number[]): Uint8Array {
   return new Uint8Array(values);
 }
@@ -379,6 +514,18 @@ function expectCertificateFailure(encoded: Uint8Array): void {
   let terminal: ArkDbError | null = null;
   try {
     postgresParseCertificateStructure(encoded);
+  } catch (error) {
+    terminal = error as ArkDbError;
+  }
+  expect(terminal instanceof ArkDbError).assertTrue();
+  expect(terminal!.kind).assertEqual(ArkDbErrorKind.Tls);
+  expect(terminal!.nativeCode).assertEqual(
+    'TLS_CERTIFICATE_IDENTITY_INVALID');
+}
+function expectSubjectAlternativeNameFailure(encoded: Uint8Array): void {
+  let terminal: ArkDbError | null = null;
+  try {
+    postgresCertificateHasSubjectAlternativeName(encoded);
   } catch (error) {
     terminal = error as ArkDbError;
   }

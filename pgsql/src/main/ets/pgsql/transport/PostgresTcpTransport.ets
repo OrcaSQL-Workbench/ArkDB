@@ -9,6 +9,9 @@ import { MAX_POSTGRES_MESSAGE_BYTES } from '../protocol/PostgresProtocolConstant
 import {
   PostgresSslConfig, PostgresSslMode
 } from '../model/PostgresConnectionConfig';
+import {
+  postgresParseCertificateSubjectAlternativeName
+} from './PostgresCertificateDer';
 const MAX_POSTGRES_WIRE_BYTES: number = MAX_POSTGRES_MESSAGE_BYTES + 1;
 const RECEIVE_BLOCK_BYTES: number = 64 * 1024;
 const SOCKET_CLOSE_TIMEOUT_MS: number = 1000;
@@ -600,6 +603,11 @@ implements PostgresTlsIdentityVerifier {
 }
 export function createDefaultPostgresTlsIdentityVerifier(): PostgresTlsIdentityVerifier {
   return new UnsupportedPostgresTlsIdentityVerifier();
+}
+export function postgresCertificateHasSubjectAlternativeName(
+  certificateDer: Uint8Array): boolean {
+  return postgresParseCertificateSubjectAlternativeName(
+    certificateDer).present;
 }
 class SystemPostgresTlsFilePort implements PostgresTlsFilePort {
   read(path: string, maximumBytes: number, label: string): string {

@@ -6,6 +6,8 @@ import {
 const MAX_POSTGRES_CERTIFICATE_DER_BYTES: number = 1024 * 1024;
 const MAX_POSTGRES_CERTIFICATE_EXTENSION_BYTES: number = 64 * 1024;
 const MAX_POSTGRES_CERTIFICATE_EXTENSIONS: number = 256;
+const MAX_POSTGRES_GENERAL_NAMES: number = 256;
+const MAX_POSTGRES_DNS_NAME_BYTES: number = 253;
 const MAX_POSTGRES_DER_NESTING: number = 32;
 
 export interface PostgresCertificateStructure {
@@ -15,6 +17,12 @@ export interface PostgresCertificateStructure {
 export interface PostgresCertificateSubjectAlternativeName {
   present: boolean;
   entryValue: Uint8Array | null;
+}
+
+export interface PostgresSubjectAlternativeNames {
+  dnsNames: Uint8Array[];
+  ipAddresses: Uint8Array[];
+  otherGeneralNameTags: number[];
 }
 
 export function postgresParseCertificateStructure(
@@ -50,6 +58,157 @@ export function postgresParseCertificateSubjectAlternativeName(
     return { present: false, entryValue: null };
   }
   return extensionsSubjectAlternativeName(certificate.extensions);
+}
+
+export function postgresParseSubjectAlternativeNamesEntry(
+  entryValue: Uint8Array): PostgresSubjectAlternativeNames {
+  const reader = new PostgresDerReader(
+    entryValue, MAX_POSTGRES_CERTIFICATE_EXTENSION_BYTES,
+    MAX_POSTGRES_DER_NESTING);
+  const outer = reader.expected(0, entryValue.length, 0x04);
+  if (outer.next !== entryValue.length) throw invalidCertificateIdentity();
+  const names = reader.expected(outer.start, outer.end, 0x30);
+  if (names.next !== outer.end || names.start === names.end) {
+    throw invalidCertificateIdentity();
+  }
+  const result: PostgresSubjectAlternativeNames = {
+    dnsNames: [], ipAddresses: [], otherGeneralNameTags: []
+  };
+  let offset = names.start;
+  let count = 0;
+  while (offset < names.end) {
+    if (count >= MAX_POSTGRES_GENERAL_NAMES) {
+      throw invalidCertificateIdentity();
+    }
+    count += 1;
+    const name = reader.read(offset, names.end);
+    if (name.tag === 0x82) {
+      result.dnsNames.push(copyIa5GeneralName(
+        reader, name, MAX_POSTGRES_DNS_NAME_BYTES));
+    } else if (name.tag === 0x87) {
+      const length = name.end - name.start;
+      if (length !== 4 && length !== 16) {
+        throw invalidCertificateIdentity();
+      }
+      result.ipAddresses.push(reader.copy(name.start, name.end));
+    } else {
+      validateOtherGeneralName(reader, name);
+      result.otherGeneralNameTags.push(name.tag);
+    }
+    offset = name.next;
+  }
+  return result;
+}
+
+function validateOtherGeneralName(reader: PostgresDerReader,
+  name: PostgresDerElement): void {
+  if (name.tag === 0x81 || name.tag === 0x86) {
+    copyIa5GeneralName(
+      reader, name, MAX_POSTGRES_CERTIFICATE_EXTENSION_BYTES);
+    return;
+  }
+  if (name.tag === 0x88) {
+    if (!reader.validOidValue(name)) throw invalidCertificateIdentity();
+    return;
+  }
+  if (name.tag === 0xa0) {
+    validateOtherName(reader, name);
+    return;
+  }
+  if (name.tag === 0xa4) {
+    validateDirectoryName(reader, name);
+    return;
+  }
+  if (name.tag === 0xa5) {
+    validateEdiPartyName(reader, name);
+    return;
+  }
+  throw invalidCertificateIdentity();
+}
+
+function copyIa5GeneralName(reader: PostgresDerReader,
+  name: PostgresDerElement, maximumBytes: number): Uint8Array {
+  const value = reader.copy(name.start, name.end);
+  if (value.length < 1 || value.length > maximumBytes) {
+    throw invalidCertificateIdentity();
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] > 0x7f) throw invalidCertificateIdentity();
+  }
+  return value;
+}
+
+function validateOtherName(reader: PostgresDerReader,
+  name: PostgresDerElement): void {
+  const oid = reader.expected(name.start, name.end, 0x06);
+  if (!reader.validOidValue(oid)) throw invalidCertificateIdentity();
+  const value = reader.expected(oid.next, name.end, 0xa0);
+  if (value.next !== name.end) throw invalidCertificateIdentity();
+  const encoded = reader.read(value.start, value.end);
+  if (encoded.next !== value.end) throw invalidCertificateIdentity();
+  reader.validateValue(encoded, 0);
+  validateCanonicalSets(reader, encoded, 0);
+}
+
+function validateCanonicalSets(reader: PostgresDerReader,
+  value: PostgresDerElement, depth: number): void {
+  if ((value.tag & 0x20) === 0) return;
+  if (depth >= MAX_POSTGRES_DER_NESTING) {
+    throw invalidCertificateIdentity();
+  }
+  let offset = value.start;
+  let previous: PostgresDerElement | null = null;
+  while (offset < value.end) {
+    const child = reader.read(offset, value.end);
+    if (value.tag === 0x31 && previous !== null &&
+      !hasUnambiguousCanonicalSetOrder(reader, previous, child)) {
+      throw invalidCertificateIdentity();
+    }
+    validateCanonicalSets(reader, child, depth + 1);
+    previous = child;
+    offset = child.next;
+  }
+}
+
+function hasUnambiguousCanonicalSetOrder(reader: PostgresDerReader,
+  left: PostgresDerElement, right: PostgresDerElement): boolean {
+  const leftTag = left.tag & 0xdf;
+  const rightTag = right.tag & 0xdf;
+  // Without an ASN.1 schema, accept only orderings canonical as both SET
+  // components and SET OF values; conflicting interpretations fail closed.
+  return leftTag <= rightTag &&
+    reader.compare(left.offset, left.next, right.offset, right.next) <= 0;
+}
+
+function validateDirectoryName(reader: PostgresDerReader,
+  name: PostgresDerElement): void {
+  const value = reader.expected(name.start, name.end, 0x30);
+  if (value.next !== name.end) throw invalidCertificateIdentity();
+  validateName(reader, value, false);
+}
+
+function validateEdiPartyName(reader: PostgresDerReader,
+  name: PostgresDerElement): void {
+  let value = reader.read(name.start, name.end);
+  if (value.tag === 0xa0) {
+    validateDirectoryString(reader, value);
+    value = reader.read(value.next, name.end);
+  }
+  if (value.tag !== 0xa1 || value.next !== name.end) {
+    throw invalidCertificateIdentity();
+  }
+  validateDirectoryString(reader, value);
+}
+
+function validateDirectoryString(reader: PostgresDerReader,
+  value: PostgresDerElement): void {
+  const string = reader.read(value.start, value.end);
+  if (string.next !== value.end || string.start === string.end ||
+    (string.tag !== 0x0c && string.tag !== 0x13 &&
+      string.tag !== 0x1c && string.tag !== 0x1e)) {
+    throw invalidCertificateIdentity();
+  }
+  reader.validateValue(string, 0);
 }
 
 function extensionsSubjectAlternativeName(
@@ -211,6 +370,7 @@ function validateName(reader: PostgresDerReader,
         throw invalidCertificateIdentity();
       }
       reader.validateValue(value, 0);
+      validateCanonicalSets(reader, value, 0);
       if (previousOffset >= 0 && reader.compare(
         previousOffset, previousEnd,
         attributeOffset, attribute.next) > 0) {

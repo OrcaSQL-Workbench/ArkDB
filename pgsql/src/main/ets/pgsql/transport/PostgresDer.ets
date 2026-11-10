@@ -231,6 +231,12 @@ export class PostgresDerReader {
       }
       return true;
     }
+    if (value.tag === 0x1b) {
+      for (let index: number = value.start; index < value.end; index += 1) {
+        if (this.data[index] < 0x20 || this.data[index] > 0x7e) return false;
+      }
+      return true;
+    }
     if (value.tag === 0x17 || value.tag === 0x18) {
       return this.validCertificateTime(value);
     }

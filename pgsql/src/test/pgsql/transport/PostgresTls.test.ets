@@ -130,11 +130,15 @@ export default function postgresTlsTest(): void {
       expect(absent.entryValue === null).assertTrue();
       const nonSanFields = tbsFields();
       nonSanFields.push(extensions(certificateExtension()));
+      const nonSan = postgresParseCertificateSubjectAlternativeName(
+        certificate(nonSanFields));
+      expect(nonSan.present).assertFalse();
+      expect(nonSan.entryValue === null).assertTrue();
       expect(postgresCertificateHasSubjectAlternativeName(
         certificate(nonSanFields))).assertFalse();
       const sanValue = element(0x04, bytes([0x30, 0x02, 0x82, 0]));
       const sanExtension = certificateExtension(
-        SUBJECT_ALTERNATIVE_NAME_OID, sanValue, 0xff);
+        SUBJECT_ALTERNATIVE_NAME_OID, sanValue);
       const sanFields = tbsFields();
       sanFields.push(extensions(sanExtension));
       const sanCertificate = certificate(sanFields);
@@ -150,6 +154,11 @@ export default function postgresTlsTest(): void {
         sanCertificate);
       assertBytes(reparsed.entryValue!, sanValue);
       expect(parsed.entryValue === reparsed.entryValue).assertFalse();
+      const criticalSanFields = tbsFields();
+      criticalSanFields.push(extensions(certificateExtension(
+        SUBJECT_ALTERNATIVE_NAME_OID, sanValue, 0xff)));
+      expect(postgresCertificateHasSubjectAlternativeName(
+        certificate(criticalSanFields))).assertTrue();
       expect(postgresCertificateHasSubjectAlternativeName(certificate(
         withTail([
           element(0x81, bytes([0])),
@@ -170,6 +179,10 @@ export default function postgresTlsTest(): void {
         certificate(withTail([extensions(new Uint8Array(0))])),
         certificate(withTail([extensions(element(0x30, concatenate([
           element(0x06, bytes([0x80])),
+          element(0x04, new Uint8Array(0))
+        ])))])),
+        certificate(withTail([extensions(element(0x30, concatenate([
+          element(0x06, bytes([0x2a, 0x80, 0])),
           element(0x04, new Uint8Array(0))
         ])))])),
         certificate(withTail([extensions(certificateExtension(

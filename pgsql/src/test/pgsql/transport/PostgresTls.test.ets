@@ -152,6 +152,9 @@ export default function postgresTlsTest(): void {
       const afterExtensions = tbsFields();
       afterExtensions.push(extensions(certificateExtension()));
       afterExtensions.push(element(0x82, bytes([0])));
+      const overDepthAlgorithm = algorithmIdentifier(nestedValue(33));
+      const overDepthFields = tbsFields();
+      overDepthFields[2] = overDepthAlgorithm;
       for (const encoded of [
         bytes([0x30, 0]),
         certificate(fields.slice(0, 2)),
@@ -181,8 +184,7 @@ export default function postgresTlsTest(): void {
           element(0xa3, element(0x30, new Uint8Array(0)))
         ])), certificate(withTail([element(0xa3, concatenate([
           element(0x30, certificateExtension()), element(0x05, new Uint8Array(0))
-        ]))])), certificate(tbsFields(),
-          algorithmIdentifier(nestedValue(33)))
+        ]))])), certificate(overDepthFields, overDepthAlgorithm)
       ]) {
         expectCertificateFailure(encoded);
       }

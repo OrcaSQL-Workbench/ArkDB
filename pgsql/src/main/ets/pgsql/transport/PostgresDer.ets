@@ -117,6 +117,22 @@ export class PostgresDerReader {
     return first;
   }
 
+  implicitStringCharacterCount(
+    value: PostgresDerElement, universalTag: number): number {
+    value = this.canonical(value);
+    if (universalTag === 0x12) {
+      return this.validAsciiSet(value.start, value.end, ' 0123456789') ?
+        value.end - value.start : -1;
+    }
+    if (universalTag === 0x13) {
+      return this.validAsciiSet(value.start, value.end,
+        " '()+,-./0123456789:=?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") ?
+        value.end - value.start : -1;
+    }
+    if (universalTag === 0x14) return this.teletexCharacterCount(value);
+    return -1;
+  }
+
   validCertificateTime(value: PostgresDerElement): boolean {
     value = this.canonical(value);
     const length: number =
@@ -224,7 +240,7 @@ export class PostgresDerReader {
       return this.validAsciiSet(value.start, value.end,
         " '()+,-./0123456789:=?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
     }
-    if (value.tag === 0x14) return this.validTeletex(value);
+    if (value.tag === 0x14) return this.teletexCharacterCount(value) >= 0;
     if (value.tag === 0x16) {
       for (let index: number = value.start; index < value.end; index += 1) {
         if (this.data[index] > 0x7f) return false;
@@ -288,13 +304,14 @@ export class PostgresDerReader {
     return true;
   }
 
-  private validTeletex(value: PostgresDerElement): boolean {
+  private teletexCharacterCount(value: PostgresDerElement): number {
     let g0: number = 102;
     let index: number = value.start;
+    let characters: number = 0;
     while (index < value.end) {
       const octet: number = this.data[index];
       if (octet === 0x1b) {
-        if (index > value.end - 3) return false;
+        if (index > value.end - 3) return -1;
         const intermediate: number = this.data[index + 1];
         const finalOctet: number = this.data[index + 2];
         // X.690 8.23.5.1-.4 and 11.4; ISO-IR 102/103/106/107;
@@ -306,37 +323,40 @@ export class PostgresDerReader {
           g0 = 103;
         } else if (!((intermediate === 0x21 && finalOctet === 0x45) ||
           (intermediate === 0x22 && finalOctet === 0x48))) {
-          return false;
+          return -1;
         }
         index += 3;
         continue;
       }
       if (octet === 0x20) {
+        characters += 1;
         index += 1;
         continue;
       }
       if (octet < 0x80) {
         if (g0 === 102) {
-          if (!this.validTeletexPrimary(octet)) return false;
+          if (!this.validTeletexPrimary(octet)) return -1;
         } else {
           const supplementary: number = octet + 0x80;
           if (!this.validTeletexSupplementary(supplementary) ||
-            this.teletexDiacritic(supplementary)) return false;
+            this.teletexDiacritic(supplementary)) return -1;
         }
+        characters += 1;
         index += 1;
         continue;
       }
-      if (!this.validTeletexSupplementary(octet)) return false;
+      if (!this.validTeletexSupplementary(octet)) return -1;
       if (this.teletexDiacritic(octet)) {
-        if (g0 !== 102 || index + 1 >= value.end) return false;
+        if (g0 !== 102 || index + 1 >= value.end) return -1;
         const next: number = this.data[index + 1];
-        if (!this.validTeletexCombination(octet, next)) return false;
+        if (!this.validTeletexCombination(octet, next)) return -1;
         index += 2;
       } else {
         index += 1;
       }
+      characters += 1;
     }
-    return true;
+    return characters;
   }
 
   private validTeletexPrimary(octet: number): boolean {

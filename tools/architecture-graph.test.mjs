@@ -433,6 +433,7 @@ test('P04, P07, P08, and P09 own exactly the registered PostgreSQL primitive sou
     'pgsql/src/main/ets/pgsql/protocol/PostgresByteCodec.ets',
     'pgsql/src/main/ets/pgsql/protocol/PostgresMessageChannel.ets',
     'pgsql/src/main/ets/pgsql/protocol/PostgresProtocolConstants.ets',
+    'pgsql/src/main/ets/pgsql/transport/PostgresCertificateDer.ets',
     'pgsql/src/main/ets/pgsql/transport/PostgresDer.ets',
     'pgsql/src/main/ets/pgsql/transport/PostgresTcpTransport.ets'
   ]);

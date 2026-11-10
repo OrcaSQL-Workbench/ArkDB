@@ -186,6 +186,20 @@ export default function postgresTlsTest(): void {
           element(0x06, bytes([0x2a, 0x03])),
           element(0xa0, element(0x0c, ascii('value')))
         ])),
+        generalName(0xa3, concatenate([
+          element(0x30, concatenate([
+            element(0x80, ascii('123')),
+            element(0x83, ascii('Example'))
+          ])),
+          element(0x30, element(0x30, concatenate([
+            element(0x13, ascii('type')),
+            element(0x13, ascii('value'))
+          ]))),
+          element(0x31, element(0x30, concatenate([
+            element(0x80, bytes([1])),
+            element(0xa1, element(0x13, ascii('common')))
+          ])))
+        ])),
         generalName(0xa4, name('directory')),
         generalName(0xa5, concatenate([
           element(0xa0, element(0x13, ascii('assigner'))),
@@ -202,7 +216,7 @@ export default function postgresTlsTest(): void {
       assertBytes(parsed.ipAddresses[0], ipv4);
       assertBytes(parsed.ipAddresses[1], ipv6);
       assertNumbers(parsed.otherGeneralNameTags,
-        [0x86, 0x81, 0xa0, 0xa4, 0xa5, 0x88]);
+        [0x86, 0x81, 0xa0, 0xa3, 0xa4, 0xa5, 0x88]);
     });
     it('rejectsMalformedGeneralNamesTagsFormsAsciiAndLengths', 0, () => {
       const valid = generalName(0x82, ascii('db.example.com'));
@@ -244,9 +258,7 @@ export default function postgresTlsTest(): void {
         sanEntry([generalName(0x87, new Uint8Array(17))]),
         sanEntry([generalName(0x88, new Uint8Array(0))]),
         sanEntry([generalName(0x88, bytes([0x80]))]),
-        sanEntry([generalName(0x88, bytes([0x2a, 0x80, 0]))]),
-        sanEntry([generalName(0xa3,
-          element(0x30, element(0x80, ascii('123'))))])
+        sanEntry([generalName(0x88, bytes([0x2a, 0x80, 0]))])
       ]) {
         expectSubjectAlternativeNamesEntryFailure(malformed);
       }
@@ -269,6 +281,68 @@ export default function postgresTlsTest(): void {
         element(0x02, bytes([2])),
         element(0x02, bytes([1]))
       ]));
+      const domainAttribute = element(0x30, concatenate([
+        element(0x13, ascii('type')), element(0x13, ascii('value'))
+      ]));
+      const tooManyUnits: Uint8Array[] = [];
+      const tooManyDomainAttributes: Uint8Array[] = [];
+      for (let index: number = 0; index < 5; index += 1) {
+        tooManyUnits.push(element(0x13, ascii('unit')));
+        tooManyDomainAttributes.push(domainAttribute);
+      }
+      const extensionValues = x400ExtensionValues();
+      expect(extensionValues.length).assertEqual(23);
+      for (let index: number = 0; index < extensionValues.length; index += 1) {
+        postgresParseSubjectAlternativeNamesEntry(sanEntry([
+          x400Extension(index + 1, extensionValues[index])
+        ]));
+      }
+      postgresParseSubjectAlternativeNamesEntry(sanEntry([
+        x400Extension(2, element(0x14, concatenate([
+          bytes([0x1b, 0x28, 0x75]), repeatedAscii(0x41, 64)
+        ]))),
+        x400Extension(3, element(0x14, concatenate([
+          bytes([0xc1, 0x41]), repeatedAscii(0x42, 63)
+        ]))),
+        x400Extension(10, element(0x31, concatenate([
+          element(0x13, ascii('printable')),
+          element(0x14, ascii('teletex'))
+        ]))),
+        x400Extension(16, element(0x31, concatenate([
+          element(0x30, element(0x13, ascii('line'))),
+          element(0x14, ascii('teletex'))
+        ])))
+      ]));
+      postgresParseSubjectAlternativeNamesEntry(sanEntry([
+        generalName(0xa3, element(0x30, concatenate([
+          element(0x61, element(0x13, ascii('US'))),
+          element(0x62, element(0x12, ascii('123'))),
+          element(0x80, ascii('123')),
+          element(0x81, ascii('terminal')),
+          element(0xa2, element(0x13, ascii('private'))),
+          element(0x83, ascii('organization')),
+          element(0x84, ascii('123')),
+          element(0xa5, concatenate([
+            element(0x80, ascii('surname')),
+            element(0x81, ascii('given')),
+            element(0x82, ascii('AB')),
+            element(0x83, ascii('III'))
+          ])),
+          element(0xa6, concatenate([
+            element(0x13, ascii('unit1')),
+            element(0x13, ascii('unit2'))
+          ]))
+        ]))),
+        x400Extension(22, element(0xa0, concatenate([
+          element(0xa0, element(0x04, bytes([1]))),
+          element(0xa1, element(0x04, bytes([2]))),
+          element(0xa2, element(0x04, bytes([3]))),
+          element(0xa3, element(0x31, concatenate([
+            element(0x04, bytes([1])),
+            element(0x04, bytes([2]))
+          ])))
+        ])))
+      ]));
       postgresParseSubjectAlternativeNamesEntry(sanEntry([
         generalName(0xa0, concatenate([
           oid, element(0xa0, element(0x31, concatenate([
@@ -289,7 +363,9 @@ export default function postgresTlsTest(): void {
           element(0xa1, element(0x1c, bytes([0, 0, 0, 0x41])))
         ])),
         generalName(0xa5,
-          element(0xa1, element(0x1e, bytes([0, 0x41]))))
+          element(0xa1, element(0x1e, bytes([0, 0x41])))),
+        generalName(0xa5,
+          element(0xa1, element(0x14, ascii('party'))))
       ]));
       for (const malformed of [
         sanEntry([generalName(0xa0, new Uint8Array(0))]),
@@ -333,6 +409,90 @@ export default function postgresTlsTest(): void {
           oid, element(0xa0, element(0x05, new Uint8Array(0))),
           element(0x05, new Uint8Array(0))
         ]))]),
+        sanEntry([generalName(0xa3,
+          element(0x30, new Uint8Array(0)))]),
+        sanEntry([generalName(0xa3, element(0x02, bytes([1])))]),
+        sanEntry([generalName(0xa3, concatenate([
+          element(0x30, new Uint8Array(0)),
+          element(0x30, new Uint8Array(0))
+        ]))]),
+        sanEntry([generalName(0xa3,
+          element(0x30, element(0x02, bytes([1]))))]),
+        sanEntry([generalName(0xa3, concatenate([
+          element(0x30, new Uint8Array(0)),
+          element(0x30, element(0x02, bytes([1])))
+        ]))]),
+        sanEntry([generalName(0xa3, concatenate([
+          element(0x30, new Uint8Array(0)),
+          element(0x31, element(0x02, bytes([1])))
+        ]))]),
+        sanEntry([generalName(0xa3, concatenate([
+          element(0x30, new Uint8Array(0)),
+          element(0x31, new Uint8Array(0))
+        ]))]),
+        sanEntry([generalName(0xa3, element(0x30, concatenate([
+          element(0x83, ascii('organization')),
+          element(0x80, ascii('123'))
+        ])))]),
+        sanEntry([generalName(0xa3, element(0x30, concatenate([
+          element(0x80, ascii('123')), element(0x80, ascii('456'))
+        ])))]),
+        sanEntry([generalName(0xa3,
+          element(0x30, element(0xa5,
+            element(0x81, ascii('given')))))]),
+        sanEntry([generalName(0xa3,
+          element(0x30, element(0xa6, concatenate(tooManyUnits))))]),
+        sanEntry([generalName(0xa3, concatenate([
+          element(0x30, new Uint8Array(0)),
+          element(0x30, concatenate(tooManyDomainAttributes))
+        ]))]),
+        sanEntry([x400Extensions([
+          x400ExtensionAttribute(2, element(0x14, ascii('two'))),
+          x400ExtensionAttribute(1, element(0x13, ascii('one')))
+        ])]),
+        sanEntry([x400Extension(0, element(0x13, ascii('zero')))]),
+        sanEntry([x400Extension(24, element(0x13, ascii('unsupported')))]),
+        sanEntry([x400Extension(1, element(0x02, bytes([1])))]),
+        sanEntry([x400Extension(1,
+          element(0x13, repeatedAscii(0x61, 65)))]),
+        sanEntry([x400Extension(2,
+          element(0x14, bytes([0x1b, 0x28, 0x75])))]),
+        sanEntry([x400Extension(10,
+          element(0x31, new Uint8Array(0)))]),
+        sanEntry([x400Extension(10, element(0x31, concatenate([
+          element(0x13, ascii('one')), element(0x13, ascii('two'))
+        ])))]),
+        sanEntry([x400Extension(10, element(0x31, concatenate([
+          element(0x14, ascii('teletex')),
+          element(0x13, ascii('printable'))
+        ])))]),
+        sanEntry([x400Extension(16,
+          element(0x31, new Uint8Array(0)))]),
+        sanEntry([x400Extension(16, element(0x31, concatenate([
+          element(0x14, ascii('teletex')),
+          element(0x30, element(0x13, ascii('line')))
+        ])))]),
+        sanEntry([generalName(0xa3, concatenate([
+          element(0x30, new Uint8Array(0)),
+          element(0x31, element(0x30, concatenate([
+            element(0x80, bytes([1])),
+            element(0xa1, concatenate([
+              element(0x13, ascii('one')),
+              element(0x13, ascii('two'))
+            ]))
+          ])))
+        ]))]),
+        sanEntry([x400Extension(22,
+          element(0x30, element(0x81, ascii('123'))))]),
+        sanEntry([x400Extension(22, element(0xa0,
+          element(0xa0, element(0x04, bytes([1])))))]),
+        sanEntry([x400Extension(22, element(0xa0,
+          element(0xa3, element(0x31, new Uint8Array(0)))))]),
+        sanEntry([x400Extension(22, element(0xa0,
+          element(0xa3, element(0x31, concatenate([
+            element(0x04, bytes([2])), element(0x04, bytes([1]))
+          ])))))]),
+        sanEntry([x400Extension(23, element(0x02, bytes([1, 1])))]),
         sanEntry([generalName(0xa4, element(0x02, bytes([1])))]),
         sanEntry([generalName(0xa4,
           element(0x30, new Uint8Array(0)))]),
@@ -352,7 +512,8 @@ export default function postgresTlsTest(): void {
         sanEntry([generalName(0xa5,
           element(0xa1, element(0x0c, new Uint8Array(0))))]),
         sanEntry([generalName(0xa5,
-          element(0xa1, element(0x14, ascii('party'))))]),
+          element(0xa1, element(0x14,
+            bytes([0x1b, 0x28, 0x75]))))]),
         sanEntry([generalName(0xa5,
           element(0xa1, element(0x16, ascii('party'))))]),
         sanEntry([generalName(0xa5, concatenate([
@@ -398,6 +559,19 @@ export default function postgresTlsTest(): void {
       expect(maximum.otherGeneralNameTags.length).assertEqual(256);
       maximumNames.push(generalName(0x86, bytes([0x78])));
       expectSubjectAlternativeNamesEntryFailure(sanEntry(maximumNames));
+      const maximumExtensions: Uint8Array[] = [];
+      for (let index: number = 0; index < 256; index += 1) {
+        maximumExtensions.push(
+          x400ExtensionAttribute(23, element(0x02, bytes([0]))));
+      }
+      postgresParseSubjectAlternativeNamesEntry(sanEntry([
+        x400Extensions(maximumExtensions)
+      ]));
+      maximumExtensions.push(
+        x400ExtensionAttribute(23, element(0x02, bytes([0]))));
+      expectSubjectAlternativeNamesEntryFailure(sanEntry([
+        x400Extensions(maximumExtensions)
+      ]));
       expectSubjectAlternativeNamesEntryFailure(
         new Uint8Array(64 * 1024 + 1));
       const encoded = sanEntry([
@@ -726,6 +900,43 @@ function sanEntry(names: Uint8Array[]): Uint8Array {
 }
 function generalName(tag: number, value: Uint8Array): Uint8Array {
   return element(tag, value);
+}
+function x400Extension(type: number, value: Uint8Array): Uint8Array {
+  return x400Extensions([x400ExtensionAttribute(type, value)]);
+}
+function x400Extensions(attributes: Uint8Array[]): Uint8Array {
+  return generalName(0xa3, concatenate([
+    element(0x30, new Uint8Array(0)),
+    element(0x31, concatenate(attributes))
+  ]));
+}
+function x400ExtensionAttribute(
+  type: number, value: Uint8Array): Uint8Array {
+  return element(0x30, concatenate([
+    element(0x80, bytes([type])), element(0xa1, value)
+  ]));
+}
+function x400ExtensionValues(): Uint8Array[] {
+  const pds = element(0x31, element(0x13, ascii('pds')));
+  return [
+    element(0x13, ascii('common')),
+    element(0x14, ascii('common')),
+    element(0x14, ascii('organization')),
+    element(0x31, element(0x80, ascii('surname'))),
+    element(0x30, element(0x14, ascii('unit'))),
+    element(0x30, element(0x30, concatenate([
+      element(0x14, ascii('type')), element(0x14, ascii('value'))
+    ]))),
+    element(0x13, ascii('pds')),
+    element(0x13, ascii('US')),
+    element(0x12, ascii('12345')),
+    pds, pds, pds, pds, pds, pds,
+    element(0x31, element(0x30,
+      element(0x13, ascii('address')))),
+    pds, pds, pds, pds, pds,
+    element(0x30, element(0x80, ascii('12345'))),
+    element(0x02, bytes([3]))
+  ];
 }
 function kerberosOtherName(realm: Uint8Array): Uint8Array {
   return generalName(0xa0, concatenate([

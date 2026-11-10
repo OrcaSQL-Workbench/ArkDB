@@ -324,6 +324,11 @@ export default function postgresTlsTest(): void {
         sanEntry([generalName(0xa0, concatenate([
           oid, element(0xa0, reversedSetOf)
         ]))]),
+        sanEntry([kerberosOtherName(bytes([0x1b]))]),
+        sanEntry([kerberosOtherName(bytes([0x1b, 0x28]))]),
+        sanEntry([kerberosOtherName(bytes([0x1b, 0x28, 0x42]))]),
+        sanEntry([kerberosOtherName(bytes([0x0e]))]),
+        sanEntry([kerberosOtherName(bytes([0x0f]))]),
         sanEntry([generalName(0xa0, concatenate([
           oid, element(0xa0, element(0x05, new Uint8Array(0))),
           element(0x05, new Uint8Array(0))
@@ -369,17 +374,7 @@ export default function postgresTlsTest(): void {
       const kerberos: PostgresSubjectAlternativeNames =
         postgresParseSubjectAlternativeNamesEntry(sanEntry([
           generalName(0x82, ascii('db.example.com')),
-          generalName(0xa0, concatenate([
-            element(0x06, bytes([0x2b, 0x06, 0x01, 0x05, 0x02, 0x02])),
-            element(0xa0, element(0x30, concatenate([
-              element(0xa0, element(0x1b, ascii('EXAMPLE.COM'))),
-              element(0xa1, element(0x30, concatenate([
-                element(0xa0, element(0x02, bytes([1]))),
-                element(0xa1, element(0x30,
-                  element(0x1b, ascii('postgres'))))
-              ])))
-            ])))
-          ]))
+          kerberosOtherName(ascii('EXAMPLE.COM'))
         ]));
       assertBytes(kerberos.dnsNames[0], ascii('db.example.com'));
       assertNumbers(kerberos.otherGeneralNameTags, [0xa0]);
@@ -731,6 +726,19 @@ function sanEntry(names: Uint8Array[]): Uint8Array {
 }
 function generalName(tag: number, value: Uint8Array): Uint8Array {
   return element(tag, value);
+}
+function kerberosOtherName(realm: Uint8Array): Uint8Array {
+  return generalName(0xa0, concatenate([
+    element(0x06, bytes([0x2b, 0x06, 0x01, 0x05, 0x02, 0x02])),
+    element(0xa0, element(0x30, concatenate([
+      element(0xa0, element(0x1b, realm)),
+      element(0xa1, element(0x30, concatenate([
+        element(0xa0, element(0x02, bytes([1]))),
+        element(0xa1, element(0x30,
+          element(0x1b, ascii('postgres'))))
+      ])))
+    ])))
+  ]));
 }
 function element(tag: number, value: Uint8Array): Uint8Array {
   let length: Uint8Array;

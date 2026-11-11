@@ -184,7 +184,7 @@ const OWNED_SOURCE_ROOTS = [
   {
     root: 'pgsql/src/main/ets/pgsql',
     files: ['PostgresConnection.ets'],
-    directories: ['api', 'auth', 'driver', 'model', 'protocol', 'transport']
+    directories: ['api', 'auth', 'driver', 'model', 'protocol', 'transport', 'value']
   },
   {
     root: 'tools',
@@ -327,6 +327,12 @@ const ARCHITECTURE_POLICY = {
       message: 'Database drivers must not depend on sibling drivers.'
     },
     {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/value\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?!(?:value|model|protocol)\/).+/,
+      transitive: true,
+      message: 'PostgreSQL value codecs may depend only on value, model, and protocol leaves.'
+    },
+    {
       from: /^mysql\/src\/main\/ets\/mysql\/api\//,
       to: new RegExp(
         '^mysql/src/main/ets/mysql/' +
@@ -417,7 +423,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, P08, and P09 own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, P09, and P14 own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -435,7 +441,9 @@ test('P04, P07, P08, and P09 own exactly the registered PostgreSQL primitive sou
     'pgsql/src/main/ets/pgsql/protocol/PostgresProtocolConstants.ets',
     'pgsql/src/main/ets/pgsql/transport/PostgresCertificateDer.ets',
     'pgsql/src/main/ets/pgsql/transport/PostgresDer.ets',
-    'pgsql/src/main/ets/pgsql/transport/PostgresTcpTransport.ets'
+    'pgsql/src/main/ets/pgsql/transport/PostgresTcpTransport.ets',
+    'pgsql/src/main/ets/pgsql/value/PostgresTextValueDecoder.ets',
+    'pgsql/src/main/ets/pgsql/value/PostgresTypeOids.ets'
   ]);
 });
 
@@ -2363,3 +2371,23 @@ test('rejects protocol and byte transport dependencies on every feature', () => 
     }
   }
 });
+
+test('rejects PostgreSQL value codec dependencies outside value, model, and protocol leaves', () => {
+  for (const target of [
+    'pgsql/src/main/ets/pgsql/PostgresConnection.ets',
+    'pgsql/src/main/ets/pgsql/auth/PostgresAuthCrypto.ets',
+    'pgsql/src/main/ets/pgsql/transport/PostgresTcpTransport.ets'
+  ]) {
+    const source = 'pgsql/src/main/ets/pgsql/value/PostgresTextValueDecoder.ets';
+    const graph = {
+      files: [source, target],
+      dependencies: { [source]: [target], [target]: [] }
+    };
+
+    assert.throws(
+      () => assertImportPolicy(graph, ARCHITECTURE_POLICY),
+      /PostgreSQL value codecs may depend only on value, model, and protocol leaves/
+    );
+  }
+});
+

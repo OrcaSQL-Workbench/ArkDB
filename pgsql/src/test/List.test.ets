@@ -7,6 +7,7 @@ import postgresProtocolTest from './pgsql/protocol/PostgresProtocol.test';
 import postgresDerTest from './pgsql/transport/PostgresDer.test';
 import postgresTcpTransportTest from './pgsql/transport/PostgresTcpTransport.test';
 import postgresTlsTest from './pgsql/transport/PostgresTls.test';
+import postgresTextValueDecoderTest from './pgsql/value/PostgresTextValueDecoder.test';
 
 export default function testsuite(): void {
   publicInterfaceTest();
@@ -18,4 +19,5 @@ export default function testsuite(): void {
   postgresDerTest();
   postgresTcpTransportTest();
   postgresTlsTest();
+  postgresTextValueDecoderTest();
 }

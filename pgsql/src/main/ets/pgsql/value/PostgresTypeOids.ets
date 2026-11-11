@@ -4,31 +4,20 @@ export const MAX_POSTGRES_OID: number = 4294967295;
 
 export const POSTGRES_OID_BOOL: number = 16;
 export const POSTGRES_OID_BYTEA: number = 17;
-export const POSTGRES_OID_CHAR: number = 18;
-export const POSTGRES_OID_NAME: number = 19;
 export const POSTGRES_OID_INT8: number = 20;
 export const POSTGRES_OID_INT2: number = 21;
 export const POSTGRES_OID_INT4: number = 23;
-export const POSTGRES_OID_TEXT: number = 25;
 export const POSTGRES_OID_OID: number = 26;
-export const POSTGRES_OID_JSON: number = 114;
-export const POSTGRES_OID_XML: number = 142;
 export const POSTGRES_OID_FLOAT4: number = 700;
 export const POSTGRES_OID_FLOAT8: number = 701;
-export const POSTGRES_OID_MONEY: number = 790;
-export const POSTGRES_OID_BPCHAR: number = 1042;
-export const POSTGRES_OID_VARCHAR: number = 1043;
 export const POSTGRES_OID_DATE: number = 1082;
 export const POSTGRES_OID_TIME: number = 1083;
 export const POSTGRES_OID_TIMESTAMP: number = 1114;
 export const POSTGRES_OID_TIMESTAMPTZ: number = 1184;
 export const POSTGRES_OID_INTERVAL: number = 1186;
 export const POSTGRES_OID_TIMETZ: number = 1266;
-export const POSTGRES_OID_BIT: number = 1560;
-export const POSTGRES_OID_VARBIT: number = 1562;
 export const POSTGRES_OID_NUMERIC: number = 1700;
 export const POSTGRES_OID_UUID: number = 2950;
-export const POSTGRES_OID_JSONB: number = 3802;
 
 export class PostgresTypeMetadata {
   readonly typeOid: number;
@@ -64,20 +53,20 @@ function buildCatalog(): Map<number, PostgresTypeMetadata> {
   const catalog = new Map<number, PostgresTypeMetadata>();
   const scalars: Array<[number, string, DbValueKind]> = [
     [POSTGRES_OID_BOOL, 'bool', DbValueKind.Boolean], [POSTGRES_OID_BYTEA, 'bytea', DbValueKind.Binary],
-    [POSTGRES_OID_CHAR, 'char', DbValueKind.Text], [POSTGRES_OID_NAME, 'name', DbValueKind.Text],
+    [18, 'char', DbValueKind.Text], [19, 'name', DbValueKind.Text],
     [POSTGRES_OID_INT8, 'int8', DbValueKind.BigInteger], [POSTGRES_OID_INT2, 'int2', DbValueKind.Integer],
-    [POSTGRES_OID_INT4, 'int4', DbValueKind.Integer], [POSTGRES_OID_TEXT, 'text', DbValueKind.Text],
-    [POSTGRES_OID_OID, 'oid', DbValueKind.Integer], [POSTGRES_OID_JSON, 'json', DbValueKind.Json],
-    [POSTGRES_OID_XML, 'xml', DbValueKind.Text], [POSTGRES_OID_FLOAT4, 'float4', DbValueKind.FloatingPoint],
-    [POSTGRES_OID_FLOAT8, 'float8', DbValueKind.FloatingPoint], [POSTGRES_OID_MONEY, 'money', DbValueKind.Text],
-    [POSTGRES_OID_BPCHAR, 'bpchar', DbValueKind.Text], [POSTGRES_OID_VARCHAR, 'varchar', DbValueKind.Text],
+    [POSTGRES_OID_INT4, 'int4', DbValueKind.Integer], [25, 'text', DbValueKind.Text],
+    [POSTGRES_OID_OID, 'oid', DbValueKind.Integer], [114, 'json', DbValueKind.Json],
+    [142, 'xml', DbValueKind.Text], [POSTGRES_OID_FLOAT4, 'float4', DbValueKind.FloatingPoint],
+    [POSTGRES_OID_FLOAT8, 'float8', DbValueKind.FloatingPoint], [790, 'money', DbValueKind.Text],
+    [1042, 'bpchar', DbValueKind.Text], [1043, 'varchar', DbValueKind.Text],
     [POSTGRES_OID_DATE, 'date', DbValueKind.Date], [POSTGRES_OID_TIME, 'time', DbValueKind.Time],
     [POSTGRES_OID_TIMESTAMP, 'timestamp', DbValueKind.DateTime],
     [POSTGRES_OID_TIMESTAMPTZ, 'timestamptz', DbValueKind.DateTime],
     [POSTGRES_OID_INTERVAL, 'interval', DbValueKind.Text], [POSTGRES_OID_TIMETZ, 'timetz', DbValueKind.Time],
-    [POSTGRES_OID_BIT, 'bit', DbValueKind.Text], [POSTGRES_OID_VARBIT, 'varbit', DbValueKind.Text],
+    [1560, 'bit', DbValueKind.Text], [1562, 'varbit', DbValueKind.Text],
     [POSTGRES_OID_NUMERIC, 'numeric', DbValueKind.Decimal], [POSTGRES_OID_UUID, 'uuid', DbValueKind.Uuid],
-    [POSTGRES_OID_JSONB, 'jsonb', DbValueKind.Json]
+    [3802, 'jsonb', DbValueKind.Json]
   ];
   for (const entry of scalars) {
     catalog.set(entry[0], new PostgresTypeMetadata(entry[0], entry[1], entry[2]));

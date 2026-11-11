@@ -48,24 +48,14 @@ export default function postgresTextValueDecoderTest(): void {
         new PostgresRowDescriptionColumn('custom_val', 0, 0, 24576, 8, -1, 1)
       ]);
       const columns = toPostgresColumnDefs(description);
-      expect(columns.length).assertEqual(2);
-      expect(columns[0].name).assertEqual('amount');
-      expect(columns[0].tableOid).assertEqual(16400);
-      expect(columns[0].columnAttributeNumber).assertEqual(2);
-      expect(columns[0].typeOid).assertEqual(1700);
-      expect(columns[0].typeSize).assertEqual(-1);
-      expect(columns[0].typeModifier).assertEqual(786438);
-      expect(columns[0].formatCode).assertEqual(0);
-      expect(columns[0].nativeTypeId).assertEqual('1700');
-      expect(columns[0].nativeTypeName).assertEqual('numeric');
-      expect(columns[0].valueKind).assertEqual(DbValueKind.Decimal);
-      expect(columns[0].sourceSchema).assertEqual('');
-      expect(columns[0].sourceTable).assertEqual('');
-      expect(columns[0].nullable).assertTrue();
-      expect(columns[1].nativeTypeId).assertEqual('24576');
-      expect(columns[1].nativeTypeName).assertEqual('');
-      expect(columns[1].valueKind).assertEqual(DbValueKind.Unknown);
-      expect(columns[1].formatCode).assertEqual(1);
+      const c0 = columns[0];
+      expect(columns.length === 2 && c0.name === 'amount' && c0.tableOid === 16400 &&
+        c0.columnAttributeNumber === 2 && c0.typeOid === 1700 && c0.typeSize === -1 &&
+        c0.typeModifier === 786438 && c0.formatCode === 0 && c0.nativeTypeId === '1700' &&
+        c0.nativeTypeName === 'numeric' && c0.valueKind === DbValueKind.Decimal &&
+        c0.sourceSchema === '' && c0.sourceTable === '' && c0.nullable).assertTrue();
+      expect(columns[1].nativeTypeId === '24576' && columns[1].nativeTypeName === '' &&
+        columns[1].valueKind === DbValueKind.Unknown && columns[1].formatCode === 1).assertTrue();
     });
 
     it('preservesSqlNullAndFailsClosedOnNonTextFormatsOrMalformedUtf8', 0, () => {
@@ -130,9 +120,15 @@ export default function postgresTextValueDecoderTest(): void {
         expect(decodeText(oid, '-Infinity')).assertEqual('-Infinity');
         expect(decodeText(oid, '0')).assertEqual(0);
         expect(decodeText(oid, '0e+309')).assertEqual(0);
-        expect(decodeText(
+        assertFloat64Bits(decodeText(
+          oid, '1.00000000000000011102230246251565404236316680908203125'
+        ), 0x3ff00000, 0x00000000);
+        assertFloat64Bits(decodeText(
           oid, '0.' + '0'.repeat(350) + '1000000000000000111022302462515654042363166809082031251e+351'
-        )).assertEqual(1.0000000000000002);
+        ), 0x3ff00000, 0x00000001);
+        assertFloat64Bits(decodeText(oid, '1.0000000000000001106'), 0x3ff00000, 0x00000000);
+        assertFloat64Bits(decodeText(oid, '1.9430538399282263e-44'), 0x36dbbb70, 0xe036180f);
+        assertFloat64Bits(decodeText(oid, '4.501222173364241e-13'), 0x3d5facae, 0x56160c35);
         expectNegZero(decodeText(oid, '-0'));
         expectNegZero(decodeText(oid, '-0.0e+500'));
         expect(decodeText(oid, '-12.5')).assertEqual(-12.5);
@@ -140,18 +136,25 @@ export default function postgresTextValueDecoderTest(): void {
           '', '+Infinity', 'nan', 'inf', '+1.5', '+', '-', '0x10', ' 1.5', '1.5 ', '.5', '5.', '01.5'
         ]);
       }
-      expect(typeof decodeText(700, '3.4028235e+38')).assertEqual('number');
+      assertFloat64Bits(decodeText(700, '3.4028234663852886e+38'), 0x47efffff, 0xe0000000);
       expect(typeof decodeText(700, '3.4028235677973365e+38')).assertEqual('number');
       expect(typeof decodeText(700, '-3.4028235677973365e+38')).assertEqual('number');
-      const nearMax = decodeText(701, '1.7976931348623155e+308') as number;
-      const nearMax5 = decodeText(701, '1.7976931348623147e+308') as number;
-      expect(Number.isFinite(nearMax) && nearMax < Number.MAX_VALUE && nearMax5 < nearMax)
-        .assertTrue();
-      expect(decodeText(701, '-1.7976931348623155e+308')).assertEqual(-nearMax);
-      expect(decodeText(701, '1.7976931348623157e+308')).assertEqual(Number.MAX_VALUE);
-      expect(decodeText(701, '-1.7976931348623157e+308')).assertEqual(-Number.MAX_VALUE);
-      expect(decodeText(701, '1.7976931348623157e+' + '0'.repeat(4096) + '308'))
-        .assertEqual(Number.MAX_VALUE);
+      const exact701Bits: Array<[string, number, number]> = [
+        ['2.4703282292062327e-324', 0x00000000, 0x00000000],
+        ['2.4703282292062328e-324', 0x00000000, 0x00000001],
+        ['-2.4703282292062328e-324', 0x80000000, 0x00000001],
+        ['7.410984687618698e-324', 0x00000000, 0x00000001],
+        ['7.410984687618699e-324', 0x00000000, 0x00000002],
+        ['8.988465674311579e+307', 0x7fdfffff, 0xffffffff],
+        ['9.999999999999999e+307', 0x7fe1ccf3, 0x85ebc89f],
+        ['9.99999999999999999e+307', 0x7fe1ccf3, 0x85ebc8a0],
+        ['1.7976931348623155e+308', 0x7fefffff, 0xfffffffe],
+        ['-1.7976931348623155e+308', 0xffefffff, 0xfffffffe],
+        ['1.7976931348623157e+308', 0x7fefffff, 0xffffffff],
+        ['-1.7976931348623157e+308', 0xffefffff, 0xffffffff],
+        ['1.7976931348623157e+' + '0'.repeat(4096) + '308', 0x7fefffff, 0xffffffff]
+      ];
+      for (const vec of exact701Bits) assertFloat64Bits(decodeText(701, vec[0]), vec[1], vec[2]);
       assertTextRejectsAll(700, [
         '3.40282356779733662e+38', '-3.40282356779733662e+38',
         '340282356779733662e+21', '3.4028235677973367e+38', '1e+39', '-1e+39'
@@ -183,14 +186,11 @@ export default function postgresTextValueDecoderTest(): void {
     it('decodesUuidTemporalJsonArrayTextUnknownOidsAndFullDataRows', 0, () => {
       const canonicalUuid = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
       expect(decodeText(2950, canonicalUuid)).assertEqual(canonicalUuid);
-      for (const badUuid of [
+      assertTextRejectsAll(2950, [
         '', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11', '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}',
         'a0eebc999c0b4ef8bb6d6bb9bd380a11', 'a0eebc9-99c0b-4ef8-bb6d-6bb9bd380a11',
         'g0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
-      ]) {
-        assertTextRejects(2950, badUuid);
-      }
-
+      ]);
       const temporalCases: Array<[number, string]> = [
         [1082, '2026-11-11'], [1082, '0042-03-15 BC'], [1083, '21:13:17.123456'],
         [1266, '21:13:17.123456+08:30'], [1114, '2026-11-11 21:13:17.123456'],
@@ -198,10 +198,8 @@ export default function postgresTextValueDecoderTest(): void {
       ];
       for (const entry of temporalCases) {
         expect(decodeText(entry[0], entry[1])).assertEqual(entry[1]);
-        assertTextRejects(entry[0], '');
-        assertTextRejects(entry[0], '   ');
+        assertTextRejectsAll(entry[0], ['', '   ']);
       }
-
       const rawJson = '{"id":9007199254740993,"dup":1,"dup":2}';
       expect(decodeText(114, rawJson)).assertEqual(rawJson);
       expect(decodeText(3802, rawJson)).assertEqual(rawJson);
@@ -230,10 +228,8 @@ export default function postgresTextValueDecoderTest(): void {
       expect(values[4]).assertEqual('opaque');
       expect(decodePostgresColumnValue(cols[0], ascii('f'))).assertEqual(false);
       expect(decodePostgresDataRow(new PostgresDataRow([]), []).length).assertEqual(0);
-
-      assertThrowsKind(() => {
-        decodePostgresDataRow(new PostgresDataRow([ascii('t')]), cols);
-      }, ArkDbErrorKind.Protocol);
+      assertThrowsKind(() => { decodePostgresDataRow(new PostgresDataRow([ascii('t')]), cols); },
+        ArkDbErrorKind.Protocol);
       assertThrowsKind(() => {
         decodePostgresDataRow(new PostgresDataRow([ascii('t'), ascii('f')]), [cols[0]]);
       }, ArkDbErrorKind.Protocol);
@@ -284,8 +280,15 @@ function assertThrowsKind(action: () => void, expectedKind: ArkDbErrorKind): voi
 }
 
 function expectNegZero(value: SqlValue): void {
-  expect(typeof value === 'number' && (value as number) === 0 &&
-    1 / (value as number) === Number.NEGATIVE_INFINITY).assertTrue();
+  assertFloat64Bits(value, 0x80000000, 0x00000000);
+}
+
+function assertFloat64Bits(value: SqlValue, expectedHigh: number, expectedLow: number): void {
+  expect(typeof value).assertEqual('number');
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value as number, false);
+  expect(view.getUint32(0, false)).assertEqual(expectedHigh);
+  expect(view.getUint32(4, false)).assertEqual(expectedLow);
 }
 
 function assertBytes(actual: Uint8Array, expected: number[]): void {

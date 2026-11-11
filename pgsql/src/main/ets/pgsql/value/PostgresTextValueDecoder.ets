@@ -18,10 +18,9 @@ export const POSTGRES_TEXT_FORMAT_CODE: number = 0;
 const MIN_INT8: bigint = -9223372036854775808n;
 const MAX_INT8: bigint = 9223372036854775807n;
 const BINARY32_OVERFLOW_THRESHOLD: bigint = ((1n << 25n) - 1n) << 103n;
-const BINARY64_OVERFLOW_THRESHOLD: bigint = ((1n << 54n) - 1n) << 970n;
-const TOP_BINADE_HALF_ULP: bigint = 1n << 970n;
-const TOP_BINADE_REM_MASK: bigint = (1n << 971n) - 1n;
-const FLOAT64_FRAC_MASK: bigint = (1n << 52n) - 1n;
+const FLOAT64_BIT52: bigint = 1n << 52n;
+const FLOAT64_BIT53: bigint = 1n << 53n;
+const FLOAT64_FRAC_MASK: bigint = FLOAT64_BIT52 - 1n;
 const MAX_FLOAT64_SIG_DIGITS: number = 768;
 const FLOAT64_VIEW: DataView = new DataView(new ArrayBuffer(8));
 
@@ -145,7 +144,7 @@ function decodeFloat(text: string, singlePrecision: boolean): SqlValue {
   let expIndex = text.indexOf('e', start);
   if (expIndex < 0) expIndex = text.indexOf('E', start);
   const mantissaEnd = expIndex < 0 ? text.length : expIndex;
-  const targetIntDigits = singlePrecision ? 39 : 309;
+  const maxIntDigits = singlePrecision ? 39 : 309;
   let seenDot = false;
   let fracTotal = 0;
   let sigTotal = 0;
@@ -160,19 +159,19 @@ function decodeFloat(text: string, singlePrecision: boolean): SqlValue {
     if (sigTotal <= MAX_FLOAT64_SIG_DIGITS) prefix += String.fromCharCode(code);
     if (code !== 0x30) lastNonZeroSig = sigTotal;
   }
-  if (lastNonZeroSig === 0) return negative ? -0 : 0;
+  if (lastNonZeroSig === 0) return packFloat64Bits(negative, 0, 0n);
   let exp10 = 0;
   if (expIndex >= 0) {
     let cursor = expIndex + 1;
     const expNeg = text.charCodeAt(cursor) === 0x2d;
     if (expNeg || text.charCodeAt(cursor) === 0x2b) cursor += 1;
     while (cursor < text.length && text.charCodeAt(cursor) === 0x30) cursor += 1;
-    const maxAbsExp = mantissaEnd + targetIntDigits + 400;
+    const maxAbsExp = mantissaEnd + maxIntDigits + 400;
     let magnitude = 0;
     while (cursor < text.length) {
       magnitude = magnitude * 10 + (text.charCodeAt(cursor) - 0x30);
       if (magnitude > maxAbsExp) {
-        if (expNeg) return negative ? -0 : 0;
+        if (expNeg) return packFloat64Bits(negative, 0, 0n);
         throw malformed('floating-point');
       }
       cursor += 1;
@@ -180,46 +179,56 @@ function decodeFloat(text: string, singlePrecision: boolean): SqlValue {
     exp10 = expNeg ? -magnitude : magnitude;
   }
   const intDigits = lastNonZeroSig + exp10 - fracTotal + (sigTotal - lastNonZeroSig);
-  if (intDigits > targetIntDigits) throw malformed('floating-point');
-  if (intDigits <= -325) return negative ? -0 : 0;
-  if (intDigits === targetIntDigits) {
-    const trimmed = prefix.slice(0, Math.min(lastNonZeroSig, targetIntDigits));
-    const scale = targetIntDigits - trimmed.length;
-    const threshold = singlePrecision ? BINARY32_OVERFLOW_THRESHOLD : BINARY64_OVERFLOW_THRESHOLD;
-    let intPart: bigint;
-    try {
-      intPart = scale > 0 ? BigInt(trimmed) * (10n ** BigInt(scale)) : BigInt(trimmed);
-    } catch (_error) {
-      throw malformed('floating-point');
-    }
-    if (intPart >= threshold) throw malformed('floating-point');
-    if (!singlePrecision) return roundTopBinadeBinary64(negative, intPart, lastNonZeroSig > 309);
+  if (intDigits > maxIntDigits) throw malformed('floating-point');
+  if (intDigits <= -325) return packFloat64Bits(negative, 0, 0n);
+  if (singlePrecision && intDigits === 39) {
+    const trimmed32 = prefix.slice(0, Math.min(lastNonZeroSig, 39));
+    const scale32 = 39 - trimmed32.length;
+    const intPart32 = scale32 > 0 ? BigInt(trimmed32) * (10n ** BigInt(scale32)) : BigInt(trimmed32);
+    if (intPart32 >= BINARY32_OVERFLOW_THRESHOLD) throw malformed('floating-point');
   }
-  const parsed = Number(Math.abs(exp10) > 325 || text.length > MAX_FLOAT64_SIG_DIGITS
-    ? canonicalSci(negative, prefix, lastNonZeroSig, intDigits) : text);
-  if (!Number.isFinite(parsed)) throw malformed('floating-point');
-  return parsed;
+  const kept = lastNonZeroSig < prefix.length ? prefix.slice(0, lastNonZeroSig) : prefix;
+  return decimalToBinary64(negative, kept, intDigits - kept.length, lastNonZeroSig > prefix.length);
 }
 
-function canonicalSci(negative: boolean, prefix: string, lastSig: number, intDigits: number): string {
-  const kept = (lastSig < prefix.length ? prefix.slice(0, lastSig) : prefix) +
-    (lastSig > prefix.length ? '1' : '');
-  const body = kept.length > 1 ? kept.charAt(0) + '.' + kept.slice(1) : kept;
-  return (negative ? '-' : '') + body + 'e' + (intDigits - 1);
+function decimalToBinary64(negative: boolean, kept: string,
+  p10: number, hasStickyTail: boolean): number {
+  const digits = BigInt(kept);
+  const numBase = p10 >= 0 ? digits * (5n ** BigInt(p10)) : digits;
+  const denBase = p10 >= 0 ? 1n : (5n ** BigInt(-p10));
+  const diff = bitLength(numBase) - bitLength(denBase);
+  const lhs = diff < 0 ? (numBase << BigInt(-diff)) : numBase;
+  const rhs = diff >= 0 ? (denBase << BigInt(diff)) : denBase;
+  const floorLog2 = (lhs >= rhs ? diff : diff - 1) + p10;
+  if (floorLog2 > 1023) throw malformed('floating-point');
+  if (floorLog2 < -1075) return packFloat64Bits(negative, 0, 0n);
+  let ulpExp = floorLog2 - 52;
+  if (ulpExp < -1074) ulpExp = -1074;
+  const shift = p10 - ulpExp;
+  const num = shift >= 0 ? (numBase << BigInt(shift)) : numBase;
+  const den = shift >= 0 ? denBase : (denBase << BigInt(-shift));
+  let sig = num / den;
+  const twiceRem = (num % den) << 1n;
+  if (twiceRem > den || (twiceRem === den && (hasStickyTail || (sig & 1n) === 1n))) sig += 1n;
+  if (sig === 0n) return packFloat64Bits(negative, 0, 0n);
+  if (sig === FLOAT64_BIT53) { sig >>= 1n; ulpExp += 1; }
+  if (ulpExp > 971) throw malformed('floating-point');
+  return packFloat64Bits(negative, sig < FLOAT64_BIT52 ? 0 : ulpExp + 1075, sig & FLOAT64_FRAC_MASK);
 }
 
-function roundTopBinadeBinary64(negative: boolean, intPart: bigint, hasTail: boolean): number {
-  let sig53 = intPart >> 971n;
-  const rem = intPart & TOP_BINADE_REM_MASK;
-  if (rem > TOP_BINADE_HALF_ULP ||
-    (rem === TOP_BINADE_HALF_ULP && (hasTail || (sig53 & 1n) === 1n))) {
-    sig53 += 1n;
-  }
-  const frac52 = sig53 & FLOAT64_FRAC_MASK;
-  const high = ((negative ? 0x80000000 : 0) | (0x7fe << 20) | Number(frac52 >> 32n)) >>> 0;
+function packFloat64Bits(negative: boolean, biasedExp: number, frac52: bigint): number {
+  const high = ((negative ? 0x80000000 : 0) | (biasedExp << 20) | Number(frac52 >> 32n)) >>> 0;
   FLOAT64_VIEW.setUint32(0, high, false);
   FLOAT64_VIEW.setUint32(4, Number(frac52 & 0xffffffffn) >>> 0, false);
   return FLOAT64_VIEW.getFloat64(0, false);
+}
+
+function bitLength(value: bigint): number {
+  const hex = value.toString(16);
+  const code = hex.charCodeAt(0);
+  const nibble = code <= 0x39 ? code - 0x30 : code - 0x61 + 10;
+  const lead = nibble >= 8 ? 4 : nibble >= 4 ? 3 : nibble >= 2 ? 2 : 1;
+  return (hex.length - 1) * 4 + lead;
 }
 
 function decodeUuid(text: string): string {

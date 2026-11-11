@@ -1316,6 +1316,8 @@ export default function postgresTlsTest(): void {
       for (const malformedCn of [
         element(0x0c, new Uint8Array(0)),
         element(0x14, bytes([0x1b, 0x28, 0x75])),
+        element(0x14, bytes([0xaa])),
+        element(0x14, bytes([0x1b, 0x28, 0x76, 0x2a])),
         element(0x16, ascii('db.example.com')),
         element(0x02, bytes([1]))
       ]) {

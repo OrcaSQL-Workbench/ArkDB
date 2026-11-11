@@ -956,16 +956,22 @@ function teletexDiacriticSequence(octet: number, base: number): string {
 }
 function teletexSupplementaryCharacter(octet: number): string {
   const lowTable: string =
-    '\u00a1\u00a2\u00a3$\u00a5#\u00a7\u00a4\u0000\u201c' +
-    '\u0000\u0000\u0000\u0000\u0000' +
+    '\u00a1\u00a2\u00a3$\u00a5#\u00a7\u00a4\u0000\u0000\u00ab' +
+    '\u0000\u0000\u0000\u0000' +
     '\u00b0\u00b1\u00b2\u00b3\u00d7\u00b5\u00b6\u00b7\u00f7' +
     '\u0000\u0000\u00bb\u00bc\u00bd\u00be\u00bf';
-  if (octet >= 0xa1 && octet <= 0xbf) return lowTable.charAt(octet - 0xa1);
-  const highTable: string =
-    '\u2126\u00c6\u0110\u00aa\u0126\u0000\u0132\u013f\u0141\u0000' +
-    '\u0152\u00ba\u00de\u0166\u014a\u0149\u0138\u00e6\u0111\u00f0' +
-    '\u0127\u0131\u0133\u0140\u0142\u00f8\u0153\u00df\u00fe\u0167\u014b';
-  return highTable.charAt(octet - 0xe0);
+  let mapped = '\u0000';
+  if (octet >= 0xa1 && octet <= 0xbf) {
+    mapped = lowTable.charAt(octet - 0xa1);
+  } else if (octet >= 0xe0 && octet <= 0xfe) {
+    const highTable: string =
+      '\u2126\u00c6\u0110\u00aa\u0126\u0000\u0132\u013f\u0141\u00d8' +
+      '\u0152\u00ba\u00de\u0166\u014a\u0149\u0138\u00e6\u0111\u00f0' +
+      '\u0127\u0131\u0133\u0140\u0142\u00f8\u0153\u00df\u00fe\u0167\u014b';
+    mapped = highTable.charAt(octet - 0xe0);
+  }
+  if (mapped === '\u0000') throw invalidTlsCertificateIdentity();
+  return mapped;
 }
 function invalidTlsCertificateIdentity(): ArkDbError {
   return ArkDbError.tls(

@@ -17,12 +17,8 @@ export const POSTGRES_TEXT_FORMAT_CODE: number = 0;
 
 const MIN_INT8: bigint = -9223372036854775808n;
 const MAX_INT8: bigint = 9223372036854775807n;
-const BINARY32_OVERFLOW_THRESHOLD: bigint = ((1n << 25n) - 1n) << 103n;
-const FLOAT64_BIT52: bigint = 1n << 52n;
-const FLOAT64_BIT53: bigint = 1n << 53n;
-const FLOAT64_FRAC_MASK: bigint = FLOAT64_BIT52 - 1n;
-const MAX_FLOAT64_SIG_DIGITS: number = 768;
-const FLOAT64_VIEW: DataView = new DataView(new ArrayBuffer(8));
+const MAX_FLOAT_SIG_DIGITS: number = 768;
+const FLOAT_VIEW: DataView = new DataView(new ArrayBuffer(8));
 
 export function toPostgresColumnDef(
   column: PostgresRowDescriptionColumn): PostgresColumnDef {
@@ -44,33 +40,30 @@ export function toPostgresColumnDef(
   return definition;
 }
 
-export function toPostgresColumnDefs(
-  description: PostgresRowDescription): PostgresColumnDef[] {
+export function toPostgresColumnDefs(description: PostgresRowDescription): PostgresColumnDef[] {
   return description.columns.map(toPostgresColumnDef);
 }
 
-export function decodePostgresColumnValue(
-  column: PostgresColumnDef, raw: Uint8Array | null): SqlValue {
+export function decodePostgresColumnValue(column: PostgresColumnDef,
+  raw: Uint8Array | null): SqlValue {
   return decodePostgresTextValue(column.typeOid, column.formatCode, raw);
 }
 
-export function decodePostgresDataRow(
-  row: PostgresDataRow, columns: PostgresColumnDef[]): SqlValue[] {
+export function decodePostgresDataRow(row: PostgresDataRow,
+  columns: PostgresColumnDef[]): SqlValue[] {
   if (row.fields.length !== columns.length) {
-    throw ArkDbError.protocol(
-      'PostgreSQL DataRow field count ' + row.fields.length +
-      ' does not match RowDescription column count ' + columns.length
-    );
+    throw ArkDbError.protocol('PostgreSQL DataRow field count ' + row.fields.length +
+      ' does not match RowDescription column count ' + columns.length);
   }
   const decoded: SqlValue[] = [];
-  for (let index = 0; index < columns.length; index += 1) {
-    decoded.push(decodePostgresColumnValue(columns[index], row.fields[index]));
+  for (let i = 0; i < columns.length; i += 1) {
+    decoded.push(decodePostgresColumnValue(columns[i], row.fields[i]));
   }
   return decoded;
 }
 
-export function decodePostgresTextValue(
-  typeOid: number, formatCode: number, raw: Uint8Array | null): SqlValue {
+export function decodePostgresTextValue(typeOid: number, formatCode: number,
+  raw: Uint8Array | null): SqlValue {
   if (raw === null) return null;
   if (!Number.isInteger(formatCode) || formatCode !== POSTGRES_TEXT_FORMAT_CODE) {
     throw ArkDbError.unsupported(
@@ -78,7 +71,6 @@ export function decodePostgresTextValue(
   }
   const checkedOid = requirePostgresTypeOid(typeOid);
   if (checkedOid === POSTGRES_OID_BYTEA) return decodeBytea(raw);
-
   const text = decodeStrictUtf8Text(raw);
   switch (checkedOid) {
     case POSTGRES_OID_BOOL:
@@ -100,12 +92,9 @@ export function decodePostgresTextValue(
         return text;
       }
       throw malformed('numeric');
-    case POSTGRES_OID_FLOAT4:
-      return decodeFloat(text, true);
-    case POSTGRES_OID_FLOAT8:
-      return decodeFloat(text, false);
-    case POSTGRES_OID_UUID:
-      return decodeUuid(text);
+    case POSTGRES_OID_FLOAT4: return decodeFloat(text, true);
+    case POSTGRES_OID_FLOAT8: return decodeFloat(text, false);
+    case POSTGRES_OID_UUID: return decodeUuid(text);
     case POSTGRES_OID_DATE:
     case POSTGRES_OID_TIME:
     case POSTGRES_OID_TIMETZ:
@@ -114,8 +103,7 @@ export function decodePostgresTextValue(
     case POSTGRES_OID_INTERVAL:
       if (text.trim().length === 0) throw malformed('temporal');
       return text;
-    default:
-      return text;
+    default: return text;
   }
 }
 
@@ -145,6 +133,7 @@ function decodeFloat(text: string, singlePrecision: boolean): SqlValue {
   if (expIndex < 0) expIndex = text.indexOf('E', start);
   const mantissaEnd = expIndex < 0 ? text.length : expIndex;
   const maxIntDigits = singlePrecision ? 39 : 309;
+  const minIntDigits = singlePrecision ? -46 : -325;
   let seenDot = false;
   let fracTotal = 0;
   let sigTotal = 0;
@@ -156,10 +145,10 @@ function decodeFloat(text: string, singlePrecision: boolean): SqlValue {
     if (seenDot) fracTotal += 1;
     if (sigTotal === 0 && code === 0x30) continue;
     sigTotal += 1;
-    if (sigTotal <= MAX_FLOAT64_SIG_DIGITS) prefix += String.fromCharCode(code);
+    if (sigTotal <= MAX_FLOAT_SIG_DIGITS) prefix += String.fromCharCode(code);
     if (code !== 0x30) lastNonZeroSig = sigTotal;
   }
-  if (lastNonZeroSig === 0) return packFloat64Bits(negative, 0, 0n);
+  if (lastNonZeroSig === 0) return packZero(negative, singlePrecision);
   let exp10 = 0;
   if (expIndex >= 0) {
     let cursor = expIndex + 1;
@@ -171,7 +160,7 @@ function decodeFloat(text: string, singlePrecision: boolean): SqlValue {
     while (cursor < text.length) {
       magnitude = magnitude * 10 + (text.charCodeAt(cursor) - 0x30);
       if (magnitude > maxAbsExp) {
-        if (expNeg) return packFloat64Bits(negative, 0, 0n);
+        if (expNeg) return packZero(negative, singlePrecision);
         throw malformed('floating-point');
       }
       cursor += 1;
@@ -180,19 +169,20 @@ function decodeFloat(text: string, singlePrecision: boolean): SqlValue {
   }
   const intDigits = lastNonZeroSig + exp10 - fracTotal + (sigTotal - lastNonZeroSig);
   if (intDigits > maxIntDigits) throw malformed('floating-point');
-  if (intDigits <= -325) return packFloat64Bits(negative, 0, 0n);
-  if (singlePrecision && intDigits === 39) {
-    const trimmed32 = prefix.slice(0, Math.min(lastNonZeroSig, 39));
-    const scale32 = 39 - trimmed32.length;
-    const intPart32 = scale32 > 0 ? BigInt(trimmed32) * (10n ** BigInt(scale32)) : BigInt(trimmed32);
-    if (intPart32 >= BINARY32_OVERFLOW_THRESHOLD) throw malformed('floating-point');
-  }
+  if (intDigits <= minIntDigits) return packZero(negative, singlePrecision);
   const kept = lastNonZeroSig < prefix.length ? prefix.slice(0, lastNonZeroSig) : prefix;
-  return decimalToBinary64(negative, kept, intDigits - kept.length, lastNonZeroSig > prefix.length);
+  return decimalToIeeeFloat(
+    negative, kept, intDigits - kept.length, lastNonZeroSig > prefix.length, singlePrecision
+  );
 }
 
-function decimalToBinary64(negative: boolean, kept: string,
-  p10: number, hasStickyTail: boolean): number {
+function decimalToIeeeFloat(negative: boolean, kept: string, p10: number,
+  hasStickyTail: boolean, singlePrecision: boolean): number {
+  const fracBits = singlePrecision ? 23 : 52;
+  const minUlpExp = singlePrecision ? -149 : -1074;
+  const maxFloorLog2 = singlePrecision ? 127 : 1023;
+  const maxUlpExp = maxFloorLog2 - fracBits;
+  const bitImplicit = 1n << BigInt(fracBits);
   const digits = BigInt(kept);
   const numBase = p10 >= 0 ? digits * (5n ** BigInt(p10)) : digits;
   const denBase = p10 >= 0 ? 1n : (5n ** BigInt(-p10));
@@ -200,27 +190,41 @@ function decimalToBinary64(negative: boolean, kept: string,
   const lhs = diff < 0 ? (numBase << BigInt(-diff)) : numBase;
   const rhs = diff >= 0 ? (denBase << BigInt(diff)) : denBase;
   const floorLog2 = (lhs >= rhs ? diff : diff - 1) + p10;
-  if (floorLog2 > 1023) throw malformed('floating-point');
-  if (floorLog2 < -1075) return packFloat64Bits(negative, 0, 0n);
-  let ulpExp = floorLog2 - 52;
-  if (ulpExp < -1074) ulpExp = -1074;
+  if (floorLog2 > maxFloorLog2) throw malformed('floating-point');
+  if (floorLog2 < minUlpExp - 1) return packZero(negative, singlePrecision);
+  let ulpExp = floorLog2 - fracBits;
+  if (ulpExp < minUlpExp) ulpExp = minUlpExp;
   const shift = p10 - ulpExp;
   const num = shift >= 0 ? (numBase << BigInt(shift)) : numBase;
   const den = shift >= 0 ? denBase : (denBase << BigInt(-shift));
   let sig = num / den;
   const twiceRem = (num % den) << 1n;
   if (twiceRem > den || (twiceRem === den && (hasStickyTail || (sig & 1n) === 1n))) sig += 1n;
-  if (sig === 0n) return packFloat64Bits(negative, 0, 0n);
-  if (sig === FLOAT64_BIT53) { sig >>= 1n; ulpExp += 1; }
-  if (ulpExp > 971) throw malformed('floating-point');
-  return packFloat64Bits(negative, sig < FLOAT64_BIT52 ? 0 : ulpExp + 1075, sig & FLOAT64_FRAC_MASK);
+  if (sig === 0n) return packZero(negative, singlePrecision);
+  if (sig === (bitImplicit << 1n)) { sig >>= 1n; ulpExp += 1; }
+  if (ulpExp > maxUlpExp) throw malformed('floating-point');
+  const biasedExp = sig < bitImplicit ? 0 : ulpExp + (1 - minUlpExp);
+  const frac = sig & (bitImplicit - 1n);
+  return singlePrecision
+    ? packFloat32Bits(negative, biasedExp, frac)
+    : packFloat64Bits(negative, biasedExp, frac);
+}
+
+function packZero(negative: boolean, singlePrecision: boolean): number {
+  return singlePrecision ? packFloat32Bits(negative, 0, 0n) : packFloat64Bits(negative, 0, 0n);
+}
+
+function packFloat32Bits(negative: boolean, biasedExp: number, frac23: bigint): number {
+  const word = ((negative ? 0x80000000 : 0) | (biasedExp << 23) | Number(frac23)) >>> 0;
+  FLOAT_VIEW.setUint32(0, word, false);
+  return FLOAT_VIEW.getFloat32(0, false);
 }
 
 function packFloat64Bits(negative: boolean, biasedExp: number, frac52: bigint): number {
   const high = ((negative ? 0x80000000 : 0) | (biasedExp << 20) | Number(frac52 >> 32n)) >>> 0;
-  FLOAT64_VIEW.setUint32(0, high, false);
-  FLOAT64_VIEW.setUint32(4, Number(frac52 & 0xffffffffn) >>> 0, false);
-  return FLOAT64_VIEW.getFloat64(0, false);
+  FLOAT_VIEW.setUint32(0, high, false);
+  FLOAT_VIEW.setUint32(4, Number(frac52 & 0xffffffffn) >>> 0, false);
+  return FLOAT_VIEW.getFloat64(0, false);
 }
 
 function bitLength(value: bigint): number {

@@ -120,15 +120,6 @@ export default function postgresTextValueDecoderTest(): void {
         expect(decodeText(oid, '-Infinity')).assertEqual('-Infinity');
         expect(decodeText(oid, '0')).assertEqual(0);
         expect(decodeText(oid, '0e+309')).assertEqual(0);
-        assertFloat64Bits(decodeText(
-          oid, '1.00000000000000011102230246251565404236316680908203125'
-        ), 0x3ff00000, 0x00000000);
-        assertFloat64Bits(decodeText(
-          oid, '0.' + '0'.repeat(350) + '1000000000000000111022302462515654042363166809082031251e+351'
-        ), 0x3ff00000, 0x00000001);
-        assertFloat64Bits(decodeText(oid, '1.0000000000000001106'), 0x3ff00000, 0x00000000);
-        assertFloat64Bits(decodeText(oid, '1.9430538399282263e-44'), 0x36dbbb70, 0xe036180f);
-        assertFloat64Bits(decodeText(oid, '4.501222173364241e-13'), 0x3d5facae, 0x56160c35);
         expectNegZero(decodeText(oid, '-0'));
         expectNegZero(decodeText(oid, '-0.0e+500'));
         expect(decodeText(oid, '-12.5')).assertEqual(-12.5);
@@ -136,22 +127,25 @@ export default function postgresTextValueDecoderTest(): void {
           '', '+Infinity', 'nan', 'inf', '+1.5', '+', '-', '0x10', ' 1.5', '1.5 ', '.5', '5.', '01.5'
         ]);
       }
-      assertFloat64Bits(decodeText(700, '3.4028234663852886e+38'), 0x47efffff, 0xe0000000);
-      expect(typeof decodeText(700, '3.4028235677973365e+38')).assertEqual('number');
-      expect(typeof decodeText(700, '-3.4028235677973365e+38')).assertEqual('number');
+      const exact700Bits: Array<[string, number, number]> = [
+        ['0.1', 0x3fb99999, 0xa0000000], ['0.10000001', 0x3fb99999, 0xc0000000],
+        ['1e-45', 0x36a00000, 0x00000000], ['7e-46', 0x00000000, 0x00000000],
+        ['-7e-46', 0x80000000, 0x00000000], ['3.4028234663852886e+38', 0x47efffff, 0xe0000000],
+        ['3.4028235e+38', 0x47efffff, 0xe0000000], ['3.4028235677973365e+38', 0x47efffff, 0xe0000000],
+        ['-3.4028235677973365e+38', 0xc7efffff, 0xe0000000]
+      ];
+      for (const vec of exact700Bits) assertFloat64Bits(decodeText(700, vec[0]), vec[1], vec[2]);
       const exact701Bits: Array<[string, number, number]> = [
-        ['2.4703282292062327e-324', 0x00000000, 0x00000000],
-        ['2.4703282292062328e-324', 0x00000000, 0x00000001],
-        ['-2.4703282292062328e-324', 0x80000000, 0x00000001],
-        ['7.410984687618698e-324', 0x00000000, 0x00000001],
-        ['7.410984687618699e-324', 0x00000000, 0x00000002],
-        ['8.988465674311579e+307', 0x7fdfffff, 0xffffffff],
-        ['9.999999999999999e+307', 0x7fe1ccf3, 0x85ebc89f],
-        ['9.99999999999999999e+307', 0x7fe1ccf3, 0x85ebc8a0],
-        ['1.7976931348623155e+308', 0x7fefffff, 0xfffffffe],
-        ['-1.7976931348623155e+308', 0xffefffff, 0xfffffffe],
-        ['1.7976931348623157e+308', 0x7fefffff, 0xffffffff],
-        ['-1.7976931348623157e+308', 0xffefffff, 0xffffffff],
+        ['0.1', 0x3fb99999, 0x9999999a], ['1.0000000000000001106', 0x3ff00000, 0x00000000],
+        ['1.00000000000000011102230246251565404236316680908203125', 0x3ff00000, 0x00000000],
+        ['0.' + '0'.repeat(350) + '1000000000000000111022302462515654042363166809082031251e+351', 0x3ff00000, 0x00000001],
+        ['1.9430538399282263e-44', 0x36dbbb70, 0xe036180f], ['4.501222173364241e-13', 0x3d5facae, 0x56160c35],
+        ['2.4703282292062327e-324', 0x00000000, 0x00000000], ['2.4703282292062328e-324', 0x00000000, 0x00000001],
+        ['-2.4703282292062328e-324', 0x80000000, 0x00000001], ['7.410984687618698e-324', 0x00000000, 0x00000001],
+        ['7.410984687618699e-324', 0x00000000, 0x00000002], ['8.988465674311579e+307', 0x7fdfffff, 0xffffffff],
+        ['9.999999999999999e+307', 0x7fe1ccf3, 0x85ebc89f], ['9.99999999999999999e+307', 0x7fe1ccf3, 0x85ebc8a0],
+        ['1.7976931348623155e+308', 0x7fefffff, 0xfffffffe], ['-1.7976931348623155e+308', 0xffefffff, 0xfffffffe],
+        ['1.7976931348623157e+308', 0x7fefffff, 0xffffffff], ['-1.7976931348623157e+308', 0xffefffff, 0xffffffff],
         ['1.7976931348623157e+' + '0'.repeat(4096) + '308', 0x7fefffff, 0xffffffff]
       ];
       for (const vec of exact701Bits) assertFloat64Bits(decodeText(701, vec[0]), vec[1], vec[2]);

@@ -956,7 +956,7 @@ function teletexDiacriticSequence(octet: number, base: number): string {
 }
 function teletexSupplementaryCharacter(octet: number): string {
   const lowTable: string =
-    '\u00a1\u00a2\u00a3$\u00a5#\u00a7\u00a4\u0000\u0000\u00ab' +
+    '\u00a1\u00a2\u00a3$\u00a5#\u00a7\u00a4\u0000\u201c\u00ab' +
     '\u0000\u0000\u0000\u0000' +
     '\u00b0\u00b1\u00b2\u00b3\u00d7\u00b5\u00b6\u00b7\u00f7' +
     '\u0000\u0000\u00bb\u00bc\u00bd\u00be\u00bf';

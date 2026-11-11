@@ -1293,7 +1293,8 @@ export default function postgresTlsTest(): void {
         element(0x31, nameAttribute(element(0x0c,
           bytes([0xc3, 0xa9, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x90, 0x98])))),
         element(0x31, nameAttribute(element(0x14,
-          bytes([0x24, 0xa3, 0xf9, 0xc4, 0x20, 0xc2, 0x20, 0xc2, 0x65]))))
+          bytes([0x24, 0xa3, 0xaa, 0x1b, 0x28, 0x76, 0x2a,
+            0x1b, 0x28, 0x75, 0xf9, 0xc4, 0x20, 0xc2, 0x20, 0xc2, 0x65]))))
       ])));
       const unicodeDecoded = new NetworkKitPostgresDecodedCertificate(
         swallowedPlatform, unicodeDer);
@@ -1302,7 +1303,25 @@ export default function postgresTlsTest(): void {
       expect(decodedUnicodeNames.length).assertEqual(2);
       expect(decodedUnicodeNames[0]).assertEqual('\u00e9\u20ac\ud83d\udc18');
       expect(decodedUnicodeNames[1])
-        .assertEqual('\u00a4\u00a3\u00f8~\u00b4e\u0301');
+        .assertEqual('\u00a4\u00a3\u201c\u201c\u00f8~\u00b4e\u0301');
+
+      const matchingFirstWith0xAaLaterDer = replaceTbsField(5,
+        element(0x30, concatenate([
+          element(0x31, nameAttribute(element(0x0c, ascii('db.example.com')))),
+          element(0x31, nameAttribute(
+            element(0x14, bytes([0xaa, 0x1b, 0x28, 0x76, 0x2a]))))
+        ])));
+      await verifyProductionPeer(
+        swallowedPlatform, matchingFirstWith0xAaLaterDer, 'db.example.com');
+      for (const nonMatching0xAa of [
+        element(0x14, bytes([0xaa])),
+        element(0x14, bytes([0x1b, 0x28, 0x76, 0x2a]))
+      ]) {
+        terminal = await failure((): Promise<void> => verifyProductionPeer(
+          forgedPlatform, replaceTbsField(5, nameValue(nonMatching0xAa)),
+          'db.example.com'));
+        expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+      }
 
       const v1Fields = tbsFields(null);
       v1Fields[4] = name('db.example.com');
@@ -1316,8 +1335,6 @@ export default function postgresTlsTest(): void {
       for (const malformedCn of [
         element(0x0c, new Uint8Array(0)),
         element(0x14, bytes([0x1b, 0x28, 0x75])),
-        element(0x14, bytes([0xaa])),
-        element(0x14, bytes([0x1b, 0x28, 0x76, 0x2a])),
         element(0x16, ascii('db.example.com')),
         element(0x02, bytes([1]))
       ]) {

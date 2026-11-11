@@ -1,9 +1,13 @@
 import { socket } from '@kit.NetworkKit';
+import { cert as platformCert } from '@kit.DeviceCertificateKit';
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import {
   buildPostgresTlsConnectOptions, createDefaultPostgresTlsIdentityVerifier,
-  PostgresTlsFilePort, postgresCertificateHasSubjectAlternativeName
+  NetworkKitPostgresPeerCertificate, PostgresDecodedCertificate,
+  PostgresPeerCertificate, PostgresPeerCertificateFactory, PostgresTlsFilePort,
+  postgresCertificateHasSubjectAlternativeName, postgresCertificateMatchesHost,
+  postgresDnsNameMatchesHost, postgresIpAddressBytes
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 import {
   PostgresCertificateStructure, PostgresCertificateSubjectAlternativeName,
@@ -803,18 +807,237 @@ export default function postgresTlsTest(): void {
         element(0xa3, element(0x30, new Uint8Array(64 * 1024 + 1)))
       ])));
     });
-    it('failsClosedWhenVerifyFullHasNoProductionIdentityVerifier', 0, async () => {
-      const verifier = createDefaultPostgresTlsIdentityVerifier();
-      const certificate = {} as socket.X509CertRawData;
-      const terminal = await failure((): Promise<void> =>
-        verifier.verify(certificate, 'db.example.com'));
-      expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+    it('matchesStrictDnsNamesAndWildcardDepth', 0, () => {
+      expect(postgresDnsNameMatchesHost(
+        'db.example.com', 'DB.EXAMPLE.COM.')).assertTrue();
+      expect(postgresDnsNameMatchesHost(
+        '*.example.com', 'db.example.com')).assertTrue();
+      expect(postgresDnsNameMatchesHost(
+        '*.example.com', 'nested.db.example.com')).assertFalse();
+      for (const invalid of [
+        '*.com', '*db.example.com', 'db.*.com', '*.*.com',
+        ' db.example.com', 'db.example.com ', 'db.example.com.',
+        '.db.example.com', 'db..example.com', '-db.example.com',
+        'db-.example.com', 'a'.repeat(64) + '.example.com'
+      ]) {
+        expect(postgresDnsNameMatchesHost(
+          invalid, 'db.example.com')).assertFalse();
+      }
+      for (const invalid of [
+        ' db.example.com', 'db.example.com ', 'db.example.com..',
+        '.db.example.com', 'db..example.com', '\u212A.example.com'
+      ]) {
+        expect(postgresDnsNameMatchesHost(
+          'db.example.com', invalid)).assertFalse();
+      }
+      expect(postgresDnsNameMatchesHost(
+        '\u212A.example.com', 'k.example.com')).assertFalse();
+    });
+    it('parsesCanonicalIpLiteralsWithoutDnsFallback', 0, () => {
+      assertIp('127.0.0.1', [127, 0, 0, 1]);
+      assertIp('2001:db8::1', [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 1
+      ]);
+      assertIp('::ffff:192.0.2.1', [
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0xff, 0xff, 192, 0, 2, 1
+      ]);
+      for (const invalid of [
+        '[2001:db8::1]', '127.00.0.1', '256.0.0.1',
+        '2001:db8::1::2', '2001:db8::1%25eth0', '2001:db8:',
+        '192.0.2.1::', '192.0.2.1::1', '192.0.2.1::192.0.2.2'
+      ]) {
+        expect(postgresIpAddressBytes(invalid) === null).assertTrue();
+      }
+      for (const legacy of [
+        '0x7f000001', '017700000001', '2130706433', '0x7f.0.0.1'
+      ]) {
+        expect(postgresCertificateMatchesHost(
+          peerWithSan(null, [legacy]), legacy)).assertFalse();
+      }
+      expect(postgresCertificateMatchesHost(
+        peerWithNames([generalName(0x82, ascii('127.00.0.1'))],
+          ['127.00.0.1']), '127.00.0.1')).assertFalse();
+      const numericDns = '0x1.0x2.0x3.0x4.0x5';
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, [numericDns]), numericDns)).assertTrue();
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, [numericDns]), numericDns + '.')).assertTrue();
+    });
+    it('usesSanBeforePermittedCnFallbackAndSeparatesDnsFromIp', 0, () => {
+      let peer = peerWithNames([
+        generalName(0x86, ascii('postgres://db.example.com')),
+        generalName(0x87, bytes([127, 0, 0, 1])),
+        generalName(0x82, ascii('db.example.com')),
+        generalName(0x82, ascii('db.example.com'))
+      ], ['wrong.example.com']);
+      expect(postgresCertificateMatchesHost(
+        peer, 'db.example.com')).assertTrue();
+      expect(postgresCertificateMatchesHost(peer, '127.0.0.1')).assertTrue();
+      expect(postgresCertificateMatchesHost(peer, '127.0.0.2')).assertFalse();
+
+      peer = peerWithNames([
+        generalName(0x82, ascii('wrong.example.com'))
+      ], ['db.example.com']);
+      expect(postgresCertificateMatchesHost(
+        peer, 'db.example.com')).assertFalse();
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, ['db.example.com']), 'db.example.com')).assertTrue();
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, ['db.example.com'],
+          [certificateExtension()]), 'db.example.com')).assertTrue();
+      expect(postgresCertificateMatchesHost(peerWithNames([
+        generalName(0x86, ascii('postgres://db.example.com')),
+        generalName(0x87, bytes([127, 0, 0, 1])),
+        generalName(0x88, bytes([0x2a, 0x03]))
+      ], ['db.example.com']), 'db.example.com')).assertTrue();
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, ['wrong.example.com', 'db.example.com']),
+        'db.example.com')).assertFalse();
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, ['db.example.com', 'wrong.example.com']),
+        'db.example.com')).assertTrue();
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, ['127.0.0.1']), '127.0.0.1')).assertFalse();
+      expect(postgresCertificateMatchesHost(peerWithNames([
+        generalName(0x82, ascii('127.0.0.1'))
+      ], []), '127.0.0.1')).assertFalse();
+    });
+    it('rejectsInvalidPresentedNamesAndMalformedIdentityData', 0, () => {
+      for (const invalid of [
+        bytes([
+          0x64, 0x62, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70,
+          0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d, 0, 0x2e,
+          0x61, 0x74, 0x74, 0x61, 0x63, 0x6b, 0x65, 0x72
+        ]),
+        ascii('db.example.com '), ascii('db..example.com'),
+        ascii('db.example.com.')
+      ]) {
+        expect(postgresCertificateMatchesHost(peerWithNames([
+          generalName(0x82, invalid)
+        ], ['db.example.com']), 'db.example.com')).assertFalse();
+      }
+      let terminal = syncFailure((): void => {
+        postgresCertificateMatchesHost(peerWithNames([
+          generalName(0x82, bytes([0xff]))
+        ], ['db.example.com']), 'db.example.com');
+      });
       expect(terminal.nativeCode).assertEqual(
-        'TLS_IDENTITY_VERIFIER_UNAVAILABLE');
+        'TLS_CERTIFICATE_IDENTITY_INVALID');
+      terminal = syncFailure((): void => {
+        postgresCertificateMatchesHost(
+          peerWithSan(element(0x04, element(0x30, new Uint8Array(0))),
+            ['db.example.com']), 'db.example.com');
+      });
+      expect(terminal.nativeCode).assertEqual(
+        'TLS_CERTIFICATE_IDENTITY_INVALID');
+      terminal = syncFailure((): void => {
+        postgresCertificateMatchesHost(
+          new MockPeerCertificate(
+            bytes([0x30, 0]), new Uint8Array(0), ['db.example.com']),
+          'db.example.com');
+      });
+      expect(terminal.nativeCode).assertEqual(
+        'TLS_CERTIFICATE_IDENTITY_INVALID');
+    });
+    it('wiresProductionVerifierAndReturnsDefensiveIdentityCopies', 0, async () => {
+      const encoded = certificate(tbsFields());
+      const san = sanEntry([
+        generalName(0x82, ascii('db.example.com'))
+      ]);
+      const commonNames = ['db.example.com'];
+      const decoded = new MockDecodedCertificate(san, commonNames);
+      const adapter = new NetworkKitPostgresPeerCertificate(
+        decoded, encoded);
+      const encodedCopy = adapter.certificateDer();
+      const sanCopy = adapter.subjectAlternativeNameExtension();
+      const commonNameCopy = adapter.subjectCommonNames();
+      encodedCopy[0] = 0;
+      sanCopy[0] = 0;
+      commonNameCopy[0] = 'changed.example.com';
+      expect(adapter.certificateDer()[0]).assertEqual(0x30);
+      expect(adapter.subjectAlternativeNameExtension()[0]).assertEqual(0x04);
+      expect(adapter.subjectCommonNames()[0]).assertEqual('db.example.com');
+
+      const factory = new MockPeerCertificateFactory(
+        peerWithSan(null, ['db.example.com']));
+      const verifier = createDefaultPostgresTlsIdentityVerifier(factory);
+      await verifier.verify(remoteCertificateFixture(), 'db.example.com');
+      let terminal = await failure((): Promise<void> =>
+        verifier.verify(remoteCertificateFixture(), 'wrong.example.com'));
+      expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
       expect(terminal.message).assertEqual(
-        'PostgreSQL VERIFY_FULL identity verification is not available in this build');
+        'PostgreSQL TLS certificate does not match the requested host');
+      const original = ArkDbError.tls(
+        'Synthetic exact certificate failure', 'CERT_DECODE');
+      factory.typedFailure = original;
+      terminal = await failure((): Promise<void> =>
+        verifier.verify(remoteCertificateFixture(), 'db.example.com'));
+      expect(terminal === original).assertTrue();
+      factory.typedFailure = null;
+      factory.failure = new Error('Synthetic certificate decode failure');
+      terminal = await failure((): Promise<void> =>
+        verifier.verify(remoteCertificateFixture(), 'db.example.com'));
+      expect(terminal.message).assertEqual(
+        'Could not verify PostgreSQL TLS server identity: ' +
+        'Synthetic certificate decode failure');
+      factory.failure = new Error('Synthetic absent peer certificate');
+      terminal = await failure((): Promise<void> =>
+        verifier.verify(remoteCertificateFixture(), 'db.example.com'));
+      expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+      const malformedVerifier = createDefaultPostgresTlsIdentityVerifier(
+        new MockPeerCertificateFactory(
+          peerWithSan(element(0x04, element(0x30, new Uint8Array(0))),
+            ['db.example.com'])));
+      terminal = await failure((): Promise<void> =>
+        malformedVerifier.verify(
+          remoteCertificateFixture(), 'db.example.com'));
+      expect(terminal.nativeCode).assertEqual(
+        'TLS_CERTIFICATE_IDENTITY_INVALID');
     });
   });
+}
+class MockDecodedCertificate implements PostgresDecodedCertificate {
+  private readonly entry: Uint8Array;
+  private readonly commonNames: string[];
+  constructor(entry: Uint8Array, commonNames: string[]) {
+    this.entry = entry;
+    this.commonNames = commonNames;
+  }
+  subjectAlternativeNameExtension(): Uint8Array {
+    return this.entry;
+  }
+  subjectCommonNames(): string[] {
+    return this.commonNames;
+  }
+}
+class MockPeerCertificate implements PostgresPeerCertificate {
+  private readonly encoded: Uint8Array;
+  private readonly sanEntry: Uint8Array;
+  private readonly commonNames: string[];
+  constructor(encoded: Uint8Array, sanEntry: Uint8Array,
+    commonNames: string[]) {
+    this.encoded = encoded;
+    this.sanEntry = sanEntry;
+    this.commonNames = commonNames;
+  }
+  certificateDer(): Uint8Array { return this.encoded; }
+  subjectAlternativeNameExtension(): Uint8Array { return this.sanEntry; }
+  subjectCommonNames(): string[] { return this.commonNames; }
+}
+class MockPeerCertificateFactory implements PostgresPeerCertificateFactory {
+  private readonly peer: PostgresPeerCertificate;
+  typedFailure: ArkDbError | null = null;
+  failure: Error | null = null;
+  constructor(peer: PostgresPeerCertificate) { this.peer = peer; }
+  async create(certificate: socket.X509CertRawData):
+  Promise<PostgresPeerCertificate> {
+    if (this.typedFailure !== null) throw this.typedFailure;
+    if (this.failure !== null) throw this.failure;
+    return this.peer;
+  }
 }
 class MockTlsFiles implements PostgresTlsFilePort {
   maximumBytes: number = 0;
@@ -908,6 +1131,25 @@ function certificateExtension(
   }
   fields.push(value);
   return element(0x30, concatenate(fields));
+}
+function peerWithNames(names: Uint8Array[],
+  commonNames: string[]): MockPeerCertificate {
+  return peerWithSan(sanEntry(names), commonNames);
+}
+function peerWithSan(entry: Uint8Array | null, commonNames: string[],
+  otherExtensions: Uint8Array[] = []): MockPeerCertificate {
+  const fields = tbsFields();
+  const encodedExtensions = otherExtensions.slice();
+  if (entry !== null) {
+    encodedExtensions.push(certificateExtension(
+      SUBJECT_ALTERNATIVE_NAME_OID, entry));
+  }
+  if (encodedExtensions.length > 0) {
+    fields.push(extensions(concatenate(encodedExtensions)));
+  }
+  return new MockPeerCertificate(
+    certificate(fields), entry === null ? new Uint8Array(0) : entry,
+    commonNames);
 }
 function sanEntry(names: Uint8Array[]): Uint8Array {
   return element(0x04, element(0x30, concatenate(names)));
@@ -1035,6 +1277,11 @@ function assertNumbers(actual: number[], expected: number[]): void {
     expect(actual[index]).assertEqual(expected[index]);
   }
 }
+function assertIp(host: string, expected: number[]): void {
+  const actual = postgresIpAddressBytes(host);
+  expect(actual !== null).assertTrue();
+  assertBytes(actual!, bytes(expected));
+}
 function expectCertificateFailure(encoded: Uint8Array): void {
   let terminal: ArkDbError | null = null;
   try {
@@ -1093,4 +1340,20 @@ async function failure(operation: () => Promise<void>): Promise<ArkDbError> {
   }
   expect(terminal instanceof ArkDbError).assertTrue();
   return terminal!;
+}
+function syncFailure(operation: () => void): ArkDbError {
+  let terminal: ArkDbError | null = null;
+  try {
+    operation();
+  } catch (error) {
+    terminal = error as ArkDbError;
+  }
+  expect(terminal instanceof ArkDbError).assertTrue();
+  return terminal!;
+}
+function remoteCertificateFixture(): socket.X509CertRawData {
+  return {
+    encodingFormat: platformCert.EncodingFormat.FORMAT_DER,
+    data: bytes([0x30, 0])
+  };
 }

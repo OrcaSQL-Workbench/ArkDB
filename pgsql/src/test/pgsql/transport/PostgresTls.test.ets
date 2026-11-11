@@ -4,10 +4,13 @@ import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import {
   buildPostgresTlsConnectOptions, createDefaultPostgresTlsIdentityVerifier,
-  NetworkKitPostgresPeerCertificate, PostgresDecodedCertificate,
-  PostgresPeerCertificate, PostgresPeerCertificateFactory, PostgresTlsFilePort,
-  postgresCertificateHasSubjectAlternativeName, postgresCertificateMatchesHost,
-  postgresDnsNameMatchesHost, postgresIpAddressBytes
+  NetworkKitPostgresDecodedCertificate, NetworkKitPostgresPeerCertificate,
+  NetworkKitPostgresPeerCertificateFactory, PostgresDecodedCertificate,
+  PostgresPeerCertificate, PostgresPeerCertificateFactory,
+  PostgresPlatformX509Cert, PostgresPlatformX509CertFactory,
+  PostgresTlsFilePort, postgresCertificateHasSubjectAlternativeName,
+  postgresCertificateMatchesHost, postgresDnsNameMatchesHost,
+  postgresIpAddressBytes, postgresParseCertificateSubjectCommonNames
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 import {
   PostgresCertificateStructure, PostgresCertificateSubjectAlternativeName,
@@ -1001,6 +1004,348 @@ export default function postgresTlsTest(): void {
       expect(terminal.nativeCode).assertEqual(
         'TLS_CERTIFICATE_IDENTITY_INVALID');
     });
+    it('treatsAbsentPlatformCommonNamesAsHostnameMismatchAndCopiesPresentNames', 0, async () => {
+      const noSanDer = certificate(tbsFields());
+      const absentPlatform = new MockPlatformX509Cert();
+      absentPlatform.commonNamesResult =
+        uncheckedPlatformValue<Array<string>>(undefined);
+      let terminal = await failure((): Promise<void> =>
+        verifyLegacyDecodedPeer(absentPlatform, noSanDer, 'db.example.com'));
+      expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+      expect(terminal.message).assertEqual(
+        'PostgreSQL TLS certificate does not match the requested host');
+      expect(absentPlatform.requestedTypes.join(',')).assertEqual('CN');
+
+      const nonDnsSan = sanEntry([
+        generalName(0x86, ascii('postgres://db.example.com')),
+        generalName(0x87, bytes([127, 0, 0, 1]))
+      ]);
+      const nonDnsDer = certificate(withTail([extensions(
+        certificateExtension(SUBJECT_ALTERNATIVE_NAME_OID, nonDnsSan))]));
+      const nonDnsPlatform = new MockPlatformX509Cert();
+      nonDnsPlatform.entryResult = { data: nonDnsSan };
+      nonDnsPlatform.commonNamesResult =
+        uncheckedPlatformValue<Array<string>>(undefined);
+      await verifyLegacyDecodedPeer(nonDnsPlatform, nonDnsDer, '127.0.0.1');
+      expect(nonDnsPlatform.requestedValueTypes.length).assertEqual(1);
+      expect(nonDnsPlatform.requestedValueTypes[0]).assertEqual(
+        platformCert.ExtensionEntryType.EXTENSION_ENTRY_TYPE_ENTRY_VALUE);
+      assertBytes(nonDnsPlatform.requestedOids[0], ascii('2.5.29.17'));
+      terminal = await failure((): Promise<void> =>
+        verifyLegacyDecodedPeer(nonDnsPlatform, nonDnsDer, 'db.example.com'));
+      expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+
+      for (const emptyCommonNames of [
+        uncheckedPlatformValue<Array<string>>(undefined),
+        uncheckedPlatformValue<Array<string>>(null),
+        [] as Array<string>
+      ]) {
+        const emptyPlatform = new MockPlatformX509Cert();
+        emptyPlatform.commonNamesResult = emptyCommonNames;
+        expect(new NetworkKitPostgresDecodedCertificate(emptyPlatform)
+          .subjectCommonNames().length).assertEqual(0);
+      }
+
+      const sourceSan = sanEntry([generalName(0x82, ascii('db.example.com'))]);
+      const expectedSan = copyBytes(sourceSan);
+      const sourceCommonNames: Array<string> = [
+        'db.example.com', 'secondary.example.com'
+      ];
+      const presentPlatform = new MockPlatformX509Cert();
+      presentPlatform.entryResult = { data: sourceSan };
+      presentPlatform.commonNamesResult = sourceCommonNames;
+      const presentDecoded =
+        new NetworkKitPostgresDecodedCertificate(presentPlatform);
+      const copiedSan = presentDecoded.subjectAlternativeNameExtension();
+      const copiedNames = presentDecoded.subjectCommonNames();
+      assertBytes(copiedSan, expectedSan);
+      expect(copiedNames.join(','))
+        .assertEqual('db.example.com,secondary.example.com');
+      copiedSan[0] = 0;
+      copiedNames[0] = 'mutated.example.com';
+      assertBytes(presentDecoded.subjectAlternativeNameExtension(), expectedSan);
+      expect(presentDecoded.subjectCommonNames().join(','))
+        .assertEqual('db.example.com,secondary.example.com');
+      sourceSan[0] = 0xff;
+      sourceCommonNames[0] = 'changed-source.example.com';
+      expect(copiedSan[0]).assertEqual(0);
+      expect(copiedNames[0]).assertEqual('mutated.example.com');
+    });
+    it('rejectsMalformedPlatformDecodedCertificateBlobsAndNamesCleanly', 0, async () => {
+      const sanDer = certificate(withTail([extensions(certificateExtension(
+        SUBJECT_ALTERNATIVE_NAME_OID,
+        sanEntry([generalName(0x82, ascii('db.example.com'))])))]));
+      const noSanDer = certificate(tbsFields());
+      const brokenSanPlatforms: MockPlatformX509Cert[] = [];
+      for (const badEntry of [
+        uncheckedPlatformValue<platformCert.DataBlob>(undefined),
+        uncheckedPlatformValue<platformCert.DataBlob>(null),
+        ('invalid' as Object) as platformCert.DataBlob
+      ]) {
+        const platform = new MockPlatformX509Cert();
+        platform.entryResult = badEntry;
+        brokenSanPlatforms.push(platform);
+      }
+      for (const badData of [
+        uncheckedPlatformValue<Uint8Array>(undefined),
+        uncheckedPlatformValue<Uint8Array>(null),
+        (new Object() as Object) as Uint8Array,
+        new Uint8Array(0)
+      ]) {
+        const platform = new MockPlatformX509Cert();
+        platform.entryResult = { data: badData };
+        brokenSanPlatforms.push(platform);
+      }
+      for (const platform of brokenSanPlatforms) {
+        const terminal = await failure((): Promise<void> =>
+          verifyProductionPeer(platform, sanDer, 'db.example.com'));
+        expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+        expect(terminal.nativeCode === undefined).assertTrue();
+        expect(terminal.message.startsWith(
+          'Could not verify PostgreSQL TLS server identity: ' +
+          'PostgreSQL TLS certificate ')).assertTrue();
+      }
+
+      for (const badNames of [
+        (new Object() as Object) as Array<string>,
+        [uncheckedPlatformValue<string>(undefined)],
+        [uncheckedPlatformValue<string>(null)],
+        new Array<string>(1)
+      ]) {
+        const platform = new MockPlatformX509Cert();
+        platform.commonNamesResult = badNames;
+        const terminal = await failure((): Promise<void> =>
+          verifyLegacyDecodedPeer(platform, noSanDer, 'db.example.com'));
+        expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+        expect(terminal.nativeCode === undefined).assertTrue();
+        expect(terminal.message.startsWith(
+          'Could not verify PostgreSQL TLS server identity: ' +
+          'PostgreSQL TLS certificate ')).assertTrue();
+      }
+      let badDerFailure: Error | null = null;
+      try {
+        new NetworkKitPostgresDecodedCertificate(
+          new MockPlatformX509Cert(), (new Object() as Object) as Uint8Array);
+      } catch (error) {
+        badDerFailure = error as Error;
+      }
+      expect(badDerFailure instanceof Error).assertTrue();
+      expect(badDerFailure!.message).assertEqual(
+        'PostgreSQL TLS certificate DER bytes are invalid');
+
+      for (const invalidRaw of [
+        uncheckedPlatformValue<socket.X509CertRawData>(undefined),
+        uncheckedPlatformValue<socket.X509CertRawData>(null),
+        ('invalid' as Object) as socket.X509CertRawData,
+        {
+          encodingFormat: platformCert.EncodingFormat.FORMAT_PEM,
+          data: noSanDer
+        } as socket.X509CertRawData,
+        {
+          encodingFormat: platformCert.EncodingFormat.FORMAT_DER,
+          data: uncheckedPlatformValue<Uint8Array>(undefined)
+        } as socket.X509CertRawData,
+        {
+          encodingFormat: platformCert.EncodingFormat.FORMAT_DER,
+          data: new Uint8Array(0)
+        } as socket.X509CertRawData,
+        {
+          encodingFormat: platformCert.EncodingFormat.FORMAT_DER,
+          data: new Uint8Array(1024 * 1024 + 1)
+        } as socket.X509CertRawData
+      ]) {
+        const loader = new MockPlatformX509CertFactory(
+          new MockPlatformX509Cert());
+        const verifier = createDefaultPostgresTlsIdentityVerifier(
+          new NetworkKitPostgresPeerCertificateFactory(loader));
+        const terminal = await failure((): Promise<void> =>
+          verifier.verify(invalidRaw, 'db.example.com'));
+        expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+        expect(terminal.nativeCode === undefined).assertTrue();
+        expect(loader.calls).assertEqual(0);
+      }
+      for (const invalidCert of [
+        uncheckedPlatformValue<PostgresPlatformX509Cert>(undefined),
+        uncheckedPlatformValue<PostgresPlatformX509Cert>(null),
+        ('invalid' as Object) as PostgresPlatformX509Cert
+      ]) {
+        const verifier = createDefaultPostgresTlsIdentityVerifier(
+          new NetworkKitPostgresPeerCertificateFactory(
+            new MockPlatformX509CertFactory(invalidCert)));
+        const terminal = await failure((): Promise<void> => verifier.verify({
+          encodingFormat: platformCert.EncodingFormat.FORMAT_DER, data: noSanDer
+        }, 'db.example.com'));
+        expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+        expect(terminal.nativeCode === undefined).assertTrue();
+      }
+      const validHostDer = replaceTbsField(5, name('db.example.com'));
+      const mutatingRaw: socket.X509CertRawData = {
+        encodingFormat: platformCert.EncodingFormat.FORMAT_DER,
+        data: copyBytes(validHostDer)
+      };
+      const mutatingLoader = new MockPlatformX509CertFactory(
+        new MockPlatformX509Cert());
+      mutatingLoader.onCreate = (snapshot: socket.X509CertRawData): void => {
+        mutatingRaw.encodingFormat = platformCert.EncodingFormat.FORMAT_PEM;
+        mutatingRaw.data.fill(0);
+        snapshot.data.fill(0xff);
+      };
+      await createDefaultPostgresTlsIdentityVerifier(
+        new NetworkKitPostgresPeerCertificateFactory(mutatingLoader))
+        .verify(mutatingRaw, 'db.example.com');
+      expect(mutatingLoader.calls).assertEqual(1);
+    });
+    it('verifiesDerSubjectCommonNamesWithoutPlatformOnelineHazards', 0, async () => {
+      const ipAndUriSan = sanEntry([
+        generalName(0x86, ascii('postgres://db.example.com')),
+        generalName(0x87, bytes([127, 0, 0, 1]))
+      ]);
+      const emptySubjectFields = tbsFields();
+      emptySubjectFields[5] = element(0x30, new Uint8Array(0));
+      emptySubjectFields.push(extensions(certificateExtension(
+        SUBJECT_ALTERNATIVE_NAME_OID, ipAndUriSan, 0xff)));
+      const emptySubjectDer = certificate(emptySubjectFields);
+      const emptySubjectPlatform = new MockPlatformX509Cert();
+      emptySubjectPlatform.entryResult = { data: ipAndUriSan };
+      emptySubjectPlatform.subjectFailure =
+        new Error('get subject name failed');
+      await verifyProductionPeer(
+        emptySubjectPlatform, emptySubjectDer, '127.0.0.1');
+      let terminal = await failure((): Promise<void> => verifyProductionPeer(
+        emptySubjectPlatform, emptySubjectDer, 'db.example.com'));
+      expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+      expect(emptySubjectPlatform.requestedTypes.length).assertEqual(0);
+
+      const customOidDer = replaceTbsField(5, element(0x30, element(0x31,
+        attributeWithOid([0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0x29, 0x01],
+          element(0x0c, ascii('service'))))));
+      const customOidPlatform = new MockPlatformX509Cert();
+      customOidPlatform.subjectFailure =
+        new Error('Distinguished Name get name failed');
+      terminal = await failure((): Promise<void> =>
+        verifyProductionPeer(customOidPlatform, customOidDer, 'db.example.com'));
+      expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+      expect(customOidPlatform.requestedTypes.length).assertEqual(0);
+
+      const forgedPlatform = new MockPlatformX509Cert();
+      forgedPlatform.commonNamesResult = [
+        'db.example.com', 'attacker.example.com'
+      ];
+      const forgedZeroCnDer = replaceTbsField(5, element(0x30, concatenate([
+        element(0x31, attributeWithOid([0x55, 0x04, 0x0b],
+          element(0x0c, ascii('x\\/CN=db.example.com')))),
+        element(0x31, attributeWithOid([0x55, 0x04, 0x0a],
+          element(0x0c, ascii('x\\+CN=db.example.com'))))
+      ])));
+      terminal = await failure((): Promise<void> =>
+        verifyProductionPeer(forgedPlatform, forgedZeroCnDer, 'db.example.com'));
+      expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+
+      const forgedMismatchedDer = replaceTbsField(5, element(0x30, concatenate([
+        element(0x31, attributeWithOid([0x55, 0x04, 0x0b],
+          element(0x0c, ascii('x\\/CN=db.example.com')))),
+        element(0x31, nameAttribute(element(0x0c, ascii('attacker.example.com'))))
+      ])));
+      terminal = await failure((): Promise<void> => verifyProductionPeer(
+        forgedPlatform, forgedMismatchedDer, 'db.example.com'));
+      expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+      await verifyProductionPeer(
+        forgedPlatform, forgedMismatchedDer, 'attacker.example.com');
+
+      const swallowedPlatform = new MockPlatformX509Cert();
+      swallowedPlatform.commonNamesResult =
+        uncheckedPlatformValue<Array<string>>(undefined);
+      const trailingBackslashDer = replaceTbsField(5, element(0x30, concatenate([
+        element(0x31, attributeWithOid([0x55, 0x04, 0x0b],
+          element(0x0c, ascii('Dept\\')))),
+        element(0x31, nameAttribute(element(0x0c, ascii('db.example.com'))))
+      ])));
+      await verifyProductionPeer(
+        swallowedPlatform, trailingBackslashDer, 'db.example.com');
+
+      for (const encodedCn of [
+        element(0x0c, ascii('db.example.com')),
+        element(0x13, ascii('db.example.com')),
+        element(0x14, ascii('db.example.com')),
+        element(0x14, concatenate([
+          bytes([0x1b, 0x28, 0x75]), ascii('db.example.com')
+        ])),
+        element(0x1e, bmpAscii('db.example.com')),
+        element(0x1c, universalAscii('db.example.com'))
+      ]) {
+        await verifyProductionPeer(swallowedPlatform,
+          replaceTbsField(5, nameValue(encodedCn)), 'db.example.com');
+      }
+
+      const isoIr103Der = replaceTbsField(5, nameValue(element(0x14,
+        concatenate([
+          bytes([0x1b, 0x28, 0x76]), ascii('db'),
+          bytes([0x1b, 0x28, 0x75]), ascii('.example.com')
+        ]))));
+      terminal = await failure((): Promise<void> =>
+        verifyProductionPeer(forgedPlatform, isoIr103Der, 'db.example.com'));
+      expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+
+      const unicodeDer = replaceTbsField(5, element(0x30, concatenate([
+        element(0x31, nameAttribute(element(0x0c,
+          bytes([0xc3, 0xa9, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x90, 0x98])))),
+        element(0x31, nameAttribute(element(0x14,
+          bytes([0x24, 0xa3, 0xaa, 0x1b, 0x28, 0x76, 0x2a,
+            0x1b, 0x28, 0x75, 0xf9, 0xc4, 0x20, 0xc2, 0x20, 0xc2, 0x65]))))
+      ])));
+      const unicodeDecoded = new NetworkKitPostgresDecodedCertificate(
+        swallowedPlatform, unicodeDer);
+      unicodeDer[0] = 0;
+      const decodedUnicodeNames = unicodeDecoded.subjectCommonNames();
+      expect(decodedUnicodeNames.length).assertEqual(2);
+      expect(decodedUnicodeNames[0]).assertEqual('\u00e9\u20ac\ud83d\udc18');
+      expect(decodedUnicodeNames[1])
+        .assertEqual('\u00a4\u00a3\u201c\u201c\u00f8~\u00b4e\u0301');
+
+      const matchingFirstWith0xAaLaterDer = replaceTbsField(5,
+        element(0x30, concatenate([
+          element(0x31, nameAttribute(element(0x0c, ascii('db.example.com')))),
+          element(0x31, nameAttribute(
+            element(0x14, bytes([0xaa, 0x1b, 0x28, 0x76, 0x2a]))))
+        ])));
+      await verifyProductionPeer(
+        swallowedPlatform, matchingFirstWith0xAaLaterDer, 'db.example.com');
+      for (const nonMatching0xAa of [
+        element(0x14, bytes([0xaa])),
+        element(0x14, bytes([0x1b, 0x28, 0x76, 0x2a]))
+      ]) {
+        terminal = await failure((): Promise<void> => verifyProductionPeer(
+          forgedPlatform, replaceTbsField(5, nameValue(nonMatching0xAa)),
+          'db.example.com'));
+        expect(terminal.nativeCode).assertEqual('TLS_HOSTNAME_MISMATCH');
+      }
+
+      const v1Fields = tbsFields(null);
+      v1Fields[4] = name('db.example.com');
+      expect(postgresParseCertificateSubjectCommonNames(
+        certificate(v1Fields)).join(',')).assertEqual('db.example.com');
+      expect(syncFailure((): void => {
+        postgresParseCertificateSubjectCommonNames(
+          (new Object() as Object) as Uint8Array);
+      }).nativeCode).assertEqual('TLS_CERTIFICATE_IDENTITY_INVALID');
+
+      for (const malformedCn of [
+        element(0x0c, new Uint8Array(0)),
+        element(0x14, bytes([0x1b, 0x28, 0x75])),
+        element(0x16, ascii('db.example.com')),
+        element(0x02, bytes([1]))
+      ]) {
+        terminal = await failure((): Promise<void> => verifyProductionPeer(
+          forgedPlatform, replaceTbsField(5, nameValue(malformedCn)),
+          'db.example.com'));
+        expect(terminal.kind).assertEqual(ArkDbErrorKind.Tls);
+        expect(terminal.nativeCode).assertEqual(
+          'TLS_CERTIFICATE_IDENTITY_INVALID');
+      }
+    });
   });
 }
 class MockDecodedCertificate implements PostgresDecodedCertificate {
@@ -1016,6 +1361,58 @@ class MockDecodedCertificate implements PostgresDecodedCertificate {
   subjectCommonNames(): string[] {
     return this.commonNames;
   }
+}
+class MockPlatformX509Cert implements PostgresPlatformX509Cert {
+  entryResult: platformCert.DataBlob = { data: new Uint8Array([0x04, 0]) };
+  commonNamesResult: Array<string> = [];
+  subjectFailure: Error | null = null;
+  requestedValueTypes: platformCert.ExtensionEntryType[] = [];
+  requestedOids: Uint8Array[] = [];
+  requestedTypes: string[] = [];
+  getExtensionEntry(valueType: platformCert.ExtensionEntryType,
+    oid: platformCert.DataBlob): platformCert.DataBlob {
+    this.requestedValueTypes.push(valueType);
+    this.requestedOids.push(copyBytes(oid.data));
+    return this.entryResult;
+  }
+  getSubjectDistinguishedNames(type: string): Array<string> {
+    this.requestedTypes.push(type);
+    if (this.subjectFailure !== null) throw this.subjectFailure;
+    return this.commonNamesResult;
+  }
+}
+class MockPlatformX509CertFactory implements PostgresPlatformX509CertFactory {
+  private readonly certificate: PostgresPlatformX509Cert;
+  calls: number = 0;
+  onCreate: ((encoded: socket.X509CertRawData) => void) | null = null;
+  constructor(certificate: PostgresPlatformX509Cert) {
+    this.certificate = certificate;
+  }
+  async create(encoded: socket.X509CertRawData):
+  Promise<PostgresPlatformX509Cert> {
+    this.calls += 1;
+    if (this.onCreate !== null) this.onCreate(encoded);
+    return this.certificate;
+  }
+}
+function verifyLegacyDecodedPeer(platform: PostgresPlatformX509Cert,
+  der: Uint8Array, host: string): Promise<void> {
+  return createDefaultPostgresTlsIdentityVerifier(
+    new MockPeerCertificateFactory(new NetworkKitPostgresPeerCertificate(
+      new NetworkKitPostgresDecodedCertificate(platform), der)))
+    .verify(remoteCertificateFixture(), host);
+}
+function verifyProductionPeer(platform: PostgresPlatformX509Cert,
+  der: Uint8Array, host: string): Promise<void> {
+  return createDefaultPostgresTlsIdentityVerifier(
+    new NetworkKitPostgresPeerCertificateFactory(
+      new MockPlatformX509CertFactory(platform)))
+    .verify({
+      encodingFormat: platformCert.EncodingFormat.FORMAT_DER, data: der
+    }, host);
+}
+function uncheckedPlatformValue<T>(value: T | null | undefined): T {
+  return value as T;
 }
 class MockPeerCertificate implements PostgresPeerCertificate {
   private readonly encoded: Uint8Array;
@@ -1117,9 +1514,26 @@ function multiValuedName(first: string, second: string): Uint8Array {
   ])));
 }
 function nameAttribute(value: Uint8Array): Uint8Array {
+  return attributeWithOid([0x55, 0x04, 0x03], value);
+}
+function attributeWithOid(oid: number[], value: Uint8Array): Uint8Array {
   return element(0x30, concatenate([
-    element(0x06, bytes([0x55, 0x04, 0x03])), value
+    element(0x06, new Uint8Array(oid)), value
   ]));
+}
+function bmpAscii(value: string): Uint8Array {
+  const result = new Uint8Array(value.length * 2);
+  for (let index = 0; index < value.length; index += 1) {
+    result[index * 2 + 1] = value.charCodeAt(index);
+  }
+  return result;
+}
+function universalAscii(value: string): Uint8Array {
+  const result = new Uint8Array(value.length * 4);
+  for (let index = 0; index < value.length; index += 1) {
+    result[index * 4 + 3] = value.charCodeAt(index);
+  }
+  return result;
 }
 function extensions(content: Uint8Array): Uint8Array {
   return element(0xa3, element(0x30, content));

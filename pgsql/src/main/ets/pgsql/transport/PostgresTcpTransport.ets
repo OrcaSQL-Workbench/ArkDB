@@ -12,13 +12,17 @@ import {
 } from '../model/PostgresConnectionConfig';
 import {
   PostgresSubjectAlternativeNames,
+  postgresParseCertificateStructure,
   postgresParseCertificateSubjectAlternativeName,
   postgresParseSubjectAlternativeNamesEntry
 } from './PostgresCertificateDer';
+import { PostgresDerElement, PostgresDerReader } from './PostgresDer';
 const MAX_POSTGRES_WIRE_BYTES: number = MAX_POSTGRES_MESSAGE_BYTES + 1;
 const RECEIVE_BLOCK_BYTES: number = 64 * 1024;
 const SOCKET_CLOSE_TIMEOUT_MS: number = 1000;
 const MAX_TLS_FILE_BYTES: number = 1024 * 1024;
+const MAX_TLS_CERTIFICATE_DER_BYTES: number = 1024 * 1024;
+const MAX_TLS_CERTIFICATE_DER_NESTING: number = 32;
 interface PendingRead {
   need: number;
   resolve: (value: Uint8Array | null | PromiseLike<Uint8Array | null>) => void;
@@ -608,11 +612,73 @@ export interface PostgresPeerCertificate {
 export interface PostgresPeerCertificateFactory {
   create(certificate: socket.X509CertRawData): Promise<PostgresPeerCertificate>;
 }
-class NetworkKitPostgresDecodedCertificate
-implements PostgresDecodedCertificate {
+export interface PostgresPlatformX509Cert {
+  getExtensionEntry(valueType: cert.ExtensionEntryType,
+    oid: cert.DataBlob): cert.DataBlob;
+  getSubjectDistinguishedNames(type: string): Array<string>;
+}
+export interface PostgresPlatformX509CertFactory {
+  create(encoded: socket.X509CertRawData): Promise<PostgresPlatformX509Cert>;
+}
+class DevicePostgresPlatformX509Cert implements PostgresPlatformX509Cert {
   private readonly certificate: cert.X509Cert;
-  constructor(certificate: cert.X509Cert) {
+  constructor(certificate: cert.X509Cert) { this.certificate = certificate; }
+  getExtensionEntry(valueType: cert.ExtensionEntryType,
+    oid: cert.DataBlob): cert.DataBlob {
+    try {
+      const extensions: cert.CertExtension | null | undefined =
+        this.certificate.getExtensionsObject();
+      if (extensions === null || extensions === undefined) {
+        throw new Error('PostgreSQL TLS certificate extensions are unavailable');
+      }
+      return extensions.getEntry(valueType, oid);
+    } catch (error) {
+      if (error instanceof Error) throw error;
+      throw new Error(asMessage(error as Object));
+    }
+  }
+  getSubjectDistinguishedNames(type: string): Array<string> {
+    try {
+      const subject: cert.X500DistinguishedName | null | undefined =
+        this.certificate.getSubjectX500DistinguishedName();
+      if (subject === null || subject === undefined) {
+        throw new Error(
+          'PostgreSQL TLS certificate subject distinguished name is unavailable');
+      }
+      return subject.getName(type);
+    } catch (error) {
+      if (error instanceof Error) throw error;
+      throw new Error(asMessage(error as Object));
+    }
+  }
+}
+class DevicePostgresPlatformX509CertFactory
+implements PostgresPlatformX509CertFactory {
+  async create(encoded: socket.X509CertRawData):
+  Promise<PostgresPlatformX509Cert> {
+    const certificate: cert.X509Cert | null | undefined =
+      await cert.createX509Cert(encoded);
+    if (certificate === null || certificate === undefined ||
+      typeof certificate !== 'object') {
+      throw new Error('PostgreSQL TLS peer certificate is invalid');
+    }
+    return new DevicePostgresPlatformX509Cert(certificate);
+  }
+}
+export class NetworkKitPostgresDecodedCertificate
+implements PostgresDecodedCertificate {
+  private readonly certificate: PostgresPlatformX509Cert;
+  private readonly encoded: Uint8Array | null;
+  constructor(certificate: PostgresPlatformX509Cert,
+    encoded: Uint8Array | null = null) {
     this.certificate = certificate;
+    if (encoded === null || encoded === undefined) {
+      this.encoded = null;
+    } else if (!(encoded instanceof Uint8Array)) {
+      throw new Error('PostgreSQL TLS certificate DER bytes are invalid');
+    } else {
+      this.encoded = encoded.slice();
+    }
   }
   subjectAlternativeNameExtension(): Uint8Array {
     const oid: cert.DataBlob = {
@@ -620,12 +686,37 @@ implements PostgresDecodedCertificate {
         0x32, 0x2e, 0x35, 0x2e, 0x32, 0x39, 0x2e, 0x31, 0x37
       ])
     };
-    return this.certificate.getExtensionsObject().getEntry(
-      cert.ExtensionEntryType.EXTENSION_ENTRY_TYPE_ENTRY_VALUE, oid).data.slice();
+    const entry: cert.DataBlob | null | undefined =
+      this.certificate.getExtensionEntry(
+        cert.ExtensionEntryType.EXTENSION_ENTRY_TYPE_ENTRY_VALUE, oid);
+    if (entry === null || entry === undefined || typeof entry !== 'object' ||
+      !(entry.data instanceof Uint8Array) || entry.data.length === 0) {
+      throw new Error(
+        'PostgreSQL TLS certificate SAN extension entry is invalid');
+    }
+    return entry.data.slice();
   }
   subjectCommonNames(): string[] {
-    return this.certificate.getSubjectX500DistinguishedName()
-      .getName('CN').slice();
+    if (this.encoded !== null) {
+      return postgresParseCertificateSubjectCommonNames(this.encoded);
+    }
+    const commonNames: Array<string> | null | undefined =
+      this.certificate.getSubjectDistinguishedNames('CN');
+    if (commonNames === null || commonNames === undefined) return [];
+    if (!Array.isArray(commonNames)) {
+      throw new Error(
+        'PostgreSQL TLS certificate subject common names are invalid');
+    }
+    const copied: string[] = [];
+    for (let index = 0; index < commonNames.length; index += 1) {
+      const commonName = commonNames[index];
+      if (typeof commonName !== 'string') {
+        throw new Error(
+          'PostgreSQL TLS certificate subject common name is invalid');
+      }
+      copied.push(commonName);
+    }
+    return copied;
   }
 }
 export class NetworkKitPostgresPeerCertificate
@@ -636,9 +727,7 @@ implements PostgresPeerCertificate {
     this.certificate = certificate;
     this.encoded = encoded.slice();
   }
-  certificateDer(): Uint8Array {
-    return this.encoded.slice();
-  }
+  certificateDer(): Uint8Array { return this.encoded.slice(); }
   subjectAlternativeNameExtension(): Uint8Array {
     return this.certificate.subjectAlternativeNameExtension().slice();
   }
@@ -646,13 +735,34 @@ implements PostgresPeerCertificate {
     return this.certificate.subjectCommonNames().slice();
   }
 }
-class NetworkKitPostgresPeerCertificateFactory
+export class NetworkKitPostgresPeerCertificateFactory
 implements PostgresPeerCertificateFactory {
+  private readonly platform: PostgresPlatformX509CertFactory;
+  constructor(platform: PostgresPlatformX509CertFactory =
+    new DevicePostgresPlatformX509CertFactory()) {
+    this.platform = platform;
+  }
   async create(encoded: socket.X509CertRawData):
   Promise<PostgresPeerCertificate> {
-    const certificate = await cert.createX509Cert(encoded);
+    if (encoded === null || encoded === undefined ||
+      typeof encoded !== 'object' ||
+      encoded.encodingFormat !== cert.EncodingFormat.FORMAT_DER ||
+      !(encoded.data instanceof Uint8Array) || encoded.data.length === 0 ||
+      encoded.data.length > MAX_TLS_CERTIFICATE_DER_BYTES) {
+      throw new Error('PostgreSQL TLS peer certificate is invalid');
+    }
+    const der = encoded.data.slice();
+    const certificate: PostgresPlatformX509Cert | null | undefined =
+      await this.platform.create({
+        data: der.slice(),
+        encodingFormat: cert.EncodingFormat.FORMAT_DER
+      });
+    if (certificate === null || certificate === undefined ||
+      typeof certificate !== 'object') {
+      throw new Error('PostgreSQL TLS peer certificate is invalid');
+    }
     return new NetworkKitPostgresPeerCertificate(
-      new NetworkKitPostgresDecodedCertificate(certificate), encoded.data);
+      new NetworkKitPostgresDecodedCertificate(certificate, der), der);
   }
 }
 class NetworkKitPostgresTlsIdentityVerifier
@@ -688,6 +798,185 @@ export function postgresCertificateHasSubjectAlternativeName(
   certificateDer: Uint8Array): boolean {
   return postgresParseCertificateSubjectAlternativeName(
     certificateDer).present;
+}
+export function postgresParseCertificateSubjectCommonNames(
+  certificateDer: Uint8Array): string[] {
+  if (!(certificateDer instanceof Uint8Array)) {
+    throw invalidTlsCertificateIdentity();
+  }
+  postgresParseCertificateStructure(certificateDer);
+  const reader = new PostgresDerReader(
+    certificateDer, MAX_TLS_CERTIFICATE_DER_BYTES,
+    MAX_TLS_CERTIFICATE_DER_NESTING);
+  const certificate = reader.expected(0, certificateDer.length, 0x30);
+  const tbsCertificate = reader.expected(
+    certificate.start, certificate.end, 0x30);
+  let offset = tbsCertificate.start;
+  const first = reader.read(offset, tbsCertificate.end);
+  if (first.tag === 0xa0) offset = first.next;
+  offset = reader.expected(offset, tbsCertificate.end, 0x02).next;
+  offset = reader.expected(offset, tbsCertificate.end, 0x30).next;
+  offset = reader.expected(offset, tbsCertificate.end, 0x30).next;
+  offset = reader.expected(offset, tbsCertificate.end, 0x30).next;
+  const subject = reader.expected(offset, tbsCertificate.end, 0x30);
+  const commonNames: string[] = [];
+  let rdnOffset = subject.start;
+  while (rdnOffset < subject.end) {
+    const rdn = reader.expected(rdnOffset, subject.end, 0x31);
+    let attributeOffset = rdn.start;
+    while (attributeOffset < rdn.end) {
+      const attribute = reader.expected(attributeOffset, rdn.end, 0x30);
+      const oid = reader.expected(attribute.start, attribute.end, 0x06);
+      const value = reader.read(oid.next, attribute.end);
+      const oidBytes = reader.copy(oid.start, oid.end);
+      if (oidBytes.length === 3 && oidBytes[0] === 0x55 &&
+        oidBytes[1] === 0x04 && oidBytes[2] === 0x03) {
+        commonNames.push(decodeCommonNameDirectoryString(reader, value));
+      }
+      attributeOffset = attribute.next;
+    }
+    rdnOffset = rdn.next;
+  }
+  return commonNames;
+}
+function decodeCommonNameDirectoryString(reader: PostgresDerReader,
+  value: PostgresDerElement): string {
+  if (value.start === value.end) throw invalidTlsCertificateIdentity();
+  if (value.tag === 0x0c || value.tag === 0x13) {
+    return decodeUtf8DirectoryString(reader.copy(value.start, value.end));
+  }
+  if (value.tag === 0x14) {
+    if (reader.implicitStringCharacterCount(value, 0x14) < 1) {
+      throw invalidTlsCertificateIdentity();
+    }
+    return decodeTeletexDirectoryString(reader.copy(value.start, value.end));
+  }
+  if (value.tag === 0x1e) {
+    return decodeBmpDirectoryString(reader.copy(value.start, value.end));
+  }
+  if (value.tag === 0x1c) {
+    return decodeUniversalDirectoryString(reader.copy(value.start, value.end));
+  }
+  throw invalidTlsCertificateIdentity();
+}
+function decodeUtf8DirectoryString(data: Uint8Array): string {
+  let result = '';
+  let index = 0;
+  while (index < data.length) {
+    const first = data[index];
+    if (first <= 0x7f) {
+      result += String.fromCharCode(first);
+      index += 1;
+    } else if (first <= 0xdf) {
+      result += String.fromCharCode(
+        ((first & 0x1f) << 6) | (data[index + 1] & 0x3f));
+      index += 2;
+    } else if (first <= 0xef) {
+      result += String.fromCharCode(
+        ((first & 0x0f) << 12) | ((data[index + 1] & 0x3f) << 6) |
+        (data[index + 2] & 0x3f));
+      index += 3;
+    } else {
+      result += String.fromCodePoint(
+        ((first & 0x07) << 18) | ((data[index + 1] & 0x3f) << 12) |
+        ((data[index + 2] & 0x3f) << 6) | (data[index + 3] & 0x3f));
+      index += 4;
+    }
+  }
+  return result;
+}
+function decodeBmpDirectoryString(data: Uint8Array): string {
+  let result = '';
+  for (let index = 0; index < data.length; index += 2) {
+    result += String.fromCharCode((data[index] << 8) | data[index + 1]);
+  }
+  return result;
+}
+function decodeUniversalDirectoryString(data: Uint8Array): string {
+  let result = '';
+  for (let index = 0; index < data.length; index += 4) {
+    const code = data[index] * 0x1000000 + data[index + 1] * 0x10000 +
+      data[index + 2] * 0x100 + data[index + 3];
+    result += String.fromCodePoint(code);
+  }
+  return result;
+}
+function decodeTeletexDirectoryString(data: Uint8Array): string {
+  let g0 = 102;
+  let index = 0;
+  let result = '';
+  while (index < data.length) {
+    const octet = data[index];
+    if (octet === 0x1b) {
+      const intermediate = data[index + 1];
+      const finalOctet = data[index + 2];
+      if (intermediate === 0x28 && finalOctet === 0x75) g0 = 102;
+      else if (intermediate === 0x28 && finalOctet === 0x76) g0 = 103;
+      index += 3;
+      continue;
+    }
+    if (octet === 0x20) {
+      result += ' ';
+      index += 1;
+      continue;
+    }
+    if (octet < 0x80) {
+      if (g0 === 102) {
+        result += octet === 0x24 ? '\u00a4' : String.fromCharCode(octet);
+      } else {
+        result += teletexSupplementaryCharacter(octet + 0x80);
+      }
+      index += 1;
+      continue;
+    }
+    const diacritic = teletexDiacriticSequence(octet, data[index + 1]);
+    if (diacritic.length > 0) {
+      result += diacritic;
+      index += 2;
+      continue;
+    }
+    result += teletexSupplementaryCharacter(octet);
+    index += 1;
+  }
+  return result;
+}
+function teletexDiacriticSequence(octet: number, base: number): string {
+  const octets: number[] = [
+    0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+    0xc8, 0xca, 0xcb, 0xcd, 0xce, 0xcf
+  ];
+  const index = octets.indexOf(octet);
+  if (index < 0) return '';
+  const spacing: string =
+    '\u0060\u00b4\u005e\u007e\u00af\u02d8\u02d9\u00a8\u02da\u00b8\u02dd\u02db\u02c7';
+  if (base === 0x20) return spacing.charAt(index);
+  const marks: string =
+    '\u0300\u0301\u0302\u0303\u0304\u0306\u0307\u0308\u030a\u0327\u030b\u0328\u030c';
+  return String.fromCharCode(base) + marks.charAt(index);
+}
+function teletexSupplementaryCharacter(octet: number): string {
+  const lowTable: string =
+    '\u00a1\u00a2\u00a3$\u00a5#\u00a7\u00a4\u0000\u201c\u00ab' +
+    '\u0000\u0000\u0000\u0000' +
+    '\u00b0\u00b1\u00b2\u00b3\u00d7\u00b5\u00b6\u00b7\u00f7' +
+    '\u0000\u0000\u00bb\u00bc\u00bd\u00be\u00bf';
+  let mapped = '\u0000';
+  if (octet >= 0xa1 && octet <= 0xbf) {
+    mapped = lowTable.charAt(octet - 0xa1);
+  } else if (octet >= 0xe0 && octet <= 0xfe) {
+    const highTable: string =
+      '\u2126\u00c6\u0110\u00aa\u0126\u0000\u0132\u013f\u0141\u00d8' +
+      '\u0152\u00ba\u00de\u0166\u014a\u0149\u0138\u00e6\u0111\u00f0' +
+      '\u0127\u0131\u0133\u0140\u0142\u00f8\u0153\u00df\u00fe\u0167\u014b';
+    mapped = highTable.charAt(octet - 0xe0);
+  }
+  if (mapped === '\u0000') throw invalidTlsCertificateIdentity();
+  return mapped;
+}
+function invalidTlsCertificateIdentity(): ArkDbError {
+  return ArkDbError.tls(
+    'Invalid PostgreSQL TLS certificate identity',
+    'TLS_CERTIFICATE_IDENTITY_INVALID');
 }
 export function postgresCertificateMatchesHost(
   certificate: PostgresPeerCertificate, host: string): boolean {

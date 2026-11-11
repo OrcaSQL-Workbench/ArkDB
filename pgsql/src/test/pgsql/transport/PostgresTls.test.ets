@@ -859,6 +859,10 @@ export default function postgresTlsTest(): void {
       expect(postgresCertificateMatchesHost(
         peerWithNames([generalName(0x82, ascii('127.00.0.1'))],
           ['127.00.0.1']), '127.00.0.1')).assertFalse();
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, ['*.0.0.1']), '127.0.0.1.')).assertFalse();
+      expect(postgresCertificateMatchesHost(
+        peerWithSan(null, ['0x7f000001']), '0x7f000001.')).assertFalse();
       const numericDns = '0x1.0x2.0x3.0x4.0x5';
       expect(postgresCertificateMatchesHost(
         peerWithSan(null, [numericDns]), numericDns)).assertTrue();

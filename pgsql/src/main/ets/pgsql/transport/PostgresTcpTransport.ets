@@ -868,9 +868,13 @@ function hexDigits(value: string): boolean {
   return true;
 }
 function looksLikeIpLiteral(value: string): boolean {
-  if (value.startsWith('[') || value.endsWith(']') ||
-    value.indexOf(':') >= 0) return true;
-  const parts = value.split('.');
+  let normalized = value;
+  if (normalized.endsWith('.')) {
+    normalized = normalized.substring(0, normalized.length - 1);
+  }
+  if (normalized.startsWith('[') || normalized.endsWith(']') ||
+    normalized.indexOf(':') >= 0) return true;
+  const parts = normalized.split('.');
   if (parts.length < 1 || parts.length > 4) return false;
   for (const part of parts) {
     if (!legacyIpv4Number(part)) return false;

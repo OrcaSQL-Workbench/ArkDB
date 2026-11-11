@@ -1,6 +1,7 @@
 import { socket } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
+import { cert } from '@kit.DeviceCertificateKit';
 import {
   ArkDbError, ConnectionTimerPort, SystemConnectionTimerPort
 } from '@arkdb/core';
@@ -10,7 +11,9 @@ import {
   PostgresSslConfig, PostgresSslMode
 } from '../model/PostgresConnectionConfig';
 import {
-  postgresParseCertificateSubjectAlternativeName
+  PostgresSubjectAlternativeNames,
+  postgresParseCertificateSubjectAlternativeName,
+  postgresParseSubjectAlternativeNamesEntry
 } from './PostgresCertificateDer';
 const MAX_POSTGRES_WIRE_BYTES: number = MAX_POSTGRES_MESSAGE_BYTES + 1;
 const RECEIVE_BLOCK_BYTES: number = 64 * 1024;
@@ -593,21 +596,307 @@ export interface PostgresTlsFilePort {
 export interface PostgresTlsIdentityVerifier {
   verify(certificate: socket.X509CertRawData, host: string): Promise<void>;
 }
-class UnsupportedPostgresTlsIdentityVerifier
-implements PostgresTlsIdentityVerifier {
-  async verify(certificate: socket.X509CertRawData, host: string): Promise<void> {
-    throw ArkDbError.tls(
-      'PostgreSQL VERIFY_FULL identity verification is not available in this build',
-      'TLS_IDENTITY_VERIFIER_UNAVAILABLE');
+export interface PostgresDecodedCertificate {
+  subjectAlternativeNameExtension(): Uint8Array;
+  subjectCommonNames(): string[];
+}
+export interface PostgresPeerCertificate {
+  certificateDer(): Uint8Array;
+  subjectAlternativeNameExtension(): Uint8Array;
+  subjectCommonNames(): string[];
+}
+export interface PostgresPeerCertificateFactory {
+  create(certificate: socket.X509CertRawData): Promise<PostgresPeerCertificate>;
+}
+class NetworkKitPostgresDecodedCertificate
+implements PostgresDecodedCertificate {
+  private readonly certificate: cert.X509Cert;
+  constructor(certificate: cert.X509Cert) {
+    this.certificate = certificate;
+  }
+  subjectAlternativeNameExtension(): Uint8Array {
+    const oid: cert.DataBlob = {
+      data: new Uint8Array([
+        0x32, 0x2e, 0x35, 0x2e, 0x32, 0x39, 0x2e, 0x31, 0x37
+      ])
+    };
+    return this.certificate.getExtensionsObject().getEntry(
+      cert.ExtensionEntryType.EXTENSION_ENTRY_TYPE_ENTRY_VALUE, oid).data.slice();
+  }
+  subjectCommonNames(): string[] {
+    return this.certificate.getSubjectX500DistinguishedName()
+      .getName('CN').slice();
   }
 }
-export function createDefaultPostgresTlsIdentityVerifier(): PostgresTlsIdentityVerifier {
-  return new UnsupportedPostgresTlsIdentityVerifier();
+export class NetworkKitPostgresPeerCertificate
+implements PostgresPeerCertificate {
+  private readonly certificate: PostgresDecodedCertificate;
+  private readonly encoded: Uint8Array;
+  constructor(certificate: PostgresDecodedCertificate, encoded: Uint8Array) {
+    this.certificate = certificate;
+    this.encoded = encoded.slice();
+  }
+  certificateDer(): Uint8Array {
+    return this.encoded.slice();
+  }
+  subjectAlternativeNameExtension(): Uint8Array {
+    return this.certificate.subjectAlternativeNameExtension().slice();
+  }
+  subjectCommonNames(): string[] {
+    return this.certificate.subjectCommonNames().slice();
+  }
+}
+class NetworkKitPostgresPeerCertificateFactory
+implements PostgresPeerCertificateFactory {
+  async create(encoded: socket.X509CertRawData):
+  Promise<PostgresPeerCertificate> {
+    const certificate = await cert.createX509Cert(encoded);
+    return new NetworkKitPostgresPeerCertificate(
+      new NetworkKitPostgresDecodedCertificate(certificate), encoded.data);
+  }
+}
+class NetworkKitPostgresTlsIdentityVerifier
+implements PostgresTlsIdentityVerifier {
+  private readonly certificates: PostgresPeerCertificateFactory;
+  constructor(certificates: PostgresPeerCertificateFactory =
+    new NetworkKitPostgresPeerCertificateFactory()) {
+    this.certificates = certificates;
+  }
+  async verify(certificate: socket.X509CertRawData, host: string): Promise<void> {
+    try {
+      const peer = await this.certificates.create(certificate);
+      if (!postgresCertificateMatchesHost(peer, host)) {
+        throw ArkDbError.tls(
+          'PostgreSQL TLS certificate does not match the requested host',
+          'TLS_HOSTNAME_MISMATCH');
+      }
+    } catch (error) {
+      if (error instanceof ArkDbError) throw error;
+      throw ArkDbError.tls(
+        'Could not verify PostgreSQL TLS server identity: ' +
+        asMessage(error as Object));
+    }
+  }
+}
+export function createDefaultPostgresTlsIdentityVerifier(
+  certificates: PostgresPeerCertificateFactory =
+    new NetworkKitPostgresPeerCertificateFactory()):
+PostgresTlsIdentityVerifier {
+  return new NetworkKitPostgresTlsIdentityVerifier(certificates);
 }
 export function postgresCertificateHasSubjectAlternativeName(
   certificateDer: Uint8Array): boolean {
   return postgresParseCertificateSubjectAlternativeName(
     certificateDer).present;
+}
+export function postgresCertificateMatchesHost(
+  certificate: PostgresPeerCertificate, host: string): boolean {
+  const names = subjectAlternativeNames(certificate);
+  const address = postgresIpAddressBytes(host);
+  if (address !== null) {
+    if (names === null) return false;
+    for (const candidate of names.ipAddresses) {
+      if (bytesEqual(candidate, address)) return true;
+    }
+    return false;
+  }
+  if (looksLikeIpLiteral(host)) return false;
+  if (names !== null && names.dnsNames.length > 0) {
+    for (const candidate of names.dnsNames) {
+      const name = asciiDnsName(candidate);
+      if (name !== null && postgresDnsNameMatchesHost(name, host)) return true;
+    }
+    return false;
+  }
+  const commonNames = certificate.subjectCommonNames();
+  return commonNames.length > 0 &&
+    postgresDnsNameMatchesHost(commonNames[0], host);
+}
+function subjectAlternativeNames(certificate: PostgresPeerCertificate):
+PostgresSubjectAlternativeNames | null {
+  if (!postgresCertificateHasSubjectAlternativeName(
+    certificate.certificateDer())) return null;
+  return postgresParseSubjectAlternativeNamesEntry(
+    certificate.subjectAlternativeNameExtension());
+}
+function asciiDnsName(data: Uint8Array): string | null {
+  let result = '';
+  for (let index = 0; index < data.length; index += 1) {
+    const value = data[index];
+    if (value > 0x7f) return null;
+    result += String.fromCharCode(value);
+  }
+  return result;
+}
+export function postgresDnsNameMatchesHost(certificateName: string,
+  host: string): boolean {
+  const pattern = normalizedCertificateDnsName(certificateName);
+  const target = normalizedReferenceDnsName(host);
+  if (pattern === null || target === null) return false;
+  if (!pattern.startsWith('*.')) return pattern === target;
+  const patternLabels = pattern.split('.');
+  const targetLabels = target.split('.');
+  if (patternLabels.length !== targetLabels.length) return false;
+  for (let index = 1; index < patternLabels.length; index += 1) {
+    if (patternLabels[index] !== targetLabels[index]) return false;
+  }
+  return true;
+}
+function normalizedCertificateDnsName(value: string): string | null {
+  const normalized = asciiLowercase(value);
+  if (normalized === null) return null;
+  return validDnsName(normalized, true) ? normalized : null;
+}
+function normalizedReferenceDnsName(value: string): string | null {
+  let normalized = asciiLowercase(value);
+  if (normalized === null) return null;
+  if (normalized.endsWith('.')) {
+    normalized = normalized.substring(0, normalized.length - 1);
+  }
+  return validDnsName(normalized, false) ? normalized : null;
+}
+function asciiLowercase(value: string): string | null {
+  let result = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code > 0x7f) return null;
+    result += String.fromCharCode(
+      code >= 65 && code <= 90 ? code + 32 : code);
+  }
+  return result;
+}
+function validDnsName(value: string, wildcardAllowed: boolean): boolean {
+  if (value.length < 1 || value.length > 253 ||
+    value.startsWith('.') || value.endsWith('.') ||
+    value.indexOf('..') >= 0) return false;
+  const labels = value.split('.');
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index];
+    if (wildcardAllowed && index === 0 && label === '*') {
+      if (labels.length < 3) return false;
+      continue;
+    }
+    if (label.length < 1 || label.length > 63 ||
+      label.startsWith('-') || label.endsWith('-')) return false;
+    for (let position = 0; position < label.length; position += 1) {
+      const code = label.charCodeAt(position);
+      const digit = code >= 48 && code <= 57;
+      const letter = code >= 97 && code <= 122;
+      if (!digit && !letter && code !== 45) return false;
+    }
+  }
+  return true;
+}
+export function postgresIpAddressBytes(host: string): Uint8Array | null {
+  if (host.startsWith('[') || host.endsWith(']')) return null;
+  if (host.indexOf(':') >= 0) return ipv6Bytes(host);
+  return ipv4Bytes(host);
+}
+function ipv4Bytes(value: string): Uint8Array | null {
+  const parts = value.split('.');
+  if (parts.length !== 4) return null;
+  const result = new Uint8Array(4);
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part.length < 1 || (part.length > 1 && part.startsWith('0')) ||
+      !decimalDigits(part)) return null;
+    const parsed = Number(part);
+    if (parsed > 255) return null;
+    result[index] = parsed;
+  }
+  return result;
+}
+function ipv6Bytes(value: string): Uint8Array | null {
+  if (value.length < 2 || value.indexOf('%') >= 0 ||
+    value.indexOf('::') !== value.lastIndexOf('::')) return null;
+  const compressedAt = value.indexOf('::');
+  const left = ipv6Groups(
+    compressedAt < 0 ? value : value.substring(0, compressedAt),
+    compressedAt < 0);
+  const right = ipv6Groups(
+    compressedAt < 0 ? '' : value.substring(compressedAt + 2), true);
+  if (left === null || right === null) return null;
+  const missing = 8 - left.length - right.length;
+  if ((compressedAt < 0 && missing !== 0) ||
+    (compressedAt >= 0 && missing < 1)) return null;
+  const groups = left.slice();
+  for (let index = 0; index < missing; index += 1) groups.push(0);
+  for (const group of right) groups.push(group);
+  const result = new Uint8Array(16);
+  for (let index = 0; index < groups.length; index += 1) {
+    result[index * 2] = (groups[index] >>> 8) & 0xff;
+    result[index * 2 + 1] = groups[index] & 0xff;
+  }
+  return result;
+}
+function ipv6Groups(value: string,
+  embeddedIpv4Allowed: boolean): number[] | null {
+  if (value.length === 0) return [];
+  const groups: number[] = [];
+  const parts = value.split(':');
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part.length < 1) return null;
+    if (part.indexOf('.') >= 0) {
+      if (!embeddedIpv4Allowed || index !== parts.length - 1) return null;
+      const address = ipv4Bytes(part);
+      if (address === null) return null;
+      groups.push((address[0] << 8) | address[1]);
+      groups.push((address[2] << 8) | address[3]);
+    } else {
+      if (part.length > 4 || !hexDigits(part)) return null;
+      groups.push(parseInt(part, 16));
+    }
+  }
+  return groups;
+}
+function decimalDigits(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 48 || code > 57) return false;
+  }
+  return true;
+}
+function hexDigits(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const digit = code >= 48 && code <= 57;
+    const lower = code >= 97 && code <= 102;
+    const upper = code >= 65 && code <= 70;
+    if (!digit && !lower && !upper) return false;
+  }
+  return true;
+}
+function looksLikeIpLiteral(value: string): boolean {
+  let normalized = value;
+  if (normalized.endsWith('.')) {
+    normalized = normalized.substring(0, normalized.length - 1);
+  }
+  if (normalized.startsWith('[') || normalized.endsWith(']') ||
+    normalized.indexOf(':') >= 0) return true;
+  const parts = normalized.split('.');
+  if (parts.length < 1 || parts.length > 4) return false;
+  for (const part of parts) {
+    if (!legacyIpv4Number(part)) return false;
+  }
+  return true;
+}
+function legacyIpv4Number(value: string): boolean {
+  let start = 0;
+  if (value.startsWith('+') || value.startsWith('-')) start = 1;
+  if (start >= value.length) return false;
+  if (value.length - start > 2 && value[start] === '0' &&
+    (value[start + 1] === 'x' || value[start + 1] === 'X')) {
+    return hexDigits(value.substring(start + 2));
+  }
+  return decimalDigits(value.substring(start));
+}
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 class SystemPostgresTlsFilePort implements PostgresTlsFilePort {
   read(path: string, maximumBytes: number, label: string): string {

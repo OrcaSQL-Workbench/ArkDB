@@ -13,7 +13,7 @@ export class PostgresCommandCloseSettlement {
   private settledNow: boolean = false;
   private resolveClose: (error: ArkDbError) => void = (_error: ArkDbError): void => {};
   private resolveSettled: () => void = (): void => {};
-  private waiters: Array<(error: ArkDbError) => void> = [];
+  private waiters: Set<(error: ArkDbError) => void> = new Set<(error: ArkDbError) => void>();
   constructor(scope: PostgresCommandScope) {
     this.scope = scope;
     this.closeRequested = new Promise<ArkDbError>(
@@ -29,15 +29,15 @@ export class PostgresCommandCloseSettlement {
     this.closeError = error;
     this.resolveClose(error);
     const pending = this.waiters;
-    this.waiters = [];
+    this.waiters = new Set<(error: ArkDbError) => void>();
     for (const waiter of pending) waiter(error);
   }
   markSettled(): void {
     if (this.settledNow) return;
     this.settledNow = true;
     const pending = this.waiters;
-    this.waiters = [];
-    if (pending.length > 0) {
+    this.waiters = new Set<(error: ArkDbError) => void>();
+    if (pending.size > 0) {
       const terminal = this.closeError !== null ? this.closeError :
         ArkDbError.protocol('PostgreSQL command settled before raced operation completed.');
       for (const waiter of pending) waiter(terminal);
@@ -55,11 +55,11 @@ export class PostgresCommandCloseSettlement {
       const fail = (error: Object): void => {
         if (done) return;
         done = true;
-        this.removeWaiter(onClose);
+        this.waiters.delete(onClose);
         reject(this.closeError !== null ? this.closeError : error);
       };
       const onClose = (error: ArkDbError): void => fail(error);
-      this.waiters.push(onClose);
+      this.waiters.add(onClose);
       try {
         operation().then((value: T): void => {
           if (done) return;
@@ -69,15 +69,11 @@ export class PostgresCommandCloseSettlement {
             return;
           }
           done = true;
-          this.removeWaiter(onClose);
+          this.waiters.delete(onClose);
           resolve(value);
         }, fail);
       } catch (error) { fail(error as Object); }
     });
-  }
-  private removeWaiter(waiter: (error: ArkDbError) => void): void {
-    const index = this.waiters.indexOf(waiter);
-    if (index >= 0) this.waiters.splice(index, 1);
   }
 }
 

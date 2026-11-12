@@ -75,7 +75,14 @@ export default function postgresCommandGateTest(): void {
       const settlement = new PostgresCommandCloseSettlement(scope);
       expect(!settlement.isCloseRequested && settlement.closeReason === null &&
         !settlement.isSettled && settlement.scope === scope).assertTrue();
-      expect(await settlement.raceClose<number>(async (): Promise<number> => 7)).assertEqual(7);
+      let r1: (v: number) => void = (_v: number): void => {};
+      let r2: (v: number) => void = (_v: number): void => {};
+      const p1 = settlement.raceClose<number>((): Promise<number> =>
+        new Promise<number>((res: (v: number) => void): void => { r1 = res; }));
+      const p2 = settlement.raceClose<number>((): Promise<number> =>
+        new Promise<number>((res: (v: number) => void): void => { r2 = res; }));
+      r2(20); r1(10);
+      expect((await p2) === 20 && (await p1) === 10).assertTrue();
       expect(await settlement.raceClose<string>(async (): Promise<string> => 'done')).assertEqual('done');
       expect((await asyncRawFail((): Promise<void> =>
         settlement.raceClose<void>((): Promise<void> => { throw new Error('sync boom'); }))).message)

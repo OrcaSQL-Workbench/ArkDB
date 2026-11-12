@@ -40,6 +40,7 @@ export default function postgresConnectionLifecycleTest(): void {
           ctx.setBackendKeyData(-2147483648, new Uint8Array([0x80, 0x00, 0x00, 0x01]));
           const firstKey = lc.readBackendKeyData()!;
           expect(firstKey.processId === -2147483648 && firstKey.secretKeyInt32 === -2147483647).assertTrue();
+          ctx.serverInfo.tlsActive = true; ctx.serverInfo.version = '16.4';
           ctx.setBackendKeyData(4242, secretBytes); ctx.applyReadyStatus(PostgresReadyStatus.Idle);
           for (const postReady of [(): void => { ctx.readPassword(); }, (): void => ctx.enterAuthenticating(), (): void => ctx.setBackendKeyData(7, secretBytes), (): void => ctx.applyReadyStatus(PostgresReadyStatus.Idle)]) {
             expect(syncFail(postReady).kind).assertEqual(ArkDbErrorKind.Protocol);
@@ -52,7 +53,7 @@ export default function postgresConnectionLifecycleTest(): void {
       expect(syncFail((): void => { capturedCtx!.readPassword(); }).kind).assertEqual(ArkDbErrorKind.Protocol);
       expect((await asyncFail((): Promise<number> => capturedCtx!.transport.write(new Uint8Array([1])))).kind).assertEqual(ArkDbErrorKind.Protocol);
       expect((await asyncFail((): Promise<void> => capturedCtx!.transport.close())).kind).assertEqual(ArkDbErrorKind.Protocol);
-      expect(lc.state === ConnectionState.Ready && lc.serverInfo.backendProcessId === 4242 &&
+      expect(lc.state === ConnectionState.Ready && lc.serverInfo.backendProcessId === 4242 && lc.serverInfo.tlsActive && lc.serverInfo.version === '16.4' &&
         lc.serverInfo.connectionHandle === '4242' && lc.sessionStatus.known && lc.sessionStatus.autocommit && !lc.sessionStatus.inTransaction).assertTrue();
       secretBytes[0] = 0xff;
       const key = lc.readBackendKeyData()!;
@@ -63,10 +64,14 @@ export default function postgresConnectionLifecycleTest(): void {
       expect(dump.indexOf(password) === -1 && dump.indexOf('305419896') === -1 &&
         dump.indexOf('18,52,86,120') === -1).assertTrue();
       expect((await asyncFail((): Promise<void> => lc.connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
-      transport.closeFailure = ArkDbError.network('socket close failed');
-      expect((await asyncFail((): Promise<void> => lc.close())).message).assertEqual('socket close failed');
-      expect(lc.state === ConnectionState.Closed && lc.readBackendKeyData() === null &&
-        !lc.sessionStatus.known && lc.commandGate.generation === 1 &&
+      transport.hangClose = true; transport.closeFailure = ArkDbError.network('socket close failed');
+      const pendingClose = lc.close();
+      expect(lc.state === ConnectionState.Closed && lc.readBackendKeyData() === null && !lc.sessionStatus.known && !lc.serverInfo.tlsActive &&
+        lc.serverInfo.backendProcessId === 0 && lc.serverInfo.connectionHandle === '' && lc.serverInfo.version === '' &&
+        lc.serverInfo.driverId === 'pgsql' && lc.serverInfo.productName === 'PostgreSQL').assertTrue();
+      transport.releaseHungAbort();
+      expect((await asyncFail((): Promise<void> => pendingClose)).message).assertEqual('socket close failed');
+      expect(lc.state === ConnectionState.Closed && lc.commandGate.generation === 1 &&
         transport.closeCalls === 1 && transport.writtenFrames.length === 0).assertTrue();
     });
 
@@ -203,40 +208,29 @@ export default function postgresConnectionLifecycleTest(): void {
             expect(syncFail((): void => damagedLc.applyReadyStatus(scope, PostgresReadyStatus.Idle)).kind).assertEqual(ArkDbErrorKind.Protocol);
           }))).kind === ArkDbErrorKind.Protocol && damagedLc.state === ConnectionState.Error).assertTrue();
       }
-      const tlsWireTransport = new FakeLifecycleTransport();
-      const tlsWireLc = readyLifecycle(new FakeTimerPort(), tlsWireTransport, 'pw-tlswire');
-      await tlsWireLc.connect();
-      tlsWireTransport.writeFailure = ArkDbError.tls('TLS bad record MAC');
+      const tlsWireTransport = new FakeLifecycleTransport(); const tlsWireLc = readyLifecycle(new FakeTimerPort(), tlsWireTransport, 'pw-tlswire');
+      await tlsWireLc.connect(); tlsWireTransport.writeFailure = ArkDbError.tls('TLS bad record MAC');
       expect((await asyncFail((): Promise<void> => tlsWireLc.runCommand<void>(PostgresCommandKind.Query,
         async (_s: PostgresCommandScope, ch: PostgresMessageChannel): Promise<void> => { await ch.writeMessage(0x51, new Uint8Array([0])); }
       ))).kind === ArkDbErrorKind.Tls && tlsWireLc.state === ConnectionState.Error).assertTrue();
-
-      const pendingIoTransport = new FakeLifecycleTransport();
-      pendingIoTransport.queuedReads.push(new Uint8Array([0x5a, 0, 0, 0, 5]));
-      const pendingIoLc = readyLifecycle(new FakeTimerPort(), pendingIoTransport, 'pw-pend');
-      await pendingIoLc.connect();
+      const pendingIoTransport = new FakeLifecycleTransport(); pendingIoTransport.queuedReads.push(new Uint8Array([0x5a, 0, 0, 0, 5]));
+      const pendingIoLc = readyLifecycle(new FakeTimerPort(), pendingIoTransport, 'pw-pend'); await pendingIoLc.connect();
       expect((await asyncFail((): Promise<void> => pendingIoLc.runCommand<void>(PostgresCommandKind.Query,
         async (scope: PostgresCommandScope, ch: PostgresMessageChannel): Promise<void> => {
           ch.readMessage().catch((): void => {}); await Promise.resolve();
           expect(syncFail((): void => pendingIoLc.applyReadyStatus(scope, PostgresReadyStatus.Idle)).kind).assertEqual(ArkDbErrorKind.Protocol);
-        }))).kind === ArkDbErrorKind.Protocol && pendingIoLc.state === ConnectionState.Error &&
-        pendingIoTransport.abortCalls === 1).assertTrue();
-
+        }))).kind === ArkDbErrorKind.Protocol && pendingIoLc.state === ConnectionState.Error && pendingIoTransport.abortCalls === 1).assertTrue();
       for (const useLocalized of [false, true]) {
-        const fatalLc = readyLifecycle(new FakeTimerPort(), new FakeLifecycleTransport(), 'pw-fatal');
-        await fatalLc.connect();
+        const fatalLc = readyLifecycle(new FakeTimerPort(), new FakeLifecycleTransport(), 'pw-fatal'); await fatalLc.connect();
         const fatalErr = new PostgresError(ArkDbErrorKind.Server, 'terminating', '57P01', '57P01');
         if (useLocalized) fatalErr.localizedSeverity = 'FATAL'; else fatalErr.severity = 'PANIC';
-        expect(await asyncFail((): Promise<void> => fatalLc.runCommand<void>(PostgresCommandKind.Query,
-          async (): Promise<void> => { throw fatalErr; }))).assertEqual(fatalErr);
+        expect(await asyncFail((): Promise<void> => fatalLc.runCommand<void>(PostgresCommandKind.Query, async (): Promise<void> => { throw fatalErr; }))).assertEqual(fatalErr);
         expect(fatalLc.state).assertEqual(ConnectionState.Error);
       }
-      const closeSigLc = readyLifecycle(new FakeTimerPort(), new FakeLifecycleTransport(), 'pw-sig');
-      await closeSigLc.connect();
+      const closeSigLc = readyLifecycle(new FakeTimerPort(), new FakeLifecycleTransport(), 'pw-sig'); await closeSigLc.connect();
       expect((await asyncFail((): Promise<void> => closeSigLc.runCommand<void>(PostgresCommandKind.Query,
-        async (_s: PostgresCommandScope, _ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<void> => {
-          st.signalClose(ArkDbError.cancelled('closed'));
-        }))).kind === ArkDbErrorKind.Cancelled && closeSigLc.state === ConnectionState.Closed).assertTrue();
+        async (_s: PostgresCommandScope, _ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<void> => { st.signalClose(ArkDbError.cancelled('closed')); }
+      ))).kind === ArkDbErrorKind.Cancelled && closeSigLc.state === ConnectionState.Closed).assertTrue();
       const desync = ArkDbError.protocol('Malformed DataRow frame');
       const primaryQueryErr = new PostgresError(ArkDbErrorKind.Server, 'aborted query', '57014', '57014');
       transport.abortFailure = ArkDbError.network('abort failed');
@@ -246,8 +240,9 @@ export default function postgresConnectionLifecycleTest(): void {
         }));
       expect(retiredErr instanceof PostgresError && retiredErr.sqlState === '57014' &&
         retiredErr.message.split('abort failed').length === 2 && lc.state === ConnectionState.Error &&
-        !lc.sessionStatus.known && lc.readBackendKeyData() === null && lc.commandGate.generation === 1 &&
-        transport.abortCalls === 1 && transport.writtenFrames.length === 2).assertTrue();
+        !lc.sessionStatus.known && lc.readBackendKeyData() === null && lc.serverInfo.backendProcessId === 0 &&
+        lc.serverInfo.connectionHandle === '' && !lc.serverInfo.tlsActive && lc.serverInfo.driverId === 'pgsql' &&
+        lc.commandGate.generation === 1 && transport.abortCalls === 1 && transport.writtenFrames.length === 2).assertTrue();
       expect((await asyncFail((): Promise<void> => lc.runCommand<void>(PostgresCommandKind.Ping, async (): Promise<void> => {}))).kind)
         .assertEqual(ArkDbErrorKind.Protocol);
       await lc.close(); expect(lc.state).assertEqual(ConnectionState.Closed);
@@ -263,7 +258,7 @@ function startupLifecycle(runner: PostgresStartupRunner): PostgresConnectionLife
 function readyLifecycle(timers: ConnectionTimerPort, transport: FakeLifecycleTransport, password: string, gate?: PostgresCommandGate): PostgresConnectionLifecycle {
   return new PostgresConnectionLifecycle(validConfig(), password, timers, (): PostgresLifecycleTransport => transport,
     async (ctx: PostgresStartupContext): Promise<void> => {
-      ctx.enterAuthenticating(); ctx.setBackendKeyData(5150, new Uint8Array([10, 20, 30, 40])); ctx.applyReadyStatus(PostgresReadyStatus.Idle);
+      ctx.enterAuthenticating(); ctx.serverInfo.tlsActive = true; ctx.setBackendKeyData(5150, new Uint8Array([10, 20, 30, 40])); ctx.applyReadyStatus(PostgresReadyStatus.Idle);
     }, gate);
 }
 class TerminalSettlementObserver implements PostgresCommandLifecycleObserver {
@@ -292,7 +287,7 @@ class FakeTimerPort implements ConnectionTimerPort {
 }
 class FakeLifecycleTransport implements PostgresLifecycleTransport {
   readonly writtenFrames: Uint8Array[] = []; readonly queuedReads: Uint8Array[] = [];
-  hangConnect: boolean = false; hangAbort: boolean = false; shortWriteBytes: number = 0;
+  hangConnect: boolean = false; hangAbort: boolean = false; hangClose: boolean = false; shortWriteBytes: number = 0;
   abortFailure: ArkDbError | null = null; closeFailure: ArkDbError | null = null; writeFailure: ArkDbError | null = null;
   closeCalls: number = 0; abortCalls: number = 0; onConnect: (() => void) | null = null; onAbort: (() => void) | null = null;
   private fatal: ArkDbError | null = null; private pendingRejects: Array<(error: Object) => void> = []; private resumeAbort: (() => void) | null = null;
@@ -313,7 +308,11 @@ class FakeLifecycleTransport implements PostgresLifecycleTransport {
     const copy = new Uint8Array(data.length); copy.set(data); this.writtenFrames.push(copy);
     return Promise.resolve(this.shortWriteBytes > 0 ? this.shortWriteBytes : data.length);
   }
-  async close(): Promise<void> { this.closeCalls += 1; this.failPending(ArkDbError.network('closed')); if (this.closeFailure !== null) throw this.closeFailure; }
+  async close(): Promise<void> {
+    this.closeCalls += 1; this.failPending(ArkDbError.network('closed'));
+    if (this.hangClose) await new Promise<void>((r: () => void): void => { this.resumeAbort = r; });
+    if (this.closeFailure !== null) throw this.closeFailure;
+  }
   async abort(error: ArkDbError): Promise<void> {
     this.abortCalls += 1; this.failPending(error); if (this.onAbort !== null) this.onAbort();
     if (this.hangAbort) await new Promise<void>((r: () => void): void => { this.resumeAbort = r; });

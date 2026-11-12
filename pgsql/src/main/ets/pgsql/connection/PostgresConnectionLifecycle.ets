@@ -140,7 +140,7 @@ export class PostgresConnectionLifecycle {
     this.storedConfig = config.clone(); this.timers = timers; this.commandGate = commandGate;
     this.transportFactory = transportFactory === undefined ? (): PostgresLifecycleTransport => new DefaultPostgresLifecycleTransport(this.timers) : transportFactory;
     this.startupRunner = startupRunner === undefined ? null : startupRunner;
-    postgresLifecyclePasswords.set(this, password); this.serverInfo.driverId = 'pgsql'; this.serverInfo.productName = 'PostgreSQL';
+    postgresLifecyclePasswords.set(this, password); commitServerInfo(defaultPostgresServerInfo(), this.serverInfo);
   }
   get config(): PostgresConnectionConfig { return this.storedConfig.clone(); }
   get state(): ConnectionState { return this.currentState; }
@@ -164,7 +164,7 @@ export class PostgresConnectionLifecycle {
     const scope = this.commandGate.reserve(PostgresCommandKind.Connect);
     const settlement = new PostgresCommandCloseSettlement(scope);
     let deadline: ConnectionDeadline | null = null; let startupClosed = false;
-    const stagingInfo = new PostgresServerInfo(); stagingInfo.driverId = 'pgsql'; stagingInfo.productName = 'PostgreSQL';
+    const stagingInfo = defaultPostgresServerInfo();
     this.retiredCleanup = null; this.retiredComposed = null;
     try {
       this.commandGate.start(scope);
@@ -257,28 +257,28 @@ export class PostgresConnectionLifecycle {
     }
   }
   async close(): Promise<void> {
-    if (this.currentState === ConnectionState.Closed && this.commandGate.current === null && this.transport === null && this.releaseTask === null) {
-      this.clearSecretsAndChannel(); return;
+    if ((this.currentState === ConnectionState.Closed || this.currentState === ConnectionState.Error) && this.commandGate.current === null) {
+      this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
+      const cleanup = await this.releaseTransport(null);
+      if (cleanup !== null) throw cleanup;
+      return;
     }
     if (this.currentState === ConnectionState.Idle && this.commandGate.current === null) {
       this.clearSecretsAndChannel(); this.commandGate.advanceGeneration(); this.currentState = ConnectionState.Closed; return;
     }
-    if (this.currentState === ConnectionState.Error && this.commandGate.current === null) {
-      const cleanup = await this.releaseTransport(null);
-      this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
-      if (cleanup !== null) throw cleanup;
-      return;
-    }
     const scope = this.commandGate.reserve(PostgresCommandKind.Close);
-    let cleanupFailure: ArkDbError | null = null;
+    let failure: ArkDbError | null = null;
     try {
-      this.commandGate.start(scope); this.commandGate.setPhase(scope, PostgresCommandPhase.Closing);
-      this.commandGate.advanceGenerationOnRelease(scope); cleanupFailure = await this.releaseTransport(null);
+      this.commandGate.advanceGenerationOnRelease(scope); this.commandGate.setPhase(scope, PostgresCommandPhase.Closing);
+      try { this.commandGate.start(scope); } catch (e) { failure = toPostgresArkDbError(e as Object); }
+      this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
+      const cleanup = await this.releaseTransport(failure);
+      if (cleanup !== null) failure = failure !== null && cleanup !== failure ? postgresAppendCleanupError(failure, cleanup) : cleanup;
     } finally {
       this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
       if (this.commandGate.isOwner(scope)) this.commandGate.release(scope);
     }
-    if (cleanupFailure !== null) throw cleanupFailure;
+    if (failure !== null) throw failure;
   }
   private assertActiveScope(scope: PostgresCommandScope, isClosed?: () => boolean): void {
     this.commandGate.assertOwner(scope);
@@ -290,22 +290,16 @@ export class PostgresConnectionLifecycle {
   }
   private createScopedChannel(scope: PostgresCommandScope, rawTransport: PostgresLifecycleTransport, isClosed?: () => boolean): PostgresMessageChannel {
     let channelTransportFailure: ArkDbError | null = null;
-    const transport = this.createScopedTransport(scope, rawTransport, isClosed, (d: ArkDbError): void => {
-      if (channelTransportFailure === null) channelTransportFailure = d;
+    const transport = this.createScopedTransport(scope, rawTransport, isClosed, (d: ArkDbError): void => { if (channelTransportFailure === null) channelTransportFailure = d; });
+    return new ScopedPostgresMessageChannel(transport, (): void => { this.assertActiveIoScope(scope, isClosed); this.pendingIoCount += 1; }, (err: Object | null, isOwner: boolean): Object => {
+      this.pendingIoCount -= 1;
+      const captured = isOwner ? channelTransportFailure : null;
+      if (isOwner) channelTransportFailure = null;
+      if (err === null) return new Object();
+      const resolved = captured !== null && captured.kind !== ArkDbErrorKind.Protocol ? captured : err;
+      if (this.commandGate.isOwner(scope)) { const typed = toPostgresArkDbError(resolved); if (typed.kind !== ArkDbErrorKind.Validation) this.markStreamDamaged(typed); }
+      return resolved;
     });
-    return new ScopedPostgresMessageChannel(transport, (): void => { this.assertActiveIoScope(scope, isClosed); this.pendingIoCount += 1; },
-      (err: Object | null, isOwner: boolean): Object => {
-        this.pendingIoCount -= 1;
-        const captured = isOwner ? channelTransportFailure : null;
-        if (isOwner) channelTransportFailure = null;
-        if (err === null) return new Object();
-        const resolved = captured !== null && captured.kind !== ArkDbErrorKind.Protocol ? captured : err;
-        if (this.commandGate.isOwner(scope)) {
-          const typed = toPostgresArkDbError(resolved);
-          if (typed.kind !== ArkDbErrorKind.Validation) this.markStreamDamaged(typed);
-        }
-        return resolved;
-      });
   }
   private createScopedTransport(scope: PostgresCommandScope, transport: PostgresLifecycleTransport,
     isClosed?: () => boolean, onDamaged?: (damaged: ArkDbError) => void): PostgresLifecycleTransport {
@@ -393,8 +387,11 @@ export class PostgresConnectionLifecycle {
   private clearSecretsAndChannel(): void {
     postgresLifecyclePasswords.delete(this); const storedKey = postgresBackendSecrets.get(this);
     if (storedKey !== undefined) { storedKey.secretKey.fill(0); postgresBackendSecrets.delete(this); }
-    resetPostgresSessionStatus(this.sessionStatus); this.awaitingReadyForQuery = false;
+    resetPostgresSessionStatus(this.sessionStatus); commitServerInfo(defaultPostgresServerInfo(), this.serverInfo); this.awaitingReadyForQuery = false;
   }
+}
+function defaultPostgresServerInfo(): PostgresServerInfo {
+  const info = new PostgresServerInfo(); info.driverId = 'pgsql'; info.productName = 'PostgreSQL'; return info;
 }
 function commitServerInfo(src: PostgresServerInfo, dst: PostgresServerInfo): void {
   dst.driverId = src.driverId; dst.productName = src.productName; dst.connectionHandle = src.connectionHandle;

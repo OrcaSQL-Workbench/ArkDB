@@ -1,8 +1,11 @@
 import { ArkDbError, DriverCapabilities } from '@arkdb/core';
+import { PostgresPreparedExecutor } from './PostgresPreparedContracts';
 
 export class PostgresDriverCapabilities extends DriverCapabilities {}
 
-export class PostgresConnectionFeatures {}
+export class PostgresConnectionFeatures {
+  prepared?: PostgresPreparedExecutor;
+}
 
 export interface PostgresFeatureConnection {
   readonly postgresFeatures?: PostgresConnectionFeatures;

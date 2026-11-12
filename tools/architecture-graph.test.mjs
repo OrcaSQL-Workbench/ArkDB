@@ -184,7 +184,11 @@ const OWNED_SOURCE_ROOTS = [
   {
     root: 'pgsql/src/main/ets/pgsql',
     files: ['PostgresConnection.ets'],
-    directories: ['api', 'auth', 'driver', 'model', 'protocol', 'transport', 'value']
+    directories: ['api', 'auth', 'driver', 'features', 'model', 'protocol', 'transport', 'value']
+  },
+  {
+    root: 'pgsql/src/main/ets/pgsql/features',
+    directories: ['prepared']
   },
   {
     root: 'tools',
@@ -300,6 +304,13 @@ const FORBIDDEN_MYSQL_LONG_DATA_PATHS = [
   'mysql/src/test/mysql/command/LongData.test.ets',
   'mysql/src/test/mysql/transport/MySqlUploadPump.test.ets'
 ];
+const POSTGRES_LEAF_PATTERN =
+  '(?:model/.+\\.ets|features/prepared/PostgresParameter\\.ets|' +
+  'protocol/PostgresProtocolConstants\\.ets|value/PostgresTypeOids\\.ets)';
+const POSTGRES_CONTRACT_MODEL_PATH =
+  new RegExp('^pgsql/src/main/ets/pgsql/' + POSTGRES_LEAF_PATTERN + '$');
+const POSTGRES_NON_LEAF_IMPLEMENTATION_PATH =
+  new RegExp('^pgsql/src/main/ets/pgsql/(?!' + POSTGRES_LEAF_PATTERN + '$).+');
 const ARCHITECTURE_POLICY = {
   forbiddenSources: FORBIDDEN_MYSQL_LEGACY_PRODUCTION_PATHS,
   ownedSourceRoots: OWNED_SOURCE_ROOTS,
@@ -331,6 +342,29 @@ const ARCHITECTURE_POLICY = {
       to: /^pgsql\/src\/main\/ets\/pgsql\/(?!(?:value|model|protocol)\/).+/,
       transitive: true,
       message: 'PostgreSQL value codecs may depend only on value, model, and protocol leaves.'
+    },
+    {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/api\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?!(?:api\/|model\/|features\/prepared\/PostgresParameter\.ets$)).+/,
+      message: 'PostgreSQL api may import only contract and model leaves.'
+    },
+    {
+      from: POSTGRES_CONTRACT_MODEL_PATH,
+      to: POSTGRES_NON_LEAF_IMPLEMENTATION_PATH,
+      transitive: true,
+      message: 'PostgreSQL contract and model leaves must not depend on implementations.'
+    },
+    {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/features\/prepared\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/transport\//,
+      transitive: true,
+      message: 'PostgreSQL prepared feature must not depend on byte transport implementations.'
+    },
+    {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/(?:protocol|transport)\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/features\//,
+      transitive: true,
+      message: 'PostgreSQL protocol and byte transport must not depend on feature ownership.'
     },
     {
       from: /^mysql\/src\/main\/ets\/mysql\/api\//,
@@ -423,7 +457,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, P08, P09, and P14 own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, P09, P14, and P17 own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -431,9 +465,12 @@ test('P04, P07, P08, P09, and P14 own exactly the registered PostgreSQL primitiv
     'pgsql/hvigorfile.ts',
     'pgsql/src/main/ets/pgsql/PostgresConnection.ets',
     'pgsql/src/main/ets/pgsql/api/PostgresContracts.ets',
+    'pgsql/src/main/ets/pgsql/api/PostgresPreparedContracts.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresAuthCrypto.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresSaslPrep.ets',
     'pgsql/src/main/ets/pgsql/driver/PostgresDriverFactory.ets',
+    'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameter.ets',
+    'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameterEncoder.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresConnectionConfig.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresModels.ets',
     'pgsql/src/main/ets/pgsql/protocol/PostgresByteCodec.ets',
@@ -2390,4 +2427,24 @@ test('rejects PostgreSQL value codec dependencies outside value, model, and prot
     );
   }
 });
+
+test('enforces PostgreSQL api, parameter leaf, and prepared feature layering', () => {
+  const cases = [
+    ['api/PostgresPreparedContracts.ets', 'features/prepared/PostgresParameterEncoder.ets',
+      /PostgreSQL api may import only contract and model leaves/],
+    ['features/prepared/PostgresParameter.ets', 'features/prepared/PostgresParameterEncoder.ets',
+      /PostgreSQL contract and model leaves must not depend on implementations/],
+    ['features/prepared/PostgresParameterEncoder.ets', 'transport/PostgresTcpTransport.ets',
+      /PostgreSQL prepared feature must not depend on byte transport implementations/],
+    ['protocol/PostgresByteCodec.ets', 'features/prepared/PostgresParameter.ets',
+      /PostgreSQL protocol and byte transport must not depend on feature ownership/]
+  ];
+  for (const [fromRel, toRel, expected] of cases) {
+    const source = `pgsql/src/main/ets/pgsql/${fromRel}`;
+    const target = `pgsql/src/main/ets/pgsql/${toRel}`;
+    const graph = { files: [source, target], dependencies: { [source]: [target], [target]: [] } };
+    assert.throws(() => assertImportPolicy(graph, ARCHITECTURE_POLICY), expected);
+  }
+});
+
 

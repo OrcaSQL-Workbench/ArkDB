@@ -1,6 +1,7 @@
 import publicInterfaceTest from './public/PublicInterface.test';
 import postgresAuthPrimitivesTest from './pgsql/auth/PostgresAuthPrimitives.test';
 import postgresScramClientTest from './pgsql/auth/PostgresScramClient.test';
+import postgresParameterEncoderTest from './pgsql/features/prepared/PostgresParameterEncoder.test';
 import postgresBackendParserTest from './pgsql/protocol/PostgresBackendParser.test';
 import postgresFrontendSerializerTest from './pgsql/protocol/PostgresFrontendSerializer.test';
 import postgresProtocolTest from './pgsql/protocol/PostgresProtocol.test';
@@ -20,4 +21,5 @@ export default function testsuite(): void {
   postgresTcpTransportTest();
   postgresTlsTest();
   postgresTextValueDecoderTest();
+  postgresParameterEncoderTest();
 }

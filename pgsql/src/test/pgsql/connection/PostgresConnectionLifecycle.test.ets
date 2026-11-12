@@ -80,32 +80,27 @@ export default function postgresConnectionLifecycleTest(): void {
       let unblockHungStartup: () => void = (): void => {}; let markEntered: () => void = (): void => {};
       const startupEntered = new Promise<void>((r: () => void): void => { markEntered = r; });
       const cfg = validConfig(); cfg.connectTimeoutMs = 2500;
-      const timeoutLc = new PostgresConnectionLifecycle(cfg, 'secret-timeout', timers,
-        (): PostgresLifecycleTransport => stalled, async (ctx: PostgresStartupContext): Promise<void> => {
+      const timeoutLc = new PostgresConnectionLifecycle(cfg, 'secret-timeout', timers, (): PostgresLifecycleTransport => stalled,
+        async (ctx: PostgresStartupContext): Promise<void> => {
           ctx.enterAuthenticating(); ctx.serverInfo.version = '16.4'; markEntered();
           await new Promise<void>((r: () => void): void => { unblockHungStartup = r; });
           ctx.serverInfo.version = 'late-17.0'; ctx.serverInfo.tlsActive = true;
         });
-      const attempt = timeoutLc.connect();
-      await startupEntered; timers.advanceBy(2500);
+      const attempt = timeoutLc.connect(); await startupEntered; timers.advanceBy(2500);
       expect((await asyncFail((): Promise<void> => attempt)).kind).assertEqual(ArkDbErrorKind.Timeout);
       unblockHungStartup(); await Promise.resolve();
-      expect(timeoutLc.state === ConnectionState.Error && !timeoutLc.sessionStatus.known && timeoutLc.serverInfo.version === '' &&
-        !timeoutLc.serverInfo.tlsActive && timeoutLc.commandGate.current === null &&
-        timeoutLc.commandGate.generation === 1 && stalled.abortCalls === 1 && timers.activeCount === 0).assertTrue();
+      expect(timeoutLc.state === ConnectionState.Error && !timeoutLc.sessionStatus.known && timeoutLc.serverInfo.version === '' && !timeoutLc.serverInfo.tlsActive &&
+        timeoutLc.commandGate.current === null && timeoutLc.commandGate.generation === 1 && stalled.abortCalls === 1 && timers.activeCount === 0).assertTrue();
 
       const brokenTimers = new FakeTimerPort(); brokenTimers.failCancel = true;
       const authTransport = new FakeLifecycleTransport(); authTransport.hangAbort = true;
-      let markAborting: () => void = (): void => {};
-      const abortEntered = new Promise<void>((r: () => void): void => { markAborting = r; });
-      authTransport.onAbort = markAborting;
-      authTransport.abortFailure = ArkDbError.network('cleanup socket failure');
+      let markAborting: () => void = (): void => {}; const abortEntered = new Promise<void>((r: () => void): void => { markAborting = r; });
+      authTransport.onAbort = markAborting; authTransport.abortFailure = ArkDbError.network('cleanup socket failure');
       const authErr = new PostgresError(ArkDbErrorKind.Auth, 'SCRAM failed', '28P01', '28P01');
       let failedCtx: PostgresStartupContext | null = null;
-      const failedLc = new PostgresConnectionLifecycle(validConfig(), 'secret-auth', brokenTimers,
-        (): PostgresLifecycleTransport => authTransport, async (ctx: PostgresStartupContext): Promise<void> => {
-          failedCtx = ctx; ctx.enterAuthenticating(); ctx.serverInfo.version = '16.4';
-          ctx.setBackendKeyData(9001, new Uint8Array([9, 8, 7, 6])); throw authErr;
+      const failedLc = new PostgresConnectionLifecycle(validConfig(), 'secret-auth', brokenTimers, (): PostgresLifecycleTransport => authTransport,
+        async (ctx: PostgresStartupContext): Promise<void> => {
+          failedCtx = ctx; ctx.enterAuthenticating(); ctx.serverInfo.version = '16.4'; ctx.setBackendKeyData(9001, new Uint8Array([9, 8, 7, 6])); throw authErr;
         });
       const pendingFail = failedLc.connect(); await abortEntered;
       expect(failedLc.state === ConnectionState.Error && failedLc.readBackendKeyData() === null &&
@@ -114,35 +109,30 @@ export default function postgresConnectionLifecycleTest(): void {
         (await asyncFail((): Promise<number> => failedCtx!.transport.write(new Uint8Array([1])))).kind === ArkDbErrorKind.Protocol).assertTrue();
       authTransport.releaseHungAbort();
       const caught = await asyncFail((): Promise<void> => pendingFail);
-      expect(caught instanceof PostgresError && caught.sqlState === '28P01' &&
-        caught.message.indexOf('timer cancel failed') >= 0 && caught.message.indexOf('cleanup socket failure') >= 0 &&
-        failedLc.state === ConnectionState.Error && failedLc.readBackendKeyData() === null &&
-        failedLc.commandGate.current === null && failedLc.serverInfo.backendProcessId === 0 &&
-        failedLc.serverInfo.connectionHandle === '' && failedLc.serverInfo.version === '' && !failedLc.sessionStatus.known).assertTrue();
+      expect(caught instanceof PostgresError && caught.sqlState === '28P01' && caught.message.indexOf('timer cancel failed') >= 0 &&
+        caught.message.indexOf('cleanup socket failure') >= 0 && failedLc.state === ConnectionState.Error && failedLc.readBackendKeyData() === null &&
+        failedLc.commandGate.current === null && failedLc.serverInfo.backendProcessId === 0 && failedLc.serverInfo.connectionHandle === '' &&
+        failedLc.serverInfo.version === '' && !failedLc.sessionStatus.known).assertTrue();
       expect((await asyncFail((): Promise<void> => failedLc.connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
       expect((await asyncFail((): Promise<number> => failedLc.runCommand<number>(PostgresCommandKind.Query, async (): Promise<number> => 1))).kind).assertEqual(ArkDbErrorKind.Protocol);
       await failedLc.close(); expect(failedLc.state === ConnectionState.Closed && authTransport.writtenFrames.length === 0).assertTrue();
 
       const shortStartupTp = new FakeLifecycleTransport(); shortStartupTp.shortWriteBytes = 1;
-      const shortStartupLc = new PostgresConnectionLifecycle(validConfig(), 'pw-short', new FakeTimerPort(),
-        (): PostgresLifecycleTransport => shortStartupTp, async (ctx: PostgresStartupContext): Promise<void> => {
+      const shortStartupLc = new PostgresConnectionLifecycle(validConfig(), 'pw-short', new FakeTimerPort(), (): PostgresLifecycleTransport => shortStartupTp,
+        async (ctx: PostgresStartupContext): Promise<void> => {
           expect((await asyncFail((): Promise<number> => ctx.transport.write(new Uint8Array([1, 2])))).kind).assertEqual(ArkDbErrorKind.Protocol);
           expect((await asyncFail((): Promise<void> => ctx.channel.writeMessage(0x51, new Uint8Array([0])))).kind).assertEqual(ArkDbErrorKind.Protocol);
         });
       expect((await asyncFail((): Promise<void> => shortStartupLc.connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
-      for (const badStartup of [async (): Promise<void> => {},
-        async (ctx: PostgresStartupContext): Promise<void> => { ctx.enterAuthenticating(); },
-        async (ctx: PostgresStartupContext): Promise<void> => {
-          ctx.enterAuthenticating(); ctx.applyReadyStatus(PostgresReadyStatus.Idle);
-          await ctx.transport.write(new Uint8Array([0x58, 0, 0, 0, 4]));
-        }]) {
+      for (const badStartup of [async (): Promise<void> => {}, async (ctx: PostgresStartupContext): Promise<void> => { ctx.enterAuthenticating(); },
+        async (ctx: PostgresStartupContext): Promise<void> => { ctx.enterAuthenticating(); ctx.applyReadyStatus(PostgresReadyStatus.Idle); await ctx.transport.write(new Uint8Array([0x58, 0, 0, 0, 4])); }]) {
         const badLc = startupLifecycle(badStartup);
         expect((await asyncFail((): Promise<void> => badLc.connect())).kind === ArkDbErrorKind.Protocol && badLc.state === ConnectionState.Error && !badLc.sessionStatus.known).assertTrue();
       }
       const retireTimers = new FakeTimerPort(); retireTimers.failCancel = true;
       const retireTransport = new FakeLifecycleTransport(); retireTransport.abortFailure = ArkDbError.network('retire abort failed');
-      const startupRetireLc = new PostgresConnectionLifecycle(validConfig(), 'pw-retire', retireTimers,
-        (): PostgresLifecycleTransport => retireTransport, async (ctx: PostgresStartupContext): Promise<void> => { await ctx.transport.abort(ArkDbError.tls('tls alert')); });
+      const startupRetireLc = new PostgresConnectionLifecycle(validConfig(), 'pw-retire', retireTimers, (): PostgresLifecycleTransport => retireTransport,
+        async (ctx: PostgresStartupContext): Promise<void> => { await ctx.transport.abort(ArkDbError.tls('tls alert')); });
       const startupRetireCaught = await asyncFail((): Promise<void> => startupRetireLc.connect());
       expect(startupRetireCaught.kind === ArkDbErrorKind.Tls && startupRetireCaught.message.split('retire abort failed').length === 2 && startupRetireCaught.message.indexOf('timer cancel failed') >= 0).assertTrue();
     });
@@ -231,7 +221,20 @@ export default function postgresConnectionLifecycleTest(): void {
       expect((await asyncFail((): Promise<void> => closeSigLc.runCommand<void>(PostgresCommandKind.Query,
         async (_s: PostgresCommandScope, _ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<void> => { st.signalClose(ArkDbError.cancelled('closed')); }
       ))).kind === ArkDbErrorKind.Cancelled && closeSigLc.state === ConnectionState.Closed).assertTrue();
-      const desync = ArkDbError.protocol('Malformed DataRow frame');
+      let throwTerminal = true;
+      const throwingGate = (): PostgresCommandGate => new PostgresCommandGate(new TerminalSettlementObserver((): void => { if (throwTerminal) throw new Error('terminal observer boom'); }));
+      const obsFailConnect = new PostgresConnectionLifecycle(validConfig(), 'pw-obs', new FakeTimerPort(), (): PostgresLifecycleTransport => new FakeLifecycleTransport(),
+        async (): Promise<void> => { throw new PostgresError(ArkDbErrorKind.Auth, 'bad auth', '28P01', '28P01'); }, throwingGate());
+      const obsConnectErr = await asyncFail((): Promise<void> => obsFailConnect.connect());
+      expect(obsConnectErr instanceof PostgresError && obsConnectErr.sqlState === '28P01' && obsConnectErr.message.indexOf('terminal observer boom') >= 0).assertTrue();
+      throwTerminal = false;
+      const obsCloseTp = new FakeLifecycleTransport(); obsCloseTp.closeFailure = ArkDbError.network('close err');
+      const obsCmdLc = readyLifecycle(new FakeTimerPort(), obsCloseTp, 'pw-obs2', throwingGate());
+      await obsCmdLc.connect(); throwTerminal = true;
+      const obsCmdErr = await asyncFail((): Promise<void> => obsCmdLc.runCommand<void>(PostgresCommandKind.Query, async (): Promise<void> => { throw new PostgresError(ArkDbErrorKind.Server, 'bad sql', '42601', '42601'); }));
+      expect(obsCmdErr instanceof PostgresError && obsCmdErr.sqlState === '42601' && obsCmdErr.message.indexOf('terminal observer boom') >= 0 && obsCmdLc.state === ConnectionState.Ready).assertTrue();
+      const obsCloseErr = await asyncFail((): Promise<void> => obsCmdLc.close());
+      expect(obsCloseErr.message.indexOf('close err') >= 0 && obsCloseErr.message.indexOf('terminal observer boom') >= 0 && obsCmdLc.state === ConnectionState.Closed).assertTrue();      const desync = ArkDbError.protocol('Malformed DataRow frame');
       const primaryQueryErr = new PostgresError(ArkDbErrorKind.Server, 'aborted query', '57014', '57014');
       transport.abortFailure = ArkDbError.network('abort failed');
       const retiredErr = await asyncFail((): Promise<void> => lc.runCommand<void>(PostgresCommandKind.Query,

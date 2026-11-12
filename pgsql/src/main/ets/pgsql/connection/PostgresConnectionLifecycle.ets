@@ -150,95 +150,83 @@ export class PostgresConnectionLifecycle {
   }
   applyReadyStatus(scope: PostgresCommandScope, ready: PostgresReadyStatus): void {
     this.commandGate.assertOwner(scope);
-    if (this.unsynchronized || this.pendingIoCount > 0 || scope.kind === PostgresCommandKind.Connect ||
-      scope.phase === PostgresCommandPhase.Closing || this.currentState !== ConnectionState.Querying) {
+    if (this.unsynchronized || this.pendingIoCount > 0 || scope.kind === PostgresCommandKind.Connect || scope.phase === PostgresCommandPhase.Closing || this.currentState !== ConnectionState.Querying) {
       throw ArkDbError.protocol('PostgreSQL ReadyForQuery requires an active synchronized command.');
     }
     applyPostgresReadyStatus(this.sessionStatus, ready); this.awaitingReadyForQuery = false;
   }
-
   async connect(): Promise<void> {
     if (this.currentState === ConnectionState.Closed) throw ArkDbError.protocol('PostgreSQL connection is closed.');
     if (this.currentState !== ConnectionState.Idle) throw ArkDbError.protocol('PostgreSQL connection cannot connect in state ' + this.currentState + '.');
     if (this.startupRunner === null) throw ArkDbError.unsupported('PostgreSQL connection is not implemented.');
-    const scope = this.commandGate.reserve(PostgresCommandKind.Connect);
-    const settlement = new PostgresCommandCloseSettlement(scope);
-    let deadline: ConnectionDeadline | null = null; let startupClosed = false;
-    const stagingInfo = defaultPostgresServerInfo();
-    this.retiredCleanup = null; this.retiredComposed = null;
+    const scope = this.commandGate.reserve(PostgresCommandKind.Connect); const settlement = new PostgresCommandCloseSettlement(scope);
+    let deadline: ConnectionDeadline | null = null; let startupClosed = false; let failure: ArkDbError | null = null;
+    const stagingInfo = defaultPostgresServerInfo(); this.retiredCleanup = null; this.retiredComposed = null;
     try {
-      this.commandGate.start(scope);
-      deadline = new ConnectionDeadline(this.storedConfig.connectTimeoutMs, this.timers);
-      const budget = deadline;
-      this.commandGate.setPhase(scope, PostgresCommandPhase.Connecting);
+      this.commandGate.start(scope); deadline = new ConnectionDeadline(this.storedConfig.connectTimeoutMs, this.timers);
+      const budget = deadline; this.commandGate.setPhase(scope, PostgresCommandPhase.Connecting);
       this.currentState = ConnectionState.Connecting; resetPostgresSessionStatus(this.sessionStatus);
       this.pendingIoCount = 0; this.awaitingReadyForQuery = false; this.unsynchronized = false; this.retiredReason = null;
       const transport = this.transportFactory(); this.transport = transport;
-      await budget.wait((): Promise<void> => settlement.raceClose((): Promise<void> =>
-        transport.connect(this.storedConfig.host, this.storedConfig.port, budget.remainingMs())));
-      budget.remainingMs();
-      const isClosed = (): boolean => startupClosed;
+      await budget.wait((): Promise<void> => settlement.raceClose((): Promise<void> => transport.connect(this.storedConfig.host, this.storedConfig.port, budget.remainingMs())));
+      budget.remainingMs(); const isClosed = (): boolean => startupClosed;
       const scoped = this.createScopedTransport(scope, transport, isClosed);
       const context = this.createStartupContext(scope, scoped, this.createScopedChannel(scope, transport, isClosed), budget, settlement, stagingInfo, isClosed);
       await budget.wait((): Promise<void> => settlement.raceClose((): Promise<void> => this.startupRunner!(context)));
       this.throwIfRetiredOrClosing(settlement); budget.remainingMs();
       if (this.state !== ConnectionState.Authenticating) throw ArkDbError.protocol('PostgreSQL startup completed without authentication.');
-      if (this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.sessionStatus.known || this.transport === null) {
-        throw ArkDbError.protocol('PostgreSQL startup completed without ReadyForQuery synchronization.');
-      }
+      if (this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.sessionStatus.known || this.transport === null) throw ArkDbError.protocol('PostgreSQL startup completed without ReadyForQuery synchronization.');
       startupClosed = true; postgresLifecyclePasswords.delete(this);
       const disposeErr = safeDisposeDeadline(deadline); deadline = null;
       if (disposeErr !== null) throw disposeErr;
       commitServerInfo(stagingInfo, this.serverInfo); this.currentState = ConnectionState.Ready;
     } catch (error) {
       startupClosed = true;
-      const rawPrimary = toPostgresArkDbError(error as Object, ArkDbErrorKind.Network);
-      const alreadyAppended = this.retiredCleanup !== null;
-      let primary = this.composeRetiredCleanup(rawPrimary);
-      const timerErr = safeDisposeDeadline(deadline); deadline = null;
+      const rawPrimary = toPostgresArkDbError(error as Object, ArkDbErrorKind.Network); const alreadyAppended = this.retiredCleanup !== null;
+      let primary = this.composeRetiredCleanup(rawPrimary); const timerErr = safeDisposeDeadline(deadline); deadline = null;
       if (timerErr !== null && timerErr !== primary) primary = postgresAppendCleanupError(primary, timerErr);
-      throw await this.abortScopeFailure(scope, primary, alreadyAppended, settlement.isCloseRequested ? ConnectionState.Closed : ConnectionState.Error);
+      failure = await this.abortScopeFailure(scope, primary, alreadyAppended, settlement.isCloseRequested ? ConnectionState.Closed : ConnectionState.Error);
     } finally {
       startupClosed = true; safeDisposeDeadline(deadline);
-      this.retiredCleanup = null; this.retiredComposed = null; this.finishScope(scope, settlement);
+      this.retiredCleanup = null; this.retiredComposed = null; failure = this.finishScope(scope, settlement, failure);
+    }
+    if (failure !== null) {
+      if (this.currentState === ConnectionState.Ready) {
+        this.clearSecretsAndChannel(); this.currentState = ConnectionState.Error;
+        if (this.commandGate.current === null) this.commandGate.advanceGeneration();
+        const cleanup = await this.releaseTransport(failure);
+        if (cleanup !== null && cleanup !== failure) failure = postgresAppendCleanupError(failure, cleanup);
+      }
+      throw failure;
     }
   }
-
   async runCommand<T>(kind: PostgresCommandKind, runner: PostgresCommandRunner<T>): Promise<T> {
     if (kind === PostgresCommandKind.Connect || kind === PostgresCommandKind.Close) throw ArkDbError.protocol('Invalid PostgreSQL command kind for session execution.');
     if (this.currentState === ConnectionState.Closed) throw ArkDbError.protocol('PostgreSQL connection is closed.');
     if (this.currentState === ConnectionState.Idle) throw ArkDbError.protocol('PostgreSQL connection is not connected.');
     if (this.currentState === ConnectionState.Error || this.unsynchronized) throw ArkDbError.protocol('PostgreSQL connection is retired after an unrecoverable error.');
-    const scope = this.commandGate.reserve(kind);
-    const settlement = new PostgresCommandCloseSettlement(scope);
-    this.retiredCleanup = null; this.retiredComposed = null;
+    const scope = this.commandGate.reserve(kind); const settlement = new PostgresCommandCloseSettlement(scope);
+    let failure: ArkDbError | null = null; let output: T | undefined = undefined; this.retiredCleanup = null; this.retiredComposed = null;
     try {
       this.commandGate.start(scope);
       if (this.currentState !== ConnectionState.Ready || this.transport === null) throw ArkDbError.protocol('PostgreSQL connection channel is unavailable.');
       const channel = this.createScopedChannel(scope, this.transport);
-      this.commandGate.setPhase(scope, PostgresCommandPhase.Executing);
-      this.currentState = ConnectionState.Querying;
+      this.commandGate.setPhase(scope, PostgresCommandPhase.Executing); this.currentState = ConnectionState.Querying;
       const result = await runner(scope, channel, settlement);
       this.throwIfRetiredOrClosing(settlement);
-      if (this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.sessionStatus.known || this.transport === null) {
-        throw ArkDbError.protocol('PostgreSQL command completed without ReadyForQuery synchronization.');
-      }
-      this.currentState = ConnectionState.Ready; return result;
+      if (this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.sessionStatus.known || this.transport === null) throw ArkDbError.protocol('PostgreSQL command completed without ReadyForQuery synchronization.');
+      this.currentState = ConnectionState.Ready; output = result;
     } catch (error) {
-      const primary = toPostgresArkDbError(error as Object);
-      const alreadyAppended = primary === this.retiredComposed || primary === this.retiredCleanup;
-      if (settlement.isCloseRequested) {
-        throw await this.abortScopeFailure(scope, primary, alreadyAppended, ConnectionState.Closed);
-      }
-      if (this.unsynchronized || this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.sessionStatus.known ||
-        this.transport === null || shouldRetireAfterError(primary)) {
-        this.markStreamDamaged(primary);
-        throw await this.abortScopeFailure(scope, primary, alreadyAppended, ConnectionState.Error);
-      }
-      this.currentState = ConnectionState.Ready; throw primary;
+      const primary = toPostgresArkDbError(error as Object); const alreadyAppended = primary === this.retiredComposed || primary === this.retiredCleanup;
+      if (settlement.isCloseRequested) failure = await this.abortScopeFailure(scope, primary, alreadyAppended, ConnectionState.Closed);
+      else if (this.unsynchronized || this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.sessionStatus.known || this.transport === null || shouldRetireAfterError(primary)) {
+        this.markStreamDamaged(primary); failure = await this.abortScopeFailure(scope, primary, alreadyAppended, ConnectionState.Error);
+      } else { this.currentState = ConnectionState.Ready; failure = primary; }
     } finally {
-      this.retiredCleanup = null; this.retiredComposed = null; this.finishScope(scope, settlement);
+      this.retiredCleanup = null; this.retiredComposed = null; failure = this.finishScope(scope, settlement, failure);
     }
+    if (failure !== null) throw failure;
+    return output as T;
   }
   async retire(scope: PostgresCommandScope, reason: ArkDbError): Promise<void> {
     this.commandGate.assertOwner(scope);
@@ -276,7 +264,7 @@ export class PostgresConnectionLifecycle {
       if (cleanup !== null) failure = failure !== null && cleanup !== failure ? postgresAppendCleanupError(failure, cleanup) : cleanup;
     } finally {
       this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
-      if (this.commandGate.isOwner(scope)) this.commandGate.release(scope);
+      failure = this.releaseScopeSafe(scope, failure);
     }
     if (failure !== null) throw failure;
   }
@@ -369,8 +357,20 @@ export class PostgresConnectionLifecycle {
   private composeRetiredCleanup(primary: ArkDbError): ArkDbError {
     return this.retiredCleanup !== null && primary !== this.retiredComposed && primary !== this.retiredCleanup ? postgresAppendCleanupError(primary, this.retiredCleanup) : primary;
   }
-  private finishScope(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement): void {
-    try { settlement.markSettled(); } finally { if (this.commandGate.isOwner(scope)) this.commandGate.release(scope); }
+  private releaseScopeSafe(scope: PostgresCommandScope, failure: ArkDbError | null): ArkDbError | null {
+    if (!this.commandGate.isOwner(scope)) return failure;
+    try { this.commandGate.release(scope); return failure; } catch (e) {
+      const relErr = toPostgresArkDbError(e as Object);
+      return failure !== null && relErr !== failure ? postgresAppendCleanupError(failure, relErr) : relErr;
+    }
+  }
+  private finishScope(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement, failure: ArkDbError | null): ArkDbError | null {
+    let current = failure;
+    try { settlement.markSettled(); } catch (e) {
+      const err = toPostgresArkDbError(e as Object);
+      current = current !== null && err !== current ? postgresAppendCleanupError(current, err) : err;
+    }
+    return this.releaseScopeSafe(scope, current);
   }
   private releaseTransport(abortReason: ArkDbError | null): Promise<ArkDbError | null> {
     if (this.releaseTask !== null) return this.releaseTask;

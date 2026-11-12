@@ -184,7 +184,7 @@ const OWNED_SOURCE_ROOTS = [
   {
     root: 'pgsql/src/main/ets/pgsql',
     files: ['PostgresConnection.ets'],
-    directories: ['api', 'auth', 'driver', 'features', 'model', 'protocol', 'transport', 'value']
+    directories: ['api', 'auth', 'driver', 'execution', 'features', 'model', 'protocol', 'transport', 'value']
   },
   {
     root: 'pgsql/src/main/ets/pgsql/features',
@@ -367,6 +367,18 @@ const ARCHITECTURE_POLICY = {
       message: 'PostgreSQL protocol and byte transport must not depend on feature ownership.'
     },
     {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/(?:protocol|transport)\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|driver\/|execution\/)/,
+      transitive: true,
+      message: 'PostgreSQL protocol and byte transport must not depend on connection or execution ownership.'
+    },
+    {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/execution\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|driver\/)/,
+      transitive: true,
+      message: 'PostgreSQL execution primitives must not depend on connection or driver facades.'
+    },
+    {
       from: /^mysql\/src\/main\/ets\/mysql\/api\//,
       to: new RegExp(
         '^mysql/src/main/ets/mysql/' +
@@ -457,7 +469,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, P08, P09, P14, and P17 own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, P09, P12A, P14, and P17 own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -469,6 +481,8 @@ test('P04, P07, P08, P09, P14, and P17 own exactly the registered PostgreSQL pri
     'pgsql/src/main/ets/pgsql/auth/PostgresAuthCrypto.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresSaslPrep.ets',
     'pgsql/src/main/ets/pgsql/driver/PostgresDriverFactory.ets',
+    'pgsql/src/main/ets/pgsql/execution/PostgresCommandGate.ets',
+    'pgsql/src/main/ets/pgsql/execution/PostgresSettlements.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameter.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameterEncoder.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresConnectionConfig.ets',
@@ -2428,7 +2442,7 @@ test('rejects PostgreSQL value codec dependencies outside value, model, and prot
   }
 });
 
-test('enforces PostgreSQL api, parameter leaf, and prepared feature layering', () => {
+test('enforces PostgreSQL api, parameter leaf, execution, and prepared feature layering', () => {
   const cases = [
     ['api/PostgresPreparedContracts.ets', 'features/prepared/PostgresParameterEncoder.ets',
       /PostgreSQL api may import only contract and model leaves/],
@@ -2437,7 +2451,13 @@ test('enforces PostgreSQL api, parameter leaf, and prepared feature layering', (
     ['features/prepared/PostgresParameterEncoder.ets', 'transport/PostgresTcpTransport.ets',
       /PostgreSQL prepared feature must not depend on byte transport implementations/],
     ['protocol/PostgresByteCodec.ets', 'features/prepared/PostgresParameter.ets',
-      /PostgreSQL protocol and byte transport must not depend on feature ownership/]
+      /PostgreSQL protocol and byte transport must not depend on feature ownership/],
+    ['transport/PostgresTcpTransport.ets', 'execution/PostgresCommandGate.ets',
+      /PostgreSQL protocol and byte transport must not depend on connection or execution ownership/],
+    ['execution/PostgresCommandGate.ets', 'PostgresConnection.ets',
+      /PostgreSQL execution primitives must not depend on connection or driver facades/],
+    ['execution/PostgresSettlements.ets', 'driver/PostgresDriverFactory.ets',
+      /PostgreSQL execution primitives must not depend on connection or driver facades/]
   ];
   for (const [fromRel, toRel, expected] of cases) {
     const source = `pgsql/src/main/ets/pgsql/${fromRel}`;

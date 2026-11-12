@@ -9,9 +9,11 @@ import {
   PostgresConnectionFeatures, PostgresConnectionOptions,
   PostgresDatabaseSessionStatus, PostgresDriverCapabilities,
   PostgresDriverFactory, PostgresError, PostgresFeatureConnection,
-  PostgresQueryResult, PostgresServerInfo, PostgresSslMode,
-  PostgresTransactionState, QueryOptions, QueryResultMeta, QueryResultSink,
-  QueryResultSummary, QueryRowChunk, QueryTruncation, requirePostgresFeatures
+  PostgresParameter, PostgresParameterType, PostgresParameterValue,
+  PostgresPreparedExecutor, PostgresQueryResult, PostgresServerInfo,
+  PostgresSslMode, PostgresTransactionState, QueryOptions, QueryResultMeta,
+  QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation,
+  requirePostgresFeatures
 } from '../../../Index';
 
 export default function publicInterfaceTest(): void {
@@ -104,6 +106,13 @@ export default function publicInterfaceTest(): void {
       expectAllCapabilitiesFalse(capabilities);
       const connection = new PostgresDriverFactory().create(
         new PostgresConnectionOptions(validConfig(), 'secret'));
+      const prepared: PostgresPreparedExecutor | undefined =
+        connection.postgresFeatures.prepared;
+      const paramValue: PostgresParameterValue = new Uint8Array([0x01, 0x02]);
+      const param = new PostgresParameter(PostgresParameterType.Bytea, paramValue);
+      expect(prepared === undefined).assertTrue();
+      expect(param.type).assertEqual('bytea');
+      expect((param.value as Uint8Array).length).assertEqual(2);
       expectAllCapabilitiesFalse(new PostgresDriverFactory().capabilities);
       expect(JSON.stringify(connection.features)).assertEqual('{}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{}');

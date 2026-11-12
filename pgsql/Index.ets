@@ -51,6 +51,15 @@ export {
 export type {
   PostgresFeatureConnection
 } from './src/main/ets/pgsql/api/PostgresContracts';
+export type {
+  PostgresPreparedExecutor
+} from './src/main/ets/pgsql/api/PostgresPreparedContracts';
+export {
+  PostgresParameter, PostgresParameterType
+} from './src/main/ets/pgsql/features/prepared/PostgresParameter';
+export type {
+  PostgresParameterValue
+} from './src/main/ets/pgsql/features/prepared/PostgresParameter';
 export { PostgresConnection } from './src/main/ets/pgsql/PostgresConnection';
 export {
   PostgresDriverFactory

@@ -2,12 +2,15 @@ import { ArkDbError, DbValueKind } from '@arkdb/core';
 
 export const MAX_POSTGRES_OID: number = 4294967295;
 
+export const POSTGRES_OID_UNSPECIFIED: number = 0;
 export const POSTGRES_OID_BOOL: number = 16;
 export const POSTGRES_OID_BYTEA: number = 17;
 export const POSTGRES_OID_INT8: number = 20;
 export const POSTGRES_OID_INT2: number = 21;
 export const POSTGRES_OID_INT4: number = 23;
+export const POSTGRES_OID_TEXT: number = 25;
 export const POSTGRES_OID_OID: number = 26;
+export const POSTGRES_OID_JSON: number = 114;
 export const POSTGRES_OID_FLOAT4: number = 700;
 export const POSTGRES_OID_FLOAT8: number = 701;
 export const POSTGRES_OID_DATE: number = 1082;
@@ -18,6 +21,7 @@ export const POSTGRES_OID_INTERVAL: number = 1186;
 export const POSTGRES_OID_TIMETZ: number = 1266;
 export const POSTGRES_OID_NUMERIC: number = 1700;
 export const POSTGRES_OID_UUID: number = 2950;
+export const POSTGRES_OID_JSONB: number = 3802;
 
 export class PostgresTypeMetadata {
   readonly typeOid: number;
@@ -55,8 +59,8 @@ function buildCatalog(): Map<number, PostgresTypeMetadata> {
     [POSTGRES_OID_BOOL, 'bool', DbValueKind.Boolean], [POSTGRES_OID_BYTEA, 'bytea', DbValueKind.Binary],
     [18, 'char', DbValueKind.Text], [19, 'name', DbValueKind.Text],
     [POSTGRES_OID_INT8, 'int8', DbValueKind.BigInteger], [POSTGRES_OID_INT2, 'int2', DbValueKind.Integer],
-    [POSTGRES_OID_INT4, 'int4', DbValueKind.Integer], [25, 'text', DbValueKind.Text],
-    [POSTGRES_OID_OID, 'oid', DbValueKind.Integer], [114, 'json', DbValueKind.Json],
+    [POSTGRES_OID_INT4, 'int4', DbValueKind.Integer], [POSTGRES_OID_TEXT, 'text', DbValueKind.Text],
+    [POSTGRES_OID_OID, 'oid', DbValueKind.Integer], [POSTGRES_OID_JSON, 'json', DbValueKind.Json],
     [142, 'xml', DbValueKind.Text], [POSTGRES_OID_FLOAT4, 'float4', DbValueKind.FloatingPoint],
     [POSTGRES_OID_FLOAT8, 'float8', DbValueKind.FloatingPoint], [790, 'money', DbValueKind.Text],
     [1042, 'bpchar', DbValueKind.Text], [1043, 'varchar', DbValueKind.Text],
@@ -66,7 +70,7 @@ function buildCatalog(): Map<number, PostgresTypeMetadata> {
     [POSTGRES_OID_INTERVAL, 'interval', DbValueKind.Text], [POSTGRES_OID_TIMETZ, 'timetz', DbValueKind.Time],
     [1560, 'bit', DbValueKind.Text], [1562, 'varbit', DbValueKind.Text],
     [POSTGRES_OID_NUMERIC, 'numeric', DbValueKind.Decimal], [POSTGRES_OID_UUID, 'uuid', DbValueKind.Uuid],
-    [3802, 'jsonb', DbValueKind.Json]
+    [POSTGRES_OID_JSONB, 'jsonb', DbValueKind.Json]
   ];
   for (const entry of scalars) {
     catalog.set(entry[0], new PostgresTypeMetadata(entry[0], entry[1], entry[2]));

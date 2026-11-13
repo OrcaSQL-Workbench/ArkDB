@@ -1,21 +1,22 @@
 import {
-  ArkDbError, ConnectionState, DatabaseContext, DatabaseContextPolicy,
-  DbConnection, DbConnectionFeatures, DbConnectionHealth, DbContextController,
-  DbExecutionController, DbStreamingConnection, DbTransactionController,
-  QueryCancellationResult, QueryExecutionSummary, QueryOptions, QueryResultSink
+  ArkDbError, ConnectionState, ConnectionTimerPort, DatabaseContext,
+  DatabaseContextPolicy, DbConnection, DbConnectionFeatures, DbConnectionHealth,
+  DbContextController, DbExecutionController, DbStreamingConnection,
+  DbTransactionController, QueryCancellationResult, QueryExecutionSummary,
+  QueryOptions, QueryResultSink
 } from '@arkdb/core';
 import {
   PostgresConnectionFeatures, PostgresFeatureConnection
 } from './api/PostgresContracts';
+import {
+  PostgresConnectionLifecycle, PostgresLifecycleTransport, PostgresStartupRunner
+} from './connection/PostgresConnectionLifecycle';
 import {
   PostgresConnectionConfig
 } from './model/PostgresConnectionConfig';
 import {
   PostgresDatabaseSessionStatus, PostgresQueryResult, PostgresServerInfo
 } from './model/PostgresModels';
-
-const postgresConnectionPasswords: WeakMap<PostgresConnection, string> =
-  new WeakMap<PostgresConnection, string>();
 
 export class PostgresConnection implements DbConnection, DbStreamingConnection,
   DbConnectionHealth, DbContextController, DbTransactionController,
@@ -24,27 +25,30 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
   readonly postgresFeatures: PostgresConnectionFeatures =
     new PostgresConnectionFeatures();
   readonly contextPolicy: DatabaseContextPolicy = new DatabaseContextPolicy();
-  readonly serverInfo: PostgresServerInfo = new PostgresServerInfo();
-  readonly sessionStatus: PostgresDatabaseSessionStatus =
-    new PostgresDatabaseSessionStatus();
-  private readonly config: PostgresConnectionConfig;
-  private currentState: ConnectionState = ConnectionState.Idle;
+  private readonly lifecycle: PostgresConnectionLifecycle;
 
-  constructor(config: PostgresConnectionConfig, password: string) {
-    const errors = config.validate();
-    if (errors.length > 0) throw errors[0];
-    this.config = config.clone();
-    postgresConnectionPasswords.set(this, password);
-    this.serverInfo.driverId = 'pgsql';
-    this.serverInfo.productName = 'PostgreSQL';
+  constructor(config: PostgresConnectionConfig, password: string,
+    timers?: ConnectionTimerPort,
+    transportFactory?: () => PostgresLifecycleTransport,
+    startupRunner?: PostgresStartupRunner) {
+    this.lifecycle = new PostgresConnectionLifecycle(
+      config, password, timers, transportFactory, startupRunner);
   }
 
   get state(): ConnectionState {
-    return this.currentState;
+    return this.lifecycle.state;
   }
 
-  async connect(): Promise<void> {
-    throw ArkDbError.unsupported('PostgreSQL connection is not implemented.');
+  get serverInfo(): PostgresServerInfo {
+    return this.lifecycle.serverInfo;
+  }
+
+  get sessionStatus(): PostgresDatabaseSessionStatus {
+    return this.lifecycle.sessionStatus.clone();
+  }
+
+  connect(): Promise<void> {
+    return this.lifecycle.connect();
   }
 
   async query(_sql: string): Promise<PostgresQueryResult> {
@@ -84,8 +88,7 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
     throw ArkDbError.unsupported('PostgreSQL interruption classification is not implemented.');
   }
 
-  async close(): Promise<void> {
-    postgresConnectionPasswords.delete(this);
-    this.currentState = ConnectionState.Closed;
+  close(): Promise<void> {
+    return this.lifecycle.close();
   }
 }

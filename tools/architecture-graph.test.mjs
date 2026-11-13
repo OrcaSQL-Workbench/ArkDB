@@ -185,7 +185,7 @@ const OWNED_SOURCE_ROOTS = [
     root: 'pgsql/src/main/ets/pgsql',
     files: ['PostgresConnection.ets'],
     directories: [
-      'api', 'auth', 'connection', 'driver', 'execution',
+      'api', 'auth', 'command', 'connection', 'driver', 'execution',
       'features', 'model', 'protocol', 'transport', 'value'
     ]
   },
@@ -377,9 +377,15 @@ const ARCHITECTURE_POLICY = {
     },
     {
       from: /^pgsql\/src\/main\/ets\/pgsql\/(?:protocol|transport)\//,
-      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|driver\/|connection\/|execution\/)/,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|driver\/|connection\/|command\/|execution\/)/,
       transitive: true,
       message: 'PostgreSQL protocol and byte transport must not depend on connection or execution ownership.'
+    },
+    {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/command\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|driver\/)/,
+      transitive: true,
+      message: 'PostgreSQL command implementations must not depend on connection or driver facades.'
     },
     {
       from: /^pgsql\/src\/main\/ets\/pgsql\/execution\//,
@@ -495,6 +501,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, and P17 own exactly the registered P
     'pgsql/src/main/ets/pgsql/api/PostgresPreparedContracts.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresAuthCrypto.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresSaslPrep.ets',
+    'pgsql/src/main/ets/pgsql/command/PostgresStartup.ets',
     'pgsql/src/main/ets/pgsql/connection/PostgresConnectionLifecycle.ets',
     'pgsql/src/main/ets/pgsql/driver/PostgresDriverFactory.ets',
     'pgsql/src/main/ets/pgsql/execution/PostgresCommandGate.ets',
@@ -2489,7 +2496,11 @@ test('enforces PostgreSQL api, parameter leaf, execution, lifecycle, and prepare
     ['connection/PostgresConnectionLifecycle.ets', 'PostgresConnection.ets',
       /PostgreSQL connection lifecycle must not depend on connection or driver facades/],
     ['connection/PostgresConnectionLifecycle.ets', 'driver/PostgresDriverFactory.ets',
-      /PostgreSQL connection lifecycle must not depend on connection or driver facades/]
+      /PostgreSQL connection lifecycle must not depend on connection or driver facades/],
+    ['command/PostgresStartup.ets', 'PostgresConnection.ets',
+      /PostgreSQL command implementations must not depend on connection or driver facades/],
+    ['command/PostgresStartup.ets', 'driver/PostgresDriverFactory.ets',
+      /PostgreSQL command implementations must not depend on connection or driver facades/]
   ];
   for (const [fromRel, toRel, expected] of cases) {
     const source = `pgsql/src/main/ets/pgsql/${fromRel}`;

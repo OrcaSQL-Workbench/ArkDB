@@ -17,7 +17,7 @@ export default function publicInterfaceTest(): void {
 
       let failure: ArkDbError | null = null;
       try {
-        await connection.connect();
+        await connection.query('SELECT 1');
       } catch (error) {
         if (!(error instanceof ArkDbError)) throw error as Error;
         failure = error;
@@ -26,7 +26,7 @@ export default function publicInterfaceTest(): void {
       expect(failure !== null).assertTrue();
       if (failure === null) throw new Error('Expected the PostgreSQL skeleton to be unsupported.');
       expect(failure.kind).assertEqual(ArkDbErrorKind.Unsupported);
-      expect(failure.message).assertEqual('PostgreSQL connection is not implemented.');
+      expect(failure.message).assertEqual('PostgreSQL query execution is not implemented.');
       expect(connection.state).assertEqual(ConnectionState.Idle);
       await connection.close();
       expect(connection.state).assertEqual(ConnectionState.Closed);
@@ -35,7 +35,7 @@ export default function publicInterfaceTest(): void {
 }
 
 function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): void {
-  expect(capabilities.supportsSsl).assertFalse();
+  expect(capabilities.supportsSsl).assertTrue();
   expect(capabilities.supportsCatalogs).assertFalse();
   expect(capabilities.supportsSchemas).assertFalse();
   expect(capabilities.supportsTransactions).assertFalse();

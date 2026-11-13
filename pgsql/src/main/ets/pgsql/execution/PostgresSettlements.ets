@@ -1,9 +1,36 @@
-import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
-import {
-  PostgresDatabaseSessionStatus, PostgresError, PostgresTransactionState
-} from '../model/PostgresModels';
-import { PostgresReadyStatus } from '../protocol/PostgresMessageChannel';
+import { ArkDbError, ArkDbErrorKind, ConnectionDeadline } from '@arkdb/core';
+import { PostgresConnectionConfig, PostgresSslConfig } from '../model/PostgresConnectionConfig';
+import { PostgresDatabaseSessionStatus, PostgresError, PostgresServerInfo, PostgresTransactionState } from '../model/PostgresModels';
+import { PostgresByteTransport, PostgresErrorResponse, PostgresMessageChannel, PostgresParameterStatus, PostgresReadyStatus } from '../protocol/PostgresMessageChannel';
 import { PostgresCommandScope } from './PostgresCommandGate';
+
+export interface PostgresLifecycleTransport extends PostgresByteTransport {
+  connect(host: string, port: number, timeoutMs: number): Promise<void>;
+  prepareTlsUpgrade?(): void;
+  upgradeToTls?(host: string, port: number, config: PostgresSslConfig, timeoutMs: number): Promise<void>;
+  close(): Promise<void>; abort(error: ArkDbError): Promise<void>;
+}
+export interface PostgresStartupCallbacks {
+  enterAuth: () => void; readPassword: () => string;
+  setBackendKey: (pid: number, key: Uint8Array) => void; applyReady: (ready: PostgresReadyStatus) => void;
+}
+export class PostgresStartupContext {
+  readonly scope: PostgresCommandScope; readonly config: PostgresConnectionConfig;
+  readonly transport: PostgresLifecycleTransport; readonly channel: PostgresMessageChannel;
+  readonly deadline: ConnectionDeadline; readonly settlement: PostgresCommandCloseSettlement;
+  readonly serverInfo: PostgresServerInfo; private readonly cb: PostgresStartupCallbacks;
+  constructor(scope: PostgresCommandScope, config: PostgresConnectionConfig, transport: PostgresLifecycleTransport,
+    channel: PostgresMessageChannel, deadline: ConnectionDeadline, settlement: PostgresCommandCloseSettlement,
+    serverInfo: PostgresServerInfo, cb: PostgresStartupCallbacks) {
+    this.scope = scope; this.config = config; this.transport = transport; this.channel = channel;
+    this.deadline = deadline; this.settlement = settlement; this.serverInfo = serverInfo; this.cb = cb;
+  }
+  enterAuthenticating(): void { this.cb.enterAuth(); }
+  readPassword(): string { return this.cb.readPassword(); }
+  setBackendKeyData(processId: number, secretKey: Uint8Array): void { this.cb.setBackendKey(processId, secretKey); }
+  applyReadyStatus(ready: PostgresReadyStatus): void { this.cb.applyReady(ready); }
+}
+export type PostgresStartupRunner = (context: PostgresStartupContext) => Promise<void>;
 
 export class PostgresCommandCloseSettlement {
   readonly scope: PostgresCommandScope;
@@ -122,6 +149,59 @@ export function applyPostgresReadyStatus(
 
 export function resetPostgresSessionStatus(status: PostgresDatabaseSessionStatus): void {
   setStatus(status, false, false, PostgresTransactionState.Idle);
+}
+
+export function postgresErrorFromResponse(response: PostgresErrorResponse): PostgresError {
+  const f = response.fields; const sqlState = f.sqlState;
+  const kind = sqlState.startsWith('28') ? ArkDbErrorKind.Auth : ArkDbErrorKind.Server;
+  const error = new PostgresError(kind, f.message, sqlState, sqlState);
+  error.severity = f.severity !== undefined && f.severity.length > 0 ? f.severity : f.localizedSeverity;
+  if (f.localizedSeverity.length > 0) error.localizedSeverity = f.localizedSeverity;
+  if (f.detail !== undefined) error.detail = f.detail;
+  if (f.hint !== undefined) error.hint = f.hint;
+  if (f.internalQuery !== undefined) error.internalQuery = f.internalQuery;
+  if (f.where !== undefined) error.where = f.where;
+  if (f.schemaName !== undefined) error.schemaName = f.schemaName;
+  if (f.tableName !== undefined) error.tableName = f.tableName;
+  if (f.columnName !== undefined) error.columnName = f.columnName;
+  if (f.dataTypeName !== undefined) error.dataTypeName = f.dataTypeName;
+  if (f.constraintName !== undefined) error.constraintName = f.constraintName;
+  if (f.sourceFile !== undefined) error.sourceFile = f.sourceFile;
+  if (f.sourceRoutine !== undefined) error.sourceRoutine = f.sourceRoutine;
+  const pos = parseCanonicalSafeUint(f.position); if (pos !== undefined) error.position = pos;
+  const intPos = parseCanonicalSafeUint(f.internalPosition); if (intPos !== undefined) error.internalPosition = intPos;
+  const line = parseCanonicalSafeUint(f.sourceLine); if (line !== undefined) error.sourceLine = line;
+  return error;
+}
+
+export function applyPostgresParameterStatus(info: PostgresServerInfo, status: PostgresParameterStatus): void {
+  switch (status.name) {
+    case 'server_version': info.version = status.value; return;
+    case 'server_encoding': info.serverEncoding = status.value; return;
+    case 'client_encoding':
+      if (status.value !== 'UTF8') throw ArkDbError.protocol('PostgreSQL server acknowledged unsupported client_encoding: ' + status.value);
+      info.defaultEncoding = 'UTF8'; return;
+    case 'integer_datetimes':
+      if (status.value === 'on') { info.integerDatetimes = true; return; }
+      if (status.value === 'off') { info.integerDatetimes = false; return; }
+      throw ArkDbError.protocol('Invalid PostgreSQL integer_datetimes parameter: ' + status.value);
+    case 'DateStyle': info.dateStyle = status.value; return;
+    case 'TimeZone': info.timeZone = status.value; return;
+    default: return;
+  }
+}
+
+function parseCanonicalSafeUint(value: string | undefined): number | undefined {
+  if (value === undefined || value.length === 0 || (value.length > 1 && value.charCodeAt(0) === 0x30)) return undefined;
+  let result = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x30 || code > 0x39) return undefined;
+    const digit = code - 0x30;
+    if (result > 900719925474099 || (result === 900719925474099 && digit > 1)) return undefined;
+    result = result * 10 + digit;
+  }
+  return result;
 }
 
 function setStatus(status: PostgresDatabaseSessionStatus, known: boolean,

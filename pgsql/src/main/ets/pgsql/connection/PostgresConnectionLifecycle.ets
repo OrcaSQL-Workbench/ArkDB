@@ -1,26 +1,50 @@
 import { ArkDbError, ArkDbErrorKind, ConnectionDeadline, ConnectionState, ConnectionTimerPort, SystemConnectionTimerPort } from '@arkdb/core';
 import { createDefaultPostgresStartupRunner } from '../command/PostgresStartup';
 import { PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase, PostgresCommandScope } from '../execution/PostgresCommandGate';
-import { PostgresCommandCloseSettlement, PostgresLifecycleTransport, PostgresStartupContext, PostgresStartupRunner, applyPostgresReadyStatus, postgresAppendCleanupError, resetPostgresSessionStatus, toPostgresArkDbError } from '../execution/PostgresSettlements';
+import { PostgresCommandCloseSettlement, PostgresStartupSession, PostgresStartupTransport, applyPostgresReadyStatus, postgresAppendCleanupError, resetPostgresSessionStatus, toPostgresArkDbError } from '../execution/PostgresSettlements';
 import { PostgresConnectionConfig, PostgresSslConfig } from '../model/PostgresConnectionConfig';
 import { PostgresDatabaseSessionStatus, PostgresError, PostgresServerInfo } from '../model/PostgresModels';
 import { PostgresFrontendSerializer } from '../protocol/PostgresByteCodec';
 import { PostgresByteTransport, PostgresMessage, PostgresMessageChannel, PostgresReadyStatus } from '../protocol/PostgresMessageChannel';
 import { PostgresTcpTransport } from '../transport/PostgresTcpTransport';
 
-export { PostgresStartupContext } from '../execution/PostgresSettlements';
-export type { PostgresLifecycleTransport, PostgresStartupRunner } from '../execution/PostgresSettlements';
-
 export const POSTGRES_TERMINATE_TIMEOUT_MS: number = 1000;
 const postgresLifecyclePasswords: WeakMap<PostgresConnectionLifecycle, string> = new WeakMap<PostgresConnectionLifecycle, string>();
 const postgresBackendSecrets: WeakMap<PostgresConnectionLifecycle, PostgresBackendCancellationKey> = new WeakMap<PostgresConnectionLifecycle, PostgresBackendCancellationKey>();
 
+export interface PostgresLifecycleTransport extends PostgresStartupTransport {
+  connect(host: string, port: number, timeoutMs: number): Promise<void>;
+  prepareTlsUpgrade?(): void;
+  upgradeToTls?(host: string, port: number, config: PostgresSslConfig, timeoutMs: number): Promise<void>;
+  close(): Promise<void>; abort(error: ArkDbError): Promise<void>;
+}
 export class PostgresBackendCancellationKey {
   readonly processId: number; readonly secretKey: Uint8Array; readonly secretKeyInt32: number;
   constructor(processId: number, secretKey: Uint8Array, secretKeyInt32: number) {
     this.processId = processId; this.secretKey = secretKey; this.secretKeyInt32 = secretKeyInt32;
   }
 }
+interface StartupCallbacks {
+  enterAuth: () => void; readPassword: () => string;
+  setBackendKey: (pid: number, key: Uint8Array) => void; applyReady: (ready: PostgresReadyStatus) => void;
+}
+export class PostgresStartupContext implements PostgresStartupSession {
+  readonly scope: PostgresCommandScope; readonly config: PostgresConnectionConfig;
+  readonly transport: PostgresLifecycleTransport; readonly channel: PostgresMessageChannel;
+  readonly deadline: ConnectionDeadline; readonly settlement: PostgresCommandCloseSettlement;
+  readonly serverInfo: PostgresServerInfo; private readonly cb: StartupCallbacks;
+  constructor(scope: PostgresCommandScope, config: PostgresConnectionConfig, transport: PostgresLifecycleTransport,
+    channel: PostgresMessageChannel, deadline: ConnectionDeadline, settlement: PostgresCommandCloseSettlement,
+    serverInfo: PostgresServerInfo, cb: StartupCallbacks) {
+    this.scope = scope; this.config = config; this.transport = transport; this.channel = channel;
+    this.deadline = deadline; this.settlement = settlement; this.serverInfo = serverInfo; this.cb = cb;
+  }
+  enterAuthenticating(): void { this.cb.enterAuth(); }
+  readPassword(): string { return this.cb.readPassword(); }
+  setBackendKeyData(processId: number, secretKey: Uint8Array): void { this.cb.setBackendKey(processId, secretKey); }
+  applyReadyStatus(ready: PostgresReadyStatus): void { this.cb.applyReady(ready); }
+}
+export type PostgresStartupRunner = (context: PostgresStartupContext) => Promise<void>;
 export type PostgresCommandRunner<T> = (scope: PostgresCommandScope, channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement) => Promise<T>;
 class DefaultPostgresLifecycleTransport implements PostgresLifecycleTransport {
   private readonly inner: PostgresTcpTransport;
@@ -79,7 +103,13 @@ class ScopedPostgresTransport implements PostgresLifecycleTransport {
   }
   read(maxBytes: number): Promise<Uint8Array | null> {
     return this.guardIo<Uint8Array | null>(ArkDbErrorKind.Network, (): Promise<Uint8Array | null> => this.inner.read(maxBytes),
-      (c: Uint8Array | null): ArkDbError | null => !Number.isSafeInteger(maxBytes) || maxBytes < 0 || c === null || (maxBytes > 0 && c.length === 0) || c.length > maxBytes ? ArkDbError.protocol('PostgreSQL transport read was incomplete.') : null);
+      (c: Uint8Array | null): ArkDbError | null => {
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || c === null || (maxBytes > 0 && c.length === 0) || c.length > maxBytes) {
+          if (c !== null) c.fill(0);
+          return ArkDbError.protocol('PostgreSQL transport read was incomplete.');
+        }
+        return null;
+      });
   }
   write(data: Uint8Array): Promise<number> {
     return this.guardIo<number>(ArkDbErrorKind.Network, (): Promise<number> => this.inner.write(data),

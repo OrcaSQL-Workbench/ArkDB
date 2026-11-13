@@ -261,7 +261,7 @@ class ChunkTransport implements PostgresByteTransport {
     if (this.index >= this.chunks.length) return null;
     const chunk = this.chunks[this.index];
     const count = Math.min(maximumBytes, chunk.length - this.offset);
-    const value = chunk.subarray(this.offset, this.offset + count);
+    const value = chunk.slice(this.offset, this.offset + count);
     this.offset += count;
     if (this.offset === chunk.length) {
       this.index += 1;

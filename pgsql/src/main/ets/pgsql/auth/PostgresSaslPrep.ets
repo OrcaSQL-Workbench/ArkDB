@@ -78,8 +78,8 @@ export class DefaultPostgresScramPort implements PostgresScramPort {
     return strictUtf8Encode(preparePostgresPassword(value, this.platform).value);
   }
   async deriveSaltedPassword(password: Uint8Array, salt: Uint8Array,
-    iterations: number): Promise<Uint8Array> {
-    return pbkdf2HmacSha256(password, salt, iterations, 32, this.platform);
+    iterations: number, shouldAbort?: () => boolean): Promise<Uint8Array> {
+    return pbkdf2HmacSha256(password, salt, iterations, 32, this.platform, shouldAbort);
   }
   async sha256(data: Uint8Array): Promise<Uint8Array> { return sha256(data, this.platform); }
   async hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {

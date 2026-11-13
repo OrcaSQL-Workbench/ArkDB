@@ -4,33 +4,19 @@ import { PostgresDatabaseSessionStatus, PostgresError, PostgresServerInfo, Postg
 import { PostgresByteTransport, PostgresErrorResponse, PostgresMessageChannel, PostgresParameterStatus, PostgresReadyStatus } from '../protocol/PostgresMessageChannel';
 import { PostgresCommandScope } from './PostgresCommandGate';
 
-export interface PostgresLifecycleTransport extends PostgresByteTransport {
-  connect(host: string, port: number, timeoutMs: number): Promise<void>;
+export interface PostgresStartupTransport extends PostgresByteTransport {
   prepareTlsUpgrade?(): void;
   upgradeToTls?(host: string, port: number, config: PostgresSslConfig, timeoutMs: number): Promise<void>;
-  close(): Promise<void>; abort(error: ArkDbError): Promise<void>;
 }
-export interface PostgresStartupCallbacks {
-  enterAuth: () => void; readPassword: () => string;
-  setBackendKey: (pid: number, key: Uint8Array) => void; applyReady: (ready: PostgresReadyStatus) => void;
-}
-export class PostgresStartupContext {
+export interface PostgresStartupSession {
   readonly scope: PostgresCommandScope; readonly config: PostgresConnectionConfig;
-  readonly transport: PostgresLifecycleTransport; readonly channel: PostgresMessageChannel;
+  readonly transport: PostgresStartupTransport; readonly channel: PostgresMessageChannel;
   readonly deadline: ConnectionDeadline; readonly settlement: PostgresCommandCloseSettlement;
-  readonly serverInfo: PostgresServerInfo; private readonly cb: PostgresStartupCallbacks;
-  constructor(scope: PostgresCommandScope, config: PostgresConnectionConfig, transport: PostgresLifecycleTransport,
-    channel: PostgresMessageChannel, deadline: ConnectionDeadline, settlement: PostgresCommandCloseSettlement,
-    serverInfo: PostgresServerInfo, cb: PostgresStartupCallbacks) {
-    this.scope = scope; this.config = config; this.transport = transport; this.channel = channel;
-    this.deadline = deadline; this.settlement = settlement; this.serverInfo = serverInfo; this.cb = cb;
-  }
-  enterAuthenticating(): void { this.cb.enterAuth(); }
-  readPassword(): string { return this.cb.readPassword(); }
-  setBackendKeyData(processId: number, secretKey: Uint8Array): void { this.cb.setBackendKey(processId, secretKey); }
-  applyReadyStatus(ready: PostgresReadyStatus): void { this.cb.applyReady(ready); }
+  readonly serverInfo: PostgresServerInfo;
+  enterAuthenticating(): void; readPassword(): string;
+  setBackendKeyData(processId: number, secretKey: Uint8Array): void;
+  applyReadyStatus(ready: PostgresReadyStatus): void;
 }
-export type PostgresStartupRunner = (context: PostgresStartupContext) => Promise<void>;
 
 export class PostgresCommandCloseSettlement {
   readonly scope: PostgresCommandScope;
@@ -153,20 +139,14 @@ export function resetPostgresSessionStatus(status: PostgresDatabaseSessionStatus
 
 export function postgresErrorFromResponse(response: PostgresErrorResponse): PostgresError {
   const f = response.fields; const sqlState = f.sqlState;
-  const kind = sqlState.startsWith('28') ? ArkDbErrorKind.Auth : ArkDbErrorKind.Server;
-  const error = new PostgresError(kind, f.message, sqlState, sqlState);
+  const error = new PostgresError(sqlState.startsWith('28') ? ArkDbErrorKind.Auth : ArkDbErrorKind.Server, f.message, sqlState, sqlState);
   error.severity = f.severity !== undefined && f.severity.length > 0 ? f.severity : f.localizedSeverity;
   if (f.localizedSeverity.length > 0) error.localizedSeverity = f.localizedSeverity;
-  if (f.detail !== undefined) error.detail = f.detail;
-  if (f.hint !== undefined) error.hint = f.hint;
-  if (f.internalQuery !== undefined) error.internalQuery = f.internalQuery;
-  if (f.where !== undefined) error.where = f.where;
-  if (f.schemaName !== undefined) error.schemaName = f.schemaName;
-  if (f.tableName !== undefined) error.tableName = f.tableName;
-  if (f.columnName !== undefined) error.columnName = f.columnName;
-  if (f.dataTypeName !== undefined) error.dataTypeName = f.dataTypeName;
-  if (f.constraintName !== undefined) error.constraintName = f.constraintName;
-  if (f.sourceFile !== undefined) error.sourceFile = f.sourceFile;
+  if (f.detail !== undefined) error.detail = f.detail; if (f.hint !== undefined) error.hint = f.hint;
+  if (f.internalQuery !== undefined) error.internalQuery = f.internalQuery; if (f.where !== undefined) error.where = f.where;
+  if (f.schemaName !== undefined) error.schemaName = f.schemaName; if (f.tableName !== undefined) error.tableName = f.tableName;
+  if (f.columnName !== undefined) error.columnName = f.columnName; if (f.dataTypeName !== undefined) error.dataTypeName = f.dataTypeName;
+  if (f.constraintName !== undefined) error.constraintName = f.constraintName; if (f.sourceFile !== undefined) error.sourceFile = f.sourceFile;
   if (f.sourceRoutine !== undefined) error.sourceRoutine = f.sourceRoutine;
   const pos = parseCanonicalSafeUint(f.position); if (pos !== undefined) error.position = pos;
   const intPos = parseCanonicalSafeUint(f.internalPosition); if (intPos !== undefined) error.internalPosition = intPos;

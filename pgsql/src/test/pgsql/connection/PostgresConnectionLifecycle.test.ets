@@ -485,6 +485,28 @@ export default function postgresConnectionLifecycleTest(): void {
         retireRaceLc.commandGate.generation === 1 && retireRaceTp.abortCalls === 1 && retireRaceTp.writtenFrames.length === 0).assertTrue();
       await retireRaceLc.close();
 
+      const retireWinTp = new FakeLifecycleTransport();
+      retireWinTp.abortFailure = ArkDbError.network('post-retire window abort failed');
+      const retireWinLc = readyLifecycle(new FakeTimerPort(), retireWinTp, 'pw-retire-win');
+      await retireWinLc.connect();
+      let markPostRetireWindow: () => void = (): void => {};
+      const postRetireWindow = new Promise<void>((r: () => void): void => { markPostRetireWindow = r; });
+      let unblockRetireWindow: () => void = (): void => {};
+      const holdRetireWindow = new Promise<void>((r: () => void): void => { unblockRetireWindow = r; });
+      const pendingWinCmd = retireWinLc.runCommand<void>(PostgresCommandKind.Query,
+        async (scope: PostgresCommandScope): Promise<void> => {
+          try { await retireWinLc.retire(scope, ArkDbError.protocol('window desync')); } catch (err) {
+            markPostRetireWindow(); await holdRetireWindow; throw err as Error;
+          }
+        });
+      await postRetireWindow;
+      const winClose = retireWinLc.close();
+      unblockRetireWindow();
+      expect((await asyncFail((): Promise<void> => pendingWinCmd)).message.indexOf('post-retire window abort failed') >= 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => winClose)).message).assertEqual('post-retire window abort failed');
+      expect(retireWinLc.state === ConnectionState.Closed && retireWinTp.abortCalls === 1).assertTrue();
+      await retireWinLc.close();
+
       let startCloseCreated = false; let startCloseLc: PostgresConnectionLifecycle | null = null;
       const startCloseGate = new PostgresCommandGate(
         new TerminalSettlementObserver((): void => {}, (): void => { startCloseLc!.close().catch((): void => {}); }));
@@ -505,13 +527,18 @@ export default function postgresConnectionLifecycleTest(): void {
       expect((await asyncFail((): Promise<void> => pendingFactoryClose!)).message).assertEqual('factory race abort failed');
       expect(factoryCloseLc.state === ConnectionState.Closed && factoryAbortTp.abortCalls === 1 && factoryAbortTp.writtenFrames.length === 0).assertTrue();
 
-      const extTp = new FakeLifecycleTransport(); const extLc = readyLifecycle(new FakeTimerPort(), extTp, 'pw-ext-scope');
+      const extTp = new FakeLifecycleTransport(); extTp.abortFailure = ArkDbError.network('ext scope abort failed');
+      const extLc = readyLifecycle(new FakeTimerPort(), extTp, 'pw-ext-scope');
       await extLc.connect();
       const extScope = extLc.commandGate.reserve(PostgresCommandKind.Transaction); extLc.commandGate.start(extScope);
-      await extLc.close(); await extLc.close();
+      expect((await asyncFail((): Promise<void> => extLc.retire(extScope, ArkDbError.protocol('ext desync')))).message
+        .indexOf('ext scope abort failed') >= 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => extLc.close())).message).assertEqual('ext scope abort failed');
+      await extLc.close();
       expect(extLc.state === ConnectionState.Closed && extLc.readBackendKeyData() === null &&
         extScope.phase === PostgresCommandPhase.Closing && extTp.abortCalls === 1 && extTp.writtenFrames.length === 0).assertTrue();
       extLc.commandGate.release(extScope);
+      await extLc.close();
       expect(extLc.commandGate.current === null && extLc.commandGate.generation === 1).assertTrue();
 
       expect(syncFail((): void => { new PostgresConnection(new PostgresConnectionConfig(), 'pw'); }).kind).assertEqual(ArkDbErrorKind.Validation);

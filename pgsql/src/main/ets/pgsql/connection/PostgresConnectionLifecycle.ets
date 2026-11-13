@@ -137,8 +137,10 @@ export class PostgresConnectionLifecycle {
   private transport: PostgresLifecycleTransport | null = null;
   private opening: ConnectionDeadline | null = null;
   private activeSettlement: PostgresCommandCloseSettlement | null = null;
+  private activeReleaseScope: PostgresCommandScope | null = null;
+  private activeScopeRelease: Promise<ArkDbError | null> | null = null;
+  private closedScope: PostgresCommandScope | null = null;
   private closedSettlement: PostgresCommandCloseSettlement | null = null;
-  private closedSettlementRelease: Promise<ArkDbError | null> | null = null;
   private closedSettlementTerminalError: ArkDbError | null = null;
   private awaitingClosedSettlement: boolean = false;
   private closing: Promise<void> | null = null;
@@ -183,7 +185,7 @@ export class PostgresConnectionLifecycle {
     if (this.currentState !== ConnectionState.Idle) throw ArkDbError.protocol('PostgreSQL connection cannot connect in state ' + this.currentState + '.');
     if (this.startupRunner === null) throw ArkDbError.unsupported('PostgreSQL connection is not implemented.');
     const scope = this.commandGate.reserve(PostgresCommandKind.Connect); const settlement = new PostgresCommandCloseSettlement(scope);
-    this.activeSettlement = settlement;
+    this.activeSettlement = settlement; this.activeReleaseScope = null; this.activeScopeRelease = null; this.closedScope = null;
     let deadline: ConnectionDeadline | null = null; let startupClosed = false; let failure: ArkDbError | null = null;
     const stagingInfo = defaultPostgresServerInfo(); this.retiredCleanup = null; this.retiredComposed = null;
     try {
@@ -243,7 +245,7 @@ export class PostgresConnectionLifecycle {
     if (this.currentState === ConnectionState.Idle) throw ArkDbError.protocol('PostgreSQL connection is not connected.');
     if (this.currentState === ConnectionState.Error || this.unsynchronized) throw ArkDbError.protocol('PostgreSQL connection is retired after an unrecoverable error.');
     const scope = this.commandGate.reserve(kind); const settlement = new PostgresCommandCloseSettlement(scope);
-    this.activeSettlement = settlement;
+    this.activeSettlement = settlement; this.activeReleaseScope = null; this.activeScopeRelease = null; this.closedScope = null;
     let failure: ArkDbError | null = null; let output: T | undefined = undefined; this.retiredCleanup = null; this.retiredComposed = null;
     try {
       this.commandGate.start(scope); this.throwIfRetiredOrClosing(settlement);
@@ -300,11 +302,11 @@ export class PostgresConnectionLifecycle {
     const settlement = this.activeSettlement;
     const activeScope = settlement !== null ? settlement.scope : this.commandGate.current;
     if (activeScope !== null) {
-      if (settlement !== null && this.closedSettlement === settlement) {
+      if (this.closedScope === activeScope) {
         this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed; return;
       }
       const closeReason = ArkDbError.cancelled('PostgreSQL connection closed during operation.');
-      this.closeRequested = true;
+      this.closeRequested = true; this.closedScope = activeScope;
       if (settlement !== null) {
         this.closedSettlement = settlement; this.closedSettlementTerminalError = null; this.awaitingClosedSettlement = true;
       }
@@ -321,15 +323,20 @@ export class PostgresConnectionLifecycle {
         cleanup = await this.releaseTransport(closeReason);
         if (settlement !== null) {
           await settlement.settled;
-          if (this.closedSettlement === settlement && this.closedSettlementRelease !== null) {
-            cleanup = composeOptionalErrors(cleanup, await this.closedSettlementRelease);
+          if (this.activeReleaseScope === activeScope && this.activeScopeRelease !== null) {
+            cleanup = composeOptionalErrors(cleanup, await this.activeScopeRelease);
           }
           if (this.closedSettlement === settlement) terminalErr = this.closedSettlementTerminalError;
         }
       } finally {
         this.awaitingClosedSettlement = false;
+        const scopeSettled = settlement !== null ? this.activeSettlement !== settlement : this.commandGate.current !== activeScope;
+        if (scopeSettled && this.closedScope === activeScope) {
+          this.closedScope = null;
+          if (this.activeReleaseScope === activeScope) { this.activeReleaseScope = null; this.activeScopeRelease = null; }
+        }
         if (settlement !== null && this.activeSettlement !== settlement && this.closedSettlement === settlement) {
-          this.closedSettlement = null; this.closedSettlementRelease = null; this.closedSettlementTerminalError = null;
+          this.closedSettlement = null; this.closedSettlementTerminalError = null;
         }
         this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
       }
@@ -337,6 +344,7 @@ export class PostgresConnectionLifecycle {
       if (failure !== null) throw failure;
       return;
     }
+    this.closedScope = null; this.activeReleaseScope = null; this.activeScopeRelease = null;
     if ((this.currentState === ConnectionState.Closed || this.currentState === ConnectionState.Error) && this.commandGate.current === null) {
       this.closeRequested = true; this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
       const cleanup = await this.releaseTransport(null);
@@ -492,22 +500,32 @@ export class PostgresConnectionLifecycle {
     return new Promise<void>((resolve: () => void): void => { this.pendingIoWaiters.push(resolve); });
   }
   private finishScope(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement, failure: ArkDbError | null): ArkDbError | null {
-    if (this.activeSettlement === settlement) this.activeSettlement = null;
+    if (this.activeSettlement === settlement) {
+      this.activeSettlement = null;
+      if (!this.awaitingClosedSettlement || this.closedSettlement !== settlement) {
+        if (this.activeReleaseScope === scope) { this.activeReleaseScope = null; this.activeScopeRelease = null; }
+        if (this.closedScope === scope) this.closedScope = null;
+      }
+    }
     let scopeEndErr: ArkDbError | null = null;
     try { settlement.markSettled(); } catch (e) { scopeEndErr = toPostgresArkDbError(e as Object); }
     scopeEndErr = this.releaseScopeSafe(scope, scopeEndErr);
     if (this.closedSettlement === settlement) {
       if (this.awaitingClosedSettlement) this.closedSettlementTerminalError = scopeEndErr;
-      else { this.closedSettlement = null; this.closedSettlementRelease = null; this.closedSettlementTerminalError = null; }
+      else {
+        this.closedSettlement = null; this.closedSettlementTerminalError = null;
+        if (this.closedScope === scope) this.closedScope = null;
+        if (this.activeReleaseScope === scope) { this.activeReleaseScope = null; this.activeScopeRelease = null; }
+      }
     }
     return composeOptionalErrors(failure, scopeEndErr);
   }
   private releaseTransport(abortReason: ArkDbError | null): Promise<ArkDbError | null> {
-    if (this.activeSettlement !== null && this.closedSettlement === this.activeSettlement && this.closedSettlementRelease !== null) {
-      return this.closedSettlementRelease;
-    }
+    const ownerScope = this.activeSettlement !== null ? this.activeSettlement.scope : this.commandGate.current;
+    if (ownerScope === null) { this.activeReleaseScope = null; this.activeScopeRelease = null; }
+    else if (this.activeReleaseScope === ownerScope && this.activeScopeRelease !== null) return this.activeScopeRelease;
     if (this.releaseTask !== null) {
-      if (this.activeSettlement !== null && this.closedSettlement === this.activeSettlement) this.closedSettlementRelease = this.releaseTask;
+      if (ownerScope !== null) { this.activeReleaseScope = ownerScope; this.activeScopeRelease = this.releaseTask; }
       return this.releaseTask;
     }
     const active = this.transport;
@@ -524,7 +542,7 @@ export class PostgresConnectionLifecycle {
       };
     });
     this.releaseTask = tracked;
-    if (this.activeSettlement !== null && this.closedSettlement === this.activeSettlement) this.closedSettlementRelease = tracked;
+    if (ownerScope !== null) { this.activeReleaseScope = ownerScope; this.activeScopeRelease = tracked; }
     begin();
     return tracked;
   }

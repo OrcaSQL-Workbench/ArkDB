@@ -1,5 +1,6 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind, ConnectionState, ConnectionTimerPort } from '@arkdb/core';
+import { PostgresConnection } from '../../../main/ets/pgsql/PostgresConnection';
 import { PostgresConnectionLifecycle, PostgresLifecycleTransport, PostgresStartupContext, PostgresStartupRunner } from '../../../main/ets/pgsql/connection/PostgresConnectionLifecycle';
 import { PostgresCommandGate, PostgresCommandKind, PostgresCommandLifecycleObserver, PostgresCommandPhase, PostgresCommandScope } from '../../../main/ets/pgsql/execution/PostgresCommandGate';
 import { PostgresCommandCloseSettlement } from '../../../main/ets/pgsql/execution/PostgresSettlements';
@@ -64,15 +65,22 @@ export default function postgresConnectionLifecycleTest(): void {
       expect(dump.indexOf(password) === -1 && dump.indexOf('305419896') === -1 &&
         dump.indexOf('18,52,86,120') === -1).assertTrue();
       expect((await asyncFail((): Promise<void> => lc.connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
+      let markClosing: () => void = (): void => {};
+      const closeEntered = new Promise<void>((r: () => void): void => { markClosing = r; });
+      transport.onClose = markClosing;
       transport.hangClose = true; transport.closeFailure = ArkDbError.network('socket close failed');
       const pendingClose = lc.close();
       expect(lc.state === ConnectionState.Closed && lc.readBackendKeyData() === null && !lc.sessionStatus.known && !lc.serverInfo.tlsActive &&
         lc.serverInfo.backendProcessId === 0 && lc.serverInfo.connectionHandle === '' && lc.serverInfo.version === '' &&
         lc.serverInfo.driverId === 'pgsql' && lc.serverInfo.productName === 'PostgreSQL').assertTrue();
+      await closeEntered;
       transport.releaseHungAbort();
       expect((await asyncFail((): Promise<void> => pendingClose)).message).assertEqual('socket close failed');
       expect(lc.state === ConnectionState.Closed && lc.commandGate.generation === 1 &&
-        transport.closeCalls === 1 && transport.writtenFrames.length === 0).assertTrue();
+        transport.closeCalls === 1 && transport.writtenFrames.length === 1).assertTrue();
+      assertBytes(transport.writtenFrames[0], [0x58, 0x00, 0x00, 0x00, 0x04]);
+      await lc.close();
+      expect(transport.closeCalls === 1 && transport.writtenFrames.length === 1).assertTrue();
     });
 
     it('timesOutAndCleansUpFailedConnectScrubbingSecrets', 0, async () => {
@@ -250,6 +258,328 @@ export default function postgresConnectionLifecycleTest(): void {
         .assertEqual(ArkDbErrorKind.Protocol);
       await lc.close(); expect(lc.state).assertEqual(ConnectionState.Closed);
     });
+
+    it('sendsBoundedTerminateOnReadyCloseAndSurvivesBrokenPipeOrTimeout', 0, async () => {
+      let created = false;
+      const idleLc = new PostgresConnectionLifecycle(validConfig(), 'pw-idle', new FakeTimerPort(),
+        (): PostgresLifecycleTransport => { created = true; return new FakeLifecycleTransport(); });
+      await idleLc.close(); await idleLc.close();
+      expect(!created && idleLc.state === ConnectionState.Closed && idleLc.commandGate.generation === 1).assertTrue();
+
+      const errorTp = new FakeLifecycleTransport(); const errorLc = readyLifecycle(new FakeTimerPort(), errorTp, 'pw-err');
+      await errorLc.connect(); errorTp.writeFailure = ArkDbError.network('wire lost');
+      expect((await asyncFail((): Promise<void> => errorLc.runCommand<void>(PostgresCommandKind.Query,
+        async (_s: PostgresCommandScope, ch: PostgresMessageChannel): Promise<void> => { await ch.writeMessage(0x51, new Uint8Array([0])); }))).kind)
+        .assertEqual(ArkDbErrorKind.Network);
+      expect(errorLc.state).assertEqual(ConnectionState.Error);
+      await errorLc.close();
+      expect(errorLc.state === ConnectionState.Closed && errorTp.writtenFrames.length === 0 &&
+        errorTp.abortCalls === 1 && errorTp.closeCalls === 0).assertTrue();
+
+      const badReadyTp = new FakeLifecycleTransport(); const badReadyLc = readyLifecycle(new FakeTimerPort(), badReadyTp, 'pw-badready');
+      await badReadyLc.connect();
+      expect((await asyncFail((): Promise<void> => badReadyLc.runCommand<void>(PostgresCommandKind.Query,
+        async (scope: PostgresCommandScope): Promise<void> => {
+          try { badReadyLc.applyReadyStatus(scope, 0x3f as PostgresReadyStatus); } catch (_e) {}
+        }))).kind === ArkDbErrorKind.Protocol && badReadyLc.state === ConnectionState.Error).assertTrue();
+      await badReadyLc.close();
+      expect(badReadyTp.writtenFrames.length === 0 && badReadyTp.abortCalls === 1).assertTrue();
+
+      const politeTimers = new FakeTimerPort(); const politeTransport = new FakeLifecycleTransport();
+      const politeLc = readyLifecycle(politeTimers, politeTransport, 'pw-polite');
+      await politeLc.connect();
+      const firstClose = politeLc.close(); const secondClose = politeLc.close();
+      expect(firstClose === secondClose && politeLc.state === ConnectionState.Closed &&
+        politeLc.readBackendKeyData() === null && !politeLc.sessionStatus.known && politeLc.serverInfo.backendProcessId === 0).assertTrue();
+      await Promise.all([firstClose, secondClose]);
+      expect(politeLc.state === ConnectionState.Closed && !politeLc.sessionStatus.known &&
+        politeLc.commandGate.current === null && politeLc.commandGate.generation === 1 &&
+        politeTransport.writtenFrames.length === 1 && politeTransport.events.join(',') === 'connect,write,close' &&
+        politeTimers.activeCount === 0).assertTrue();
+      assertBytes(politeTransport.writtenFrames[0], [0x58, 0x00, 0x00, 0x00, 0x04]);
+      await politeLc.close();
+      expect(politeTransport.writtenFrames.length === 1 && politeTransport.closeCalls === 1 && politeLc.commandGate.generation === 1).assertTrue();
+
+      const partialTp = new FakeLifecycleTransport(); const partialLc = readyLifecycle(new FakeTimerPort(), partialTp, 'pw-partial');
+      await partialLc.connect(); partialTp.shortWriteBytes = 2; await partialLc.close();
+      expect(partialTp.writtenFrames.length === 3 && partialTp.closeCalls === 1).assertTrue();
+      assertBytes(partialTp.writtenFrames[0], [0x58, 0x00, 0x00, 0x00, 0x04]);
+      assertBytes(partialTp.writtenFrames[1], [0x00, 0x00, 0x04]); assertBytes(partialTp.writtenFrames[2], [0x04]);
+
+      const brokenReadyTimers = new FakeTimerPort(); const brokenReady = new FakeLifecycleTransport();
+      const brokenReadyLc = readyLifecycle(brokenReadyTimers, brokenReady, 'pw-epipe');
+      await brokenReadyLc.connect(); brokenReadyTimers.failCancel = true; brokenReady.writeFailure = ArkDbError.network('EPIPE broken pipe');
+      await brokenReadyLc.close();
+      expect(brokenReadyLc.state === ConnectionState.Closed && brokenReady.closeCalls === 1 && brokenReadyTimers.activeCount === 0).assertTrue();
+
+      const closeFailTransport = new FakeLifecycleTransport();
+      const closeFailLc = readyLifecycle(new FakeTimerPort(), closeFailTransport, 'pw-close-fail');
+      await closeFailLc.connect(); closeFailTransport.closeFailure = ArkDbError.network('socket close failed');
+      expect((await asyncFail((): Promise<void> => closeFailLc.close())).message).assertEqual('socket close failed');
+      expect(closeFailLc.state === ConnectionState.Closed && closeFailTransport.writtenFrames.length === 1).assertTrue();
+      assertBytes(closeFailTransport.writtenFrames[0], [0x58, 0x00, 0x00, 0x00, 0x04]);
+      await closeFailLc.close(); expect(closeFailTransport.closeCalls).assertEqual(1);
+
+      const hungTimers = new FakeTimerPort(); const hungTransport = new FakeLifecycleTransport();
+      const hungLc = readyLifecycle(hungTimers, hungTransport, 'pw-hung');
+      await hungLc.connect(); hungTransport.hangWrite = true;
+      let closed = false; const closing = hungLc.close().then((): void => { closed = true; });
+      expect(hungLc.state === ConnectionState.Closed && hungLc.readBackendKeyData() === null && !hungLc.sessionStatus.known).assertTrue();
+      hungTimers.advanceBy(999); await flushMicrotasks();
+      expect(!closed && hungTransport.closeCalls === 0 && hungTimers.activeCount === 1).assertTrue();
+      hungTimers.advanceBy(1); await closing;
+      expect(closed && hungLc.state === ConnectionState.Closed && hungTransport.closeCalls === 1 &&
+        hungTimers.activeCount === 0 && hungTransport.writtenFrames.length === 0).assertTrue();
+    });
+
+    it('abortsWithoutMidStreamTerminateWhenCloseRacesConnectOrActiveCommand', 0, async () => {
+      const connectTimers = new FakeTimerPort(); const connectRace = new FakeLifecycleTransport(); connectRace.hangConnect = true;
+      const connectLc = readyLifecycle(connectTimers, connectRace, 'pw-race-c');
+      const pendingConnect = connectLc.connect(); const cClose1 = connectLc.close(); const cClose2 = connectLc.close();
+      expect(cClose1 === cClose2 && connectLc.state === ConnectionState.Closed && connectTimers.activeCount === 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => pendingConnect)).kind).assertEqual(ArkDbErrorKind.Cancelled);
+      await Promise.all([cClose1, cClose2]);
+      expect(connectLc.state === ConnectionState.Closed && connectLc.commandGate.current === null &&
+        connectLc.commandGate.generation === 1 && connectRace.abortCalls === 1 &&
+        connectRace.closeCalls === 0 && connectRace.writtenFrames.length === 0).assertTrue();
+
+      const authRaceTimers = new FakeTimerPort(); const authRaceTp = new FakeLifecycleTransport();
+      authRaceTp.abortFailure = ArkDbError.network('abort during auth failed');
+      let markAuthReady: () => void = (): void => {}; const authEntered = new Promise<void>((r: () => void): void => { markAuthReady = r; });
+      const authRaceLc = new PostgresConnectionLifecycle(validConfig(), 'pw-race-auth', authRaceTimers, (): PostgresLifecycleTransport => authRaceTp,
+        async (ctx: PostgresStartupContext): Promise<void> => {
+          ctx.enterAuthenticating(); ctx.serverInfo.version = '16.4'; ctx.setBackendKeyData(7777, new Uint8Array([1, 2, 3, 4]));
+          markAuthReady(); await ctx.channel.readMessage();
+        });
+      const pendingAuthConnect = authRaceLc.connect(); await authEntered; const authClose = authRaceLc.close();
+      expect(authRaceLc.state === ConnectionState.Closed && authRaceLc.readBackendKeyData() === null &&
+        authRaceLc.serverInfo.version === '' && authRaceLc.serverInfo.backendProcessId === 0).assertTrue();
+      const authRaceErr = await asyncFail((): Promise<void> => pendingAuthConnect);
+      expect(authRaceErr.kind === ArkDbErrorKind.Cancelled && authRaceErr.message.indexOf('abort during auth failed') >= 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => authClose)).message).assertEqual('abort during auth failed');
+      expect(authRaceTp.writtenFrames.length === 0 && authRaceTp.abortCalls === 1).assertTrue();
+      await authRaceLc.close();
+
+      for (const queuePartialHeader of [false, true]) {
+        const queryRace = new FakeLifecycleTransport();
+        if (queuePartialHeader) queryRace.queuedReads.push(new Uint8Array([0x5a, 0x00]));
+        const queryLc = readyLifecycle(new FakeTimerPort(), queryRace, 'pw-race-q');
+        await queryLc.connect();
+        let markReading: () => void = (): void => {}; const readingStarted = new Promise<void>((r: () => void): void => { markReading = r; });
+        const pendingQuery = queryLc.runCommand<void>(PostgresCommandKind.Query,
+          async (_s: PostgresCommandScope, ch: PostgresMessageChannel): Promise<void> => {
+            const readPromise = ch.readMessage(); markReading(); await readPromise;
+          });
+        await readingStarted; if (queuePartialHeader) await flushMicrotasks();
+        const qClose1 = queryLc.close(); const qClose2 = queryLc.close();
+        expect(qClose1 === qClose2 && queryLc.state === ConnectionState.Closed && queryLc.readBackendKeyData() === null &&
+          !queryLc.sessionStatus.known && queryLc.serverInfo.backendProcessId === 0).assertTrue();
+        expect((await asyncFail((): Promise<void> => pendingQuery)).kind).assertEqual(ArkDbErrorKind.Cancelled);
+        await Promise.all([qClose1, qClose2]);
+        expect(queryLc.state === ConnectionState.Closed && !queryLc.sessionStatus.known && queryLc.commandGate.current === null &&
+          queryLc.commandGate.generation === 1 && queryRace.abortCalls === 1 && queryRace.closeCalls === 0 &&
+          queryRace.writtenFrames.length === 0).assertTrue();
+      }
+
+      const reentrantTransport = new FakeLifecycleTransport();
+      const reentrantLc = readyLifecycle(new FakeTimerPort(), reentrantTransport, 'pw-reentrant');
+      await reentrantLc.connect();
+      const reentrantErr = await asyncFail((): Promise<void> =>
+        reentrantLc.runCommand<void>(PostgresCommandKind.QueryStream,
+          async (_s: PostgresCommandScope, _ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<void> => {
+            await st.raceClose((): Promise<void> => reentrantLc.close());
+          }));
+      expect(reentrantErr.kind === ArkDbErrorKind.Cancelled && reentrantLc.state === ConnectionState.Closed &&
+        reentrantLc.commandGate.current === null && reentrantLc.commandGate.generation === 1 &&
+        reentrantTransport.abortCalls === 1 && reentrantTransport.writtenFrames.length === 0).assertTrue();
+
+      let throwDirectObs = false;
+      const directObsGate = new PostgresCommandGate(
+        new TerminalSettlementObserver((): void => { if (throwDirectObs) throw new Error('direct reentrant terminal boom'); }));
+      const directCloseTp = new FakeLifecycleTransport(); directCloseTp.abortFailure = ArkDbError.network('direct close abort failed');
+      const directCloseLc = readyLifecycle(new FakeTimerPort(), directCloseTp, 'pw-direct-close', directObsGate);
+      await directCloseLc.connect(); throwDirectObs = true;
+      let directCloseErrMessage = ''; let directCloseReturned = false;
+      let markDirectRunnerDone: () => void = (): void => {};
+      const directRunnerDone = new Promise<void>((r: () => void): void => { markDirectRunnerDone = r; });
+      const directRun = directCloseLc.runCommand<void>(PostgresCommandKind.QueryStream, async (scope: PostgresCommandScope): Promise<void> => {
+        try {
+          const closeTask = directCloseLc.close();
+          expect(syncFail((): void => directCloseLc.applyReadyStatus(scope, PostgresReadyStatus.Idle)).kind).assertEqual(ArkDbErrorKind.Cancelled);
+          const raced = await Promise.race<string>([
+            closeTask.then((): string => 'resolved', (e: Object): string => { directCloseErrMessage = (e as ArkDbError).message; return 'rejected'; }),
+            flushManyMicrotasks(40).then((): string => 'deadlocked')
+          ]);
+          directCloseReturned = raced !== 'deadlocked';
+        } finally { markDirectRunnerDone(); }
+      });
+      const directRunErr = await asyncFail((): Promise<void> => directRun);
+      await directRunnerDone;
+      expect(directCloseReturned && directCloseErrMessage.indexOf('direct close abort failed') >= 0 &&
+        directCloseErrMessage.indexOf('direct reentrant terminal boom') >= 0 &&
+        directRunErr.kind === ArkDbErrorKind.Cancelled && directRunErr.message.indexOf('direct close abort failed') >= 0 &&
+        directRunErr.message.indexOf('direct reentrant terminal boom') >= 0 &&
+        directCloseLc.state === ConnectionState.Closed && directCloseLc.commandGate.current === null &&
+        directCloseLc.commandGate.generation === 1 && directCloseTp.abortCalls === 1 && directCloseTp.writtenFrames.length === 0).assertTrue();
+      await directCloseLc.close();
+
+      let postTermClose: Promise<void> | null = null;
+      const postTermTp = new FakeLifecycleTransport(); postTermTp.abortFailure = ArkDbError.network('post-terminal abort failed');
+      const postTermGate = new PostgresCommandGate(new TerminalSettlementObserver((): void => { throw new Error('connect terminal boom'); }));
+      const postTermLc = readyLifecycle(new FakeTimerPort(), postTermTp, 'pw-post-term', postTermGate);
+      postTermTp.onAbort = (): void => { postTermClose = postTermLc.close(); };
+      const postTermConnectErr = await asyncFail((): Promise<void> => postTermLc.connect());
+      expect(postTermConnectErr.message.indexOf('connect terminal boom') >= 0 &&
+        postTermConnectErr.message.indexOf('post-terminal abort failed') >= 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => postTermClose!)).message).assertEqual('post-terminal abort failed');
+      expect(postTermLc.state === ConnectionState.Closed && postTermTp.abortCalls === 1).assertTrue();
+
+      const timerReentryTimers = new FakeTimerPort(); const timerReentryTp = new FakeLifecycleTransport();
+      const timerReentryLc = readyLifecycle(timerReentryTimers, timerReentryTp, 'pw-timer-reentry');
+      let timerCancelClose: Promise<void> | null = null;
+      timerReentryTimers.onCancel = (): void => { if (timerCancelClose === null) timerCancelClose = timerReentryLc.close(); };
+      expect((await asyncFail((): Promise<void> => timerReentryLc.connect())).kind).assertEqual(ArkDbErrorKind.Cancelled);
+      await timerCancelClose!;
+      expect(timerReentryLc.state === ConnectionState.Closed && timerReentryLc.readBackendKeyData() === null &&
+        timerReentryLc.serverInfo.backendProcessId === 0 && timerReentryLc.commandGate.generation === 1 &&
+        timerReentryTp.abortCalls === 1 && timerReentryTp.writtenFrames.length === 0).assertTrue();
+
+      let throwRaceObs = false;
+      const obsRaceGate = new PostgresCommandGate(
+        new TerminalSettlementObserver((): void => { if (throwRaceObs) throw new Error('close race terminal boom'); }));
+      const obsRaceTp = new FakeLifecycleTransport(); obsRaceTp.readRejectDelayTicks = 30;
+      obsRaceTp.abortFailure = ArkDbError.network('close race abort failed');
+      const obsRaceLc = readyLifecycle(new FakeTimerPort(), obsRaceTp, 'pw-obs-race', obsRaceGate);
+      await obsRaceLc.connect(); throwRaceObs = true;
+      let markObsRead: () => void = (): void => {}; const obsReadStarted = new Promise<void>((r: () => void): void => { markObsRead = r; });
+      const pendingObsQuery = obsRaceLc.runCommand<void>(PostgresCommandKind.Query,
+        async (_s: PostgresCommandScope, ch: PostgresMessageChannel): Promise<void> => {
+          const r = ch.readMessage(); markObsRead(); await r;
+        });
+      await obsReadStarted;
+      const obsRacingClose = obsRaceLc.close();
+      const obsRacingCloseErr = await asyncFail((): Promise<void> => obsRacingClose);
+      expect(obsRaceLc.commandGate.current === null && obsRaceLc.commandGate.generation === 1 &&
+        obsRacingCloseErr.message.indexOf('close race abort failed') >= 0 &&
+        obsRacingCloseErr.message.indexOf('close race terminal boom') >= 0).assertTrue();
+      const obsQueryErr = await asyncFail((): Promise<void> => pendingObsQuery);
+      expect(obsQueryErr.kind === ArkDbErrorKind.Cancelled && obsQueryErr.message.indexOf('close race abort failed') >= 0 &&
+        obsQueryErr.message.indexOf('close race terminal boom') >= 0 && obsRaceLc.state === ConnectionState.Closed).assertTrue();
+      await obsRaceLc.close();
+
+      const retireRaceTp = new FakeLifecycleTransport(); retireRaceTp.hangAbort = true;
+      retireRaceTp.abortFailure = ArkDbError.network('retire race abort failed');
+      let markRetireAbort: () => void = (): void => {}; const retireAbortEntered = new Promise<void>((r: () => void): void => { markRetireAbort = r; });
+      retireRaceTp.onAbort = markRetireAbort;
+      const retireRaceLc = readyLifecycle(new FakeTimerPort(), retireRaceTp, 'pw-retire-race');
+      await retireRaceLc.connect();
+      const pendingRetireCmd = retireRaceLc.runCommand<void>(PostgresCommandKind.Query,
+        async (scope: PostgresCommandScope): Promise<void> => { await retireRaceLc.retire(scope, ArkDbError.protocol('frame desync')); });
+      await retireAbortEntered;
+      const racingCloseOnRetire = retireRaceLc.close(); expect(retireRaceLc.state).assertEqual(ConnectionState.Closed);
+      retireRaceTp.releaseHungAbort();
+      const retireCmdErr = await asyncFail((): Promise<void> => pendingRetireCmd);
+      expect(retireCmdErr.kind === ArkDbErrorKind.Protocol && retireCmdErr.message.split('retire race abort failed').length === 2).assertTrue();
+      expect((await asyncFail((): Promise<void> => racingCloseOnRetire)).message).assertEqual('retire race abort failed');
+      expect(retireRaceLc.state === ConnectionState.Closed && retireRaceLc.commandGate.current === null &&
+        retireRaceLc.commandGate.generation === 1 && retireRaceTp.abortCalls === 1 && retireRaceTp.writtenFrames.length === 0).assertTrue();
+      await retireRaceLc.close();
+
+      const retireWinTp = new FakeLifecycleTransport();
+      retireWinTp.abortFailure = ArkDbError.network('post-retire window abort failed');
+      const retireWinLc = readyLifecycle(new FakeTimerPort(), retireWinTp, 'pw-retire-win');
+      await retireWinLc.connect();
+      let markPostRetireWindow: () => void = (): void => {};
+      const postRetireWindow = new Promise<void>((r: () => void): void => { markPostRetireWindow = r; });
+      let unblockRetireWindow: () => void = (): void => {};
+      const holdRetireWindow = new Promise<void>((r: () => void): void => { unblockRetireWindow = r; });
+      const pendingWinCmd = retireWinLc.runCommand<void>(PostgresCommandKind.Query,
+        async (scope: PostgresCommandScope): Promise<void> => {
+          try { await retireWinLc.retire(scope, ArkDbError.protocol('window desync')); } catch (err) {
+            markPostRetireWindow(); await holdRetireWindow; throw err as Error;
+          }
+        });
+      await postRetireWindow;
+      const winClose = retireWinLc.close();
+      unblockRetireWindow();
+      expect((await asyncFail((): Promise<void> => pendingWinCmd)).message.indexOf('post-retire window abort failed') >= 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => winClose)).message).assertEqual('post-retire window abort failed');
+      expect(retireWinLc.state === ConnectionState.Closed && retireWinTp.abortCalls === 1).assertTrue();
+      await retireWinLc.close();
+
+      let startCloseCreated = false; let startCloseLc: PostgresConnectionLifecycle | null = null;
+      const startCloseGate = new PostgresCommandGate(
+        new TerminalSettlementObserver((): void => {}, (): void => { startCloseLc!.close().catch((): void => {}); }));
+      startCloseLc = new PostgresConnectionLifecycle(validConfig(), 'pw-onstart', new FakeTimerPort(),
+        (): PostgresLifecycleTransport => { startCloseCreated = true; return new FakeLifecycleTransport(); },
+        async (): Promise<void> => {}, startCloseGate);
+      expect((await asyncFail((): Promise<void> => startCloseLc!.connect())).kind).assertEqual(ArkDbErrorKind.Cancelled);
+      expect(!startCloseCreated && startCloseLc.state === ConnectionState.Closed &&
+        startCloseLc.commandGate.current === null && startCloseLc.commandGate.generation === 1).assertTrue();
+
+      let factoryCloseLc: PostgresConnectionLifecycle | null = null; let pendingFactoryClose: Promise<void> | null = null;
+      const factoryAbortTp = new FakeLifecycleTransport(); factoryAbortTp.abortFailure = ArkDbError.network('factory race abort failed');
+      factoryCloseLc = new PostgresConnectionLifecycle(validConfig(), 'pw-onfactory', new FakeTimerPort(),
+        (): PostgresLifecycleTransport => { pendingFactoryClose = factoryCloseLc!.close(); return factoryAbortTp; },
+        async (): Promise<void> => {});
+      const factoryConnectErr = await asyncFail((): Promise<void> => factoryCloseLc!.connect());
+      expect(factoryConnectErr.kind === ArkDbErrorKind.Cancelled && factoryConnectErr.message.indexOf('factory race abort failed') >= 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => pendingFactoryClose!)).message).assertEqual('factory race abort failed');
+      expect(factoryCloseLc.state === ConnectionState.Closed && factoryAbortTp.abortCalls === 1 && factoryAbortTp.writtenFrames.length === 0).assertTrue();
+
+      const extTp = new FakeLifecycleTransport(); extTp.abortFailure = ArkDbError.network('ext scope abort failed');
+      const extLc = readyLifecycle(new FakeTimerPort(), extTp, 'pw-ext-scope');
+      await extLc.connect();
+      const extScope = extLc.commandGate.reserve(PostgresCommandKind.Transaction); extLc.commandGate.start(extScope);
+      expect((await asyncFail((): Promise<void> => extLc.retire(extScope, ArkDbError.protocol('ext desync')))).message
+        .indexOf('ext scope abort failed') >= 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => extLc.close())).message).assertEqual('ext scope abort failed');
+      await extLc.close();
+      expect(extLc.state === ConnectionState.Closed && extLc.readBackendKeyData() === null &&
+        extScope.phase === PostgresCommandPhase.Closing && extTp.abortCalls === 1 && extTp.writtenFrames.length === 0).assertTrue();
+      extLc.commandGate.release(extScope);
+      await extLc.close();
+      expect(extLc.commandGate.current === null && extLc.commandGate.generation === 1).assertTrue();
+
+      expect(syncFail((): void => { new PostgresConnection(new PostgresConnectionConfig(), 'pw'); }).kind).assertEqual(ArkDbErrorKind.Validation);
+      const defaultConn = new PostgresConnection(validConfig(), 'pw-default-conn');
+      expect((await asyncFail((): Promise<void> => defaultConn.connect())).kind).assertEqual(ArkDbErrorKind.Unsupported);
+      const dc1 = defaultConn.close(); const dc2 = defaultConn.close();
+      expect(dc1 === dc2 && defaultConn.state === ConnectionState.Closed).assertTrue();
+      await Promise.all([dc1, dc2]);
+      expect((await asyncFail((): Promise<void> => defaultConn.connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
+
+      const facadePw = 'pw-conn-facade-77'; const facadeTp = new FakeLifecycleTransport();
+      const facadeTimers = new FakeTimerPort(); const facadeStates: ConnectionState[] = []; const facadeCfg = validConfig();
+      const conn = new PostgresConnection(facadeCfg, facadePw, facadeTimers, (): PostgresLifecycleTransport => facadeTp,
+        async (ctx: PostgresStartupContext): Promise<void> => {
+          facadeStates.push(conn.state); ctx.enterAuthenticating(); facadeStates.push(conn.state);
+          expect(ctx.readPassword()).assertEqual(facadePw);
+          ctx.serverInfo.version = '17.2'; ctx.serverInfo.tlsActive = true;
+          ctx.setBackendKeyData(4242, new Uint8Array([0x12, 0x34, 0x56, 0x78])); ctx.applyReadyStatus(PostgresReadyStatus.Idle);
+        });
+      facadeCfg.host = ''; facadeTp.onConnect = (): void => { facadeStates.push(conn.state); };
+      expect(conn.state === ConnectionState.Idle && !conn.sessionStatus.known &&
+        conn.serverInfo.driverId === 'pgsql' && conn.serverInfo.productName === 'PostgreSQL').assertTrue();
+      await conn.connect();
+      expect(conn.state === ConnectionState.Ready && facadeStates.join(',') === 'connecting,connecting,authenticating' &&
+        conn.serverInfo.backendProcessId === 4242 && conn.serverInfo.connectionHandle === '4242' &&
+        conn.serverInfo.version === '17.2' && conn.serverInfo.tlsActive &&
+        conn.sessionStatus.known && conn.sessionStatus.autocommit && !conn.sessionStatus.inTransaction).assertTrue();
+      const statusSnapshot = conn.sessionStatus; statusSnapshot.known = false; statusSnapshot.inTransaction = true;
+      expect(conn.sessionStatus.known && !conn.sessionStatus.inTransaction).assertTrue();
+      const connDump = JSON.stringify(conn) + JSON.stringify(conn.serverInfo);
+      expect(connDump.indexOf(facadePw) === -1 && connDump.indexOf('305419896') === -1 && connDump.indexOf('18,52,86,120') === -1).assertTrue();
+      const fc1 = conn.close(); const fc2 = conn.close();
+      expect(fc1 === fc2 && conn.state === ConnectionState.Closed && !conn.sessionStatus.known &&
+        conn.serverInfo.backendProcessId === 0 && conn.serverInfo.version === '' && !conn.serverInfo.tlsActive).assertTrue();
+      await Promise.all([fc1, fc2]);
+      expect(facadeTp.writtenFrames.length === 1 && facadeTp.closeCalls === 1 && facadeTimers.activeCount === 0).assertTrue();
+      assertBytes(facadeTp.writtenFrames[0], [0x58, 0x00, 0x00, 0x00, 0x04]);
+      expect((await asyncFail((): Promise<void> => conn.connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
+      await conn.close();
+      expect(facadeTp.writtenFrames.length === 1 && facadeTp.closeCalls === 1).assertTrue();
+    });
   });
 }
 function validConfig(): PostgresConnectionConfig {
@@ -265,16 +595,20 @@ function readyLifecycle(timers: ConnectionTimerPort, transport: FakeLifecycleTra
     }, gate);
 }
 class TerminalSettlementObserver implements PostgresCommandLifecycleObserver {
-  private readonly onDone: () => void; constructor(onDone: () => void) { this.onDone = onDone; }
-  onStart(_scope: PostgresCommandScope): void {} onTerminal(_scope: PostgresCommandScope): void { this.onDone(); }
+  private readonly onDone: () => void; private readonly onBegin: (() => void) | null;
+  constructor(onDone: () => void, onBegin?: () => void) { this.onDone = onDone; this.onBegin = onBegin === undefined ? null : onBegin; }
+  onStart(_scope: PostgresCommandScope): void { if (this.onBegin !== null) this.onBegin(); }
+  onTerminal(_scope: PostgresCommandScope): void { this.onDone(); }
 }
 interface ScheduledTimer { id: number; dueAtMs: number; handler: () => void; }
 class FakeTimerPort implements ConnectionTimerPort {
-  failCancel: boolean = false; private currentMs: number = 1000; private nextId: number = 1; private timers: ScheduledTimer[] = [];
+  failCancel: boolean = false; onCancel: (() => void) | null = null;
+  private currentMs: number = 1000; private nextId: number = 1; private timers: ScheduledTimer[] = [];
   get activeCount(): number { return this.timers.length; } nowMs(): number { return this.currentMs; }
   schedule(handler: () => void, timeoutMs: number): number { const id = this.nextId++; this.timers.push({ id: id, dueAtMs: this.currentMs + timeoutMs, handler: handler }); return id; }
   cancel(timerId: number): void {
     for (let i = 0; i < this.timers.length; i += 1) { if (this.timers[i].id === timerId) { this.timers.splice(i, 1); break; } }
+    if (this.onCancel !== null) this.onCancel();
     if (this.failCancel) throw new Error('timer cancel failed');
   }
   advanceBy(deltaMs: number): void {
@@ -289,13 +623,16 @@ class FakeTimerPort implements ConnectionTimerPort {
   }
 }
 class FakeLifecycleTransport implements PostgresLifecycleTransport {
-  readonly writtenFrames: Uint8Array[] = []; readonly queuedReads: Uint8Array[] = [];
-  hangConnect: boolean = false; hangAbort: boolean = false; hangClose: boolean = false; shortWriteBytes: number = 0;
+  readonly writtenFrames: Uint8Array[] = []; readonly queuedReads: Uint8Array[] = []; readonly events: string[] = [];
+  hangConnect: boolean = false; hangWrite: boolean = false; hangAbort: boolean = false; hangClose: boolean = false;
+  shortWriteBytes: number = 0; readRejectDelayTicks: number = 0;
   abortFailure: ArkDbError | null = null; closeFailure: ArkDbError | null = null; writeFailure: ArkDbError | null = null;
-  closeCalls: number = 0; abortCalls: number = 0; onConnect: (() => void) | null = null; onAbort: (() => void) | null = null;
+  closeCalls: number = 0; abortCalls: number = 0;
+  onConnect: (() => void) | null = null; onAbort: (() => void) | null = null; onClose: (() => void) | null = null;
   private fatal: ArkDbError | null = null; private pendingRejects: Array<(error: Object) => void> = []; private resumeAbort: (() => void) | null = null;
   releaseHungAbort(): void { if (this.resumeAbort !== null) { const r = this.resumeAbort; this.resumeAbort = null; r(); } }
   connect(_host: string, _port: number, _timeoutMs: number): Promise<void> {
+    this.events.push('connect');
     if (this.onConnect !== null) this.onConnect();
     if (this.fatal !== null) return Promise.reject<void>(this.fatal);
     return !this.hangConnect ? Promise.resolve() : new Promise<void>((_r: () => void, reject: (e: Object) => void): void => { this.pendingRejects.push(reject); });
@@ -303,25 +640,39 @@ class FakeLifecycleTransport implements PostgresLifecycleTransport {
   read(_maximumBytes: number): Promise<Uint8Array | null> {
     if (this.fatal !== null) return Promise.reject<Uint8Array | null>(this.fatal);
     if (this.queuedReads.length > 0) return Promise.resolve<Uint8Array | null>(this.queuedReads.shift()!);
-    return new Promise<Uint8Array | null>((_r: (v: Uint8Array | null) => void, reject: (e: Object) => void): void => { this.pendingRejects.push(reject); });
+    return new Promise<Uint8Array | null>((_r: (v: Uint8Array | null) => void, reject: (e: Object) => void): void => {
+      this.pendingRejects.push((e: Object): void => {
+        if (this.readRejectDelayTicks <= 0) { reject(e); return; }
+        flushManyMicrotasks(this.readRejectDelayTicks).then((): void => reject(e));
+      });
+    });
   }
   write(data: Uint8Array): Promise<number> {
+    this.events.push('write');
     if (this.fatal !== null) return Promise.reject<number>(this.fatal);
     if (this.writeFailure !== null) return Promise.reject<number>(this.writeFailure);
+    if (this.hangWrite) return new Promise<number>((_r: (v: number) => void, reject: (e: Object) => void): void => { this.pendingRejects.push(reject); });
     const copy = new Uint8Array(data.length); copy.set(data); this.writtenFrames.push(copy);
-    return Promise.resolve(this.shortWriteBytes > 0 ? this.shortWriteBytes : data.length);
+    return Promise.resolve(this.shortWriteBytes > 0 ? Math.min(this.shortWriteBytes, data.length) : data.length);
   }
   async close(): Promise<void> {
-    this.closeCalls += 1; this.failPending(ArkDbError.network('closed'));
+    this.events.push('close'); this.closeCalls += 1; this.failPending(ArkDbError.network('closed'));
+    if (this.onClose !== null) this.onClose();
     if (this.hangClose) await new Promise<void>((r: () => void): void => { this.resumeAbort = r; });
     if (this.closeFailure !== null) throw this.closeFailure;
   }
   async abort(error: ArkDbError): Promise<void> {
-    this.abortCalls += 1; this.failPending(error); if (this.onAbort !== null) this.onAbort();
+    this.events.push('abort'); this.abortCalls += 1; this.failPending(error); if (this.onAbort !== null) this.onAbort();
     if (this.hangAbort) await new Promise<void>((r: () => void): void => { this.resumeAbort = r; });
     if (this.abortFailure !== null) throw this.abortFailure;
   }
   private failPending(error: ArkDbError): void { if (this.fatal === null) this.fatal = error; const w = this.pendingRejects; this.pendingRejects = []; for (const reject of w) reject(this.fatal); }
+}
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+}
+async function flushManyMicrotasks(count: number): Promise<void> {
+  for (let i = 0; i < count; i += 1) await Promise.resolve();
 }
 function syncFail(op: () => void): ArkDbError { let f: Object | null = null; try { op(); } catch (e) { f = e as Object; } expect(f instanceof ArkDbError).assertTrue(); return f as ArkDbError; }
 async function asyncFail<T>(op: () => Promise<T>): Promise<ArkDbError> { let f: Object | null = null; try { await op(); } catch (e) { f = e as Object; } expect(f instanceof ArkDbError).assertTrue(); return f as ArkDbError; }

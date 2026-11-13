@@ -276,6 +276,15 @@ export default function postgresConnectionLifecycleTest(): void {
       expect(errorLc.state === ConnectionState.Closed && errorTp.writtenFrames.length === 0 &&
         errorTp.abortCalls === 1 && errorTp.closeCalls === 0).assertTrue();
 
+      const badReadyTp = new FakeLifecycleTransport(); const badReadyLc = readyLifecycle(new FakeTimerPort(), badReadyTp, 'pw-badready');
+      await badReadyLc.connect();
+      expect((await asyncFail((): Promise<void> => badReadyLc.runCommand<void>(PostgresCommandKind.Query,
+        async (scope: PostgresCommandScope): Promise<void> => {
+          try { badReadyLc.applyReadyStatus(scope, 0x3f as PostgresReadyStatus); } catch (_e) {}
+        }))).kind === ArkDbErrorKind.Protocol && badReadyLc.state === ConnectionState.Error).assertTrue();
+      await badReadyLc.close();
+      expect(badReadyTp.writtenFrames.length === 0 && badReadyTp.abortCalls === 1).assertTrue();
+
       const politeTimers = new FakeTimerPort(); const politeTransport = new FakeLifecycleTransport();
       const politeLc = readyLifecycle(politeTimers, politeTransport, 'pw-polite');
       await politeLc.connect();
@@ -391,26 +400,55 @@ export default function postgresConnectionLifecycleTest(): void {
       const directCloseLc = readyLifecycle(new FakeTimerPort(), directCloseTp, 'pw-direct-close', directObsGate);
       await directCloseLc.connect(); throwDirectObs = true;
       let directCloseErrMessage = ''; let directCloseReturned = false;
+      let markDirectRunnerDone: () => void = (): void => {};
+      const directRunnerDone = new Promise<void>((r: () => void): void => { markDirectRunnerDone = r; });
       const directRun = directCloseLc.runCommand<void>(PostgresCommandKind.QueryStream, async (scope: PostgresCommandScope): Promise<void> => {
-        const raced = await Promise.race<string>([
-          directCloseLc.close().then((): string => 'resolved', (e: Object): string => { directCloseErrMessage = (e as ArkDbError).message; return 'rejected'; }),
-          flushManyMicrotasks(40).then((): string => 'deadlocked')
-        ]);
-        directCloseReturned = raced !== 'deadlocked';
-        directCloseLc.applyReadyStatus(scope, PostgresReadyStatus.Idle);
+        try {
+          const closeTask = directCloseLc.close();
+          expect(syncFail((): void => directCloseLc.applyReadyStatus(scope, PostgresReadyStatus.Idle)).kind).assertEqual(ArkDbErrorKind.Cancelled);
+          const raced = await Promise.race<string>([
+            closeTask.then((): string => 'resolved', (e: Object): string => { directCloseErrMessage = (e as ArkDbError).message; return 'rejected'; }),
+            flushManyMicrotasks(40).then((): string => 'deadlocked')
+          ]);
+          directCloseReturned = raced !== 'deadlocked';
+        } finally { markDirectRunnerDone(); }
       });
       const directRunErr = await asyncFail((): Promise<void> => directRun);
-      expect(directCloseReturned && directCloseErrMessage === 'direct close abort failed' &&
+      await directRunnerDone;
+      expect(directCloseReturned && directCloseErrMessage.indexOf('direct close abort failed') >= 0 &&
+        directCloseErrMessage.indexOf('direct reentrant terminal boom') >= 0 &&
         directRunErr.kind === ArkDbErrorKind.Cancelled && directRunErr.message.indexOf('direct close abort failed') >= 0 &&
         directRunErr.message.indexOf('direct reentrant terminal boom') >= 0 &&
         directCloseLc.state === ConnectionState.Closed && directCloseLc.commandGate.current === null &&
         directCloseLc.commandGate.generation === 1 && directCloseTp.abortCalls === 1 && directCloseTp.writtenFrames.length === 0).assertTrue();
       await directCloseLc.close();
 
+      let postTermClose: Promise<void> | null = null;
+      const postTermTp = new FakeLifecycleTransport(); postTermTp.abortFailure = ArkDbError.network('post-terminal abort failed');
+      const postTermGate = new PostgresCommandGate(new TerminalSettlementObserver((): void => { throw new Error('connect terminal boom'); }));
+      const postTermLc = readyLifecycle(new FakeTimerPort(), postTermTp, 'pw-post-term', postTermGate);
+      postTermTp.onAbort = (): void => { postTermClose = postTermLc.close(); };
+      const postTermConnectErr = await asyncFail((): Promise<void> => postTermLc.connect());
+      expect(postTermConnectErr.message.indexOf('connect terminal boom') >= 0 &&
+        postTermConnectErr.message.indexOf('post-terminal abort failed') >= 0).assertTrue();
+      expect((await asyncFail((): Promise<void> => postTermClose!)).message).assertEqual('post-terminal abort failed');
+      expect(postTermLc.state === ConnectionState.Closed && postTermTp.abortCalls === 1).assertTrue();
+
+      const timerReentryTimers = new FakeTimerPort(); const timerReentryTp = new FakeLifecycleTransport();
+      const timerReentryLc = readyLifecycle(timerReentryTimers, timerReentryTp, 'pw-timer-reentry');
+      let timerCancelClose: Promise<void> | null = null;
+      timerReentryTimers.onCancel = (): void => { if (timerCancelClose === null) timerCancelClose = timerReentryLc.close(); };
+      expect((await asyncFail((): Promise<void> => timerReentryLc.connect())).kind).assertEqual(ArkDbErrorKind.Cancelled);
+      await timerCancelClose!;
+      expect(timerReentryLc.state === ConnectionState.Closed && timerReentryLc.readBackendKeyData() === null &&
+        timerReentryLc.serverInfo.backendProcessId === 0 && timerReentryLc.commandGate.generation === 1 &&
+        timerReentryTp.abortCalls === 1 && timerReentryTp.writtenFrames.length === 0).assertTrue();
+
       let throwRaceObs = false;
       const obsRaceGate = new PostgresCommandGate(
         new TerminalSettlementObserver((): void => { if (throwRaceObs) throw new Error('close race terminal boom'); }));
-      const obsRaceTp = new FakeLifecycleTransport(); obsRaceTp.abortFailure = ArkDbError.network('close race abort failed');
+      const obsRaceTp = new FakeLifecycleTransport(); obsRaceTp.readRejectDelayTicks = 30;
+      obsRaceTp.abortFailure = ArkDbError.network('close race abort failed');
       const obsRaceLc = readyLifecycle(new FakeTimerPort(), obsRaceTp, 'pw-obs-race', obsRaceGate);
       await obsRaceLc.connect(); throwRaceObs = true;
       let markObsRead: () => void = (): void => {}; const obsReadStarted = new Promise<void>((r: () => void): void => { markObsRead = r; });
@@ -420,13 +458,13 @@ export default function postgresConnectionLifecycleTest(): void {
         });
       await obsReadStarted;
       const obsRacingClose = obsRaceLc.close();
-      const obsQueryErr = await asyncFail((): Promise<void> => pendingObsQuery);
       const obsRacingCloseErr = await asyncFail((): Promise<void> => obsRacingClose);
-      expect(obsQueryErr.kind === ArkDbErrorKind.Cancelled && obsQueryErr.message.indexOf('close race abort failed') >= 0 &&
-        obsQueryErr.message.indexOf('close race terminal boom') >= 0 &&
+      expect(obsRaceLc.commandGate.current === null && obsRaceLc.commandGate.generation === 1 &&
         obsRacingCloseErr.message.indexOf('close race abort failed') >= 0 &&
-        obsRacingCloseErr.message.indexOf('close race terminal boom') >= 0 &&
-        obsRaceLc.state === ConnectionState.Closed && obsRaceLc.commandGate.current === null && obsRaceLc.commandGate.generation === 1).assertTrue();
+        obsRacingCloseErr.message.indexOf('close race terminal boom') >= 0).assertTrue();
+      const obsQueryErr = await asyncFail((): Promise<void> => pendingObsQuery);
+      expect(obsQueryErr.kind === ArkDbErrorKind.Cancelled && obsQueryErr.message.indexOf('close race abort failed') >= 0 &&
+        obsQueryErr.message.indexOf('close race terminal boom') >= 0 && obsRaceLc.state === ConnectionState.Closed).assertTrue();
       await obsRaceLc.close();
 
       const retireRaceTp = new FakeLifecycleTransport(); retireRaceTp.hangAbort = true;
@@ -537,11 +575,13 @@ class TerminalSettlementObserver implements PostgresCommandLifecycleObserver {
 }
 interface ScheduledTimer { id: number; dueAtMs: number; handler: () => void; }
 class FakeTimerPort implements ConnectionTimerPort {
-  failCancel: boolean = false; private currentMs: number = 1000; private nextId: number = 1; private timers: ScheduledTimer[] = [];
+  failCancel: boolean = false; onCancel: (() => void) | null = null;
+  private currentMs: number = 1000; private nextId: number = 1; private timers: ScheduledTimer[] = [];
   get activeCount(): number { return this.timers.length; } nowMs(): number { return this.currentMs; }
   schedule(handler: () => void, timeoutMs: number): number { const id = this.nextId++; this.timers.push({ id: id, dueAtMs: this.currentMs + timeoutMs, handler: handler }); return id; }
   cancel(timerId: number): void {
     for (let i = 0; i < this.timers.length; i += 1) { if (this.timers[i].id === timerId) { this.timers.splice(i, 1); break; } }
+    if (this.onCancel !== null) this.onCancel();
     if (this.failCancel) throw new Error('timer cancel failed');
   }
   advanceBy(deltaMs: number): void {
@@ -557,7 +597,8 @@ class FakeTimerPort implements ConnectionTimerPort {
 }
 class FakeLifecycleTransport implements PostgresLifecycleTransport {
   readonly writtenFrames: Uint8Array[] = []; readonly queuedReads: Uint8Array[] = []; readonly events: string[] = [];
-  hangConnect: boolean = false; hangWrite: boolean = false; hangAbort: boolean = false; hangClose: boolean = false; shortWriteBytes: number = 0;
+  hangConnect: boolean = false; hangWrite: boolean = false; hangAbort: boolean = false; hangClose: boolean = false;
+  shortWriteBytes: number = 0; readRejectDelayTicks: number = 0;
   abortFailure: ArkDbError | null = null; closeFailure: ArkDbError | null = null; writeFailure: ArkDbError | null = null;
   closeCalls: number = 0; abortCalls: number = 0;
   onConnect: (() => void) | null = null; onAbort: (() => void) | null = null; onClose: (() => void) | null = null;
@@ -572,7 +613,12 @@ class FakeLifecycleTransport implements PostgresLifecycleTransport {
   read(_maximumBytes: number): Promise<Uint8Array | null> {
     if (this.fatal !== null) return Promise.reject<Uint8Array | null>(this.fatal);
     if (this.queuedReads.length > 0) return Promise.resolve<Uint8Array | null>(this.queuedReads.shift()!);
-    return new Promise<Uint8Array | null>((_r: (v: Uint8Array | null) => void, reject: (e: Object) => void): void => { this.pendingRejects.push(reject); });
+    return new Promise<Uint8Array | null>((_r: (v: Uint8Array | null) => void, reject: (e: Object) => void): void => {
+      this.pendingRejects.push((e: Object): void => {
+        if (this.readRejectDelayTicks <= 0) { reject(e); return; }
+        flushManyMicrotasks(this.readRejectDelayTicks).then((): void => reject(e));
+      });
+    });
   }
   write(data: Uint8Array): Promise<number> {
     this.events.push('write');

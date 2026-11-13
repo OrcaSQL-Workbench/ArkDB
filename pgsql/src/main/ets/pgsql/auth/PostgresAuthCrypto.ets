@@ -458,6 +458,7 @@ export interface PostgresScramPort {
 export class PostgresScramClient {
   private currentState: PostgresScramClientState = PostgresScramClientState.Initial;
   private inFlight: boolean = false;
+  private disposed: boolean = false;
   private readonly username: string;
   private password: string;
   private readonly port: PostgresScramPort;
@@ -482,7 +483,7 @@ export class PostgresScramClient {
         throw ArkDbError.unsupported('PostgreSQL server does not offer SCRAM-SHA-256.');
       }
       validateScramUsername(this.username);
-      this.clientNonce = await this.port.createNonce();
+      this.clientNonce = await this.awaitActive<string>((): Promise<string> => this.port.createNonce());
       if (!isPrintableScramNonce(this.clientNonce) ||
         this.clientNonce.length >= MAX_SCRAM_NONCE_CHARACTERS) {
         throw ArkDbError.auth('PostgreSQL SCRAM nonce generation returned invalid data.');
@@ -541,24 +542,24 @@ export class PostgresScramClient {
       password = copyScramClientBytes(this.port.preparePassword(this.password),
         MAX_SCRAM_PASSWORD_BYTES, 'prepared password');
       this.password = '';
-      saltedPassword = copyScramCryptoBytes(await this.port.deriveSaltedPassword(
-        password, salt, iterations), 'Salted Password');
-      clientKey = copyScramCryptoBytes(await this.port.hmacSha256(
-        saltedPassword, strictUtf8Encode('Client Key')), 'Client Key');
-      storedKey = copyScramCryptoBytes(await this.port.sha256(clientKey), 'Stored Key');
+      saltedPassword = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.deriveSaltedPassword(password, salt, iterations), 'Salted Password');
+      password.fill(0);
+      clientKey = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.hmacSha256(saltedPassword, strictUtf8Encode('Client Key')), 'Client Key');
+      storedKey = await this.awaitActiveBytes((): Promise<Uint8Array> => this.port.sha256(clientKey), 'Stored Key');
       const finalWithoutProof = 'c=' + SCRAM_CHANNEL_BINDING + ',r=' + combinedNonce;
-      authMessage = strictUtf8Encode(this.clientFirstBare + ',' +
-        parsed.text + ',' + finalWithoutProof);
+      authMessage = strictUtf8Encode(this.clientFirstBare + ',' + parsed.text + ',' + finalWithoutProof);
       if (authMessage.length > MAX_SCRAM_MESSAGE_BYTES) {
         throw ArkDbError.auth('PostgreSQL SCRAM authentication message exceeds its limit.');
       }
-      clientSignature = copyScramCryptoBytes(await this.port.hmacSha256(
-        storedKey, authMessage), 'Client Signature');
+      clientSignature = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.hmacSha256(storedKey, authMessage), 'Client Signature');
       proof = xorBytes(clientKey, clientSignature);
-      serverKey = copyScramCryptoBytes(await this.port.hmacSha256(
-        saltedPassword, strictUtf8Encode('Server Key')), 'Server Key');
-      serverSignature = copyScramCryptoBytes(await this.port.hmacSha256(
-        serverKey, authMessage), 'Server Signature');
+      serverKey = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.hmacSha256(saltedPassword, strictUtf8Encode('Server Key')), 'Server Key');
+      serverSignature = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.hmacSha256(serverKey, authMessage), 'Server Signature');
       this.expectedServerSignature = copyBytes(serverSignature);
       response = strictUtf8Encode(
         finalWithoutProof + ',p=' + base64Encode(proof));
@@ -568,7 +569,11 @@ export class PostgresScramClient {
       this.clientNonce = '';
       this.clientFirstBare = '';
       this.currentState = PostgresScramClientState.Continued;
-      return PostgresFrontendSerializer.saslResponse(response);
+      const frame = new Uint8Array(response.length + 5);
+      frame[0] = 0x70;
+      new DataView(frame.buffer).setInt32(1, response.length + 4, false);
+      frame.set(response, 5);
+      return frame;
     } catch (error) {
       this.fail();
       if (error instanceof ArkDbError) throw error;
@@ -611,8 +616,33 @@ export class PostgresScramClient {
     }
   }
 
+  dispose(): void {
+    this.disposed = true;
+    this.clearSensitive();
+    if (this.currentState !== PostgresScramClientState.Finalized) {
+      this.currentState = PostgresScramClientState.Failed;
+    }
+  }
+
+  private async awaitActive<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.disposed) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    const value = await operation();
+    if (this.disposed) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    return value;
+  }
+
+  private async awaitActiveBytes(operation: () => Promise<Uint8Array>, label: string): Promise<Uint8Array> {
+    if (this.disposed) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    const value = await operation();
+    if (this.disposed) {
+      value.fill(0);
+      throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    }
+    try { return copyScramCryptoBytes(value, label); } finally { value.fill(0); }
+  }
+
   private enterState(expected: PostgresScramClientState): void {
-    if (this.currentState !== expected || this.inFlight) {
+    if (this.disposed || this.currentState !== expected || this.inFlight) {
       throw ArkDbError.validation('PostgreSQL SCRAM call is out of order.');
     }
     this.inFlight = true;
@@ -789,10 +819,14 @@ function validateScramPasswordLength(value: string): void {
 
 function copyScramClientBytes(value: Uint8Array, maximum: number,
   label: string): Uint8Array {
-  if (value.length > maximum) {
-    throw ArkDbError.validation('PostgreSQL SCRAM ' + label + ' exceeds its limit.');
+  try {
+    if (value.length > maximum) {
+      throw ArkDbError.validation('PostgreSQL SCRAM ' + label + ' exceeds its limit.');
+    }
+    return copyBytes(value);
+  } finally {
+    value.fill(0);
   }
-  return copyBytes(value);
 }
 
 function copyScramCryptoBytes(value: Uint8Array, label: string): Uint8Array {

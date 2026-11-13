@@ -16,10 +16,10 @@ import {
   PostgresErrorResponse, PostgresMessage, PostgresNegotiateProtocolVersion, PostgresNoticeResponse,
   PostgresNotificationResponse, PostgresParameterStatus, PostgresReadyForQuery
 } from '../protocol/PostgresMessageChannel';
+import { MAX_POSTGRES_MESSAGE_BYTES, POSTGRES_LENGTH_BYTES, POSTGRES_NORMAL_HEADER_BYTES } from '../protocol/PostgresProtocolConstants';
 
 const SCRAM_SHA_256: string = 'SCRAM-SHA-256';
 const DEFAULT_AUTH_PLATFORM: PostgresAuthPlatform = new HarmonyPostgresAuthPlatform();
-
 export type PostgresScramPortFactory = (platform: PostgresAuthPlatform) => PostgresScramPort;
 function defaultScramPortFactory(platform: PostgresAuthPlatform): PostgresScramPort { return new DefaultPostgresScramPort(platform); }
 
@@ -59,21 +59,15 @@ export async function runPostgresStartup(context: PostgresStartupContext,
           const pw = context.readPassword();
           if (pw.length === 0) throw ArkDbError.validation('Password is required for PostgreSQL SCRAM authentication.');
           const activeScram = new PostgresScramClient(context.config.user, pw, scramPortFactory(authPlatform));
-          scram = activeScram; let clientFirst = new Uint8Array(0);
-          try {
-            clientFirst = await runStartupStep<Uint8Array>(context, (): Promise<Uint8Array> => activeScram.start(msg));
-            await writeExactBytes(context, clientFirst);
-          } finally { clientFirst.fill(0); }
-          continue;
+          scram = activeScram;
+          const clientFirst = await runSensitiveBytesStep(context, (): Promise<Uint8Array> => activeScram.start(msg), (): void => activeScram.dispose());
+          await writeSensitiveFrame(context, clientFirst); continue;
         }
         if (msg instanceof PostgresAuthenticationSaslContinue) {
           if (scram === null || scram.state !== PostgresScramClientState.Started) throw ArkDbError.protocol('Unexpected PostgreSQL SASLContinue message.');
-          const activeScram = scram; let clientFinal = new Uint8Array(0);
-          try {
-            clientFinal = await runStartupStep<Uint8Array>(context, (): Promise<Uint8Array> => activeScram.continue(msg));
-            await writeExactBytes(context, clientFinal);
-          } finally { clientFinal.fill(0); }
-          continue;
+          const activeScram = scram;
+          const clientFinal = await runSensitiveBytesStep(context, (): Promise<Uint8Array> => activeScram.continue(msg), (): void => activeScram.dispose());
+          await writeSensitiveFrame(context, clientFinal); continue;
         }
         if (msg instanceof PostgresAuthenticationSaslFinal) {
           if (scram === null || scram.state !== PostgresScramClientState.Continued) throw ArkDbError.protocol('Unexpected PostgreSQL SASLFinal message.');
@@ -83,12 +77,8 @@ export async function runPostgresStartup(context: PostgresStartupContext,
           if (authExchangeStarted) throw duplicateAuthChallenge();
           authExchangeStarted = true; const pw = context.readPassword();
           if (pw.length === 0) throw ArkDbError.validation('Password is required for PostgreSQL MD5 authentication.');
-          let payload = new Uint8Array(0);
-          try {
-            payload = await runStartupStep<Uint8Array>(context, (): Promise<Uint8Array> => buildPostgresMd5PasswordResponse(pw, context.config.user, msg.salt, authPlatform));
-            await runStartupStep<void>(context, (): Promise<void> => context.channel.writeMessage(0x70, payload));
-          } finally { payload.fill(0); }
-          continue;
+          const payload = await runSensitiveBytesStep(context, (): Promise<Uint8Array> => buildPostgresMd5PasswordResponse(pw, context.config.user, msg.salt, authPlatform));
+          await writeSensitivePasswordPayload(context, payload); continue;
         }
         if (msg instanceof PostgresAuthenticationCleartextPassword) {
           if (authExchangeStarted) throw duplicateAuthChallenge();
@@ -96,12 +86,8 @@ export async function runPostgresStartup(context: PostgresStartupContext,
           if (context.config.allowCleartextPassword && context.serverInfo.tlsActive && context.config.ssl.mode === PostgresSslMode.VERIFY_FULL && pw.length === 0) {
             throw ArkDbError.validation('Password is required for PostgreSQL cleartext password authentication.');
           }
-          let payload = new Uint8Array(0);
-          try {
-            payload = buildPostgresCleartextPasswordResponse(pw, context.config.allowCleartextPassword, context.serverInfo.tlsActive, context.config.ssl.mode);
-            await runStartupStep<void>(context, (): Promise<void> => context.channel.writeMessage(0x70, payload));
-          } finally { payload.fill(0); }
-          continue;
+          const payload = buildPostgresCleartextPasswordResponse(pw, context.config.allowCleartextPassword, context.serverInfo.tlsActive, context.config.ssl.mode);
+          await writeSensitivePasswordPayload(context, payload); continue;
         }
         if (msg instanceof PostgresAuthenticationRequest) {
           if (authExchangeStarted) throw duplicateAuthChallenge();
@@ -119,10 +105,7 @@ export async function runPostgresStartup(context: PostgresStartupContext,
       throw ArkDbError.protocol('Unexpected PostgreSQL backend message during post-authentication startup.');
     }
   } finally {
-    if (scram !== null && scram.state === PostgresScramClientState.Continued) {
-      try { scram.finalize(new PostgresAuthenticationSaslFinal(new Uint8Array(0))); } catch (_e) {}
-    }
-    scram = null;
+    if (scram !== null) { scram.dispose(); scram = null; }
   }
 }
 
@@ -142,12 +125,9 @@ async function negotiateTlsIfConfigured(context: PostgresStartupContext): Promis
   if (reply === null || reply.length !== 1) throw ArkDbError.tls('PostgreSQL SSLRequest did not receive a 1-byte server reply.');
   if (reply[0] === 0x53) {
     assertStartupActive(context);
-    if (context.transport.prepareTlsUpgrade === undefined || context.transport.upgradeToTls === undefined) {
-      throw ArkDbError.tls('PostgreSQL TLS upgrade is unavailable.');
-    }
+    if (context.transport.prepareTlsUpgrade === undefined || context.transport.upgradeToTls === undefined) throw ArkDbError.tls('PostgreSQL TLS upgrade is unavailable.');
     context.transport.prepareTlsUpgrade();
-    await runStartupStep<void>(context, (): Promise<void> =>
-      context.transport.upgradeToTls!(config.host, config.port, config.ssl, context.deadline.remainingMs()));
+    await runStartupStep<void>(context, (): Promise<void> => context.transport.upgradeToTls!(config.host, config.port, config.ssl, context.deadline.remainingMs()));
     assertStartupActive(context); context.serverInfo.tlsActive = true; return;
   }
   if (reply[0] === 0x4e) throw ArkDbError.tls('PostgreSQL server does not support TLS connections.', 'SSL_NOT_SUPPORTED');
@@ -163,16 +143,46 @@ function buildStartupParameters(context: PostgresStartupContext): PostgresStartu
   parameters.push({ name: 'client_encoding', value: 'UTF8' });
   return parameters;
 }
-
-async function writeExactBytes(context: PostgresStartupContext, frame: Uint8Array): Promise<void> {
-  const written = await runStartupStep<number>(context, (): Promise<number> => context.transport.write(frame));
-  if (!Number.isSafeInteger(written) || written !== frame.length) {
-    throw ArkDbError.protocol('PostgreSQL transport write was incomplete.');
+async function runSensitiveBytesStep(context: PostgresStartupContext,
+  operation: () => Promise<Uint8Array>, onAbandonedSettle?: () => void): Promise<Uint8Array> {
+  assertStartupActive(context); let abandoned = false; let hasResolved = false; let resolved = new Uint8Array(0);
+  const task = operation();
+  task.then((bytes: Uint8Array): void => {
+    if (abandoned) { bytes.fill(0); if (onAbandonedSettle !== undefined) onAbandonedSettle(); }
+    else { hasResolved = true; resolved = bytes; }
+  }, (): void => { if (abandoned && onAbandonedSettle !== undefined) onAbandonedSettle(); });
+  try { return await runStartupStep<Uint8Array>(context, (): Promise<Uint8Array> => task); }
+  catch (error) {
+    abandoned = true;
+    if (hasResolved) { resolved.fill(0); resolved = new Uint8Array(0); if (onAbandonedSettle !== undefined) onAbandonedSettle(); }
+    throw error as Error;
   }
 }
+async function writeSensitivePasswordPayload(context: PostgresStartupContext, payload: Uint8Array): Promise<void> {
+  if (payload.length > MAX_POSTGRES_MESSAGE_BYTES - POSTGRES_LENGTH_BYTES) {
+    payload.fill(0); throw ArkDbError.validation('PostgreSQL message exceeds the client limit');
+  }
+  const frame = new Uint8Array(payload.length + POSTGRES_NORMAL_HEADER_BYTES);
+  frame[0] = 0x70; new DataView(frame.buffer).setInt32(1, payload.length + POSTGRES_LENGTH_BYTES, false);
+  frame.set(payload, POSTGRES_NORMAL_HEADER_BYTES); payload.fill(0);
+  await writeSensitiveFrame(context, frame);
+}
+async function writeSensitiveFrame(context: PostgresStartupContext, frame: Uint8Array): Promise<void> {
+  let settled = false; let writeTask: Promise<number> | null = null;
+  try {
+    assertStartupActive(context);
+    const task = context.transport.write(frame); writeTask = task;
+    task.then((): void => { settled = true; frame.fill(0); }, (): void => { settled = true; frame.fill(0); });
+    const written = await runStartupStep<number>(context, (): Promise<number> => task);
+    if (!Number.isSafeInteger(written) || written !== frame.length) throw ArkDbError.protocol('PostgreSQL transport write was incomplete.');
+  } finally { if (writeTask === null || settled) frame.fill(0); }
+}
+async function writeExactBytes(context: PostgresStartupContext, frame: Uint8Array): Promise<void> {
+  const written = await runStartupStep<number>(context, (): Promise<number> => context.transport.write(frame));
+  if (!Number.isSafeInteger(written) || written !== frame.length) throw ArkDbError.protocol('PostgreSQL transport write was incomplete.');
+}
 function runStartupStep<T>(context: PostgresStartupContext, operation: () => Promise<T>): Promise<T> {
-  return context.deadline.wait<T>((): Promise<T> =>
-    context.settlement.raceClose<T>((): Promise<T> => { context.deadline.remainingMs(); return operation(); }));
+  return context.deadline.wait<T>((): Promise<T> => context.settlement.raceClose<T>((): Promise<T> => { context.deadline.remainingMs(); return operation(); }));
 }
 function assertStartupActive(context: PostgresStartupContext): void {
   if (context.settlement.closeReason !== null) throw context.settlement.closeReason;
@@ -183,6 +193,4 @@ function offersMechanism(mechanisms: string[], expected: string): boolean {
   for (const m of mechanisms) { if (m === expected) return true; }
   return false;
 }
-function duplicateAuthChallenge(): ArkDbError {
-  return ArkDbError.protocol('Unexpected duplicate PostgreSQL authentication challenge.');
-}
+function duplicateAuthChallenge(): ArkDbError { return ArkDbError.protocol('Unexpected duplicate PostgreSQL authentication challenge.'); }

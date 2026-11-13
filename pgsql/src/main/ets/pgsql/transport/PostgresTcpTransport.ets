@@ -82,12 +82,15 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
   }
   async send(data: Uint8Array): Promise<void> {
     const copy = new ArrayBuffer(data.length);
-    new Uint8Array(copy).set(data);
+    const bytes = new Uint8Array(copy);
+    bytes.set(data);
     const options: socket.TCPSendOptions = { data: copy };
     try {
       await this.tcp.send(options);
     } catch (error) {
       throw new Error(asMessage(error as Object));
+    } finally {
+      bytes.fill(0);
     }
   }
   async close(): Promise<void> {
@@ -150,11 +153,14 @@ class NetworkKitPostgresTlsSocket implements PostgresTlsSocket {
   }
   async send(data: Uint8Array): Promise<void> {
     const copy = new ArrayBuffer(data.length);
-    new Uint8Array(copy).set(data);
+    const bytes = new Uint8Array(copy);
+    bytes.set(data);
     try {
       await this.tls.send(copy);
     } catch (error) {
       throw new Error(asMessage(error as Object));
+    } finally {
+      bytes.fill(0);
     }
   }
   async close(): Promise<void> {

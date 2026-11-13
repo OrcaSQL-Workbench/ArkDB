@@ -79,14 +79,22 @@ export default function postgresStartupTest(): void {
       ]);
       expect((await asyncFail((): Promise<void> => new PostgresConnection(cfg, 'pencil', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(rogueSkipAuthOk), scramRunner).connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
 
+      const pausedPort = new PausedScramPort();
+      const raceScramRunner = createDefaultPostgresStartupRunner(new StubAuthPlatform(), (): PostgresScramPort => pausedPort);
+      const raceScramCfg = baseConfig(PostgresSslMode.DISABLED); raceScramCfg.user = 'user';
+      const raceScramConn = new PostgresConnection(raceScramCfg, 'pencil', new PassiveTimers(),
+        (): PostgresLifecycleTransport => wrapTcp(new ScriptedSocket([msgAuthSasl(['SCRAM-SHA-256']), msgAuthSaslContinue(RFC_SERVER_FIRST)])), raceScramRunner);
+      const pendingScramConnect = raceScramConn.connect();
+      await pausedPort.deriveEntered; await raceScramConn.close();
+      expect((await asyncFail((): Promise<void> => pendingScramConnect)).kind).assertEqual(ArkDbErrorKind.Cancelled);
+      pausedPort.releaseDerive(); await flushTicks(20);
+      expect(pausedPort.hmacAfterDispose).assertEqual(0);
       const emptyScramSock = new ScriptedSocket([msgAuthSasl(['SCRAM-SHA-256'])]);
-      const emptyScramCfg = baseConfig(PostgresSslMode.DISABLED); emptyScramCfg.user = 'user';
-      expect((await asyncFail((): Promise<void> => new PostgresConnection(emptyScramCfg, '', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(emptyScramSock), scramRunner).connect())).kind).assertEqual(ArkDbErrorKind.Validation);
+      expect((await asyncFail((): Promise<void> => new PostgresConnection(raceScramCfg, '', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(emptyScramSock), scramRunner).connect())).kind).assertEqual(ArkDbErrorKind.Validation);
       expect(emptyScramSock.tcpWrites.length).assertEqual(1);
-
       for (const badSeq of [[msgAuthSaslContinue(RFC_SERVER_FIRST)], [msgAuthSaslFinal(RFC_SERVER_FINAL)],
         [msgAuthSasl(['SCRAM-SHA-256']), msgAuthSaslFinal(RFC_SERVER_FINAL)], [msgAuthSasl(['SCRAM-SHA-256']), msgAuthCleartext()]]) {
-        expect((await asyncFail((): Promise<void> => new PostgresConnection(emptyScramCfg, 'pencil', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(new ScriptedSocket(badSeq)), scramRunner).connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
+        expect((await asyncFail((): Promise<void> => new PostgresConnection(raceScramCfg, 'pencil', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(new ScriptedSocket(badSeq)), scramRunner).connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
       }
     });
 
@@ -99,8 +107,24 @@ export default function postgresStartupTest(): void {
       const expectedMd5Frame = new Uint8Array(41);
       expectedMd5Frame[0] = 0x70; new DataView(expectedMd5Frame.buffer).setInt32(1, 40, false);
       expectedMd5Frame.set(strictUtf8Encode('md5d6f407104ca5ba8553d598fed7df90e0'), 5); expectedMd5Frame[40] = 0x00;
-      assertBytes(md5Sock.tcpWrites[1], expectedMd5Frame);
+      assertBytes(md5Sock.tcpWrites[1], expectedMd5Frame); assertZeroed(md5Sock.rawTcpWriteRefs[1]);
       await md5Conn.close();
+
+      const pausedMd5 = new PausedMd5Platform();
+      const raceMd5Conn = new PostgresConnection(md5Cfg, 'password', new PassiveTimers(),
+        (): PostgresLifecycleTransport => wrapTcp(new ScriptedSocket([msgAuthMd5([0x12, 0x34, 0x56, 0x78])])), createDefaultPostgresStartupRunner(pausedMd5));
+      const pendingMd5 = raceMd5Conn.connect();
+      await pausedMd5.entered; await raceMd5Conn.close();
+      expect((await asyncFail((): Promise<void> => pendingMd5)).kind).assertEqual(ArkDbErrorKind.Cancelled);
+      pausedMd5.release(); await flushTicks(20);
+
+      const clockTimers = new PassiveTimers(); const postExpiryCfg = baseConfig(PostgresSslMode.DISABLED);
+      postExpiryCfg.user = 'user'; postExpiryCfg.connectTimeoutMs = 500;
+      const postExpirySock = new ScriptedSocket([msgAuthSasl(['SCRAM-SHA-256']), msgAuthSaslContinue(RFC_SERVER_FIRST)]);
+      const postExpiryConn = new PostgresConnection(postExpiryCfg, 'pencil', clockTimers, (): PostgresLifecycleTransport => wrapTcp(postExpirySock),
+        createDefaultPostgresStartupRunner(new StubAuthPlatform(), (): PostgresScramPort => new PostExpiryScramPort(clockTimers)));
+      expect((await asyncFail((): Promise<void> => postExpiryConn.connect())).kind).assertEqual(ArkDbErrorKind.Timeout);
+      expect(postExpirySock.tcpWrites.length).assertEqual(2);
 
       const emptyMd5Sock = new ScriptedSocket([msgAuthMd5([0x12, 0x34, 0x56, 0x78])]);
       expect((await asyncFail((): Promise<void> => new PostgresConnection(md5Cfg, '', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(emptyMd5Sock), md5Runner).connect())).kind).assertEqual(ArkDbErrorKind.Validation);
@@ -115,7 +139,13 @@ export default function postgresStartupTest(): void {
       assertBytes(socket.tcpWrites[0], [0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f]);
       assertBytes(socket.tlsWrites[0], expectedStartupFrame('carol', 'analytics', ''));
       assertBytes(socket.tlsWrites[1], [0x70, 0x00, 0x00, 0x00, 0x0b, 0x73, 0x33, 0x63, 0x72, 0x33, 0x74, 0x00]);
+      assertZeroed(socket.rawTlsWriteRefs[1]);
       await conn.close();
+
+      const failWriteSock = new ScriptedSocket([new Uint8Array([0x53])], [msgAuthCleartext()]);
+      failWriteSock.failTlsSendAt = 2;
+      expect((await asyncFail((): Promise<void> => new PostgresConnection(cfg, 's3cr3t', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(failWriteSock)).connect())).kind).assertEqual(ArkDbErrorKind.Tls);
+      assertZeroed(failWriteSock.rawTlsWriteRefs[1]);
 
       for (const badMode of [PostgresSslMode.DISABLED, PostgresSslMode.REQUIRED, PostgresSslMode.VERIFY_CA]) {
         const modeSocket = badMode === PostgresSslMode.DISABLED ? new ScriptedSocket([msgAuthCleartext()]) : new ScriptedSocket([new Uint8Array([0x53])], [msgAuthCleartext()]);
@@ -197,15 +227,10 @@ export default function postgresStartupTest(): void {
   });
 }
 
-function baseConfig(mode: PostgresSslMode): PostgresConnectionConfig {
-  const cfg = new PostgresConnectionConfig(); cfg.host = 'pg.example.internal'; cfg.user = 'postgres'; cfg.ssl.mode = mode; return cfg;
-}
-function wrapTcp(socket: ScriptedSocket): PostgresLifecycleTransport {
-  return new WrappedTcpTransport(new PostgresTcpTransport(new SingleSocketFactory(socket), undefined, new PassiveTimers()));
-}
+function baseConfig(mode: PostgresSslMode): PostgresConnectionConfig { const cfg = new PostgresConnectionConfig(); cfg.host = 'pg.example.internal'; cfg.user = 'postgres'; cfg.ssl.mode = mode; return cfg; }
+function wrapTcp(socket: ScriptedSocket): PostgresLifecycleTransport { return new WrappedTcpTransport(new PostgresTcpTransport(new SingleSocketFactory(socket), undefined, new PassiveTimers())); }
 class WrappedTcpTransport implements PostgresLifecycleTransport {
-  private readonly inner: PostgresTcpTransport;
-  constructor(inner: PostgresTcpTransport) { this.inner = inner; }
+  private readonly inner: PostgresTcpTransport; constructor(inner: PostgresTcpTransport) { this.inner = inner; }
   connect(h: string, p: number, t: number): Promise<void> { return this.inner.connect(h, p, t); }
   prepareTlsUpgrade(): void { this.inner.prepareTlsUpgrade(); }
   upgradeToTls(h: string, p: number, c: PostgresSslConfig, t: number): Promise<void> { return this.inner.upgradeToTls(h, p, c, t); }
@@ -214,18 +239,15 @@ class WrappedTcpTransport implements PostgresLifecycleTransport {
   close(): Promise<void> { return this.inner.close(); }
   abort(e: ArkDbError): Promise<void> { return this.inner.abort(e); }
 }
-class SingleSocketFactory implements PostgresTcpSocketFactory {
-  private readonly socket: ScriptedSocket;
-  constructor(socket: ScriptedSocket) { this.socket = socket; }
-  create(): PostgresTcpSocket { return this.socket; }
-}
+class SingleSocketFactory implements PostgresTcpSocketFactory { private readonly s: ScriptedSocket; constructor(s: ScriptedSocket) { this.s = s; } create(): PostgresTcpSocket { return this.s; } }
 class ScriptedSocket implements PostgresTcpSocket, PostgresTlsSocket {
   readonly tcpWrites: Uint8Array[] = []; readonly tlsWrites: Uint8Array[] = [];
-  tlsUpgraded: boolean = false; peerVerified: boolean = false;
+  readonly rawTcpWriteRefs: Uint8Array[] = []; readonly rawTlsWriteRefs: Uint8Array[] = [];
+  tlsUpgraded: boolean = false; peerVerified: boolean = false; failTlsSendAt: number = 0;
   private readonly tcpReplies: Uint8Array[]; private readonly tlsReplies: Uint8Array[];
   private onTcpMsg: ((d: Uint8Array) => void) | null = null; private onTlsMsg: ((d: Uint8Array) => void) | null = null;
   constructor(tcpReplies: Uint8Array[], tlsReplies: Uint8Array[] = []) { this.tcpReplies = tcpReplies.slice(); this.tlsReplies = tlsReplies.slice(); }
-  listen(msg: (d: Uint8Array) => void, _close: () => void, _err: (f: Object) => void): void { if (!this.tlsUpgraded) this.onTcpMsg = msg; else this.onTlsMsg = msg; }
+  listen(msg: (d: Uint8Array) => void, _c: () => void, _e: (f: Object) => void): void { if (!this.tlsUpgraded) this.onTcpMsg = msg; else this.onTlsMsg = msg; }
   clearListeners(): void { if (!this.tlsUpgraded) this.onTcpMsg = null; else this.onTlsMsg = null; }
   async connect(_h: string, _p: number, _t: number): Promise<void> {}
   prepareUpgrade(): void { this.onTcpMsg = null; }
@@ -234,8 +256,14 @@ class ScriptedSocket implements PostgresTcpSocket, PostgresTlsSocket {
   async verifyPeerIdentity(_h: string): Promise<void> { this.peerVerified = true; }
   async send(data: Uint8Array): Promise<void> {
     const copy = new Uint8Array(data.length); copy.set(data);
-    if (!this.tlsUpgraded) { this.tcpWrites.push(copy); if (this.tcpReplies.length > 0 && this.onTcpMsg !== null) this.onTcpMsg(this.tcpReplies.shift()!); }
-    else { this.tlsWrites.push(copy); if (this.tlsReplies.length > 0 && this.onTlsMsg !== null) this.onTlsMsg(this.tlsReplies.shift()!); }
+    if (!this.tlsUpgraded) {
+      this.rawTcpWriteRefs.push(data); this.tcpWrites.push(copy);
+      if (this.tcpReplies.length > 0 && this.onTcpMsg !== null) this.onTcpMsg(this.tcpReplies.shift()!);
+    } else {
+      this.rawTlsWriteRefs.push(data); this.tlsWrites.push(copy);
+      if (this.failTlsSendAt > 0 && this.tlsWrites.length === this.failTlsSendAt) throw new Error('tls send failed');
+      if (this.tlsReplies.length > 0 && this.onTlsMsg !== null) this.onTlsMsg(this.tlsReplies.shift()!);
+    }
   }
   async close(): Promise<void> {}
 }
@@ -247,17 +275,15 @@ class NullReadTransport implements PostgresLifecycleTransport {
   async abort(_e: ArkDbError): Promise<void> {}
 }
 class PassiveTimers implements ConnectionTimerPort {
-  private nextId: number = 1;
-  nowMs(): number { return 1000; }
-  schedule(_h: () => void, _ms: number): number { return this.nextId++; }
+  currentMs: number = 1000; private id: number = 1;
+  nowMs(): number { return this.currentMs; }
+  schedule(_h: () => void, _ms: number): number { return this.id++; }
   cancel(_id: number): void {}
 }
 class StubAuthPlatform implements PostgresAuthPlatform {
   private md5Call: number = 0;
   async randomBytes(len: number): Promise<Uint8Array> { return new Uint8Array(len); }
-  async md5(_data: Uint8Array): Promise<Uint8Array> {
-    this.md5Call += 1; return hexBytes(this.md5Call === 1 ? '4d45974e13472b5a0be3533de4666414' : 'd6f407104ca5ba8553d598fed7df90e0');
-  }
+  async md5(_d: Uint8Array): Promise<Uint8Array> { this.md5Call += 1; return hexBytes(this.md5Call === 1 ? '4d45974e13472b5a0be3533de4666414' : 'd6f407104ca5ba8553d598fed7df90e0'); }
   async sha256(_d: Uint8Array): Promise<Uint8Array> { return new Uint8Array(32); }
   async hmacSha256(_k: Uint8Array, _d: Uint8Array): Promise<Uint8Array> { return new Uint8Array(32); }
   normalizeNfkc(val: string): string { return val; }
@@ -310,4 +336,40 @@ function hexBytes(hex: string): Uint8Array { const out = new Uint8Array(hex.leng
 function concatFrames(frames: Uint8Array[]): Uint8Array { let len = 0; for (const f of frames) len += f.length; const out = new Uint8Array(len); let off = 0; for (const f of frames) { out.set(f, off); off += f.length; } return out; }
 async function expectOk(op: () => Promise<void>): Promise<void> { let err: Object | null = null; try { await op(); } catch (e) { err = e as Object; } expect(err === null).assertTrue(); }
 async function asyncFail<T>(op: () => Promise<T>): Promise<ArkDbError> { let err: Object | null = null; try { await op(); } catch (e) { err = e as Object; } expect(err instanceof ArkDbError).assertTrue(); return err as ArkDbError; }
+class PausedMd5Platform extends StubAuthPlatform {
+  private openGate: () => void = (): void => {};
+  private notifyEntered: () => void = (): void => {};
+  readonly entered: Promise<void> = new Promise<void>((r: () => void): void => { this.notifyEntered = r; });
+  private readonly gate: Promise<void> = new Promise<void>((r: () => void): void => { this.openGate = r; });
+  release(): void { this.openGate(); }
+  async md5(data: Uint8Array): Promise<Uint8Array> { this.notifyEntered(); await this.gate; return super.md5(data); }
+}
+class PausedScramPort extends RfcScramPort {
+  hmacAfterDispose: number = 0; private closed: boolean = false; private hmacCount: number = 0;
+  private openGate: () => void = (): void => {}; private notifyEntered: () => void = (): void => {};
+  readonly deriveEntered: Promise<void> = new Promise<void>((r: () => void): void => { this.notifyEntered = r; });
+  private readonly gate: Promise<void> = new Promise<void>((r: () => void): void => { this.openGate = r; });
+  releaseDerive(): void { this.closed = true; this.openGate(); }
+  async hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+    this.hmacCount += 1;
+    if (this.closed) this.hmacAfterDispose += 1;
+    if (this.hmacCount === 1) { this.notifyEntered(); await this.gate; }
+    return super.hmacSha256(key, data);
+  }
+}
+class PostExpiryScramPort extends RfcScramPort {
+  private readonly timers: PassiveTimers; private calls: number = 0;
+  constructor(timers: PassiveTimers) { super(); this.timers = timers; }
+  async hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+    this.calls += 1; if (this.calls === 4) this.timers.currentMs += 1000;
+    return super.hmacSha256(key, data);
+  }
+}
+async function flushTicks(count: number): Promise<void> {
+  for (let i = 0; i < count; i += 1) await Promise.resolve();
+}
+function assertZeroed(actual: Uint8Array): void {
+  expect(actual.length > 0).assertTrue();
+  for (let i = 0; i < actual.length; i += 1) expect(actual[i]).assertEqual(0);
+}
 function assertBytes(actual: Uint8Array, expected: ArrayLike<number>): void { expect(actual.length).assertEqual(expected.length); for (let i = 0; i < expected.length; i += 1) expect(actual[i]).assertEqual(expected[i]); }

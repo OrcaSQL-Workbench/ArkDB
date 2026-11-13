@@ -384,9 +384,12 @@ export default function postgresConnectionLifecycleTest(): void {
         reentrantLc.commandGate.current === null && reentrantLc.commandGate.generation === 1 &&
         reentrantTransport.abortCalls === 1 && reentrantTransport.writtenFrames.length === 0).assertTrue();
 
+      let throwDirectObs = false;
+      const directObsGate = new PostgresCommandGate(
+        new TerminalSettlementObserver((): void => { if (throwDirectObs) throw new Error('direct reentrant terminal boom'); }));
       const directCloseTp = new FakeLifecycleTransport(); directCloseTp.abortFailure = ArkDbError.network('direct close abort failed');
-      const directCloseLc = readyLifecycle(new FakeTimerPort(), directCloseTp, 'pw-direct-close');
-      await directCloseLc.connect();
+      const directCloseLc = readyLifecycle(new FakeTimerPort(), directCloseTp, 'pw-direct-close', directObsGate);
+      await directCloseLc.connect(); throwDirectObs = true;
       let directCloseErrMessage = ''; let directCloseReturned = false;
       const directRun = directCloseLc.runCommand<void>(PostgresCommandKind.QueryStream, async (scope: PostgresCommandScope): Promise<void> => {
         const raced = await Promise.race<string>([
@@ -399,9 +402,32 @@ export default function postgresConnectionLifecycleTest(): void {
       const directRunErr = await asyncFail((): Promise<void> => directRun);
       expect(directCloseReturned && directCloseErrMessage === 'direct close abort failed' &&
         directRunErr.kind === ArkDbErrorKind.Cancelled && directRunErr.message.indexOf('direct close abort failed') >= 0 &&
+        directRunErr.message.indexOf('direct reentrant terminal boom') >= 0 &&
         directCloseLc.state === ConnectionState.Closed && directCloseLc.commandGate.current === null &&
         directCloseLc.commandGate.generation === 1 && directCloseTp.abortCalls === 1 && directCloseTp.writtenFrames.length === 0).assertTrue();
       await directCloseLc.close();
+
+      let throwRaceObs = false;
+      const obsRaceGate = new PostgresCommandGate(
+        new TerminalSettlementObserver((): void => { if (throwRaceObs) throw new Error('close race terminal boom'); }));
+      const obsRaceTp = new FakeLifecycleTransport(); obsRaceTp.abortFailure = ArkDbError.network('close race abort failed');
+      const obsRaceLc = readyLifecycle(new FakeTimerPort(), obsRaceTp, 'pw-obs-race', obsRaceGate);
+      await obsRaceLc.connect(); throwRaceObs = true;
+      let markObsRead: () => void = (): void => {}; const obsReadStarted = new Promise<void>((r: () => void): void => { markObsRead = r; });
+      const pendingObsQuery = obsRaceLc.runCommand<void>(PostgresCommandKind.Query,
+        async (_s: PostgresCommandScope, ch: PostgresMessageChannel): Promise<void> => {
+          const r = ch.readMessage(); markObsRead(); await r;
+        });
+      await obsReadStarted;
+      const obsRacingClose = obsRaceLc.close();
+      const obsQueryErr = await asyncFail((): Promise<void> => pendingObsQuery);
+      const obsRacingCloseErr = await asyncFail((): Promise<void> => obsRacingClose);
+      expect(obsQueryErr.kind === ArkDbErrorKind.Cancelled && obsQueryErr.message.indexOf('close race abort failed') >= 0 &&
+        obsQueryErr.message.indexOf('close race terminal boom') >= 0 &&
+        obsRacingCloseErr.message.indexOf('close race abort failed') >= 0 &&
+        obsRacingCloseErr.message.indexOf('close race terminal boom') >= 0 &&
+        obsRaceLc.state === ConnectionState.Closed && obsRaceLc.commandGate.current === null && obsRaceLc.commandGate.generation === 1).assertTrue();
+      await obsRaceLc.close();
 
       const retireRaceTp = new FakeLifecycleTransport(); retireRaceTp.hangAbort = true;
       retireRaceTp.abortFailure = ArkDbError.network('retire race abort failed');

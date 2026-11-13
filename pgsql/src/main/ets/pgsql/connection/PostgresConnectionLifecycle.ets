@@ -139,6 +139,8 @@ export class PostgresConnectionLifecycle {
   private activeSettlement: PostgresCommandCloseSettlement | null = null;
   private closedSettlement: PostgresCommandCloseSettlement | null = null;
   private closedSettlementRelease: Promise<ArkDbError | null> | null = null;
+  private closedSettlementTerminalError: ArkDbError | null = null;
+  private awaitingClosedSettlement: boolean = false;
   private closing: Promise<void> | null = null;
   private releaseTask: Promise<ArkDbError | null> | null = null;
   private closeRequested: boolean = false;
@@ -292,29 +294,37 @@ export class PostgresConnectionLifecycle {
         this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed; return;
       }
       const closeReason = ArkDbError.cancelled('PostgreSQL connection closed during operation.');
-      this.closeRequested = true; if (settlement !== null) this.closedSettlement = settlement;
-      this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
-      if (this.commandGate.isOwner(activeScope)) {
-        this.commandGate.advanceGenerationOnRelease(activeScope);
-        if (activeScope.phase !== PostgresCommandPhase.Closing) this.commandGate.setPhase(activeScope, PostgresCommandPhase.Closing);
-      }
-      const activeDeadline = this.opening; this.opening = null;
-      const timerErr = safeCancelDeadline(activeDeadline, closeReason);
-      if (settlement !== null) settlement.signalClose(closeReason);
-      let cleanup = await this.releaseTransport(closeReason);
+      this.closeRequested = true;
       if (settlement !== null) {
-        await Promise.resolve();
-        if (this.closedSettlement === settlement && this.closedSettlementRelease !== null) {
-          const lateCleanup = await this.closedSettlementRelease;
-          if (lateCleanup !== null) {
-            cleanup = cleanup !== null && lateCleanup !== cleanup ? postgresAppendCleanupError(cleanup, lateCleanup) : lateCleanup;
-          }
-        }
-        await settleOrDrainMicrotasks(settlement.settled);
+        this.closedSettlement = settlement; this.closedSettlementTerminalError = null; this.awaitingClosedSettlement = true;
       }
-      this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
-      const failure = timerErr !== null && cleanup !== null && cleanup !== timerErr ?
-        postgresAppendCleanupError(timerErr, cleanup) : (timerErr !== null ? timerErr : cleanup);
+      let timerErr: ArkDbError | null = null; let cleanup: ArkDbError | null = null; let terminalErr: ArkDbError | null = null;
+      try {
+        this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
+        if (this.commandGate.isOwner(activeScope)) {
+          this.commandGate.advanceGenerationOnRelease(activeScope);
+          if (activeScope.phase !== PostgresCommandPhase.Closing) this.commandGate.setPhase(activeScope, PostgresCommandPhase.Closing);
+        }
+        const activeDeadline = this.opening; this.opening = null;
+        timerErr = safeCancelDeadline(activeDeadline, closeReason);
+        if (settlement !== null) settlement.signalClose(closeReason);
+        cleanup = await this.releaseTransport(closeReason);
+        if (settlement !== null) {
+          await Promise.resolve();
+          if (this.closedSettlement === settlement && this.closedSettlementRelease !== null) {
+            cleanup = composeOptionalErrors(cleanup, await this.closedSettlementRelease);
+          }
+          await settleOrDrainMicrotasks(settlement.settled);
+          if (this.closedSettlement === settlement) terminalErr = this.closedSettlementTerminalError;
+        }
+      } finally {
+        this.awaitingClosedSettlement = false;
+        if (settlement !== null && this.activeSettlement !== settlement && this.closedSettlement === settlement) {
+          this.closedSettlement = null; this.closedSettlementRelease = null; this.closedSettlementTerminalError = null;
+        }
+        this.clearSecretsAndChannel(); this.currentState = ConnectionState.Closed;
+      }
+      const failure = composeOptionalErrors(composeOptionalErrors(timerErr, cleanup), terminalErr);
       if (failure !== null) throw failure;
       return;
     }
@@ -449,19 +459,19 @@ export class PostgresConnectionLifecycle {
   private releaseScopeSafe(scope: PostgresCommandScope, failure: ArkDbError | null): ArkDbError | null {
     if (!this.commandGate.isOwner(scope)) return failure;
     try { this.commandGate.release(scope); return failure; } catch (e) {
-      const relErr = toPostgresArkDbError(e as Object);
-      return failure !== null && relErr !== failure ? postgresAppendCleanupError(failure, relErr) : relErr;
+      return composeOptionalErrors(failure, toPostgresArkDbError(e as Object));
     }
   }
   private finishScope(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement, failure: ArkDbError | null): ArkDbError | null {
     if (this.activeSettlement === settlement) this.activeSettlement = null;
-    if (this.closedSettlement === settlement) { this.closedSettlement = null; this.closedSettlementRelease = null; }
-    let current = failure;
-    try { settlement.markSettled(); } catch (e) {
-      const err = toPostgresArkDbError(e as Object);
-      current = current !== null && err !== current ? postgresAppendCleanupError(current, err) : err;
+    let scopeEndErr: ArkDbError | null = null;
+    try { settlement.markSettled(); } catch (e) { scopeEndErr = toPostgresArkDbError(e as Object); }
+    scopeEndErr = this.releaseScopeSafe(scope, scopeEndErr);
+    if (this.closedSettlement === settlement) {
+      if (this.awaitingClosedSettlement) this.closedSettlementTerminalError = scopeEndErr;
+      else { this.closedSettlement = null; this.closedSettlementRelease = null; this.closedSettlementTerminalError = null; }
     }
-    return this.releaseScopeSafe(scope, current);
+    return composeOptionalErrors(failure, scopeEndErr);
   }
   private releaseTransport(abortReason: ArkDbError | null): Promise<ArkDbError | null> {
     if (this.activeSettlement !== null && this.closedSettlement === this.activeSettlement && this.closedSettlementRelease !== null) {
@@ -537,6 +547,11 @@ function safeDisposeDeadline(deadline: ConnectionDeadline | null): ArkDbError | 
 function safeCancelDeadline(deadline: ConnectionDeadline | null, reason: ArkDbError): ArkDbError | null {
   if (deadline === null) return null;
   try { deadline.cancel(reason); return null; } catch (error) { return toPostgresArkDbError(error as Object, ArkDbErrorKind.Protocol); }
+}
+function composeOptionalErrors(primary: ArkDbError | null, secondary: ArkDbError | null): ArkDbError | null {
+  if (primary === null) return secondary;
+  if (secondary === null || secondary === primary) return primary;
+  return postgresAppendCleanupError(primary, secondary);
 }
 function settleOrDrainMicrotasks(settled: Promise<void>): Promise<void> {
   return Promise.race<void>([settled, drainMicrotasks()]);

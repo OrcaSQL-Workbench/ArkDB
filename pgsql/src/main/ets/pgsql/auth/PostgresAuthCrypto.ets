@@ -83,13 +83,14 @@ export async function secureRandomBytes(length: number,
 export async function sha256(data: Uint8Array,
   platform: PostgresAuthPlatform = SYSTEM_PLATFORM): Promise<Uint8Array> {
   requireBytes(data, MAX_INPUT_BYTES, 'PostgreSQL SHA-256 input');
-  let result: Uint8Array;
+  const input = copyBytes(data); let result: Uint8Array | null = null;
   try {
-    result = await platform.sha256(copyBytes(data));
-  } catch (_error) {
-    throw ArkDbError.auth('PostgreSQL SHA-256 is unavailable.');
+    try { result = await platform.sha256(input); }
+    catch (_error) { throw ArkDbError.auth('PostgreSQL SHA-256 is unavailable.'); }
+    return requirePlatformBytes(result, SHA256_BYTES, 'PostgreSQL SHA-256');
+  } finally {
+    input.fill(0); if (result instanceof Uint8Array) result.fill(0);
   }
-  return requirePlatformBytes(result, SHA256_BYTES, 'PostgreSQL SHA-256');
 }
 /**
  * Builds the NUL-terminated password payload for legacy PostgreSQL MD5 authentication.
@@ -170,39 +171,50 @@ export async function hmacSha256(key: Uint8Array, data: Uint8Array,
   platform: PostgresAuthPlatform = SYSTEM_PLATFORM): Promise<Uint8Array> {
   requireBytes(key, MAX_INPUT_BYTES, 'PostgreSQL HMAC key');
   requireBytes(data, MAX_INPUT_BYTES, 'PostgreSQL HMAC input');
-  const dataSnapshot = copyBytes(data);
-  return invokeHmac(await hmacKeyBlock(key, platform), dataSnapshot, platform);
+  const dataSnapshot = copyBytes(data); let keyBlock = new Uint8Array(0);
+  try { keyBlock = await hmacKeyBlock(key, platform); return await invokeHmac(keyBlock, dataSnapshot, platform); }
+  finally { keyBlock.fill(0); dataSnapshot.fill(0); }
 }
 export async function pbkdf2HmacSha256(password: Uint8Array, salt: Uint8Array,
   iterations: number, derivedKeyBytes: number,
-  platform: PostgresAuthPlatform = SYSTEM_PLATFORM): Promise<Uint8Array> {
+  platform: PostgresAuthPlatform = SYSTEM_PLATFORM,
+  shouldAbort?: () => boolean): Promise<Uint8Array> {
   requireBytes(password, MAX_INPUT_BYTES, 'PostgreSQL PBKDF2 password');
   requireBytes(salt, MAX_INPUT_BYTES - 4, 'PostgreSQL PBKDF2 salt');
-  requireIntegerRange(iterations, 1, MAX_PBKDF2_ITERATIONS,
-    'PostgreSQL PBKDF2 iteration count');
-  requireIntegerRange(derivedKeyBytes, 1, MAX_DERIVED_KEY_BYTES,
-    'PostgreSQL PBKDF2 derived-key length');
-  const passwordSnapshot = copyBytes(password);
-  const saltSnapshot = copyBytes(salt);
-  const keyBlock = await hmacKeyBlock(passwordSnapshot, platform);
-  const output = new Uint8Array(derivedKeyBytes);
-  const blocks = Math.ceil(derivedKeyBytes / SHA256_BYTES);
-  for (let block = 1; block <= blocks; block += 1) {
-    const firstInput = new Uint8Array(saltSnapshot.length + 4);
-    firstInput.set(saltSnapshot);
-    new DataView(firstInput.buffer).setUint32(saltSnapshot.length, block, false);
-    let value = await invokeHmac(keyBlock, firstInput, platform);
-    const accumulated = copyBytes(value);
-    for (let iteration = 1; iteration < iterations; iteration += 1) {
-      value = await invokeHmac(keyBlock, value, platform);
-      for (let index = 0; index < SHA256_BYTES; index += 1) {
-        accumulated[index] ^= value[index];
-      }
+  requireIntegerRange(iterations, 1, MAX_PBKDF2_ITERATIONS, 'PostgreSQL PBKDF2 iteration count');
+  requireIntegerRange(derivedKeyBytes, 1, MAX_DERIVED_KEY_BYTES, 'PostgreSQL PBKDF2 derived-key length');
+  const passwordSnapshot = copyBytes(password); const saltSnapshot = copyBytes(salt);
+  let keyBlock = new Uint8Array(0); const output = new Uint8Array(derivedKeyBytes);
+  try {
+    if (shouldAbort !== undefined && shouldAbort()) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    keyBlock = await hmacKeyBlock(passwordSnapshot, platform);
+    passwordSnapshot.fill(0);
+    const blocks = Math.ceil(derivedKeyBytes / SHA256_BYTES);
+    for (let block = 1; block <= blocks; block += 1) {
+      const firstInput = new Uint8Array(saltSnapshot.length + 4);
+      firstInput.set(saltSnapshot);
+      new DataView(firstInput.buffer).setUint32(saltSnapshot.length, block, false);
+      let value = new Uint8Array(0); let accumulated = new Uint8Array(0);
+      try {
+        if (shouldAbort !== undefined && shouldAbort()) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+        value = await invokeHmac(keyBlock, firstInput, platform);
+        accumulated = copyBytes(value);
+        for (let iteration = 1; iteration < iterations; iteration += 1) {
+          if (shouldAbort !== undefined && shouldAbort()) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+          const next = await invokeHmac(keyBlock, value, platform);
+          value.fill(0); value = next;
+          for (let index = 0; index < SHA256_BYTES; index += 1) accumulated[index] ^= value[index];
+        }
+        const offset = (block - 1) * SHA256_BYTES;
+        output.set(accumulated.subarray(0, Math.min(SHA256_BYTES, derivedKeyBytes - offset)), offset);
+      } finally { firstInput.fill(0); value.fill(0); accumulated.fill(0); }
     }
-    const offset = (block - 1) * SHA256_BYTES;
-    output.set(accumulated.subarray(0, Math.min(SHA256_BYTES, derivedKeyBytes - offset)), offset);
+    return output;
+  } catch (error) {
+    output.fill(0); throw error as Error;
+  } finally {
+    passwordSnapshot.fill(0); saltSnapshot.fill(0); keyBlock.fill(0);
   }
-  return output;
 }
 export function base64Encode(data: Uint8Array): string {
   requireBytes(data, MAX_INPUT_BYTES, 'PostgreSQL base64 input');
@@ -325,20 +337,25 @@ async function md5Digest(data: Uint8Array,
 }
 async function invokeHmac(key: Uint8Array, data: Uint8Array,
   platform: PostgresAuthPlatform): Promise<Uint8Array> {
-  let result: Uint8Array;
+  const keyCopy = copyBytes(key); const dataCopy = copyBytes(data);
+  let result: Uint8Array | null = null;
   try {
-    result = await platform.hmacSha256(copyBytes(key), copyBytes(data));
-  } catch (_error) {
-    throw ArkDbError.auth('PostgreSQL HMAC-SHA256 is unavailable.');
+    try { result = await platform.hmacSha256(keyCopy, dataCopy); }
+    catch (_error) { throw ArkDbError.auth('PostgreSQL HMAC-SHA256 is unavailable.'); }
+    return requirePlatformBytes(result, SHA256_BYTES, 'PostgreSQL HMAC-SHA256');
+  } finally {
+    keyCopy.fill(0); dataCopy.fill(0);
+    if (result instanceof Uint8Array) result.fill(0);
   }
-  return requirePlatformBytes(result, SHA256_BYTES, 'PostgreSQL HMAC-SHA256');
 }
 async function hmacKeyBlock(key: Uint8Array,
   platform: PostgresAuthPlatform): Promise<Uint8Array> {
-  const source = key.length > HMAC_BLOCK_BYTES ? await sha256(key, platform) : key;
-  const block = new Uint8Array(HMAC_BLOCK_BYTES);
-  block.set(source);
-  return block;
+  const hashed = key.length > HMAC_BLOCK_BYTES ? await sha256(key, platform) : null;
+  try {
+    const block = new Uint8Array(HMAC_BLOCK_BYTES);
+    block.set(hashed !== null ? hashed : key);
+    return block;
+  } finally { if (hashed !== null) hashed.fill(0); }
 }
 function requirePlatformBytes(value: Uint8Array | null, expectedLength: number,
   label: string): Uint8Array {
@@ -450,7 +467,7 @@ export interface PostgresScramPort {
   createNonce(): Promise<string>;
   preparePassword(value: string): Uint8Array;
   deriveSaltedPassword(password: Uint8Array, salt: Uint8Array,
-    iterations: number): Promise<Uint8Array>;
+    iterations: number, shouldAbort?: () => boolean): Promise<Uint8Array>;
   sha256(data: Uint8Array): Promise<Uint8Array>;
   hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array>;
 }
@@ -458,6 +475,7 @@ export interface PostgresScramPort {
 export class PostgresScramClient {
   private currentState: PostgresScramClientState = PostgresScramClientState.Initial;
   private inFlight: boolean = false;
+  private disposed: boolean = false;
   private readonly username: string;
   private password: string;
   private readonly port: PostgresScramPort;
@@ -482,7 +500,7 @@ export class PostgresScramClient {
         throw ArkDbError.unsupported('PostgreSQL server does not offer SCRAM-SHA-256.');
       }
       validateScramUsername(this.username);
-      this.clientNonce = await this.port.createNonce();
+      this.clientNonce = await this.awaitActive<string>((): Promise<string> => this.port.createNonce());
       if (!isPrintableScramNonce(this.clientNonce) ||
         this.clientNonce.length >= MAX_SCRAM_NONCE_CHARACTERS) {
         throw ArkDbError.auth('PostgreSQL SCRAM nonce generation returned invalid data.');
@@ -541,24 +559,25 @@ export class PostgresScramClient {
       password = copyScramClientBytes(this.port.preparePassword(this.password),
         MAX_SCRAM_PASSWORD_BYTES, 'prepared password');
       this.password = '';
-      saltedPassword = copyScramCryptoBytes(await this.port.deriveSaltedPassword(
-        password, salt, iterations), 'Salted Password');
-      clientKey = copyScramCryptoBytes(await this.port.hmacSha256(
-        saltedPassword, strictUtf8Encode('Client Key')), 'Client Key');
-      storedKey = copyScramCryptoBytes(await this.port.sha256(clientKey), 'Stored Key');
+      saltedPassword = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.deriveSaltedPassword(
+          password, salt, iterations, (): boolean => this.disposed), 'Salted Password');
+      password.fill(0);
+      clientKey = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.hmacSha256(saltedPassword, strictUtf8Encode('Client Key')), 'Client Key');
+      storedKey = await this.awaitActiveBytes((): Promise<Uint8Array> => this.port.sha256(clientKey), 'Stored Key');
       const finalWithoutProof = 'c=' + SCRAM_CHANNEL_BINDING + ',r=' + combinedNonce;
-      authMessage = strictUtf8Encode(this.clientFirstBare + ',' +
-        parsed.text + ',' + finalWithoutProof);
+      authMessage = strictUtf8Encode(this.clientFirstBare + ',' + parsed.text + ',' + finalWithoutProof);
       if (authMessage.length > MAX_SCRAM_MESSAGE_BYTES) {
         throw ArkDbError.auth('PostgreSQL SCRAM authentication message exceeds its limit.');
       }
-      clientSignature = copyScramCryptoBytes(await this.port.hmacSha256(
-        storedKey, authMessage), 'Client Signature');
+      clientSignature = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.hmacSha256(storedKey, authMessage), 'Client Signature');
       proof = xorBytes(clientKey, clientSignature);
-      serverKey = copyScramCryptoBytes(await this.port.hmacSha256(
-        saltedPassword, strictUtf8Encode('Server Key')), 'Server Key');
-      serverSignature = copyScramCryptoBytes(await this.port.hmacSha256(
-        serverKey, authMessage), 'Server Signature');
+      serverKey = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.hmacSha256(saltedPassword, strictUtf8Encode('Server Key')), 'Server Key');
+      serverSignature = await this.awaitActiveBytes(
+        (): Promise<Uint8Array> => this.port.hmacSha256(serverKey, authMessage), 'Server Signature');
       this.expectedServerSignature = copyBytes(serverSignature);
       response = strictUtf8Encode(
         finalWithoutProof + ',p=' + base64Encode(proof));
@@ -568,7 +587,11 @@ export class PostgresScramClient {
       this.clientNonce = '';
       this.clientFirstBare = '';
       this.currentState = PostgresScramClientState.Continued;
-      return PostgresFrontendSerializer.saslResponse(response);
+      const frame = new Uint8Array(response.length + 5);
+      frame[0] = 0x70;
+      new DataView(frame.buffer).setInt32(1, response.length + 4, false);
+      frame.set(response, 5);
+      return frame;
     } catch (error) {
       this.fail();
       if (error instanceof ArkDbError) throw error;
@@ -611,8 +634,33 @@ export class PostgresScramClient {
     }
   }
 
+  dispose(): void {
+    this.disposed = true;
+    this.clearSensitive();
+    if (this.currentState !== PostgresScramClientState.Finalized) {
+      this.currentState = PostgresScramClientState.Failed;
+    }
+  }
+
+  private async awaitActive<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.disposed) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    const value = await operation();
+    if (this.disposed) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    return value;
+  }
+
+  private async awaitActiveBytes(operation: () => Promise<Uint8Array>, label: string): Promise<Uint8Array> {
+    if (this.disposed) throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    const value = await operation();
+    if (this.disposed) {
+      value.fill(0);
+      throw ArkDbError.cancelled('PostgreSQL SCRAM client was disposed.');
+    }
+    try { return copyScramCryptoBytes(value, label); } finally { value.fill(0); }
+  }
+
   private enterState(expected: PostgresScramClientState): void {
-    if (this.currentState !== expected || this.inFlight) {
+    if (this.disposed || this.currentState !== expected || this.inFlight) {
       throw ArkDbError.validation('PostgreSQL SCRAM call is out of order.');
     }
     this.inFlight = true;
@@ -789,10 +837,14 @@ function validateScramPasswordLength(value: string): void {
 
 function copyScramClientBytes(value: Uint8Array, maximum: number,
   label: string): Uint8Array {
-  if (value.length > maximum) {
-    throw ArkDbError.validation('PostgreSQL SCRAM ' + label + ' exceeds its limit.');
+  try {
+    if (value.length > maximum) {
+      throw ArkDbError.validation('PostgreSQL SCRAM ' + label + ' exceeds its limit.');
+    }
+    return copyBytes(value);
+  } finally {
+    value.fill(0);
   }
-  return copyBytes(value);
 }
 
 function copyScramCryptoBytes(value: Uint8Array, label: string): Uint8Array {

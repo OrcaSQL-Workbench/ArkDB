@@ -4,7 +4,7 @@ import { PostgresConnection } from '../../../main/ets/pgsql/PostgresConnection';
 import { PostgresConnectionLifecycle, PostgresLifecycleTransport, PostgresStartupContext, PostgresStartupRunner } from '../../../main/ets/pgsql/connection/PostgresConnectionLifecycle';
 import { PostgresCommandGate, PostgresCommandKind, PostgresCommandLifecycleObserver, PostgresCommandPhase, PostgresCommandScope } from '../../../main/ets/pgsql/execution/PostgresCommandGate';
 import { PostgresCommandCloseSettlement } from '../../../main/ets/pgsql/execution/PostgresSettlements';
-import { PostgresConnectionConfig } from '../../../main/ets/pgsql/model/PostgresConnectionConfig';
+import { PostgresConnectionConfig, PostgresSslMode } from '../../../main/ets/pgsql/model/PostgresConnectionConfig';
 import { PostgresError, PostgresTransactionState } from '../../../main/ets/pgsql/model/PostgresModels';
 import { PostgresMessageChannel, PostgresReadyStatus } from '../../../main/ets/pgsql/protocol/PostgresMessageChannel';
 
@@ -12,17 +12,19 @@ export default function postgresConnectionLifecycleTest(): void {
   describe('PostgresConnectionLifecycle', () => {
     it('transitionsConnectThroughAuthenticatingToReadyWithIsolatedSecrets', 0, async () => {
       expect(syncFail((): void => { new PostgresConnectionLifecycle(new PostgresConnectionConfig(), 'pw'); }).kind).assertEqual(ArkDbErrorKind.Validation);
-      let unimplementedCreated = false; const callerCfg = validConfig();
-      const unimplemented = new PostgresConnectionLifecycle(callerCfg, 'pw-default', new FakeTimerPort(),
-        (): PostgresLifecycleTransport => { unimplementedCreated = true; return new FakeLifecycleTransport(); });
+      const defaultTp = new FakeLifecycleTransport();
+      defaultTp.queuedReads.push(new Uint8Array([0x52, 0, 0, 0, 8]), new Uint8Array([0, 0, 0, 0]), new Uint8Array([0x5a, 0, 0, 0, 5]), new Uint8Array([0x49]));
+      const callerCfg = validConfig(); callerCfg.ssl.mode = PostgresSslMode.DISABLED;
+      const defaultLc = new PostgresConnectionLifecycle(callerCfg, 'pw-default', new FakeTimerPort(),
+        (): PostgresLifecycleTransport => defaultTp);
       callerCfg.host = '';
-      expect(unimplemented.config.host === 'db.example.internal' && unimplemented.state === ConnectionState.Idle &&
-        !unimplemented.sessionStatus.known && unimplemented.serverInfo.driverId === 'pgsql' && unimplemented.serverInfo.productName === 'PostgreSQL').assertTrue();
-      expect((await asyncFail((): Promise<void> => unimplemented.connect())).kind).assertEqual(ArkDbErrorKind.Unsupported);
-      expect(!unimplementedCreated && unimplemented.state === ConnectionState.Idle && unimplemented.commandGate.current === null && unimplemented.commandGate.generation === 0).assertTrue();
-      await unimplemented.close(); await unimplemented.close();
-      expect(!unimplementedCreated && unimplemented.state === ConnectionState.Closed && unimplemented.commandGate.generation === 1).assertTrue();
-      expect((await asyncFail((): Promise<void> => unimplemented.connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
+      expect(defaultLc.config.host === 'db.example.internal' && defaultLc.state === ConnectionState.Idle &&
+        !defaultLc.sessionStatus.known && defaultLc.serverInfo.driverId === 'pgsql' && defaultLc.serverInfo.productName === 'PostgreSQL').assertTrue();
+      let connErr1: Object | null = null; try { await defaultLc.connect(); } catch (e) { connErr1 = e as Object; }
+      expect(connErr1 === null && defaultLc.state === ConnectionState.Ready && defaultLc.sessionStatus.known && defaultLc.commandGate.current === null).assertTrue();
+      await defaultLc.close(); await defaultLc.close();
+      expect(defaultLc.state === ConnectionState.Closed && defaultLc.commandGate.generation === 1).assertTrue();
+      expect((await asyncFail((): Promise<void> => defaultLc.connect())).kind).assertEqual(ArkDbErrorKind.Protocol);
 
       const password = 'pw-never-serialized-991'; const secretBytes = new Uint8Array([0x12, 0x34, 0x56, 0x78]);
       const transport = new FakeLifecycleTransport();
@@ -542,8 +544,12 @@ export default function postgresConnectionLifecycleTest(): void {
       expect(extLc.commandGate.current === null && extLc.commandGate.generation === 1).assertTrue();
 
       expect(syncFail((): void => { new PostgresConnection(new PostgresConnectionConfig(), 'pw'); }).kind).assertEqual(ArkDbErrorKind.Validation);
-      const defaultConn = new PostgresConnection(validConfig(), 'pw-default-conn');
-      expect((await asyncFail((): Promise<void> => defaultConn.connect())).kind).assertEqual(ArkDbErrorKind.Unsupported);
+      const defaultConnTp = new FakeLifecycleTransport();
+      defaultConnTp.queuedReads.push(new Uint8Array([0x52, 0, 0, 0, 8]), new Uint8Array([0, 0, 0, 0]), new Uint8Array([0x5a, 0, 0, 0, 5]), new Uint8Array([0x49]));
+      const defaultConnCfg = validConfig(); defaultConnCfg.ssl.mode = PostgresSslMode.DISABLED;
+      const defaultConn = new PostgresConnection(defaultConnCfg, 'pw-default-conn', new FakeTimerPort(), (): PostgresLifecycleTransport => defaultConnTp);
+      let connErr2: Object | null = null; try { await defaultConn.connect(); } catch (e) { connErr2 = e as Object; }
+      expect(connErr2 === null && defaultConn.state === ConnectionState.Ready).assertTrue();
       const dc1 = defaultConn.close(); const dc2 = defaultConn.close();
       expect(dc1 === dc2 && defaultConn.state === ConnectionState.Closed).assertTrue();
       await Promise.all([dc1, dc2]);

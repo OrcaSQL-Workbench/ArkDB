@@ -390,10 +390,12 @@ export class PostgresMessageChannel {
 
   readMessage(): Promise<PostgresMessage> {
     return this.runExclusive(async (): Promise<PostgresMessage> => {
-      const reader = new PostgresByteReader(
-        await this.readExact(POSTGRES_NORMAL_HEADER_BYTES), POSTGRES_NORMAL_HEADER_BYTES);
-      const type = reader.readUInt8();
-      const length = reader.readInt32();
+      const header = await this.readExact(POSTGRES_NORMAL_HEADER_BYTES);
+      let type = 0; let length = 0;
+      try {
+        const reader = new PostgresByteReader(header, POSTGRES_NORMAL_HEADER_BYTES);
+        type = reader.readUInt8(); length = reader.readInt32();
+      } finally { header.fill(0); }
       if (length < POSTGRES_LENGTH_BYTES || length > MAX_POSTGRES_MESSAGE_BYTES) {
         throw this.failure('Invalid PostgreSQL message length');
       }
@@ -435,23 +437,30 @@ export class PostgresMessageChannel {
     if (!Number.isSafeInteger(length) || length < 0 || length > MAX_POSTGRES_MESSAGE_BYTES) {
       throw this.failure('Invalid PostgreSQL exact read length');
     }
-    const output = new Uint8Array(length);
-    let offset = 0;
-    while (offset < length) {
-      let chunk: Uint8Array | null = null;
-      try {
-        chunk = await this.transport.read(length - offset);
-      } catch (_error) {
-        throw this.failure('PostgreSQL transport read failed');
+    if (length === 0) return new Uint8Array(0);
+    let output: Uint8Array | null = null; let offset = 0;
+    try {
+      while (offset < length) {
+        let chunk: Uint8Array | null = null;
+        try { chunk = await this.transport.read(length - offset); }
+        catch (_error) { throw this.failure('PostgreSQL transport read failed'); }
+        if (chunk === null) throw this.failure('PostgreSQL message is truncated');
+        if (chunk.length === 0 || chunk.length > length - offset) {
+          chunk.fill(0);
+          throw this.failure('PostgreSQL transport returned an invalid chunk');
+        }
+        if (offset === 0 && chunk.length === length && chunk.byteOffset === 0 && chunk.buffer.byteLength === length) {
+          return chunk;
+        }
+        if (output === null) output = new Uint8Array(length);
+        output.set(chunk, offset); offset += chunk.length;
+        chunk.fill(0);
       }
-      if (chunk === null) throw this.failure('PostgreSQL message is truncated');
-      if (chunk.length === 0 || chunk.length > length - offset) {
-        throw this.failure('PostgreSQL transport returned an invalid chunk');
-      }
-      output.set(chunk, offset);
-      offset += chunk.length;
+      return output!;
+    } catch (error) {
+      if (output !== null) output.fill(0);
+      throw error as Error;
     }
-    return output;
   }
 
   private async writeExact(frame: Uint8Array): Promise<void> {
@@ -603,9 +612,9 @@ function parseParameterStatus(payload: Uint8Array): PostgresParameterStatus {
 function parseBackendKeyData(payload: Uint8Array): PostgresBackendKeyData {
   const reader = new PostgresByteReader(payload);
   const processId = reader.readInt32();
-  const secretKey = copyBytes(reader.readBytes(4));
+  const secretSlice = reader.readBytes(4);
   requireReaderEmpty(reader, 'BackendKeyData');
-  return new PostgresBackendKeyData(processId, secretKey);
+  return new PostgresBackendKeyData(processId, copyBytes(secretSlice));
 }
 
 function parseReadyForQuery(payload: Uint8Array): PostgresReadyForQuery {

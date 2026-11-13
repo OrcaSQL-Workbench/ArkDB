@@ -134,7 +134,6 @@ export default function publicInterfaceTest(): void {
     it('rejectsEveryUnimplementedRuntimeOperation', 0, async () => {
       const connection = new PostgresDriverFactory().create(
         new PostgresConnectionOptions(validConfig(), 'secret'));
-      await expectUnsupported((): Promise<void> => connection.connect());
       await expectUnsupported(async (): Promise<void> => { await connection.query('SELECT 1'); });
       await expectUnsupported(async (): Promise<void> => {
         await connection.queryStream('SELECT 1', new QueryOptions(), new NoopSink());
@@ -178,7 +177,7 @@ function expectValidation(config: PostgresConnectionConfig): void {
 }
 
 function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): void {
-  expect(capabilities.supportsSsl).assertFalse();
+  expect(capabilities.supportsSsl).assertTrue();
   expect(capabilities.supportsCatalogs).assertFalse();
   expect(capabilities.supportsSchemas).assertFalse();
   expect(capabilities.supportsTransactions).assertFalse();

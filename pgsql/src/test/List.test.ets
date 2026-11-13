@@ -1,6 +1,7 @@
 import publicInterfaceTest from './public/PublicInterface.test';
 import postgresAuthPrimitivesTest from './pgsql/auth/PostgresAuthPrimitives.test';
 import postgresScramClientTest from './pgsql/auth/PostgresScramClient.test';
+import postgresStartupTest from './pgsql/command/PostgresStartup.test';
 import postgresConnectionLifecycleTest from './pgsql/connection/PostgresConnectionLifecycle.test';
 import postgresCommandGateTest from './pgsql/execution/PostgresCommandGate.test';
 import postgresParameterEncoderTest from './pgsql/features/prepared/PostgresParameterEncoder.test';
@@ -16,6 +17,7 @@ export default function testsuite(): void {
   publicInterfaceTest();
   postgresAuthPrimitivesTest();
   postgresScramClientTest();
+  postgresStartupTest();
   postgresConnectionLifecycleTest();
   postgresCommandGateTest();
   postgresBackendParserTest();

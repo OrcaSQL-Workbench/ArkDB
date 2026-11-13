@@ -58,7 +58,8 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void {
     this.tcp.on('message', (info: socket.SocketMessageInfo): void => {
-      message(new Uint8Array(info.message));
+      const data = new Uint8Array(info.message);
+      try { message(data); } finally { data.fill(0); }
     });
     this.tcp.on('close', close);
     this.tcp.on('error', (failure: BusinessError): void => {
@@ -82,12 +83,15 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
   }
   async send(data: Uint8Array): Promise<void> {
     const copy = new ArrayBuffer(data.length);
-    new Uint8Array(copy).set(data);
+    const bytes = new Uint8Array(copy);
+    bytes.set(data);
     const options: socket.TCPSendOptions = { data: copy };
     try {
       await this.tcp.send(options);
     } catch (error) {
       throw new Error(asMessage(error as Object));
+    } finally {
+      bytes.fill(0);
     }
   }
   async close(): Promise<void> {
@@ -121,7 +125,8 @@ class NetworkKitPostgresTlsSocket implements PostgresTlsSocket {
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void {
     this.tls.on('message', (info: socket.SocketMessageInfo): void => {
-      message(new Uint8Array(info.message));
+      const data = new Uint8Array(info.message);
+      try { message(data); } finally { data.fill(0); }
     });
     this.tls.on('close', close);
     this.tls.on('error', (failure: BusinessError): void => error(failure));
@@ -150,11 +155,14 @@ class NetworkKitPostgresTlsSocket implements PostgresTlsSocket {
   }
   async send(data: Uint8Array): Promise<void> {
     const copy = new ArrayBuffer(data.length);
-    new Uint8Array(copy).set(data);
+    const bytes = new Uint8Array(copy);
+    bytes.set(data);
     try {
       await this.tls.send(copy);
     } catch (error) {
       throw new Error(asMessage(error as Object));
+    } finally {
+      bytes.fill(0);
     }
   }
   async close(): Promise<void> {
@@ -463,6 +471,7 @@ export class PostgresTcpTransport implements PostgresByteTransport {
         this.tailLength : head.length;
       const count = Math.min(end - this.headOffset, length - offset);
       result.set(head.subarray(this.headOffset, this.headOffset + count), offset);
+      head.fill(0, this.headOffset, this.headOffset + count);
       this.headOffset += count;
       offset += count;
       if (this.headOffset === end) {
@@ -505,6 +514,7 @@ export class PostgresTcpTransport implements PostgresByteTransport {
   private fail(error: ArkDbError, alreadyClosed: boolean = false): void {
     if (this.fatal !== null) return;
     this.fatal = error;
+    for (const chunk of this.chunks) chunk.fill(0);
     this.chunks = [];
     this.buffered = 0;
     this.headIndex = 0;

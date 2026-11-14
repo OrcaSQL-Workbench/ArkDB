@@ -51,12 +51,17 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
   const invokeSink = async <T>(op: () => Promise<T>): Promise<T | undefined> => {
     if (errors.sink !== null || errors.latched !== null) return undefined;
     if (settlement.closeReason !== null) throw settlement.closeReason;
-    let failedNow = false; let value: T | undefined = undefined;
-    await raceDrainDeadline<void>(host.timers, drainDeadlineMs, (): Promise<void> => settlement.raceClose<void>(async (): Promise<void> => {
-      try { value = await op(); } catch (e) { failedNow = true; const se = toPostgresArkDbError(e as Object); errors.sink = se; host.latchConsumerError(se, false); }
-    }));
-    if (failedNow) { discardChunkRows(chunkRows); chunkWireBytes = 0; beginDrain(false); return undefined; }
-    return value;
+    let caught: ArkDbError | null = null;
+    try {
+      return await raceDrainDeadline<T>(host.timers, drainDeadlineMs, (): Promise<T> => settlement.raceClose<T>(async (): Promise<T> => {
+        try { return await op(); } catch (e) { const se = toPostgresArkDbError(e as Object); caught = se; throw se; }
+      }));
+    } catch (err) {
+      if (caught !== null && err === caught && settlement.closeReason === null) {
+        errors.sink = caught; host.latchConsumerError(caught, false); discardChunkRows(chunkRows); chunkWireBytes = 0; beginDrain(false); return undefined;
+      }
+      throw err as Error;
+    }
   };
   const flushChunk = async (): Promise<boolean> => {
     if (chunkRows.length === 0) return errors.sink === null && errors.latched === null;

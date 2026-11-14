@@ -179,8 +179,9 @@ export default function postgresResultStreamTest(): void {
       for (const hangStage of ['rows', 'trunc', 'end']) {
         const hTimers = new StepTimers(); const hTp = new QueueTransport([bootFrames(0x49), concatFrames([msgRowDesc(cols), msgDataRow(['1']), msgDataRow(['2']), msgCmd('SELECT 2'), msgReady(0x49)])]);
         const hConn = openReady(hTp, hTimers); await hConn.connect(); const hOpts = new QueryOptions(); hOpts.maxRows = 1; hOpts.maxChunkRows = 5; hOpts.maxDrainTimeMs = 20;
-        const hSink = new GatedSink(hangStage); const hTask = hConn.queryStream('HANG_' + hangStage, hOpts, hSink); await hSink.waitReached(hangStage, hTask); hTimers.now += 25; hTimers.fireAll();
-        expect((await asyncFail((): Promise<Object> => hTask)).kind === ArkDbErrorKind.Protocol && hConn.state === ConnectionState.Error).assertTrue(); hSink.release(hangStage);
+        const hSink = new GatedSink(hangStage); const hTask = hConn.queryStream('HANG_' + hangStage, hOpts, hSink); await hSink.waitReached(hangStage, hTask);
+        hTimers.now += 25; hTimers.fireAll(); hSink.fail(hangStage, ArkDbError.validation('late sink after deadline'));
+        expect((await asyncFail((): Promise<Object> => hTask)).kind === ArkDbErrorKind.Protocol && hConn.state === ConnectionState.Error).assertTrue();
       }
     });
     it('handlesSinkErrorsServerErrorsCopyCloseRaceAndScrubbing', 0, async () => {
@@ -250,7 +251,7 @@ export default function postgresResultStreamTest(): void {
       const closeConn = openReady(closeTp); await closeConn.connect(); closeTp.writes.length = 0; const closeSink = new GatedSink('rows');
       const closeOpts = new QueryOptions(); closeOpts.maxChunkBytes = 1;
       const closeQuery = closeConn.queryStream('CLOSE_HUNG_SINK', closeOpts, closeSink);
-      await closeSink.waitReached('rows', closeQuery); const closing = closeConn.close();
+      await closeSink.waitReached('rows', closeQuery); const closing = closeConn.close(); closeSink.fail('rows', ArkDbError.validation('late sink after close'));
       expect((await asyncFail((): Promise<Object> => closeQuery)).kind === ArkDbErrorKind.Cancelled && closeConn.state === ConnectionState.Closed).assertTrue();
       await closing; expect(closeTp.writes.length).assertEqual(1);
     });
@@ -319,7 +320,7 @@ class GatedSink implements QueryResultSink {
   readonly events: string[] = []; private readonly onlyStage: string;
   private readonly reached: Map<string, () => void> = new Map<string, () => void>();
   private readonly arrived: Set<string> = new Set<string>();
-  private readonly gates: Map<string, () => void> = new Map<string, () => void>();
+  private readonly gates: Map<string, [() => void, (e: Object) => void]> = new Map<string, [() => void, (e: Object) => void]>();
   constructor(onlyStage: string = '') { this.onlyStage = onlyStage; }
   waitReached(stage: string, inflight: Promise<Object>): Promise<void> {
     if (this.arrived.has(stage)) return Promise.resolve();
@@ -327,12 +328,13 @@ class GatedSink implements QueryResultSink {
     const earlyDone = inflight.then((): void => { throw new Error('settled before ' + stage); });
     return Promise.race([arrivedTask, earlyDone]);
   }
-  release(stage: string): void { const fn = this.gates.get(stage); if (fn !== undefined) { this.gates.delete(stage); fn(); } }
+  release(stage: string): void { const pair = this.gates.get(stage); if (pair !== undefined) { this.gates.delete(stage); pair[0](); } }
+  fail(stage: string, err: Object): void { const pair = this.gates.get(stage); if (pair !== undefined) { this.gates.delete(stage); pair[1](err); } }
   private hold(stage: string): Promise<void> {
     this.events.push(stage);
     if (this.onlyStage.length > 0 && this.onlyStage !== stage) return Promise.resolve();
-    return new Promise<void>((r: () => void): void => {
-      this.gates.set(stage, r); this.arrived.add(stage); const notify = this.reached.get(stage); if (notify !== undefined) notify();
+    return new Promise<void>((res: () => void, rej: (e: Object) => void): void => {
+      this.gates.set(stage, [res, rej]); this.arrived.add(stage); const notify = this.reached.get(stage); if (notify !== undefined) notify();
     });
   }
   onResultStart(_m: QueryResultMeta): Promise<void> { return this.hold('start'); }

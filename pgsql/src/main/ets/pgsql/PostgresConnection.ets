@@ -8,12 +8,15 @@ import {
 import {
   PostgresConnectionFeatures, PostgresFeatureConnection
 } from './api/PostgresContracts';
+import { PostgresQueryStreamHost, runPostgresQueryStream } from './command/PostgresResultStream';
 import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery } from './command/PostgresSimpleQuery';
 import {
   PostgresConnectionLifecycle, PostgresLifecycleTransport, PostgresStartupRunner
 } from './connection/PostgresConnectionLifecycle';
-import { PostgresConnectionHealth } from './connection/PostgresFeatureFacades';
-import { PostgresCommandKind, PostgresCommandScope } from './execution/PostgresCommandGate';
+import { PostgresConnectionHealth, PostgresConnectionStreaming } from './connection/PostgresFeatureFacades';
+import {
+  PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase, PostgresCommandScope
+} from './execution/PostgresCommandGate';
 import { PostgresCommandCloseSettlement } from './execution/PostgresSettlements';
 import {
   PostgresConnectionConfig
@@ -35,9 +38,13 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
   constructor(config: PostgresConnectionConfig, password: string,
     timers?: ConnectionTimerPort,
     transportFactory?: () => PostgresLifecycleTransport,
-    startupRunner?: PostgresStartupRunner) {
+    startupRunner?: PostgresStartupRunner,
+    commandGate?: PostgresCommandGate) {
     this.lifecycle = new PostgresConnectionLifecycle(
-      config, password, timers, transportFactory, startupRunner);
+      config, password, timers, transportFactory, startupRunner, commandGate);
+    this.features.streaming = new PostgresConnectionStreaming(this,
+      (sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
+        this.queryStream(sql, options, sink));
     this.features.health = new PostgresConnectionHealth((): Promise<void> => this.ping());
   }
 
@@ -63,9 +70,11 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
         runPostgresSimpleQuery(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st, sql));
   }
 
-  async queryStream(_sql: string, _options: QueryOptions,
-    _sink: QueryResultSink): Promise<QueryExecutionSummary> {
-    throw ArkDbError.unsupported('PostgreSQL streaming is not implemented.');
+  queryStream(sql: string, options: QueryOptions,
+    sink: QueryResultSink): Promise<QueryExecutionSummary> {
+    return this.lifecycle.runCommand<QueryExecutionSummary>(PostgresCommandKind.QueryStream,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> =>
+        runPostgresQueryStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, sql, options, sink));
   }
 
   ping(): Promise<void> {
@@ -104,12 +113,21 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
 }
 
 class SimpleQueryLifecycleHost implements PostgresSimpleQueryHost {
-  private readonly lifecycle: PostgresConnectionLifecycle;
-  private readonly scope: PostgresCommandScope;
+  protected readonly lifecycle: PostgresConnectionLifecycle;
+  protected readonly scope: PostgresCommandScope;
   constructor(lifecycle: PostgresConnectionLifecycle, scope: PostgresCommandScope) { this.lifecycle = lifecycle; this.scope = scope; }
   get serverInfo(): PostgresServerInfo { return this.lifecycle.serverInfo; }
   get sessionStatus(): PostgresDatabaseSessionStatus { return this.lifecycle.sessionStatus; }
   get timers(): ConnectionTimerPort { return this.lifecycle.timers; }
   applyReadyStatus(ready: PostgresReadyStatus): void { this.lifecycle.applyReadyStatus(this.scope, ready); }
   retire(reason: ArkDbError): Promise<void> { return this.lifecycle.retire(this.scope, reason); }
+}
+
+class QueryStreamLifecycleHost extends SimpleQueryLifecycleHost implements PostgresQueryStreamHost {
+  private setPhase(phase: PostgresCommandPhase): void {
+    if (this.lifecycle.commandGate.isOwner(this.scope) && this.scope.phase !== PostgresCommandPhase.Closing) this.lifecycle.commandGate.setPhase(this.scope, phase);
+  }
+  enterStreaming(): void { this.setPhase(PostgresCommandPhase.Streaming); }
+  enterDraining(): void { this.setPhase(PostgresCommandPhase.Draining); }
+  latchConsumerError(error: ArkDbError, synchronized: boolean = false): void { this.lifecycle.latchConsumerError(this.scope, error, synchronized); }
 }

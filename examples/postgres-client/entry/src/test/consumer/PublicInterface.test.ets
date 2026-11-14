@@ -1,7 +1,8 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, PostgresConnectionConfig,
-  PostgresConnectionOptions, PostgresDriverCapabilities, PostgresDriverFactory
+  PostgresConnectionOptions, PostgresDriverCapabilities, PostgresDriverFactory,
+  QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk
 } from '@arkdb/postgres';
 
 export default function publicInterfaceTest(): void {
@@ -14,10 +15,13 @@ export default function publicInterfaceTest(): void {
       const connection = factory.create(new PostgresConnectionOptions(config, 'secret'));
       expect(factory.driverId).assertEqual('pgsql');
       expectAllCapabilitiesFalse(factory.capabilities);
-      expect(JSON.stringify(connection.features)).assertEqual('{"health":{}}');
+      expect(connection.features.streaming !== undefined).assertTrue();
+      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{}}');
       expect(JSON.stringify(connection).indexOf('secret')).assertEqual(-1);
 
       for (const op of [async (): Promise<void> => { await connection.query('SELECT 1'); },
+        async (): Promise<void> => { await connection.queryStream('SELECT 1', new QueryOptions(), new ConsumerNoopSink()); },
+        async (): Promise<void> => { await connection.features.streaming!.queryStream('SELECT 1', new QueryOptions(), new ConsumerNoopSink()); },
         (): Promise<void> => connection.ping(), (): Promise<void> => connection.features.health!.ping()]) {
         await expectUnconnectedProtocol(op);
       }
@@ -45,9 +49,15 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsTransactions).assertFalse();
   expect(capabilities.supportsMetadata).assertFalse();
   expect(capabilities.supportsMultipleResults).assertTrue();
-  expect(capabilities.supportsStreamingResults).assertFalse();
+  expect(capabilities.supportsStreamingResults).assertTrue();
   expect(capabilities.supportsGracefulCancel).assertFalse();
   expect(capabilities.supportsExplain).assertFalse();
   expect(capabilities.supportsPreparedStatements).assertFalse();
   expect(capabilities.supportsServerMetrics).assertFalse();
+}
+
+class ConsumerNoopSink implements QueryResultSink {
+  async onResultStart(_meta: QueryResultMeta): Promise<void> {}
+  async onRows(_chunk: QueryRowChunk): Promise<void> {}
+  async onResultEnd(_summary: QueryResultSummary): Promise<void> {}
 }

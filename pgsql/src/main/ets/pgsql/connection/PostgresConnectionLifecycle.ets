@@ -156,6 +156,7 @@ export class PostgresConnectionLifecycle {
   private readySynchronized: boolean = false;
   private pendingIoCount: number = 0; private pendingIoWaiters: Array<() => void> = [];
   private awaitingReadyForQuery: boolean = false; private unsynchronized: boolean = false;
+  private latchedPrimaryError: ArkDbError | null = null; private synchronizedConsumerError: ArkDbError | null = null;
   private retiredReason: ArkDbError | null = null; private retiredCleanup: ArkDbError | null = null; private retiredComposed: ArkDbError | null = null;
   constructor(config: PostgresConnectionConfig, password: string, timers: ConnectionTimerPort = new SystemConnectionTimerPort(),
     transportFactory?: () => PostgresLifecycleTransport, startupRunner?: PostgresStartupRunner,
@@ -172,6 +173,9 @@ export class PostgresConnectionLifecycle {
   readBackendKeyData(): PostgresBackendCancellationKey | null {
     const stored = postgresBackendSecrets.get(this);
     return stored === undefined ? null : new PostgresBackendCancellationKey(stored.processId, copySecretBytes(stored.secretKey), stored.secretKeyInt32);
+  }
+  latchConsumerError(scope: PostgresCommandScope, error: ArkDbError, synchronized: boolean = false): void {
+    this.commandGate.assertOwner(scope); this.latchedPrimaryError = error; if (synchronized) this.synchronizedConsumerError = error;
   }
   applyReadyStatus(scope: PostgresCommandScope, ready: PostgresReadyStatus): void {
     this.commandGate.assertOwner(scope);
@@ -252,7 +256,8 @@ export class PostgresConnectionLifecycle {
     if (this.currentState === ConnectionState.Error || this.unsynchronized) throw ArkDbError.protocol('PostgreSQL connection is retired after an unrecoverable error.');
     const scope = this.commandGate.reserve(kind); const settlement = new PostgresCommandCloseSettlement(scope);
     this.activeSettlement = settlement; this.activeReleaseScope = null; this.activeScopeRelease = null; this.closedScope = null;
-    let failure: ArkDbError | null = null; let output: T | undefined = undefined; let delivered = false; this.retiredCleanup = null; this.retiredComposed = null;
+    let failure: ArkDbError | null = null; let output: T | undefined = undefined; let delivered = false;
+    this.latchedPrimaryError = null; this.synchronizedConsumerError = null; this.retiredCleanup = null; this.retiredComposed = null;
     try {
       this.commandGate.start(scope); this.throwIfRetiredOrClosing(settlement);
       if (this.currentState !== ConnectionState.Ready || this.transport === null) throw ArkDbError.protocol('PostgreSQL connection channel is unavailable.');
@@ -264,14 +269,16 @@ export class PostgresConnectionLifecycle {
       this.currentState = ConnectionState.Ready; output = result; delivered = true;
     } catch (error) {
       const rawErr = toPostgresArkDbError(error as Object);
-      const primary = rawErr === settlement.closeReason && this.unsynchronized && this.retiredReason !== null ? this.retiredReason : rawErr;
+      let primary = rawErr === settlement.closeReason && this.unsynchronized && this.retiredReason !== null ? this.retiredReason : rawErr;
+      if (this.latchedPrimaryError !== null && primary !== this.latchedPrimaryError) primary = postgresAppendCleanupError(this.latchedPrimaryError, primary);
       const alreadyAppended = primary === this.retiredComposed || primary === this.retiredCleanup;
+      const retireOnError = primary !== this.synchronizedConsumerError && shouldRetireAfterError(primary);
       if (this.closeRequested || settlement.isCloseRequested) failure = await this.abortScopeFailure(scope, primary, alreadyAppended, ConnectionState.Closed);
-      else if (this.unsynchronized || this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.readySynchronized || this.transport === null || shouldRetireAfterError(primary)) {
+      else if (this.unsynchronized || this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.readySynchronized || this.transport === null || retireOnError) {
         this.markStreamDamaged(primary); failure = await this.abortScopeFailure(scope, primary, alreadyAppended, ConnectionState.Error);
       } else { this.currentState = ConnectionState.Ready; failure = primary; }
     } finally {
-      this.retiredCleanup = null; this.retiredComposed = null;
+      this.latchedPrimaryError = null; this.synchronizedConsumerError = null; this.retiredCleanup = null; this.retiredComposed = null;
       failure = this.finishScope(scope, settlement, failure, delivered && failure === null);
       if (delivered && failure === null) settlement.markDelivered(); else settlement.discardUndelivered();
     }
@@ -289,6 +296,7 @@ export class PostgresConnectionLifecycle {
       const composed = postgresAppendCleanupError(reason, cleanup);
       if (this.commandGate.isOwner(scope)) {
         if (this.retiredCleanup === null) this.retiredCleanup = cleanup;
+        if (this.latchedPrimaryError === reason) this.latchedPrimaryError = composed;
         this.retiredComposed = composed; this.retiredReason = composed;
       }
       throw composed;

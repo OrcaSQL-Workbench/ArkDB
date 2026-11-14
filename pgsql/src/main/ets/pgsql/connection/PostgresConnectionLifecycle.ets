@@ -63,7 +63,7 @@ class ScopedPostgresMessageChannel extends PostgresMessageChannel {
   constructor(transport: PostgresByteTransport, onBegin: () => void, onEnd: (error: Object | null, isOwner: boolean) => Object) {
     super(transport); this.onBegin = onBegin; this.onEnd = onEnd;
   }
-  readMessage(): Promise<PostgresMessage> { return this.guard<PostgresMessage>((): Promise<PostgresMessage> => super.readMessage()); }
+  readMessage(maxFrameBytes?: number): Promise<PostgresMessage> { return this.guard<PostgresMessage>((): Promise<PostgresMessage> => super.readMessage(maxFrameBytes)); }
   writeMessage(type: number, payload: Uint8Array): Promise<void> { return this.guard<void>((): Promise<void> => super.writeMessage(type, payload)); }
   writeUntypedMessage(payload: Uint8Array): Promise<void> { return this.guard<void>((): Promise<void> => super.writeUntypedMessage(payload)); }
   private guard<T>(op: () => Promise<T>): Promise<T> {

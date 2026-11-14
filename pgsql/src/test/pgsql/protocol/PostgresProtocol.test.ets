@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import {
-  PostgresByteReader, PostgresByteWriter
+  PostgresByteReader, PostgresByteWriter, PostgresFrontendSerializer
 } from '../../../main/ets/pgsql/protocol/PostgresByteCodec';
 import {
   PostgresByteTransport, PostgresMessageChannel
@@ -74,6 +74,14 @@ export default function postgresProtocolTest(): void {
       assertRejectedWrite((writer: PostgresByteWriter): void => {
         writer.writeUInt16(1);
       }, 1);
+      assertRejectedWrite((w: PostgresByteWriter): void => { w.writeCString('secret').writeInt32(Number.NaN); });
+      assertRejectedWrite((w: PostgresByteWriter): void => { w.writeCString('secret').writeUInt64(-1n); });
+      assertRejectedWrite((w: PostgresByteWriter): void => { w.writeCString('secret').writeInt64(9223372036854775808n); });
+      assertRejectedWrite((w: PostgresByteWriter): void => { w.writeCString('secret').copyTo(new Uint8Array(2), 0); });
+      expect(((): ArkDbErrorKind => {
+        try { PostgresFrontendSerializer.bind('', '', [0], [new Uint8Array([1, 2])], [2]); return ArkDbErrorKind.Network; }
+        catch (e) { return (e as ArkDbError).kind; }
+      })()).assertEqual(ArkDbErrorKind.Validation);
     });
 
     it('keepsUtf8AndCStringParsingStrictAndAtomic', 0, () => {
@@ -274,7 +282,7 @@ class ChunkTransport implements PostgresByteTransport {
     if (this.throwWrite) throw ArkDbError.protocol('synthetic write failure');
     this.lastWriteLength = data.length;
     this.lastWriteHeader = data.slice(0, Math.min(5, data.length));
-    if (this.captureWrites) this.writes.push(data);
+    if (this.captureWrites) this.writes.push(data.slice());
     return this.writeResult < 0 ? data.length : this.writeResult;
   }
 }

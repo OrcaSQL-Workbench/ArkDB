@@ -8,15 +8,20 @@ import {
 import {
   PostgresConnectionFeatures, PostgresFeatureConnection
 } from './api/PostgresContracts';
+import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery } from './command/PostgresSimpleQuery';
 import {
   PostgresConnectionLifecycle, PostgresLifecycleTransport, PostgresStartupRunner
 } from './connection/PostgresConnectionLifecycle';
+import { PostgresConnectionHealth } from './connection/PostgresFeatureFacades';
+import { PostgresCommandKind, PostgresCommandScope } from './execution/PostgresCommandGate';
+import { PostgresCommandCloseSettlement } from './execution/PostgresSettlements';
 import {
   PostgresConnectionConfig
 } from './model/PostgresConnectionConfig';
 import {
   PostgresDatabaseSessionStatus, PostgresQueryResult, PostgresServerInfo
 } from './model/PostgresModels';
+import { PostgresMessageChannel, PostgresReadyStatus } from './protocol/PostgresMessageChannel';
 
 export class PostgresConnection implements DbConnection, DbStreamingConnection,
   DbConnectionHealth, DbContextController, DbTransactionController,
@@ -33,6 +38,7 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
     startupRunner?: PostgresStartupRunner) {
     this.lifecycle = new PostgresConnectionLifecycle(
       config, password, timers, transportFactory, startupRunner);
+    this.features.health = new PostgresConnectionHealth((): Promise<void> => this.ping());
   }
 
   get state(): ConnectionState {
@@ -51,8 +57,10 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
     return this.lifecycle.connect();
   }
 
-  async query(_sql: string): Promise<PostgresQueryResult> {
-    throw ArkDbError.unsupported('PostgreSQL query execution is not implemented.');
+  query(sql: string): Promise<PostgresQueryResult> {
+    return this.lifecycle.runCommand<PostgresQueryResult>(PostgresCommandKind.Query,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> =>
+        runPostgresSimpleQuery(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st, sql));
   }
 
   async queryStream(_sql: string, _options: QueryOptions,
@@ -60,8 +68,10 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
     throw ArkDbError.unsupported('PostgreSQL streaming is not implemented.');
   }
 
-  async ping(): Promise<void> {
-    throw ArkDbError.unsupported('PostgreSQL health checks are not implemented.');
+  ping(): Promise<void> {
+    return this.lifecycle.runCommand<void>(PostgresCommandKind.Ping,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<void> =>
+        runPostgresPing(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st));
   }
 
   async changeContext(_context: DatabaseContext): Promise<void> {
@@ -91,4 +101,15 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
   close(): Promise<void> {
     return this.lifecycle.close();
   }
+}
+
+class SimpleQueryLifecycleHost implements PostgresSimpleQueryHost {
+  private readonly lifecycle: PostgresConnectionLifecycle;
+  private readonly scope: PostgresCommandScope;
+  constructor(lifecycle: PostgresConnectionLifecycle, scope: PostgresCommandScope) { this.lifecycle = lifecycle; this.scope = scope; }
+  get serverInfo(): PostgresServerInfo { return this.lifecycle.serverInfo; }
+  get sessionStatus(): PostgresDatabaseSessionStatus { return this.lifecycle.sessionStatus; }
+  get timers(): ConnectionTimerPort { return this.lifecycle.timers; }
+  applyReadyStatus(ready: PostgresReadyStatus): void { this.lifecycle.applyReadyStatus(this.scope, ready); }
+  retire(reason: ArkDbError): Promise<void> { return this.lifecycle.retire(this.scope, reason); }
 }

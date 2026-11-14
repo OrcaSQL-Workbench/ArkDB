@@ -123,6 +123,7 @@ export class PostgresByteWriter {
 
   writeUInt64(value: bigint): PostgresByteWriter {
     if (value < 0n || value > 0xffffffffffffffffn) {
+      this.clear();
       throw ArkDbError.validation('UInt64 is outside the unsigned 64-bit range');
     }
     return this.writeBigInt(value);
@@ -130,6 +131,7 @@ export class PostgresByteWriter {
 
   writeInt64(value: bigint): PostgresByteWriter {
     if (value < -0x8000000000000000n || value > 0x7fffffffffffffffn) {
+      this.clear();
       throw ArkDbError.validation('Int64 is outside the signed 64-bit range');
     }
     return this.writeBigInt(value < 0n ? value + 0x10000000000000000n : value);
@@ -144,22 +146,23 @@ export class PostgresByteWriter {
   }
 
   writeUtf8(value: string): PostgresByteWriter {
-    const length = checkedUtf8Length(value);
+    const length = this.checkedLength(value);
     this.reserve(length);
     const encoded = rawUtf8(value);
-    if (encoded.length !== length) throw ArkDbError.validation('UTF-8 length mismatch');
+    if (encoded.length !== length) { encoded.fill(0); this.clear(); throw ArkDbError.validation('UTF-8 length mismatch'); }
     this.store(encoded);
     return this;
   }
 
   writeCString(value: string): PostgresByteWriter {
     if (value.indexOf('\u0000') >= 0) {
+      this.clear();
       throw ArkDbError.validation('PostgreSQL C strings cannot contain NUL');
     }
-    const length = checkedUtf8Length(value);
+    const length = this.checkedLength(value);
     this.reserve(length + 1);
     const encoded = rawUtf8(value);
-    if (encoded.length !== length) throw ArkDbError.validation('UTF-8 length mismatch');
+    if (encoded.length !== length) { encoded.fill(0); this.clear(); throw ArkDbError.validation('UTF-8 length mismatch'); }
     const terminator = new Uint8Array(1);
     this.store(encoded);
     this.store(terminator);
@@ -169,6 +172,7 @@ export class PostgresByteWriter {
   copyTo(output: Uint8Array, offset: number): void {
     if (!Number.isSafeInteger(offset) || offset < 0 ||
       this.total > output.length - offset) {
+      this.clear();
       throw ArkDbError.validation('PostgreSQL byte output destination is too small');
     }
     let position = offset;
@@ -184,9 +188,15 @@ export class PostgresByteWriter {
     return output;
   }
 
+  clear(): void { for (const c of this.chunks) c.fill(0); this.chunks.length = 0; this.total = 0; }
+  private checkedLength(value: string): number {
+    try { return checkedUtf8Length(value); } catch (e) { this.clear(); throw e as Error; }
+  }
+
   private writeNumber(value: number, minimum: number, maximum: number,
     width: number, signed: boolean, name: string): PostgresByteWriter {
     if (!Number.isInteger(value) || value < minimum || value > maximum) {
+      this.clear();
       throw ArkDbError.validation(name + ' is outside its integer range');
     }
     this.reserve(width);
@@ -215,6 +225,7 @@ export class PostgresByteWriter {
 
   private reserve(length: number): void {
     if (!Number.isSafeInteger(length) || length < 0 || length > this.maximumBytes - this.total) {
+      this.clear();
       throw ArkDbError.validation('PostgreSQL byte output exceeds the configured limit');
     }
   }
@@ -369,7 +380,7 @@ function typedFrame(type: number, payload: PostgresByteWriter): Uint8Array {
     .writeUInt8(type)
     .writeUInt32(payload.length + POSTGRES_LENGTH_BYTES)
     .copyTo(frame, 0);
-  payload.copyTo(frame, POSTGRES_NORMAL_HEADER_BYTES);
+  try { payload.copyTo(frame, POSTGRES_NORMAL_HEADER_BYTES); } finally { payload.clear(); }
   return frame;
 }
 
@@ -378,7 +389,7 @@ function untypedFrame(payload: PostgresByteWriter): Uint8Array {
   new PostgresByteWriter(POSTGRES_LENGTH_BYTES)
     .writeUInt32(payload.length + POSTGRES_LENGTH_BYTES)
     .copyTo(frame, 0);
-  payload.copyTo(frame, POSTGRES_LENGTH_BYTES);
+  try { payload.copyTo(frame, POSTGRES_LENGTH_BYTES); } finally { payload.clear(); }
   return frame;
 }
 
@@ -409,6 +420,7 @@ function requireTarget(target: PostgresFrontendTarget): number {
 function writeFormats(writer: PostgresByteWriter, formats: number[]): void {
   for (const format of formats) {
     if (format !== 0 && format !== 1) {
+      writer.clear();
       throw ArkDbError.validation('PostgreSQL format code must be text or binary');
     }
     writer.writeInt16(format);
@@ -446,9 +458,9 @@ function utf8Length(value: string): number {
 
 function decodeUtf8(value: Uint8Array): string {
   const decoded = rawUtf8Text(value);
-  if (utf8Length(decoded) < 0 || !sameBytes(value, rawUtf8(decoded))) {
-    throw ArkDbError.protocol('PostgreSQL string contains invalid UTF-8');
-  }
+  if (utf8Length(decoded) < 0) throw ArkDbError.protocol('PostgreSQL string contains invalid UTF-8');
+  const reencoded = rawUtf8(decoded); const valid = sameBytes(value, reencoded); reencoded.fill(0);
+  if (!valid) throw ArkDbError.protocol('PostgreSQL string contains invalid UTF-8');
   return decoded;
 }
 
@@ -457,6 +469,7 @@ function rawUtf8(value: string): Uint8Array {
     const encoded = buffer.from(value, 'utf8');
     const bytes = new Uint8Array(encoded.length);
     encoded.copy(bytes);
+    encoded.fill(0);
     return bytes;
   } catch (_error) {
     throw ArkDbError.validation('UTF-8 encoding failed');

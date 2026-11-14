@@ -227,6 +227,9 @@ export default function postgresTextValueDecoderTest(): void {
       assertThrowsKind(() => {
         decodePostgresDataRow(new PostgresDataRow([ascii('t'), ascii('f')]), [cols[0]]);
       }, ArkDbErrorKind.Protocol);
+      assertThrowsKind(() => {
+        decodePostgresDataRow(new PostgresDataRow([ascii('\\xdead'), ascii('bad')]), [cols[2], cols[0]]);
+      }, ArkDbErrorKind.Protocol);
     });
   });
 }

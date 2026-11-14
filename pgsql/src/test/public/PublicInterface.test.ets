@@ -114,7 +114,8 @@ export default function publicInterfaceTest(): void {
       expect(param.type).assertEqual('bytea');
       expect((param.value as Uint8Array).length).assertEqual(2);
       expectAllCapabilitiesFalse(new PostgresDriverFactory().capabilities);
-      expect(JSON.stringify(connection.features)).assertEqual('{}');
+      expect(connection.features.health !== undefined).assertTrue();
+      expect(JSON.stringify(connection.features)).assertEqual('{"health":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{}');
       expect(requirePostgresFeatures(connection) === connection.postgresFeatures).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
@@ -134,11 +135,12 @@ export default function publicInterfaceTest(): void {
     it('rejectsEveryUnimplementedRuntimeOperation', 0, async () => {
       const connection = new PostgresDriverFactory().create(
         new PostgresConnectionOptions(validConfig(), 'secret'));
-      await expectUnsupported(async (): Promise<void> => { await connection.query('SELECT 1'); });
+      await expectNotConnected(async (): Promise<void> => { await connection.query('SELECT 1'); });
       await expectUnsupported(async (): Promise<void> => {
         await connection.queryStream('SELECT 1', new QueryOptions(), new NoopSink());
       });
-      await expectUnsupported((): Promise<void> => connection.ping());
+      await expectNotConnected((): Promise<void> => connection.ping());
+      await expectNotConnected((): Promise<void> => connection.features.health!.ping());
       await expectUnsupported((): Promise<void> =>
         connection.changeContext(new DatabaseContext()));
       await expectUnsupported(async (): Promise<void> => { await connection.begin(); });
@@ -182,12 +184,19 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsSchemas).assertFalse();
   expect(capabilities.supportsTransactions).assertFalse();
   expect(capabilities.supportsMetadata).assertFalse();
-  expect(capabilities.supportsMultipleResults).assertFalse();
+  expect(capabilities.supportsMultipleResults).assertTrue();
   expect(capabilities.supportsStreamingResults).assertFalse();
   expect(capabilities.supportsGracefulCancel).assertFalse();
   expect(capabilities.supportsExplain).assertFalse();
   expect(capabilities.supportsPreparedStatements).assertFalse();
   expect(capabilities.supportsServerMetrics).assertFalse();
+}
+
+async function expectNotConnected(operation: () => Promise<void>): Promise<void> {
+  let failure: ArkDbError | null = null;
+  try { await operation(); } catch (error) { failure = error as ArkDbError; }
+  expect(failure instanceof ArkDbError && failure.kind === ArkDbErrorKind.Protocol &&
+    failure.message === 'PostgreSQL connection is not connected.').assertTrue();
 }
 
 async function expectUnsupported(operation: () => Promise<void>): Promise<void> {

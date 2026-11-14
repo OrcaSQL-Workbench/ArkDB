@@ -114,8 +114,9 @@ export default function publicInterfaceTest(): void {
       expect(param.type).assertEqual('bytea');
       expect((param.value as Uint8Array).length).assertEqual(2);
       expectAllCapabilitiesFalse(new PostgresDriverFactory().capabilities);
+      expect(connection.features.streaming !== undefined).assertTrue();
       expect(connection.features.health !== undefined).assertTrue();
-      expect(JSON.stringify(connection.features)).assertEqual('{"health":{}}');
+      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{}');
       expect(requirePostgresFeatures(connection) === connection.postgresFeatures).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
@@ -136,8 +137,11 @@ export default function publicInterfaceTest(): void {
       const connection = new PostgresDriverFactory().create(
         new PostgresConnectionOptions(validConfig(), 'secret'));
       await expectNotConnected(async (): Promise<void> => { await connection.query('SELECT 1'); });
-      await expectUnsupported(async (): Promise<void> => {
+      await expectNotConnected(async (): Promise<void> => {
         await connection.queryStream('SELECT 1', new QueryOptions(), new NoopSink());
+      });
+      await expectNotConnected(async (): Promise<void> => {
+        await connection.features.streaming!.queryStream('SELECT 1', new QueryOptions(), new NoopSink());
       });
       await expectNotConnected((): Promise<void> => connection.ping());
       await expectNotConnected((): Promise<void> => connection.features.health!.ping());
@@ -185,7 +189,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsTransactions).assertFalse();
   expect(capabilities.supportsMetadata).assertFalse();
   expect(capabilities.supportsMultipleResults).assertTrue();
-  expect(capabilities.supportsStreamingResults).assertFalse();
+  expect(capabilities.supportsStreamingResults).assertTrue();
   expect(capabilities.supportsGracefulCancel).assertFalse();
   expect(capabilities.supportsExplain).assertFalse();
   expect(capabilities.supportsPreparedStatements).assertFalse();

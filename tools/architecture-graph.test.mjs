@@ -501,6 +501,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, and P17 own exactly the registered P
     'pgsql/src/main/ets/pgsql/api/PostgresPreparedContracts.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresAuthCrypto.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresSaslPrep.ets',
+    'pgsql/src/main/ets/pgsql/command/PostgresResultStream.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresSimpleQuery.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresStartup.ets',
     'pgsql/src/main/ets/pgsql/connection/PostgresConnectionLifecycle.ets',

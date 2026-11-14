@@ -4,6 +4,7 @@ import { PostgresPreparedExecutor } from './PostgresPreparedContracts';
 export class PostgresDriverCapabilities extends DriverCapabilities {
   supportsSsl: boolean = true;
   supportsMultipleResults: boolean = true;
+  supportsStreamingResults: boolean = true;
 }
 
 export class PostgresConnectionFeatures {

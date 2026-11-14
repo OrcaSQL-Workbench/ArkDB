@@ -161,7 +161,7 @@ export async function runPostgresPing(host: PostgresSimpleQueryHost, channel: Po
   }
 }
 
-function consumeAsyncMessage(host: PostgresSimpleQueryHost, msg: PostgresBackendMessage): boolean {
+export function consumeAsyncMessage(host: PostgresSimpleQueryHost, msg: PostgresBackendMessage): boolean {
   if (msg instanceof PostgresNoticeResponse) return true;
   if (msg instanceof PostgresNotificationResponse) { Logger.d(LogTag.Proto, 'PostgreSQL NotificationResponse discarded channel=' + Logger.mask(msg.channel)); return true; }
   if (msg instanceof PostgresParameterStatus) { applyPostgresParameterStatus(host.serverInfo, msg); return true; }
@@ -173,12 +173,12 @@ function estimateRowDescBytes(wireLen: number, msg: PostgresRowDescription): num
 function chargeResultBytes(current: number, add: number, cap: number): number {
   if (current + add > cap) throw ArkDbError.protocol('PostgreSQL buffered query exceeded maxResultBytes.'); return current + add;
 }
-function accountDrainedBytes(current: number, payloadLen: number, cap: number): number {
+export function accountDrainedBytes(current: number, payloadLen: number, cap: number): number {
   const next = current + POSTGRES_NORMAL_HEADER_BYTES + payloadLen;
   if (next > cap) throw ArkDbError.protocol('PostgreSQL post-error drain exceeded maxDrainBytes.'); return next;
 }
 function isPingFrameType(type: number): boolean { return type === 0x4e || type === 0x41 || type === 0x53 || type === 0x49 || type === 0x45 || type === 0x5a; }
-function isSimpleQueryFrameType(type: number): boolean { return isPingFrameType(type) || type === 0x43 || type === 0x54 || type === 0x44 || type === 0x47 || type === 0x48 || type === 0x57 || type === 0x64 || type === 0x63; }
+export function isSimpleQueryFrameType(type: number): boolean { return isPingFrameType(type) || type === 0x43 || type === 0x54 || type === 0x44 || type === 0x47 || type === 0x48 || type === 0x57 || type === 0x64 || type === 0x63; }
 function pushResultItem(results: PostgresQueryResult[], item: PostgresQueryResult, cap: number): void {
   if (results.length + 1 > cap) throw ArkDbError.protocol('PostgreSQL buffered query exceeded maxResultSets.'); results.push(item);
 }
@@ -192,19 +192,19 @@ function finalizeQueryResults(results: PostgresQueryResult[], status: PostgresDa
 function applyCommandTag(target: PostgresQueryResult, tag: string): void {
   const counts = parsePostgresCommandCompleteTag(tag); target.commandTag = tag; target.rowCountExact = counts.rowCountExact; target.affectedRowsExact = counts.affectedRowsExact; target.affectedRows = counts.affectedRows;
 }
-function findNonTextFormatCode(rowDesc: PostgresRowDescription): number | null {
+export function findNonTextFormatCode(rowDesc: PostgresRowDescription): number | null {
   for (const col of rowDesc.columns) { if (!Number.isInteger(col.formatCode) || col.formatCode !== POSTGRES_TEXT_FORMAT_CODE) return col.formatCode; } return null;
 }
-function isFatalPostgresError(error: PostgresError): boolean { return error.severity === 'FATAL' || error.severity === 'PANIC' || error.localizedSeverity === 'FATAL' || error.localizedSeverity === 'PANIC'; }
+export function isFatalPostgresError(error: PostgresError): boolean { return error.severity === 'FATAL' || error.severity === 'PANIC' || error.localizedSeverity === 'FATAL' || error.localizedSeverity === 'PANIC'; }
 function isUnsignedAsciiDigits(token: string): boolean {
   if (token.length === 0) return false;
   for (let i = 0; i < token.length; i += 1) { const c = token.charCodeAt(i); if (c < 0x30 || c > 0x39) return false; } return true;
 }
-function scrubBackendMessage(msg: PostgresBackendMessage | null): void {
+export function scrubBackendMessage(msg: PostgresBackendMessage | null): void {
   if (msg instanceof PostgresCopyData) { msg.data.fill(0); return; }
   if (msg instanceof PostgresDataRow) { for (const f of msg.fields) { if (f !== null) f.fill(0); } }
 }
-function scrubSqlRow(row: SqlValue[]): void { for (const v of row) { if (v instanceof Uint8Array) v.fill(0); } }
+export function scrubSqlRow(row: SqlValue[]): void { for (const v of row) { if (v instanceof Uint8Array) v.fill(0); } }
 function scrubQueryResult(res: PostgresQueryResult): void {
   for (const row of res.rows) scrubSqlRow(row); res.rows.length = 0;
   for (const extra of res.additionalResults) { for (const row of extra.rows) scrubSqlRow(row); extra.rows.length = 0; }
@@ -214,15 +214,15 @@ function discardResults(results: PostgresQueryResult[], current: PostgresQueryRe
   for (const r of results) scrubQueryResult(r); results.length = 0;
   if (current !== null) scrubQueryResult(current);
 }
-function readClockMs(timers: ConnectionTimerPort): number {
+export function readClockMs(timers: ConnectionTimerPort): number {
   const now = timers.nowMs(); if (!Number.isSafeInteger(now) || now < 0) throw ArkDbError.protocol('Connection clock is unavailable.'); return now;
 }
-function startDrain(timers: ConnectionTimerPort, deadlineMs: number, maxDrainTimeMs: number): number { return deadlineMs >= 0 ? deadlineMs : Math.min(Number.MAX_SAFE_INTEGER, readClockMs(timers) + maxDrainTimeMs); }
+export function startDrain(timers: ConnectionTimerPort, deadlineMs: number, maxDrainTimeMs: number): number { return deadlineMs >= 0 ? deadlineMs : Math.min(Number.MAX_SAFE_INTEGER, readClockMs(timers) + maxDrainTimeMs); }
 function cancelDrainTimer(timers: ConnectionTimerPort, tid: number, primary: Object | null): ArkDbError | null {
   try { timers.cancel(tid); return primary === null ? null : toPostgresArkDbError(primary); }
   catch (ce) { const c = toPostgresArkDbError(ce as Object); return primary === null ? c : postgresAppendCleanupError(toPostgresArkDbError(primary), c); }
 }
-function raceDrainDeadline<T>(timers: ConnectionTimerPort, deadlineMs: number, op: () => Promise<T>): Promise<T> {
+export function raceDrainDeadline<T>(timers: ConnectionTimerPort, deadlineMs: number, op: () => Promise<T>): Promise<T> {
   if (deadlineMs < 0) return op();
   let now = 0; try { now = readClockMs(timers); } catch (e) { return Promise.reject<T>(toPostgresArkDbError(e as Object)); }
   const rem = deadlineMs - now; if (rem <= 0) return Promise.reject<T>(ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.'));
@@ -240,13 +240,13 @@ function raceDrainDeadline<T>(timers: ConnectionTimerPort, deadlineMs: number, o
     } catch (e) { if (!done) { done = true; reject(scheduled ? cancelDrainTimer(timers, tid, e as Object)! : toPostgresArkDbError(e as Object)); } }
   });
 }
-async function writeQueryFrame(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, type: number, frame: Uint8Array, timers: ConnectionTimerPort, drainDeadlineMs: number): Promise<void> {
+export async function writeQueryFrame(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, type: number, frame: Uint8Array, timers: ConnectionTimerPort, drainDeadlineMs: number): Promise<void> {
   try {
     if (settlement.closeReason !== null) throw settlement.closeReason;
     await raceDrainDeadline<void>(timers, drainDeadlineMs, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => channel.writeMessage(type, frame.subarray(5))));
   } finally { frame.fill(0); }
 }
-async function readQueryMessage(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, timers: ConnectionTimerPort, drainDeadlineMs: number, maxFrameBytes: number): Promise<PostgresMessage> {
+export async function readQueryMessage(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, timers: ConnectionTimerPort, drainDeadlineMs: number, maxFrameBytes: number): Promise<PostgresMessage> {
   if (settlement.closeReason !== null) throw settlement.closeReason;
   let abandoned = false; let hasResolved = false; let resolvedPayload = new Uint8Array(0);
   const task = channel.readMessage(maxFrameBytes);
@@ -257,7 +257,7 @@ async function readQueryMessage(channel: PostgresMessageChannel, settlement: Pos
     abandoned = true; if (hasResolved) { resolvedPayload.fill(0); resolvedPayload = new Uint8Array(0); } throw err as Error;
   }
 }
-function snapshotQueryOptions(options: QueryOptions): QueryOptions {
+export function snapshotQueryOptions(options: QueryOptions): QueryOptions {
   if (options === DEFAULT_QUERY_OPTIONS) return DEFAULT_QUERY_OPTIONS;
   const cloned = options.clone(); validateQueryOptions(cloned); return cloned;
 }

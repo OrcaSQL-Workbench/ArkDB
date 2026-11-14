@@ -388,7 +388,7 @@ export class PostgresMessageChannel {
 
   constructor(transport: PostgresByteTransport) { this.transport = transport; }
 
-  readMessage(): Promise<PostgresMessage> {
+  readMessage(maxFrameBytes: number = MAX_POSTGRES_MESSAGE_BYTES + 1): Promise<PostgresMessage> {
     return this.runExclusive(async (): Promise<PostgresMessage> => {
       const header = await this.readExact(POSTGRES_NORMAL_HEADER_BYTES);
       let type = 0; let length = 0;
@@ -396,7 +396,7 @@ export class PostgresMessageChannel {
         const reader = new PostgresByteReader(header, POSTGRES_NORMAL_HEADER_BYTES);
         type = reader.readUInt8(); length = reader.readInt32();
       } finally { header.fill(0); }
-      if (length < POSTGRES_LENGTH_BYTES || length > MAX_POSTGRES_MESSAGE_BYTES) {
+      if (length < POSTGRES_LENGTH_BYTES || length > MAX_POSTGRES_MESSAGE_BYTES || length + 1 > maxFrameBytes) {
         throw this.failure('Invalid PostgreSQL message length');
       }
       return { type: type, payload: await this.readExact(length - POSTGRES_LENGTH_BYTES) };
@@ -464,15 +464,17 @@ export class PostgresMessageChannel {
   }
 
   private async writeExact(frame: Uint8Array): Promise<void> {
-    let written: number = -1;
+    let written: number = -1; let settled = false; let task: Promise<number> | null = null;
     try {
-      written = await this.transport.write(frame);
-    } catch (_error) {
-      throw this.failure('PostgreSQL transport write failed');
-    }
-    if (!Number.isSafeInteger(written) || written !== frame.length) {
-      throw this.failure('PostgreSQL transport write was incomplete');
-    }
+      try {
+        task = this.transport.write(frame);
+        task.then((): void => { settled = true; frame.fill(0); }, (): void => { settled = true; frame.fill(0); });
+        written = await task;
+      } catch (_error) { throw this.failure('PostgreSQL transport write failed'); }
+      if (!Number.isSafeInteger(written) || written !== frame.length) {
+        throw this.failure('PostgreSQL transport write was incomplete');
+      }
+    } finally { if (task === null || settled) frame.fill(0); }
   }
 
   private async runExclusive<T>(operation: () => Promise<T>): Promise<T> {

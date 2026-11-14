@@ -56,10 +56,15 @@ export function decodePostgresDataRow(row: PostgresDataRow,
       ' does not match RowDescription column count ' + columns.length);
   }
   const decoded: SqlValue[] = [];
-  for (let i = 0; i < columns.length; i += 1) {
-    decoded.push(decodePostgresColumnValue(columns[i], row.fields[i]));
+  try {
+    for (let i = 0; i < columns.length; i += 1) {
+      decoded.push(decodePostgresColumnValue(columns[i], row.fields[i]));
+    }
+    return decoded;
+  } catch (err) {
+    for (const v of decoded) { if (v instanceof Uint8Array) v.fill(0); }
+    throw err as Error;
   }
-  return decoded;
 }
 
 export function decodePostgresTextValue(typeOid: number, formatCode: number,
@@ -255,7 +260,7 @@ function decodeBytea(raw: Uint8Array): Uint8Array {
     for (let index = 2, writeOffset = 0; index < raw.length; index += 2, writeOffset += 1) {
       const high = hexNibble(raw[index]);
       const low = hexNibble(raw[index + 1]);
-      if (high < 0 || low < 0) throw malformed('bytea hex');
+      if (high < 0 || low < 0) { output.fill(0); throw malformed('bytea hex'); }
       output[writeOffset] = (high << 4) | low;
     }
     return output;
@@ -264,7 +269,7 @@ function decodeBytea(raw: Uint8Array): Uint8Array {
   let writeOffset = 0;
   for (let index = 0; index < raw.length; index += 1) {
     const current = raw[index];
-    if (current < 0x20 || current > 0x7e) throw malformed('bytea escape');
+    if (current < 0x20 || current > 0x7e) { scratch.fill(0); throw malformed('bytea escape'); }
     if (current !== 0x5c) {
       scratch[writeOffset] = current;
     } else if (index + 1 < raw.length && raw[index + 1] === 0x5c) {
@@ -276,11 +281,11 @@ function decodeBytea(raw: Uint8Array): Uint8Array {
         ((raw[index + 2] - 0x30) << 3) | (raw[index + 3] - 0x30);
       index += 3;
     } else {
-      throw malformed('bytea escape');
+      scratch.fill(0); throw malformed('bytea escape');
     }
     writeOffset += 1;
   }
-  return writeOffset === scratch.length ? scratch : scratch.slice(0, writeOffset);
+  const decoded = scratch.slice(0, writeOffset); scratch.fill(0); return decoded;
 }
 
 function decodeStrictUtf8Text(raw: Uint8Array): string {

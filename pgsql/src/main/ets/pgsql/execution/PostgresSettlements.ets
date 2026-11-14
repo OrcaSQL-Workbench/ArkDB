@@ -24,6 +24,8 @@ export class PostgresCommandCloseSettlement {
   readonly settled: Promise<void>;
   private closeError: ArkDbError | null = null;
   private settledNow: boolean = false;
+  private delivered: boolean = false;
+  private undeliveredCleanup: (() => void) | null = null;
   private resolveClose: (error: ArkDbError) => void = (_error: ArkDbError): void => {};
   private resolveSettled: () => void = (): void => {};
   private waiters: Set<(error: ArkDbError) => void> = new Set<(error: ArkDbError) => void>();
@@ -37,17 +39,25 @@ export class PostgresCommandCloseSettlement {
   get isCloseRequested(): boolean { return this.closeError !== null; }
   get closeReason(): ArkDbError | null { return this.closeError; }
   get isSettled(): boolean { return this.settledNow; }
+  deferUndeliveredCleanup(cleanup: () => void): void {
+    const safe = (): void => { try { cleanup(); } catch (_e) {} };
+    if (this.closeError !== null || this.settledNow || this.delivered) { safe(); return; }
+    const prev = this.undeliveredCleanup; this.undeliveredCleanup = prev === null ? safe : (): void => { prev(); safe(); };
+  }
+  discardUndelivered(): void { const fn = this.undeliveredCleanup; this.undeliveredCleanup = null; if (!this.delivered && fn !== null) fn(); }
+  markDelivered(): void { this.delivered = true; this.undeliveredCleanup = null; }
   signalClose(error: ArkDbError): void {
     if (this.settledNow || this.closeError !== null) return;
     this.closeError = error;
+    this.discardUndelivered();
     this.resolveClose(error);
     const pending = this.waiters;
     this.waiters = new Set<(error: ArkDbError) => void>();
     for (const waiter of pending) waiter(error);
   }
-  markSettled(): void {
+  markSettled(preservePendingDelivery: boolean = false): void {
     if (this.settledNow) return;
-    this.settledNow = true;
+    this.settledNow = true; if (!preservePendingDelivery) this.discardUndelivered();
     const pending = this.waiters;
     this.waiters = new Set<(error: ArkDbError) => void>();
     if (pending.size > 0) {

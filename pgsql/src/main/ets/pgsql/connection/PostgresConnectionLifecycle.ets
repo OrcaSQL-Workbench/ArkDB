@@ -252,7 +252,7 @@ export class PostgresConnectionLifecycle {
     if (this.currentState === ConnectionState.Error || this.unsynchronized) throw ArkDbError.protocol('PostgreSQL connection is retired after an unrecoverable error.');
     const scope = this.commandGate.reserve(kind); const settlement = new PostgresCommandCloseSettlement(scope);
     this.activeSettlement = settlement; this.activeReleaseScope = null; this.activeScopeRelease = null; this.closedScope = null;
-    let failure: ArkDbError | null = null; let output: T | undefined = undefined; this.retiredCleanup = null; this.retiredComposed = null;
+    let failure: ArkDbError | null = null; let output: T | undefined = undefined; let delivered = false; this.retiredCleanup = null; this.retiredComposed = null;
     try {
       this.commandGate.start(scope); this.throwIfRetiredOrClosing(settlement);
       if (this.currentState !== ConnectionState.Ready || this.transport === null) throw ArkDbError.protocol('PostgreSQL connection channel is unavailable.');
@@ -261,7 +261,7 @@ export class PostgresConnectionLifecycle {
       const result = await settlement.raceClose<T>((): Promise<T> => runner(scope, channel, settlement));
       this.throwIfRetiredOrClosing(settlement);
       if (this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.readySynchronized || this.transport === null) throw ArkDbError.protocol('PostgreSQL command completed without ReadyForQuery synchronization.');
-      this.currentState = ConnectionState.Ready; output = result;
+      this.currentState = ConnectionState.Ready; output = result; delivered = true;
     } catch (error) {
       const rawErr = toPostgresArkDbError(error as Object);
       const primary = rawErr === settlement.closeReason && this.unsynchronized && this.retiredReason !== null ? this.retiredReason : rawErr;
@@ -271,7 +271,9 @@ export class PostgresConnectionLifecycle {
         this.markStreamDamaged(primary); failure = await this.abortScopeFailure(scope, primary, alreadyAppended, ConnectionState.Error);
       } else { this.currentState = ConnectionState.Ready; failure = primary; }
     } finally {
-      this.retiredCleanup = null; this.retiredComposed = null; failure = this.finishScope(scope, settlement, failure);
+      this.retiredCleanup = null; this.retiredComposed = null;
+      failure = this.finishScope(scope, settlement, failure, delivered && failure === null);
+      if (delivered && failure === null) settlement.markDelivered(); else settlement.discardUndelivered();
     }
     if (failure !== null) throw failure;
     return output as T;
@@ -505,7 +507,7 @@ export class PostgresConnectionLifecycle {
     if (this.pendingIoCount <= 0) return Promise.resolve();
     return new Promise<void>((resolve: () => void): void => { this.pendingIoWaiters.push(resolve); });
   }
-  private finishScope(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement, failure: ArkDbError | null): ArkDbError | null {
+  private finishScope(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement, failure: ArkDbError | null, preservePendingDelivery: boolean = false): ArkDbError | null {
     if (this.activeSettlement === settlement) {
       this.activeSettlement = null;
       if (!this.awaitingClosedSettlement || this.closedSettlement !== settlement) {
@@ -514,7 +516,7 @@ export class PostgresConnectionLifecycle {
       }
     }
     let scopeEndErr: ArkDbError | null = null;
-    try { settlement.markSettled(); } catch (e) { scopeEndErr = toPostgresArkDbError(e as Object); }
+    try { settlement.markSettled(preservePendingDelivery); } catch (e) { scopeEndErr = toPostgresArkDbError(e as Object); }
     scopeEndErr = this.releaseScopeSafe(scope, scopeEndErr);
     if (this.closedSettlement === settlement) {
       if (this.awaitingClosedSettlement) this.closedSettlementTerminalError = scopeEndErr;

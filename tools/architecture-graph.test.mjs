@@ -191,7 +191,7 @@ const OWNED_SOURCE_ROOTS = [
   },
   {
     root: 'pgsql/src/main/ets/pgsql/features',
-    directories: ['prepared']
+    directories: ['prepared', 'transaction']
   },
   {
     root: 'tools',
@@ -309,6 +309,7 @@ const FORBIDDEN_MYSQL_LONG_DATA_PATHS = [
 ];
 const POSTGRES_LEAF_PATTERN =
   '(?:model/.+\\.ets|features/prepared/PostgresParameter\\.ets|' +
+  'features/transaction/PostgresTransactionOptions\\.ets|' +
   'protocol/PostgresProtocolConstants\\.ets|value/PostgresTypeOids\\.ets)';
 const POSTGRES_CONTRACT_MODEL_PATH =
   new RegExp('^pgsql/src/main/ets/pgsql/' + POSTGRES_LEAF_PATTERN + '$');
@@ -348,7 +349,7 @@ const ARCHITECTURE_POLICY = {
     },
     {
       from: /^pgsql\/src\/main\/ets\/pgsql\/api\//,
-      to: /^pgsql\/src\/main\/ets\/pgsql\/(?!(?:api\/|model\/|features\/prepared\/PostgresParameter\.ets$)).+/,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?!(?:api\/|model\/|features\/prepared\/PostgresParameter\.ets$|features\/transaction\/PostgresTransactionOptions\.ets$)).+/,
       message: 'PostgreSQL api may import only contract and model leaves.'
     },
     {
@@ -490,7 +491,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, and P19 own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, and P20A own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -499,6 +500,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, and P19 own exactly the re
     'pgsql/src/main/ets/pgsql/PostgresConnection.ets',
     'pgsql/src/main/ets/pgsql/api/PostgresContracts.ets',
     'pgsql/src/main/ets/pgsql/api/PostgresPreparedContracts.ets',
+    'pgsql/src/main/ets/pgsql/api/PostgresTransactionContracts.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresAuthCrypto.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresSaslPrep.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresExtendedQuery.ets',
@@ -506,6 +508,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, and P19 own exactly the re
     'pgsql/src/main/ets/pgsql/command/PostgresResultStream.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresSimpleQuery.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresStartup.ets',
+    'pgsql/src/main/ets/pgsql/command/PostgresTransactionCommand.ets',
     'pgsql/src/main/ets/pgsql/connection/PostgresConnectionLifecycle.ets',
     'pgsql/src/main/ets/pgsql/connection/PostgresFeatureFacades.ets',
     'pgsql/src/main/ets/pgsql/driver/PostgresDriverFactory.ets',
@@ -514,6 +517,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, and P19 own exactly the re
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameter.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameterEncoder.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresPreparedExecutor.ets',
+    'pgsql/src/main/ets/pgsql/features/transaction/PostgresTransactionOptions.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresConnectionConfig.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresModels.ets',
     'pgsql/src/main/ets/pgsql/protocol/PostgresByteCodec.ets',
@@ -2478,6 +2482,8 @@ test('enforces PostgreSQL api, parameter leaf, execution, lifecycle, and prepare
       /PostgreSQL api may import only contract and model leaves/],
     ['features/prepared/PostgresParameter.ets', 'features/prepared/PostgresParameterEncoder.ets',
       /PostgreSQL contract and model leaves must not depend on implementations/],
+    ['features/transaction/PostgresTransactionOptions.ets', 'command/PostgresSimpleQuery.ets',
+      /PostgreSQL contract and model leaves must not depend on implementations/],
     ['auth/PostgresAuthCrypto.ets', 'connection/PostgresConnectionLifecycle.ets',
       /PostgreSQL auth primitives may depend only on auth, model, and protocol layers/],
     ['auth/PostgresSaslPrep.ets', 'execution/PostgresCommandGate.ets',
@@ -2525,6 +2531,10 @@ test('enforces PostgreSQL api, parameter leaf, execution, lifecycle, and prepare
     ['command/PostgresStartup.ets', 'PostgresConnection.ets',
       /PostgreSQL command implementations must not depend on connection or driver facades/],
     ['command/PostgresStartup.ets', 'driver/PostgresDriverFactory.ets',
+      /PostgreSQL command implementations must not depend on connection or driver facades/],
+    ['command/PostgresTransactionCommand.ets', 'PostgresConnection.ets',
+      /PostgreSQL command implementations must not depend on connection or driver facades/],
+    ['command/PostgresTransactionCommand.ets', 'driver/PostgresDriverFactory.ets',
       /PostgreSQL command implementations must not depend on connection or driver facades/]
   ];
   for (const [fromRel, toRel, expected] of cases) {

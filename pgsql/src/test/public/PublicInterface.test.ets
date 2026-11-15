@@ -11,7 +11,8 @@ import {
   PostgresDriverCapabilities, PostgresDriverFactory, PostgresError,
   PostgresFeatureConnection, PostgresParameter, PostgresParameterType,
   PostgresParameterValue, PostgresPreparedExecutor, PostgresQueryResult,
-  PostgresQueryResultSummary, PostgresServerInfo, PostgresSslMode,
+  PostgresQueryResultSummary, PostgresServerInfo, PostgresSession, PostgresSslMode,
+  PostgresTransactionIsolation, PostgresTransactionOptions, PostgresTransactionRunner,
   PostgresTransactionState, QueryOptions, QueryResultMeta, QueryResultSink,
   QueryResultSummary, QueryRowChunk, QueryTruncation, postgresPlaceholders,
   quotePostgresIdentifier, requirePostgresFeatures
@@ -112,9 +113,15 @@ export default function publicInterfaceTest(): void {
         new PostgresConnectionOptions(validConfig(), 'secret'));
       const prepared: PostgresPreparedExecutor | undefined =
         connection.postgresFeatures.prepared;
+      const txRunner: PostgresTransactionRunner | undefined =
+        connection.postgresFeatures.transactions;
+      const txSession: PostgresSession | null = null;
+      const txOptions = new PostgresTransactionOptions();
       const paramValue: PostgresParameterValue = new Uint8Array([0x01, 0x02]);
       const param = new PostgresParameter(PostgresParameterType.Bytea, paramValue);
-      expect(prepared !== undefined).assertTrue();
+      expect(prepared !== undefined && txRunner === undefined && txSession === null &&
+        connection.features.transactions === undefined &&
+        txOptions.isolation === PostgresTransactionIsolation.ReadCommitted).assertTrue();
       expect(param.type).assertEqual('bytea');
       expect((param.value as Uint8Array).length).assertEqual(2);
       expectAllCapabilitiesFalse(new PostgresDriverFactory().capabilities);
@@ -174,9 +181,9 @@ export default function publicInterfaceTest(): void {
         connection.changeContext(new DatabaseContext()));
       await expectNotConnected((): Promise<void> =>
         connection.features.context!.changeContext(new DatabaseContext()));
-      await expectUnsupported(async (): Promise<void> => { await connection.begin(); });
-      await expectUnsupported(async (): Promise<void> => { await connection.commit(); });
-      await expectUnsupported(async (): Promise<void> => { await connection.rollback(); });
+      await expectNotConnected(async (): Promise<void> => { await connection.begin(); });
+      await expectNotConnected(async (): Promise<void> => { await connection.commit(); });
+      await expectNotConnected(async (): Promise<void> => { await connection.rollback(); });
       await expectUnsupported(async (): Promise<void> => { await connection.cancel(); });
       expectSyncUnsupported((): void => {
         connection.isInterruptionError(ArkDbError.cancelled('cancelled'));

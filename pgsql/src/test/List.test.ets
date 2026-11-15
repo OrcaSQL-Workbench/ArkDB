@@ -10,6 +10,7 @@ import postgresContextTest from './pgsql/connection/PostgresContext.test';
 import postgresCommandGateTest from './pgsql/execution/PostgresCommandGate.test';
 import postgresExtendedQueryTest from './pgsql/features/prepared/PostgresExtendedQuery.test';
 import postgresParameterEncoderTest from './pgsql/features/prepared/PostgresParameterEncoder.test';
+import postgresTransactionControlTest from './pgsql/features/transaction/PostgresTransactionControl.test';
 import postgresBackendParserTest from './pgsql/protocol/PostgresBackendParser.test';
 import postgresFrontendSerializerTest from './pgsql/protocol/PostgresFrontendSerializer.test';
 import postgresProtocolTest from './pgsql/protocol/PostgresProtocol.test';
@@ -40,4 +41,5 @@ export default function testsuite(): void {
   postgresTextValueDecoderTest();
   postgresParameterEncoderTest();
   postgresExtendedQueryTest();
+  postgresTransactionControlTest();
 }

@@ -55,12 +55,18 @@ export type {
 export type {
   PostgresPreparedExecutor
 } from './src/main/ets/pgsql/api/PostgresPreparedContracts';
+export type {
+  PostgresSession, PostgresTransactionRunner
+} from './src/main/ets/pgsql/api/PostgresTransactionContracts';
 export {
   PostgresParameter, PostgresParameterType
 } from './src/main/ets/pgsql/features/prepared/PostgresParameter';
 export type {
   PostgresParameterValue
 } from './src/main/ets/pgsql/features/prepared/PostgresParameter';
+export {
+  PostgresTransactionIsolation, PostgresTransactionOptions
+} from './src/main/ets/pgsql/features/transaction/PostgresTransactionOptions';
 export { PostgresConnection } from './src/main/ets/pgsql/PostgresConnection';
 export {
   PostgresDriverFactory

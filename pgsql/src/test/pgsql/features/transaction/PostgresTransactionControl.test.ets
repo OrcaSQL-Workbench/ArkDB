@@ -33,26 +33,23 @@ export default function postgresTransactionControlTest(): void {
       expect(defaults.isolation === PostgresTransactionIsolation.ReadCommitted && !defaults.readOnly &&
         rrReadOnly.validate().length === 0).assertTrue();
       expect(buildPostgresBeginSql(rrReadOnly)).assertEqual('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY NOT DEFERRABLE');
-      expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.ReadCommitted, true, false)))
-        .assertEqual('BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY NOT DEFERRABLE');
-      expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.RepeatableRead, false, false)))
-        .assertEqual('BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE NOT DEFERRABLE');
-      expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.Serializable, false, false)))
-        .assertEqual('BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE NOT DEFERRABLE');
-      expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.Serializable, true, false)))
-        .assertEqual('BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY NOT DEFERRABLE');
+      expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.ReadCommitted, true, false)) ===
+        'BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY NOT DEFERRABLE' &&
+        buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.RepeatableRead, false, false)) ===
+        'BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE NOT DEFERRABLE' &&
+        buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.Serializable, false, false)) ===
+        'BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE NOT DEFERRABLE' &&
+        buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.Serializable, true, false)) ===
+        'BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY NOT DEFERRABLE').assertTrue();
       const serDeferrable = makeOpts(PostgresTransactionIsolation.Serializable, true, true);
       expect(serDeferrable.validate().length === 0 && buildPostgresBeginSql(serDeferrable) ===
         'BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE').assertTrue();
-
-      const nullOpts: PostgresTransactionOptions | null = null;
-      const undefOpts: PostgresTransactionOptions | undefined = undefined;
+      const nullOpts: PostgresTransactionOptions | null = null; const undefOpts: PostgresTransactionOptions | undefined = undefined;
       for (const missing of [nullOpts!, undefOpts!, (new Object()) as PostgresTransactionOptions]) {
         const errs = validatePostgresTransactionOptions(missing);
         expect(errs.length === 1 && errs[0].kind === ArkDbErrorKind.Validation &&
-          errs[0].message === 'PostgreSQL transaction options are required.').assertTrue();
-        expect(syncFail((): void => { buildPostgresBeginSql(missing); }).message)
-          .assertEqual('PostgreSQL transaction options are required.');
+          errs[0].message === 'PostgreSQL transaction options are required.' &&
+          syncFail((): void => { buildPostgresBeginSql(missing); }).message === 'PostgreSQL transaction options are required.').assertTrue();
       }
       const badFields = new PostgresTransactionOptions();
       badFields.isolation = 'read_uncommitted' as PostgresTransactionIsolation;
@@ -63,13 +60,10 @@ export default function postgresTransactionControlTest(): void {
         fieldErrs[1].message === 'PostgreSQL transaction readOnly must be a boolean.' &&
         fieldErrs[2].message === 'PostgreSQL transaction deferrable must be a boolean.' &&
         syncFail((): void => { buildPostgresBeginSql(badFields); }).kind === ArkDbErrorKind.Validation).assertTrue();
-
-      for (const badDef of [
-        makeOpts(PostgresTransactionIsolation.ReadCommitted, false, true),
+      for (const badDef of [makeOpts(PostgresTransactionIsolation.ReadCommitted, false, true),
         makeOpts(PostgresTransactionIsolation.ReadCommitted, true, true),
         makeOpts(PostgresTransactionIsolation.RepeatableRead, true, true),
-        makeOpts(PostgresTransactionIsolation.Serializable, false, true)
-      ]) {
+        makeOpts(PostgresTransactionIsolation.Serializable, false, true)]) {
         const errs = badDef.validate();
         expect(errs.length === 1 && errs[0].kind === ArkDbErrorKind.Validation && errs[0].message ===
           'PostgreSQL DEFERRABLE transactions require SERIALIZABLE isolation and READ ONLY mode.' &&
@@ -295,12 +289,14 @@ export default function postgresTransactionControlTest(): void {
         const initReady = postReadyOp === runPostgresBegin ? 0x49 : 0x54;
         const tag = postReadyOp === runPostgresBegin ? 'BEGIN' : (postReadyOp === runPostgresCommit ? 'COMMIT' : 'ROLLBACK');
         const nextReady = postReadyOp === runPostgresBegin ? 0x54 : 0x49;
-        const raceLife = openLifecycle(new QueueTransport([bootFrames(initReady), concatFrames([msgCmd(tag), msgReady(nextReady)])]));
-        await raceLife.connect();
-        const retired: ArkDbError[] = [];
-        const raceErr = await asyncFail((): Promise<PostgresDatabaseSessionStatus> => runOnLifecycle(raceLife, postReadyOp, retired, true));
-        await raceLife.close();
-        expect(raceErr.kind === ArkDbErrorKind.Cancelled && retired.length === 0 && raceLife.state === ConnectionState.Closed).assertTrue();
+        for (const closeMode of [1, 2, 3]) {
+          const raceLife = openLifecycle(new QueueTransport([bootFrames(initReady), concatFrames([msgCmd(tag), msgReady(nextReady)])]));
+          await raceLife.connect();
+          const retired: ArkDbError[] = [];
+          await assertDirectCloseRace(raceLife, postReadyOp, retired, closeMode);
+          await raceLife.close();
+          expect(retired.length === 0 && raceLife.state === ConnectionState.Closed).assertTrue();
+        }
       }
     });
   });
@@ -334,11 +330,39 @@ function openLifecycle(tp: QueueTransport): PostgresConnectionLifecycle {
 }
 function runOnLifecycle(life: PostgresConnectionLifecycle,
   op: (h: PostgresSimpleQueryHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresDatabaseSessionStatus>,
-  retired: ArkDbError[] = [], closeAfterApply: boolean = false
+  retired: ArkDbError[] = []
 ): Promise<PostgresDatabaseSessionStatus> {
   return life.runCommand<PostgresDatabaseSessionStatus>(PostgresCommandKind.Transaction,
     (sc: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> =>
-      op(new TestSimpleHost(life, sc, retired, closeAfterApply), ch, st));
+      op(new TestSimpleHost(life, sc, retired, null, 0), ch, st));
+}
+async function assertDirectCloseRace(life: PostgresConnectionLifecycle,
+  op: (h: PostgresSimpleQueryHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresDatabaseSessionStatus>,
+  retired: ArkDbError[], closeMode: number
+): Promise<void> {
+  if (closeMode === 3) {
+    await life.runCommand<PostgresDatabaseSessionStatus>(PostgresCommandKind.Transaction,
+      async (sc: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> => {
+        const host = new TestSimpleHost(life, sc, retired, st, 3);
+        const p = op(host, ch, st); p.then((): void => { host.settled = true; }, (): void => { host.settled = true; });
+        const res = await p; for (let i = 0; i < 4; i += 1) { await Promise.resolve(); }
+        expect(host.settledOnSingleHop).assertTrue(); return res;
+      });
+    return;
+  }
+  const err = await asyncFail((): Promise<PostgresDatabaseSessionStatus> =>
+    life.runCommand<PostgresDatabaseSessionStatus>(PostgresCommandKind.Transaction,
+      (sc: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> => {
+        if (closeMode === 1) {
+          Promise.resolve().then((): void => {
+            life.sessionStatus.known = false; life.sessionStatus.inTransaction = op === runPostgresBegin;
+            life.sessionStatus.transactionState = op === runPostgresBegin ? PostgresTransactionState.InTransaction : PostgresTransactionState.Idle;
+            st.signalClose(ArkDbError.cancelled('closed'));
+          });
+        }
+        return op(new TestSimpleHost(life, sc, retired, st, closeMode), ch, st);
+      }));
+  expect(err.kind === ArkDbErrorKind.Cancelled).assertTrue();
 }
 async function assertUnknownStateRetires(
   op: (h: PostgresSimpleQueryHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresDatabaseSessionStatus>
@@ -363,15 +387,11 @@ async function assertUnknownStateRetires(
   await closedLife.close();
 }
 function makeOpts(isolation: PostgresTransactionIsolation, readOnly: boolean, deferrable: boolean): PostgresTransactionOptions {
-  const opts = new PostgresTransactionOptions();
-  opts.isolation = isolation; opts.readOnly = readOnly; opts.deferrable = deferrable;
-  return opts;
+  const opts = new PostgresTransactionOptions(); opts.isolation = isolation; opts.readOnly = readOnly; opts.deferrable = deferrable; return opts;
 }
 function syncFail(op: () => void): ArkDbError {
-  let err: Object | null = null;
-  try { op(); } catch (e) { err = e as Object; }
-  expect(err instanceof ArkDbError).assertTrue();
-  return err as ArkDbError;
+  let err: Object | null = null; try { op(); } catch (e) { err = e as Object; }
+  expect(err instanceof ArkDbError).assertTrue(); return err as ArkDbError;
 }
 class StubSession implements PostgresSession {
   readonly postgresFeatures: PostgresConnectionFeatures = new PostgresConnectionFeatures();
@@ -392,25 +412,32 @@ class CustomTxConnection extends PostgresConnection {
   constructor(config: PostgresConnectionConfig) { super(config, ''); }
   get sessionStatus(): PostgresDatabaseSessionStatus {
     const st = new PostgresDatabaseSessionStatus();
-    st.known = true; st.autocommit = true; st.inTransaction = true; st.transactionState = PostgresTransactionState.InTransaction;
-    return st;
+    st.known = true; st.autocommit = true; st.inTransaction = true; st.transactionState = PostgresTransactionState.InTransaction; return st;
   }
   async begin(): Promise<PostgresDatabaseSessionStatus> { this.calls.push('begin'); return this.sessionStatus; }
   async commit(): Promise<PostgresDatabaseSessionStatus> { this.calls.push('commit'); return this.sessionStatus; }
   async rollback(): Promise<PostgresDatabaseSessionStatus> { this.calls.push('rollback'); return this.sessionStatus; }
 }
 class TestSimpleHost implements PostgresSimpleQueryHost {
+  settled: boolean = false; settledOnSingleHop: boolean = false;
   private readonly life: PostgresConnectionLifecycle; private readonly sc: PostgresCommandScope;
-  private readonly retiredReasons: ArkDbError[]; private readonly closeAfterApply: boolean;
-  constructor(life: PostgresConnectionLifecycle, sc: PostgresCommandScope, retired: ArkDbError[], closeAfterApply: boolean) {
-    this.life = life; this.sc = sc; this.retiredReasons = retired; this.closeAfterApply = closeAfterApply;
+  private readonly retiredReasons: ArkDbError[]; private readonly st: PostgresCommandCloseSettlement | null; private readonly closeMode: number;
+  constructor(life: PostgresConnectionLifecycle, sc: PostgresCommandScope, retired: ArkDbError[],
+    st: PostgresCommandCloseSettlement | null, closeMode: number) {
+    this.life = life; this.sc = sc; this.retiredReasons = retired; this.st = st; this.closeMode = closeMode;
   }
   get serverInfo(): PostgresServerInfo { return this.life.serverInfo; }
   get sessionStatus(): PostgresDatabaseSessionStatus { return this.life.sessionStatus; }
   get timers(): ConnectionTimerPort { return this.life.timers; }
   applyReadyStatus(ready: PostgresReadyStatus): void {
-    this.life.applyReadyStatus(this.sc, ready);
-    if (this.closeAfterApply) { Promise.resolve().then((): void => { void this.life.close(); }); }
+    this.life.applyReadyStatus(this.sc, ready); const st = this.st; if (st === null) return;
+    if (this.closeMode === 2) {
+      Promise.resolve().then((): void => { this.life.sessionStatus.known = false; st.signalClose(ArkDbError.cancelled('closed')); });
+    } else if (this.closeMode === 3) {
+      Promise.resolve().then((): void => { Promise.resolve().then((): void => {
+        Promise.resolve().then((): void => { this.settledOnSingleHop = this.settled; });
+      }); });
+    }
   }
   retire(reason: ArkDbError): Promise<void> { this.retiredReasons.push(reason); return this.life.retire(this.sc, reason); }
 }
@@ -429,8 +456,7 @@ class FixedTimers implements ConnectionTimerPort {
 class QueueTransport implements PostgresLifecycleTransport {
   readonly writes: Uint8Array[] = []; readonly rawWrites: Uint8Array[] = [];
   hangAtEmpty: boolean = false; waitingRead: boolean = false;
-  private rejectHung: ((e: Object) => void) | null = null;
-  private readonly reads: Uint8Array[];
+  private rejectHung: ((e: Object) => void) | null = null; private readonly reads: Uint8Array[];
   constructor(reads: Uint8Array[]) { this.reads = reads.slice(); }
   enqueue(chunks: Uint8Array[]): void { for (const c of chunks) this.reads.push(c); }
   async connect(_h: string, _p: number, _t: number): Promise<void> {}
@@ -440,13 +466,11 @@ class QueueTransport implements PostgresLifecycleTransport {
       this.waitingRead = true;
       return new Promise<Uint8Array | null>((_res: (v: Uint8Array | null) => void, rej: (e: Object) => void): void => { this.rejectHung = rej; });
     }
-    const head = this.reads[0];
-    if (head.length <= max) return this.reads.shift()!;
+    const head = this.reads[0]; if (head.length <= max) return this.reads.shift()!;
     this.reads[0] = head.subarray(max); return head.subarray(0, max);
   }
   write(data: Uint8Array): Promise<number> {
-    this.rawWrites.push(data); const cp = new Uint8Array(data.length); cp.set(data); this.writes.push(cp);
-    return Promise.resolve(data.length);
+    this.rawWrites.push(data); const cp = new Uint8Array(data.length); cp.set(data); this.writes.push(cp); return Promise.resolve(data.length);
   }
   async close(): Promise<void> {}
   async abort(e: ArkDbError): Promise<void> {
@@ -454,9 +478,7 @@ class QueueTransport implements PostgresLifecycleTransport {
   }
 }
 function makeConfig(): PostgresConnectionConfig {
-  const c = new PostgresConnectionConfig();
-  c.host = 'pg.local'; c.user = 'alice'; c.database = 'app_db'; c.ssl.mode = PostgresSslMode.DISABLED;
-  return c;
+  const c = new PostgresConnectionConfig(); c.host = 'pg.local'; c.user = 'alice'; c.database = 'app_db'; c.ssl.mode = PostgresSslMode.DISABLED; return c;
 }
 function openReady(tp: QueueTransport, gate?: PostgresCommandGate): PostgresConnection {
   return new PostgresConnection(makeConfig(), '', new FixedTimers(), (): PostgresLifecycleTransport => tp, undefined, gate);
@@ -465,10 +487,8 @@ function bootFrames(ready: number): Uint8Array {
   return concatFrames([backendFrame(0x52, [0, 0, 0, 0]), msgParam('client_encoding', 'UTF8'), msgReady(ready)]);
 }
 function backendFrame(type: number, payload: number[] | Uint8Array): Uint8Array {
-  const src = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
-  const out = new Uint8Array(src.length + 5);
-  out[0] = type; new DataView(out.buffer).setInt32(1, src.length + 4, false); out.set(src, 5);
-  return out;
+  const src = payload instanceof Uint8Array ? payload : new Uint8Array(payload); const out = new Uint8Array(src.length + 5);
+  out[0] = type; new DataView(out.buffer).setInt32(1, src.length + 4, false); out.set(src, 5); return out;
 }
 function expectedQueryFrame(sql: string): Uint8Array { const p: number[] = []; pushCStr(p, sql); return backendFrame(0x51, p); }
 function msgCmd(tag: string): Uint8Array { const p: number[] = []; pushCStr(p, tag); return backendFrame(0x43, p); }
@@ -482,19 +502,14 @@ function msgError(st: string, m: string): Uint8Array {
 }
 function pushCStr(dst: number[], text: string): void { for (let i = 0; i < text.length; i += 1) dst.push(text.charCodeAt(i)); dst.push(0); }
 function concatFrames(frames: Uint8Array[]): Uint8Array {
-  let len = 0; for (const f of frames) len += f.length;
-  const out = new Uint8Array(len); let off = 0;
-  for (const f of frames) { out.set(f, off); off += f.length; }
-  return out;
+  let len = 0; for (const f of frames) len += f.length; const out = new Uint8Array(len); let off = 0;
+  for (const f of frames) { out.set(f, off); off += f.length; } return out;
 }
 function assertBytes(actual: Uint8Array, expected: Uint8Array): void {
-  expect(actual.length).assertEqual(expected.length);
-  for (let i = 0; i < expected.length; i += 1) expect(actual[i]).assertEqual(expected[i]);
+  expect(actual.length).assertEqual(expected.length); for (let i = 0; i < expected.length; i += 1) expect(actual[i]).assertEqual(expected[i]);
 }
 function assertZeroed(buf: Uint8Array): void { for (let i = 0; i < buf.length; i += 1) expect(buf[i]).assertEqual(0); }
 async function asyncFail<T>(op: () => Promise<T>): Promise<ArkDbError> {
-  let err: Object | null = null;
-  try { await op(); } catch (e) { err = e as Object; }
-  expect(err instanceof ArkDbError).assertTrue();
-  return err as ArkDbError;
+  let err: Object | null = null; try { await op(); } catch (e) { err = e as Object; }
+  expect(err instanceof ArkDbError).assertTrue(); return err as ArkDbError;
 }

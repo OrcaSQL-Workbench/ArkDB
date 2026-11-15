@@ -189,7 +189,7 @@ function finalizeQueryResults(results: PostgresQueryResult[], status: PostgresDa
   if (results.length > 1) { const last = results[results.length - 1]; last.statusKnown = status.known; last.autocommit = status.autocommit; last.inTransaction = status.inTransaction; }
   return primary;
 }
-function applyCommandTag(target: PostgresQueryResult, tag: string): void {
+export function applyCommandTag(target: PostgresQueryResult, tag: string): void {
   const counts = parsePostgresCommandCompleteTag(tag); target.commandTag = tag; target.rowCountExact = counts.rowCountExact; target.affectedRowsExact = counts.affectedRowsExact; target.affectedRows = counts.affectedRows;
 }
 export function findNonTextFormatCode(rowDesc: PostgresRowDescription): number | null {
@@ -205,7 +205,7 @@ export function scrubBackendMessage(msg: PostgresBackendMessage | null): void {
   if (msg instanceof PostgresDataRow) { for (const f of msg.fields) { if (f !== null) f.fill(0); } }
 }
 export function scrubSqlRow(row: SqlValue[]): void { for (const v of row) { if (v instanceof Uint8Array) v.fill(0); } }
-function scrubQueryResult(res: PostgresQueryResult): void {
+export function scrubQueryResult(res: PostgresQueryResult): void {
   for (const row of res.rows) scrubSqlRow(row); res.rows.length = 0;
   for (const extra of res.additionalResults) { for (const row of extra.rows) scrubSqlRow(row); extra.rows.length = 0; }
   res.additionalResults.length = 0;

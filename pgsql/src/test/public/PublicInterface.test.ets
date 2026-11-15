@@ -110,15 +110,16 @@ export default function publicInterfaceTest(): void {
         connection.postgresFeatures.prepared;
       const paramValue: PostgresParameterValue = new Uint8Array([0x01, 0x02]);
       const param = new PostgresParameter(PostgresParameterType.Bytea, paramValue);
-      expect(prepared === undefined).assertTrue();
+      expect(prepared !== undefined).assertTrue();
       expect(param.type).assertEqual('bytea');
       expect((param.value as Uint8Array).length).assertEqual(2);
       expectAllCapabilitiesFalse(new PostgresDriverFactory().capabilities);
       expect(connection.features.streaming !== undefined).assertTrue();
       expect(connection.features.health !== undefined).assertTrue();
       expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{}}');
-      expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{}');
+      expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{}}');
       expect(requirePostgresFeatures(connection) === connection.postgresFeatures).assertTrue();
+      expect(requirePostgresFeatures(connection).prepared === prepared).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
     });
 
@@ -145,6 +146,13 @@ export default function publicInterfaceTest(): void {
       });
       await expectNotConnected((): Promise<void> => connection.ping());
       await expectNotConnected((): Promise<void> => connection.features.health!.ping());
+      await expectNotConnected(async (): Promise<void> => {
+        await connection.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions());
+      });
+      await expectUnsupported(async (): Promise<void> => {
+        await connection.postgresFeatures.prepared!.queryStream(
+          'SELECT 1', [], new QueryOptions(), new NoopSink());
+      });
       await expectUnsupported((): Promise<void> =>
         connection.changeContext(new DatabaseContext()));
       await expectUnsupported(async (): Promise<void> => { await connection.begin(); });

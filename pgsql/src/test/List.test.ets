@@ -6,6 +6,7 @@ import postgresSimpleQueryTest from './pgsql/command/PostgresSimpleQuery.test';
 import postgresStartupTest from './pgsql/command/PostgresStartup.test';
 import postgresConnectionLifecycleTest from './pgsql/connection/PostgresConnectionLifecycle.test';
 import postgresCommandGateTest from './pgsql/execution/PostgresCommandGate.test';
+import postgresExtendedQueryTest from './pgsql/features/prepared/PostgresExtendedQuery.test';
 import postgresParameterEncoderTest from './pgsql/features/prepared/PostgresParameterEncoder.test';
 import postgresBackendParserTest from './pgsql/protocol/PostgresBackendParser.test';
 import postgresFrontendSerializerTest from './pgsql/protocol/PostgresFrontendSerializer.test';
@@ -32,4 +33,5 @@ export default function testsuite(): void {
   postgresTlsTest();
   postgresTextValueDecoderTest();
   postgresParameterEncoderTest();
+  postgresExtendedQueryTest();
 }

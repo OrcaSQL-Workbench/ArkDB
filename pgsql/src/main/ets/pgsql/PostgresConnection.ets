@@ -8,6 +8,7 @@ import {
 import {
   PostgresConnectionFeatures, PostgresFeatureConnection
 } from './api/PostgresContracts';
+import { PostgresExtendedQueryHost, runPostgresExtendedQuery } from './command/PostgresExtendedQuery';
 import { PostgresQueryStreamHost, runPostgresQueryStream } from './command/PostgresResultStream';
 import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery } from './command/PostgresSimpleQuery';
 import {
@@ -18,6 +19,8 @@ import {
   PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase, PostgresCommandScope
 } from './execution/PostgresCommandGate';
 import { PostgresCommandCloseSettlement } from './execution/PostgresSettlements';
+import { PostgresPreparedFrames } from './features/prepared/PostgresParameterEncoder';
+import { PostgresConnectionPreparedExecutor } from './features/prepared/PostgresPreparedExecutor';
 import {
   PostgresConnectionConfig
 } from './model/PostgresConnectionConfig';
@@ -46,6 +49,9 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
       (sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
         this.queryStream(sql, options, sink));
     this.features.health = new PostgresConnectionHealth((): Promise<void> => this.ping());
+    this.postgresFeatures.prepared = new PostgresConnectionPreparedExecutor(
+      (frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> =>
+        this.executeExtendedQuery(frames, options));
   }
 
   get state(): ConnectionState {
@@ -110,6 +116,13 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
   close(): Promise<void> {
     return this.lifecycle.close();
   }
+
+  private executeExtendedQuery(frames: PostgresPreparedFrames,
+    options: QueryOptions): Promise<PostgresQueryResult> {
+    return this.lifecycle.runCommand<PostgresQueryResult>(PostgresCommandKind.ExtendedQuery,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> =>
+        runPostgresExtendedQuery(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, options));
+  }
 }
 
 class SimpleQueryLifecycleHost implements PostgresSimpleQueryHost {
@@ -123,7 +136,8 @@ class SimpleQueryLifecycleHost implements PostgresSimpleQueryHost {
   retire(reason: ArkDbError): Promise<void> { return this.lifecycle.retire(this.scope, reason); }
 }
 
-class QueryStreamLifecycleHost extends SimpleQueryLifecycleHost implements PostgresQueryStreamHost {
+class QueryStreamLifecycleHost extends SimpleQueryLifecycleHost
+  implements PostgresQueryStreamHost, PostgresExtendedQueryHost {
   private setPhase(phase: PostgresCommandPhase): void {
     if (this.lifecycle.commandGate.isOwner(this.scope) && this.scope.phase !== PostgresCommandPhase.Closing) this.lifecycle.commandGate.setPhase(this.scope, phase);
   }

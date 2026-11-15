@@ -25,6 +25,7 @@ export type PostgresParameterValue =
 
 const MIN_INT8: bigint = -9223372036854775808n;
 const MAX_INT8: bigint = 9223372036854775807n;
+const ownedParameterBytes: WeakMap<Uint8Array, boolean> = new WeakMap<Uint8Array, boolean>();
 const KNOWN_TYPES: Set<string> = new Set<string>([
   PostgresParameterType.Unspecified, PostgresParameterType.Boolean,
   PostgresParameterType.Int2, PostgresParameterType.Int4, PostgresParameterType.Int8,
@@ -45,8 +46,17 @@ export class PostgresParameter {
   }
 
   get value(): PostgresParameterValue {
-    return this.storedValue instanceof Uint8Array ? copyBytes(this.storedValue) : this.storedValue;
+    if (!(this.storedValue instanceof Uint8Array)) return this.storedValue;
+    const copy = copyBytes(this.storedValue);
+    ownedParameterBytes.set(copy, true);
+    return copy;
   }
+}
+
+export function takeOwnedParameterBytes(value: Uint8Array): boolean {
+  if (!ownedParameterBytes.has(value)) return false;
+  ownedParameterBytes.delete(value);
+  return true;
 }
 
 export function validatePostgresParameterValue(

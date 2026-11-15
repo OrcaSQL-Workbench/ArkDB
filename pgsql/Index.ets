@@ -65,3 +65,6 @@ export { PostgresConnection } from './src/main/ets/pgsql/PostgresConnection';
 export {
   PostgresDriverFactory
 } from './src/main/ets/pgsql/driver/PostgresDriverFactory';
+export {
+  postgresPlaceholders, quotePostgresIdentifier
+} from './src/main/ets/pgsql/value/PostgresSqlHelpers';

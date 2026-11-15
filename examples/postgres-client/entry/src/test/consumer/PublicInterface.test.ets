@@ -1,9 +1,10 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
-  ArkDbError, ArkDbErrorKind, ConnectionState, PostgresConnectionConfig,
-  PostgresConnectionOptions, PostgresDriverCapabilities, PostgresDriverFactory,
-  PostgresQueryResultSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
-  requirePostgresFeatures
+  ArkDbError, ArkDbErrorKind, ConnectionState, ContextChangeMode, DatabaseContext,
+  PostgresConnectionConfig, PostgresConnectionOptions, PostgresDriverCapabilities,
+  PostgresDriverFactory, PostgresQueryResultSummary, QueryOptions, QueryResultMeta,
+  QueryResultSink, QueryResultSummary, QueryRowChunk, postgresPlaceholders,
+  quotePostgresIdentifier, requirePostgresFeatures
 } from '@arkdb/postgres';
 
 export default function publicInterfaceTest(): void {
@@ -17,10 +18,21 @@ export default function publicInterfaceTest(): void {
       expect(factory.driverId).assertEqual('pgsql');
       expectAllCapabilitiesFalse(factory.capabilities);
       expect(connection.features.streaming !== undefined).assertTrue();
+      expect(connection.features.context !== undefined).assertTrue();
+      const policy = connection.contextPolicy;
+      expect(policy.catalogChange === ContextChangeMode.Reconnect &&
+        policy.schemaChange === ContextChangeMode.InPlace && !policy.catalogsAreSchemas).assertTrue();
+      policy.schemaChange = ContextChangeMode.Unsupported;
+      expect(connection.contextPolicy.schemaChange).assertEqual(ContextChangeMode.InPlace);
+      expect(connection.features.context!.contextPolicy.catalogChange)
+        .assertEqual(ContextChangeMode.Reconnect);
       expect(connection.postgresFeatures.prepared !== undefined).assertTrue();
       expect(requirePostgresFeatures(connection).prepared === connection.postgresFeatures.prepared).assertTrue();
-      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{}}');
+      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{},"context":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{}}');
+      expect(quotePostgresIdentifier(['public', 'my"tbl'])).assertEqual('"public"."my""tbl"');
+      expect(postgresPlaceholders(3)).assertEqual('$1,$2,$3');
+      expect(postgresPlaceholders(2, 4)).assertEqual('$4,$5');
       expect(new PostgresQueryResultSummary() instanceof QueryResultSummary && !new PostgresQueryResultSummary().affectedRowsKnown).assertTrue();
       expect(JSON.stringify(connection).indexOf('secret')).assertEqual(-1);
 
@@ -29,6 +41,8 @@ export default function publicInterfaceTest(): void {
         async (): Promise<void> => { await connection.features.streaming!.queryStream('SELECT 1', new QueryOptions(), new ConsumerNoopSink()); },
         async (): Promise<void> => { await connection.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()); },
         async (): Promise<void> => { await connection.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new ConsumerNoopSink()); },
+        (): Promise<void> => connection.changeContext(new DatabaseContext()),
+        (): Promise<void> => connection.features.context!.changeContext(new DatabaseContext()),
         (): Promise<void> => connection.ping(), (): Promise<void> => connection.features.health!.ping()]) {
         await expectUnconnectedProtocol(op);
       }
@@ -51,8 +65,8 @@ async function expectUnconnectedProtocol(op: () => Promise<void>): Promise<void>
 
 function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): void {
   expect(capabilities.supportsSsl).assertTrue();
-  expect(capabilities.supportsCatalogs).assertFalse();
-  expect(capabilities.supportsSchemas).assertFalse();
+  expect(capabilities.supportsCatalogs).assertTrue();
+  expect(capabilities.supportsSchemas).assertTrue();
   expect(capabilities.supportsTransactions).assertFalse();
   expect(capabilities.supportsMetadata).assertFalse();
   expect(capabilities.supportsMultipleResults).assertTrue();

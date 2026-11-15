@@ -1,11 +1,26 @@
 import {
-  ArkDbError, ConnectionState, DbConnection, DbConnectionFeatures, DbConnectionHealth,
+  ArkDbError, ConnectionState, ContextChangeMode, DatabaseContext, DatabaseContextPolicy,
+  DbConnection, DbConnectionFeatures, DbConnectionHealth, DbContextController,
   DbStreamingConnection, QueryExecutionSummary, QueryOptions, QueryResult, QueryResultSink, ServerInfo
 } from '@arkdb/core';
 
 type StreamRunner = (sql: string, options: QueryOptions, sink: QueryResultSink) => Promise<QueryExecutionSummary>;
 interface StreamingDelegate { readonly connection: DbConnection; readonly runStream: StreamRunner; }
 const streamingDelegates: WeakMap<PostgresConnectionStreaming, StreamingDelegate> = new WeakMap<PostgresConnectionStreaming, StreamingDelegate>();
+interface ContextDelegate {
+  readonly getPolicy: () => DatabaseContextPolicy;
+  readonly runChangeContext: (context: DatabaseContext) => Promise<void>;
+}
+const contextDelegates: WeakMap<PostgresConnectionContext, ContextDelegate> =
+  new WeakMap<PostgresConnectionContext, ContextDelegate>();
+
+export function createPostgresContextPolicy(): DatabaseContextPolicy {
+  const policy = new DatabaseContextPolicy();
+  policy.catalogChange = ContextChangeMode.Reconnect;
+  policy.schemaChange = ContextChangeMode.InPlace;
+  policy.catalogsAreSchemas = false;
+  return policy;
+}
 
 export class PostgresConnectionStreaming implements DbStreamingConnection {
   constructor(connection: DbConnection, runStream: StreamRunner) {
@@ -29,4 +44,20 @@ export class PostgresConnectionHealth implements DbConnectionHealth {
   private readonly runPing: () => Promise<void>;
   constructor(runPing: () => Promise<void>) { this.runPing = runPing; }
   ping(): Promise<void> { return this.runPing(); }
+}
+
+export class PostgresConnectionContext implements DbContextController {
+  constructor(getPolicy: () => DatabaseContextPolicy,
+    runChangeContext: (context: DatabaseContext) => Promise<void>) {
+    contextDelegates.set(this, { getPolicy: getPolicy, runChangeContext: runChangeContext });
+  }
+  get contextPolicy(): DatabaseContextPolicy { return this.delegate().getPolicy(); }
+  changeContext(context: DatabaseContext): Promise<void> {
+    return this.delegate().runChangeContext(context);
+  }
+  private delegate(): ContextDelegate {
+    const d = contextDelegates.get(this);
+    if (d === undefined) throw ArkDbError.protocol('PostgreSQL context facade is uninitialized.');
+    return d;
+  }
 }

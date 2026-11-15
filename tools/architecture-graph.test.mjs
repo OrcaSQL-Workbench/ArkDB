@@ -522,6 +522,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, and P19 own exactly the re
     'pgsql/src/main/ets/pgsql/transport/PostgresCertificateDer.ets',
     'pgsql/src/main/ets/pgsql/transport/PostgresDer.ets',
     'pgsql/src/main/ets/pgsql/transport/PostgresTcpTransport.ets',
+    'pgsql/src/main/ets/pgsql/value/PostgresSqlHelpers.ets',
     'pgsql/src/main/ets/pgsql/value/PostgresTextValueDecoder.ets',
     'pgsql/src/main/ets/pgsql/value/PostgresTypeOids.ets'
   ]);

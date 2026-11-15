@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind, ConnectionState, ConnectionTimerPort, Logger, LogLevel, LogSink, QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation } from '@arkdb/core';
-import { PostgresConnection, PostgresConnectionConfig, PostgresDriverFactory, PostgresError, PostgresSslMode, PostgresTransactionState } from '../../../../Index';
+import { PostgresConnection, PostgresConnectionConfig, PostgresDriverFactory, PostgresError, PostgresQueryResultSummary, PostgresSslMode, PostgresTransactionState } from '../../../../Index';
 import { PostgresLifecycleTransport } from '../../../main/ets/pgsql/connection/PostgresConnectionLifecycle';
 import { PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase } from '../../../main/ets/pgsql/execution/PostgresCommandGate';
 
@@ -38,12 +38,12 @@ export default function postgresResultStreamTest(): void {
         const tp = new QueueTransport([bootFrames(0x49), batch]); const conn = openReady(tp); await conn.connect();
         const sink = new RecSink(); const exec = await conn.queryStream('BATCH', new QueryOptions(), sink);
         expect(sink.events.join(',')).assertEqual('start:0:false,end:0,start:1:false,end:1,start:2:false,end:2,start:3:false,end:3,start:4:true,rows:4:0:2,end:4,start:5:true,rows:5:0:2,end:5');
-        expect(sink.ends[0].rowCount === 0 && sink.ends[0].rowCountKnown && sink.ends[0].affectedRows === 0 && !sink.ends[0].statusKnown &&
-          sink.ends[1].rowCount === 0 && sink.ends[1].rowCountKnown && sink.ends[1].affectedRows === 3 && !sink.ends[1].statusKnown &&
-          sink.ends[2].rowCount === 5 && sink.ends[2].rowCountKnown && sink.ends[2].affectedRows === 0 && !sink.ends[2].statusKnown &&
-          sink.ends[3].rowCount === 0 && sink.ends[3].rowCountKnown && sink.ends[3].affectedRows === 0 &&
-          sink.ends[4].rowCount === 2 && sink.ends[4].loadedRowCount === 2 && sink.ends[4].rowCountKnown && sink.ends[4].affectedRows === 0 &&
-          sink.ends[5].rowCount === 2 && sink.ends[5].loadedRowCount === 2 && sink.ends[5].rowCountKnown && sink.ends[5].affectedRows === 2 && !sink.ends[5].status.known).assertTrue();
+        expect(sink.ends[0].rowCount === 0 && sink.ends[0].rowCountKnown && sink.ends[0].affectedRows === 0 && (sink.ends[0] as PostgresQueryResultSummary).affectedRowsKnown && !sink.ends[0].statusKnown &&
+          sink.ends[1].rowCount === 0 && sink.ends[1].rowCountKnown && sink.ends[1].affectedRows === 3 && (sink.ends[1] as PostgresQueryResultSummary).affectedRowsKnown && (sink.ends[1] as PostgresQueryResultSummary).rowCountExact === undefined && (sink.ends[1] as PostgresQueryResultSummary).affectedRowsExact === 3n && !sink.ends[1].statusKnown &&
+          sink.ends[2].rowCount === 5 && sink.ends[2].rowCountKnown && sink.ends[2].affectedRows === 0 && !(sink.ends[2] as PostgresQueryResultSummary).affectedRowsKnown && (sink.ends[2] as PostgresQueryResultSummary).rowCountExact === 5n && !sink.ends[2].statusKnown &&
+          sink.ends[3].rowCount === 0 && sink.ends[3].rowCountKnown && sink.ends[3].affectedRows === 0 && !(sink.ends[3] as PostgresQueryResultSummary).affectedRowsKnown &&
+          sink.ends[4].rowCount === 2 && sink.ends[4].loadedRowCount === 2 && sink.ends[4].rowCountKnown && sink.ends[4].affectedRows === 0 && !(sink.ends[4] as PostgresQueryResultSummary).affectedRowsKnown &&
+          sink.ends[5].rowCount === 2 && sink.ends[5].loadedRowCount === 2 && sink.ends[5].rowCountKnown && sink.ends[5].affectedRows === 2 && (sink.ends[5] as PostgresQueryResultSummary).affectedRowsKnown && (sink.ends[5] as PostgresQueryResultSummary).rowCountExact === 2n && !sink.ends[5].status.known).assertTrue();
         expect(exec.resultSetCount === 6 && exec.loadedRowCount === 4 && exec.rowCount === 9 && exec.rowCountKnown && exec.statusKnown && exec.status.inTransaction &&
           exec.status.autocommit && conn.sessionStatus.transactionState === PostgresTransactionState.InTransaction && conn.serverInfo.timeZone === 'Asia/Tokyo').assertTrue();
         const joinedLogs = logSink.messages.join('\n'); expect(joinedLogs.indexOf('secret_ch') === -1 && joinedLogs.indexOf('secret_pay') === -1).assertTrue();
@@ -132,7 +132,7 @@ export default function postgresResultStreamTest(): void {
       const cancelOpts = new QueryOptions(); cancelOpts.maxRows = 1; cancelOpts.maxDrainTimeMs = 500;
       const sMid57014 = new RecSink(); sMid57014.cancelOnTruncation = true;
       const eMid57014 = await cConn.queryStream('CANCEL_MID', cancelOpts, sMid57014);
-      expect(sMid57014.ends.length === 1 && sMid57014.ends[0].truncated && !sMid57014.ends[0].rowCountKnown && sMid57014.ends[0].rowCount === 1 &&
+      expect(sMid57014.ends.length === 1 && sMid57014.ends[0] instanceof PostgresQueryResultSummary && !(sMid57014.ends[0] as PostgresQueryResultSummary).affectedRowsKnown && sMid57014.ends[0].truncated && !sMid57014.ends[0].rowCountKnown && sMid57014.ends[0].rowCount === 1 &&
         !eMid57014.rowCountKnown && eMid57014.rowCount === 1 && eMid57014.truncationInterrupted && eMid57014.statusKnown && cConn.state === ConnectionState.Ready).assertTrue();
       const sBetween57014 = new RecSink(); sBetween57014.cancelOnTruncation = true;
       const eBetween57014 = await cConn.queryStream('CANCEL_BETWEEN', cancelOpts, sBetween57014);

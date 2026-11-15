@@ -2,7 +2,7 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, PostgresConnectionConfig,
   PostgresConnectionOptions, PostgresDriverCapabilities, PostgresDriverFactory,
-  QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
+  PostgresQueryResultSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
   requirePostgresFeatures
 } from '@arkdb/postgres';
 
@@ -21,21 +21,17 @@ export default function publicInterfaceTest(): void {
       expect(requirePostgresFeatures(connection).prepared === connection.postgresFeatures.prepared).assertTrue();
       expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{}}');
+      expect(new PostgresQueryResultSummary() instanceof QueryResultSummary && !new PostgresQueryResultSummary().affectedRowsKnown).assertTrue();
       expect(JSON.stringify(connection).indexOf('secret')).assertEqual(-1);
 
       for (const op of [async (): Promise<void> => { await connection.query('SELECT 1'); },
         async (): Promise<void> => { await connection.queryStream('SELECT 1', new QueryOptions(), new ConsumerNoopSink()); },
         async (): Promise<void> => { await connection.features.streaming!.queryStream('SELECT 1', new QueryOptions(), new ConsumerNoopSink()); },
         async (): Promise<void> => { await connection.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()); },
+        async (): Promise<void> => { await connection.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new ConsumerNoopSink()); },
         (): Promise<void> => connection.ping(), (): Promise<void> => connection.features.health!.ping()]) {
         await expectUnconnectedProtocol(op);
       }
-      let streamErr: ArkDbError | null = null;
-      try {
-        await connection.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new ConsumerNoopSink());
-      } catch (e) { streamErr = e as ArkDbError; }
-      expect(streamErr instanceof ArkDbError && streamErr.kind === ArkDbErrorKind.Unsupported &&
-        streamErr.message === 'PostgreSQL parameterized result streaming is not implemented.').assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
       await connection.close();
       expect(connection.state).assertEqual(ConnectionState.Closed);
@@ -63,7 +59,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsStreamingResults).assertTrue();
   expect(capabilities.supportsGracefulCancel).assertFalse();
   expect(capabilities.supportsExplain).assertFalse();
-  expect(capabilities.supportsPreparedStatements).assertFalse();
+  expect(capabilities.supportsPreparedStatements).assertTrue();
   expect(capabilities.supportsServerMetrics).assertFalse();
 }
 

@@ -9,6 +9,7 @@ import {
   PostgresConnectionFeatures, PostgresFeatureConnection
 } from './api/PostgresContracts';
 import { PostgresExtendedQueryHost, runPostgresExtendedQuery } from './command/PostgresExtendedQuery';
+import { runPostgresPortalStream } from './command/PostgresPortalStream';
 import { PostgresQueryStreamHost, runPostgresQueryStream } from './command/PostgresResultStream';
 import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery } from './command/PostgresSimpleQuery';
 import {
@@ -51,7 +52,9 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
     this.features.health = new PostgresConnectionHealth((): Promise<void> => this.ping());
     this.postgresFeatures.prepared = new PostgresConnectionPreparedExecutor(
       (frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> =>
-        this.executeExtendedQuery(frames, options));
+        this.executeExtendedQuery(frames, options),
+      (frames: PostgresPreparedFrames, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
+        this.streamPreparedQuery(frames, options, sink));
   }
 
   get state(): ConnectionState {
@@ -122,6 +125,13 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
     return this.lifecycle.runCommand<PostgresQueryResult>(PostgresCommandKind.ExtendedQuery,
       (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> =>
         runPostgresExtendedQuery(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, options));
+  }
+
+  private streamPreparedQuery(frames: PostgresPreparedFrames, options: QueryOptions,
+    sink: QueryResultSink): Promise<QueryExecutionSummary> {
+    return this.lifecycle.runCommand<QueryExecutionSummary>(PostgresCommandKind.Prepared,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> =>
+        runPostgresPortalStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, options, sink));
   }
 }
 

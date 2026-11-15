@@ -14,8 +14,8 @@ import { PostgresMessageChannel, PostgresReadyStatus } from '../../../../main/et
 export default function postgresExtendedQueryTest(): void {
   describe('PostgresExtendedQuery', () => {
     it('executesUnnamedPipelineAndDecodesTypedParametersAndResults', 0, async () => {
-      expect(new PostgresDriverCapabilities().supportsPreparedStatements).assertFalse();
-      expect(new PostgresDriverFactory().capabilities.supportsPreparedStatements).assertFalse();
+      expect(new PostgresDriverCapabilities().supportsPreparedStatements).assertTrue();
+      expect(new PostgresDriverFactory().capabilities.supportsPreparedStatements).assertTrue();
       const timers = new StepTimers(); const tp = new QueueTransport([bootFrames(0x49)]);
       const conn = openReady(tp, timers, 'secret-pw-p18');
       expect(conn.postgresFeatures.prepared !== undefined && requirePostgresFeatures(conn).prepared === conn.postgresFeatures.prepared &&
@@ -63,7 +63,7 @@ export default function postgresExtendedQueryTest(): void {
       const idleErr = await asyncFail((): Promise<Object> => idle.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()));
       expect(idleErr.kind === ArkDbErrorKind.Protocol && idleErr.message === 'PostgreSQL connection is not connected.' && idleTp.writes.length === 0).assertTrue();
       const idleStreamErr = await asyncFail((): Promise<Object> => idle.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new NoopSink()));
-      expect(idleStreamErr.kind === ArkDbErrorKind.Unsupported && idleStreamErr.message === 'PostgreSQL parameterized result streaming is not implemented.' && idleTp.writes.length === 0).assertTrue();
+      expect(idleStreamErr.kind === ArkDbErrorKind.Protocol && idleStreamErr.message === 'PostgreSQL connection is not connected.' && idleTp.writes.length === 0).assertTrue();
 
       let capturedFrames: PostgresPreparedFrames | null = null;
       const failExec = new PostgresConnectionPreparedExecutor((f: PostgresPreparedFrames, _o: QueryOptions): Promise<PostgresQueryResult> => {
@@ -81,8 +81,6 @@ export default function postgresExtendedQueryTest(): void {
       assertBytes(callerSecret, new Uint8Array([0xaa, 0xbb, 0xcc])); assertBytes(liveBytes, new Uint8Array([0x11, 0x22]));
 
       const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect(); tp.writes.length = 0;
-      const streamErr = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.queryStream('SELECT $1', [new PostgresParameter(PostgresParameterType.Int4, 1)], new QueryOptions(), new NoopSink()));
-      expect(streamErr.kind === ArkDbErrorKind.Unsupported && streamErr.message === 'PostgreSQL parameterized result streaming is not implemented.').assertTrue();
       const nonOptsErr = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.execute('SELECT 1', [], asQueryOpts(null)));
       expect(nonOptsErr.kind === ArkDbErrorKind.Validation && nonOptsErr.message === 'QueryOptions is required.').assertTrue();
       for (const mut of [(o: QueryOptions): void => { o.maxRows = -1; }, (o: QueryOptions): void => { o.maxResultBytes = 0; }, (o: QueryOptions): void => { o.maxDrainBytes = 0; }, (o: QueryOptions): void => { o.maxDrainTimeMs = 0; }]) {

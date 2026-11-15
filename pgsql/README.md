@@ -3,11 +3,18 @@
 A headless ArkTS PostgreSQL HAR for HarmonyOS 6.1.1 / API 24, tablet and
 2in1.
 
-**Source status:** The 1.0.0 package currently exposes its stable public
-configuration, result, error, connection, and factory skeleton. Protocol,
-transport, authentication, metadata, prepared execution, and transactions are
-not implemented. Runtime operations reject with the shared
-`ArkDbErrorKind.Unsupported`; capability flags remain false.
+**Source status:** The 1.0.0 package provides PostgreSQL 3.0 startup/TLS
+connection lifecycle (`connect()`, `ping()`, `close()`), simple-query execution
+and result streaming (`query()`, `queryStream()`), and parameterized
+extended-query execution and `PortalSuspended` streaming via
+`connection.postgresFeatures.prepared` (`execute()` and `queryStream()`, with
+`PostgresQueryResultSummary` reporting `commandTag`, exact counts, and
+`affectedRowsKnown` for empty queries and safe-integer DML tags — early portal
+close bounds client row delivery without rolling back server DML — and
+`supportsSsl`, `supportsMultipleResults`, `supportsStreamingResults`, and
+`supportsPreparedStatements` enabled). Context changes, explicit transactions,
+cancellation, metadata, server metrics, and statement deadlines are not yet
+implemented and reject with `ArkDbErrorKind.Unsupported`.
 
 The package depends on `@arkdb/core` 1.1.0 in the source workspace. Driver
 delivery will compile the selected source dependency closure into one
@@ -20,9 +27,10 @@ passed separately through transient `PostgresConnectionOptions`.
 
 ## Compile-only skeleton usage
 
-The current factory can construct and close an idle skeleton connection. Calling
-`connect()`, querying, streaming, health checks, context changes, transactions or
-cancellation rejects with `ArkDbErrorKind.Unsupported`.
+The factory constructs an idle connection that can be closed offline; calling
+querying, streaming, prepared execution, or health checks before `connect()`
+rejects with `ArkDbErrorKind.Protocol`, while unimplemented context changes,
+transactions, or cancellation reject with `ArkDbErrorKind.Unsupported`.
 
 <!-- arkts-example: skeleton -->
 ```typescript

@@ -1,5 +1,5 @@
 import {
-  ArkDbError, ColumnDef, DatabaseSessionStatus, QueryResult, ServerInfo
+  ArkDbError, ColumnDef, DatabaseSessionStatus, QueryResult, QueryResultSummary, ServerInfo
 } from '@arkdb/core';
 
 export enum PostgresTransactionState {
@@ -23,6 +23,10 @@ export class PostgresQueryResult extends QueryResult {
   commandTag: string = '';
   affectedRowsExact?: bigint;
   rowCountExact?: bigint;
+}
+
+export class PostgresQueryResultSummary extends QueryResultSummary {
+  commandTag: string = ''; affectedRowsKnown: boolean = false; affectedRowsExact?: bigint; rowCountExact?: bigint;
 }
 
 export class PostgresServerInfo extends ServerInfo {

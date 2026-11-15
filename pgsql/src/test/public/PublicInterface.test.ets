@@ -10,7 +10,7 @@ import {
   PostgresDatabaseSessionStatus, PostgresDriverCapabilities,
   PostgresDriverFactory, PostgresError, PostgresFeatureConnection,
   PostgresParameter, PostgresParameterType, PostgresParameterValue,
-  PostgresPreparedExecutor, PostgresQueryResult, PostgresServerInfo,
+  PostgresPreparedExecutor, PostgresQueryResult, PostgresQueryResultSummary, PostgresServerInfo,
   PostgresSslMode, PostgresTransactionState, QueryOptions, QueryResultMeta,
   QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation,
   requirePostgresFeatures
@@ -82,6 +82,9 @@ export default function publicInterfaceTest(): void {
       expect(result.warningCount === undefined).assertTrue();
       expect(result.additionalResults.length).assertEqual(0);
 
+      const summary = new PostgresQueryResultSummary();
+      expect(summary instanceof CoreQueryResultSummary && !summary.affectedRowsKnown && summary.commandTag === '' && summary.affectedRowsExact === undefined && summary.rowCountExact === undefined).assertTrue();
+
       const info = new PostgresServerInfo();
       expect(info.protocolMajor).assertEqual(3);
       expect(info.integerDatetimes).assertTrue();
@@ -149,7 +152,7 @@ export default function publicInterfaceTest(): void {
       await expectNotConnected(async (): Promise<void> => {
         await connection.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions());
       });
-      await expectUnsupported(async (): Promise<void> => {
+      await expectNotConnected(async (): Promise<void> => {
         await connection.postgresFeatures.prepared!.queryStream(
           'SELECT 1', [], new QueryOptions(), new NoopSink());
       });
@@ -200,7 +203,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsStreamingResults).assertTrue();
   expect(capabilities.supportsGracefulCancel).assertFalse();
   expect(capabilities.supportsExplain).assertFalse();
-  expect(capabilities.supportsPreparedStatements).assertFalse();
+  expect(capabilities.supportsPreparedStatements).assertTrue();
   expect(capabilities.supportsServerMetrics).assertFalse();
 }
 

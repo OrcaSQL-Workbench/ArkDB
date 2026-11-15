@@ -42,7 +42,8 @@ export {
 } from './src/main/ets/pgsql/model/PostgresConnectionConfig';
 export {
   PostgresTransactionState, PostgresColumnDef, PostgresQueryResult,
-  PostgresServerInfo, PostgresDatabaseSessionStatus, PostgresError
+  PostgresQueryResultSummary, PostgresServerInfo, PostgresDatabaseSessionStatus,
+  PostgresError
 } from './src/main/ets/pgsql/model/PostgresModels';
 export {
   PostgresDriverCapabilities, PostgresConnectionFeatures,

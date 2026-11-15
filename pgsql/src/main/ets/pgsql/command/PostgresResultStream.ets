@@ -1,6 +1,6 @@
-import { ArkDbError, estimateSqlRowBytes, QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation, SqlValue } from '@arkdb/core';
+import { ArkDbError, estimateSqlRowBytes, QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryRowChunk, QueryTruncation, SqlValue } from '@arkdb/core';
 import { postgresAppendCleanupError, PostgresCommandCloseSettlement, postgresErrorFromResponse, toPostgresArkDbError } from '../execution/PostgresSettlements';
-import { PostgresColumnDef } from '../model/PostgresModels';
+import { PostgresColumnDef, PostgresQueryResultSummary } from '../model/PostgresModels';
 import { PostgresFrontendSerializer } from '../protocol/PostgresByteCodec';
 import {
   PostgresBackendMessage, PostgresBackendParser, PostgresCommandComplete, PostgresCopyBothResponse, PostgresCopyData,
@@ -100,9 +100,7 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
           if (cancellationRequested && pgErr.sqlState === '57014' && errors.sink === null && errors.latched === null) {
             beginDrain(false); allRowCountsKnown = false;
             if (subState === StreamSubState.InRowResult) {
-              const summary = new QueryResultSummary(); summary.resultIndex = resultIndex; summary.rowCount = emittedRows; summary.rowCountKnown = false;
-              summary.loadedRowCount = emittedRows; summary.loadedBytes = stmtLoadedBytes; summary.truncated = true;
-              summary.truncationReason = stmtTruncationReason.length > 0 ? stmtTruncationReason : globalTruncationReason;
+              const summary = buildIncompleteRowSummary(resultIndex, emittedRows, stmtLoadedBytes, stmtTruncationReason.length > 0 ? stmtTruncationReason : globalTruncationReason);
               await invokeSink((): Promise<void> => sink.onResultEnd(summary));
               if (errors.sink === null) { resultIndex += 1; execution.resultSetCount = resultIndex; execution.loadedRowCount += emittedRows; execution.loadedBytes += stmtLoadedBytes; }
             }
@@ -119,7 +117,8 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
               const meta = new QueryResultMeta(); meta.resultIndex = resultIndex;
               await invokeSink((): Promise<void> => sink.onResultStart(meta));
               if (errors.sink === null) {
-                const summary = buildStandaloneSummary(resultIndex, msg instanceof PostgresCommandComplete ? parsePostgresCommandCompleteTag(msg.tag) : null);
+                const isCmd = msg instanceof PostgresCommandComplete; const tag = isCmd ? msg.tag : '';
+                const summary = buildStandaloneSummary(resultIndex, isCmd ? parsePostgresCommandCompleteTag(tag) : null, tag);
                 const known = summary.rowCountKnown; const exact = known ? BigInt(summary.rowCount) : 0n;
                 await invokeSink((): Promise<void> => sink.onResultEnd(summary));
                 if (errors.sink === null) { resultIndex += 1; execution.resultSetCount = resultIndex; if (known) totalExactRows += exact; else allRowCountsKnown = false; }
@@ -194,7 +193,7 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
           }
           if (msg instanceof PostgresCommandComplete) {
             if (errors.sink === null && errors.latched === null && await flushChunk()) {
-              const summary = buildRowResultSummary(resultIndex, parsePostgresCommandCompleteTag(msg.tag), wireRowCountExact, emittedRows, stmtLoadedBytes, stmtTruncationReason);
+              const summary = buildRowResultSummary(resultIndex, parsePostgresCommandCompleteTag(msg.tag), wireRowCountExact, emittedRows, stmtLoadedBytes, stmtTruncationReason, msg.tag);
               const known = summary.rowCountKnown; const exact = known ? BigInt(summary.rowCount) : 0n;
               await invokeSink((): Promise<void> => sink.onResultEnd(summary));
               if (errors.sink === null) {
@@ -227,25 +226,37 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
   }
 }
 
-function buildStandaloneSummary(resultIndex: number, counts: PostgresCommandTagCounts | null): QueryResultSummary {
-  const s = new QueryResultSummary(); s.resultIndex = resultIndex; if (counts === null) return s;
-  s.affectedRows = counts.affectedRows;
-  if (counts.affectedRowsExact === undefined && counts.rowCountExact !== undefined) {
-    if (counts.rowCountExact <= MAX_SAFE_BIGINT) s.rowCount = Number(counts.rowCountExact); else s.rowCountKnown = false;
+export function buildStandaloneSummary(resultIndex: number, counts: PostgresCommandTagCounts | null, commandTag: string = ''): PostgresQueryResultSummary {
+  const s = new PostgresQueryResultSummary(); s.resultIndex = resultIndex; s.commandTag = commandTag;
+  if (counts === null) { s.affectedRowsKnown = true; return s; }
+  if (counts.affectedRowsExact !== undefined) {
+    s.affectedRowsExact = counts.affectedRowsExact;
+    if (counts.affectedRowsExact <= MAX_SAFE_BIGINT) { s.affectedRows = Number(counts.affectedRowsExact); s.affectedRowsKnown = true; }
+  } else if (counts.rowCountExact !== undefined) {
+    s.rowCountExact = counts.rowCountExact; if (counts.rowCountExact <= MAX_SAFE_BIGINT) s.rowCount = Number(counts.rowCountExact); else s.rowCountKnown = false;
   }
   return s;
 }
 
-function buildRowResultSummary(resultIndex: number, counts: PostgresCommandTagCounts, wireRowCountExact: bigint,
-  emittedRows: number, loadedBytes: number, truncationReason: string): QueryResultSummary {
-  const s = new QueryResultSummary(); s.resultIndex = resultIndex; s.loadedRowCount = emittedRows; s.loadedBytes = loadedBytes;
-  s.affectedRows = counts.affectedRows; s.truncated = truncationReason.length > 0; s.truncationReason = truncationReason;
+export function buildRowResultSummary(resultIndex: number, counts: PostgresCommandTagCounts, wireRowCountExact: bigint,
+  emittedRows: number, loadedBytes: number, truncationReason: string, commandTag: string = '', suspendedPortal: boolean = false): PostgresQueryResultSummary {
+  const s = new PostgresQueryResultSummary(); s.resultIndex = resultIndex; s.commandTag = commandTag; s.loadedRowCount = emittedRows; s.loadedBytes = loadedBytes;
+  s.truncated = truncationReason.length > 0; s.truncationReason = truncationReason;
+  const exactAffected = suspendedPortal && counts.affectedRowsExact !== undefined && wireRowCountExact > counts.affectedRowsExact ? wireRowCountExact : counts.affectedRowsExact;
+  if (exactAffected !== undefined) {
+    s.affectedRowsExact = exactAffected; if (exactAffected <= MAX_SAFE_BIGINT) { s.affectedRows = Number(exactAffected); s.affectedRowsKnown = true; }
+  }
   let exactTotal = wireRowCountExact;
   if (counts.rowCountExact !== undefined && (counts.affectedRowsExact === undefined || wireRowCountExact === counts.rowCountExact || counts.rowCountExact > MAX_SAFE_BIGINT)) {
     exactTotal = wireRowCountExact > counts.rowCountExact ? wireRowCountExact : counts.rowCountExact;
   }
-  if (exactTotal <= MAX_SAFE_BIGINT) { s.rowCountKnown = true; s.rowCount = Number(exactTotal); } else { s.rowCountKnown = false; s.rowCount = emittedRows; }
+  s.rowCountExact = exactTotal; if (exactTotal <= MAX_SAFE_BIGINT) { s.rowCountKnown = true; s.rowCount = Number(exactTotal); } else { s.rowCountKnown = false; s.rowCount = emittedRows; }
   return s;
 }
 
-function discardChunkRows(rows: SqlValue[][]): void { for (const row of rows) scrubSqlRow(row); rows.length = 0; }
+export function buildIncompleteRowSummary(resultIndex: number, emittedRows: number, loadedBytes: number, truncationReason: string): PostgresQueryResultSummary {
+  const s = new PostgresQueryResultSummary(); s.resultIndex = resultIndex; s.rowCount = emittedRows; s.rowCountKnown = false;
+  s.loadedRowCount = emittedRows; s.loadedBytes = loadedBytes; s.truncated = true; s.truncationReason = truncationReason; return s;
+}
+
+export function discardChunkRows(rows: SqlValue[][]): void { for (const row of rows) scrubSqlRow(row); rows.length = 0; }

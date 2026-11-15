@@ -10,7 +10,7 @@ import {
   PostgresDatabaseSessionStatus, PostgresDriverCapabilities,
   PostgresDriverFactory, PostgresError, PostgresFeatureConnection,
   PostgresParameter, PostgresParameterType, PostgresParameterValue,
-  PostgresPreparedExecutor, PostgresQueryResult, PostgresServerInfo,
+  PostgresPreparedExecutor, PostgresQueryResult, PostgresQueryResultSummary, PostgresServerInfo,
   PostgresSslMode, PostgresTransactionState, QueryOptions, QueryResultMeta,
   QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation,
   requirePostgresFeatures
@@ -81,6 +81,9 @@ export default function publicInterfaceTest(): void {
       expect(result.lastInsertId === undefined).assertTrue();
       expect(result.warningCount === undefined).assertTrue();
       expect(result.additionalResults.length).assertEqual(0);
+
+      const summary = new PostgresQueryResultSummary();
+      expect(summary instanceof CoreQueryResultSummary && !summary.affectedRowsKnown && summary.commandTag === '' && summary.affectedRowsExact === undefined && summary.rowCountExact === undefined).assertTrue();
 
       const info = new PostgresServerInfo();
       expect(info.protocolMajor).assertEqual(3);

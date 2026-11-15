@@ -1,4 +1,4 @@
-import { ArkDbError, estimateSqlRowBytes, QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation, SqlValue } from '@arkdb/core';
+import { ArkDbError, estimateSqlRowBytes, QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryRowChunk, QueryTruncation, SqlValue } from '@arkdb/core';
 import { postgresAppendCleanupError, PostgresCommandCloseSettlement, postgresErrorFromResponse, toPostgresArkDbError } from '../execution/PostgresSettlements';
 import { PostgresPreparedFrames, scrubPostgresPreparedFrames } from '../features/prepared/PostgresParameterEncoder';
 import { PostgresColumnDef } from '../model/PostgresModels';
@@ -6,7 +6,7 @@ import { PostgresFrontendSerializer, PostgresFrontendTarget } from '../protocol/
 import { PostgresBackendMessage, PostgresBackendParser, PostgresBindComplete, PostgresCloseComplete, PostgresCommandComplete, PostgresCopyBothResponse, PostgresCopyData, PostgresCopyDone, PostgresCopyInResponse, PostgresCopyOutResponse, PostgresDataRow, PostgresEmptyQueryResponse, PostgresErrorResponse, PostgresMessageChannel, PostgresNoData, PostgresParseComplete, PostgresPortalSuspended, PostgresReadyForQuery, PostgresRowDescription } from '../protocol/PostgresMessageChannel';
 import { MAX_POSTGRES_MESSAGE_BYTES, POSTGRES_NORMAL_HEADER_BYTES } from '../protocol/PostgresProtocolConstants';
 import { decodePostgresDataRow, toPostgresColumnDefs } from '../value/PostgresTextValueDecoder';
-import { buildRowResultSummary, buildStandaloneSummary, discardChunkRows, PostgresQueryStreamHost } from './PostgresResultStream';
+import { buildIncompleteRowSummary, buildRowResultSummary, buildStandaloneSummary, discardChunkRows, PostgresQueryStreamHost } from './PostgresResultStream';
 import { accountDrainedBytes, consumeAsyncMessage, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, parsePostgresCommandCompleteTag, raceDrainDeadline, readClockMs, readQueryMessage, scrubBackendMessage, scrubSqlRow, snapshotQueryOptions, writeQueryFrame } from './PostgresSimpleQuery';
 
 const MAX_SAFE_BIGINT: bigint = BigInt(Number.MAX_SAFE_INTEGER);
@@ -29,12 +29,10 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
     await writeQueryFrame(channel, settlement, 0x44, PostgresFrontendSerializer.describe(PostgresFrontendTarget.Portal, ''), host.timers, -1);
     let batchRows = 0;
     const sendExecute = async (rows: number): Promise<void> => {
-      batchRows = 0;
-      await writeQueryFrame(channel, settlement, 0x45, PostgresFrontendSerializer.execute('', rows), host.timers, -1);
+      batchRows = 0; await writeQueryFrame(channel, settlement, 0x45, PostgresFrontendSerializer.execute('', rows), host.timers, -1);
       await writeQueryFrame(channel, settlement, 0x48, PostgresFrontendSerializer.flush(), host.timers, -1);
     };
-    await sendExecute(firstRows);
-    host.enterStreaming();
+    await sendExecute(firstRows); host.enterStreaming();
     const execution = new QueryExecutionSummary();
     let stage = PortalStage.ExpectParse; let syncSent = false; let eofProbeActive = false; let sawPortalSuspended = false;
     let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0;
@@ -70,8 +68,7 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
       }
     };
     const emitIncompleteRowEnd = async (): Promise<void> => {
-      const summary = new QueryResultSummary(); summary.resultIndex = 0; summary.rowCount = emittedRows; summary.rowCountKnown = false;
-      summary.loadedRowCount = emittedRows; summary.loadedBytes = stmtLoadedBytes; summary.truncated = true; summary.truncationReason = stmtTruncationReason;
+      const summary = buildIncompleteRowSummary(0, emittedRows, stmtLoadedBytes, stmtTruncationReason);
       resultEnded = true; allRowCountsKnown = false; await invokeSink((): Promise<void> => sink.onResultEnd(summary));
       if (errors.sink === null) { execution.resultSetCount = 1; execution.loadedRowCount = emittedRows; execution.loadedBytes = stmtLoadedBytes; }
     };
@@ -173,9 +170,7 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
             }
             if (msg instanceof PostgresCommandComplete) {
               if (errors.sink === null && errors.latched === null && !resultEnded && await flushChunk()) {
-                const counts = parsePostgresCommandCompleteTag(msg.tag);
-                const summary = buildRowResultSummary(0, counts, wireRowCountExact, emittedRows, stmtLoadedBytes, stmtTruncationReason);
-                if (sawPortalSuspended && counts.affectedRowsExact !== undefined && wireRowCountExact > counts.affectedRowsExact) summary.affectedRows = Number(wireRowCountExact);
+                const summary = buildRowResultSummary(0, parsePostgresCommandCompleteTag(msg.tag), wireRowCountExact, emittedRows, stmtLoadedBytes, stmtTruncationReason, msg.tag, sawPortalSuspended);
                 const known = summary.rowCountKnown; const exact = known ? BigInt(summary.rowCount) : 0n;
                 resultEnded = true; await invokeSink((): Promise<void> => sink.onResultEnd(summary));
                 if (errors.sink === null) {
@@ -193,7 +188,8 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
                 const meta = new QueryResultMeta(); meta.resultIndex = 0;
                 await invokeSink((): Promise<void> => sink.onResultStart(meta));
                 if (errors.sink === null) {
-                  const summary = buildStandaloneSummary(0, msg instanceof PostgresCommandComplete ? parsePostgresCommandCompleteTag(msg.tag) : null);
+                  const isCmd = msg instanceof PostgresCommandComplete; const tag = isCmd ? msg.tag : '';
+                  const summary = buildStandaloneSummary(0, isCmd ? parsePostgresCommandCompleteTag(tag) : null, tag);
                   const known = summary.rowCountKnown; const exact = known ? BigInt(summary.rowCount) : 0n;
                   resultEnded = true; await invokeSink((): Promise<void> => sink.onResultEnd(summary));
                   if (errors.sink === null) { execution.resultSetCount = 1; if (known) totalExactRows = exact; else allRowCountsKnown = false; }
@@ -202,12 +198,10 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
               await sendSync(); stage = PortalStage.AwaitReady; continue;
             }
             if (msg instanceof PostgresCopyOutResponse) {
-              beginDrain(); recordStreamError(ArkDbError.unsupported('PostgreSQL COPY TO STDOUT is not supported.'));
-              stage = PortalStage.InCopyOutData; continue;
+              beginDrain(); recordStreamError(ArkDbError.unsupported('PostgreSQL COPY TO STDOUT is not supported.')); stage = PortalStage.InCopyOutData; continue;
             }
             if (msg instanceof PostgresCopyInResponse || msg instanceof PostgresCopyBothResponse) {
-              const unsupported = ArkDbError.unsupported(msg instanceof PostgresCopyInResponse
-                ? 'PostgreSQL COPY FROM STDIN is not supported.' : 'PostgreSQL COPY BOTH is not supported.');
+              const unsupported = ArkDbError.unsupported(msg instanceof PostgresCopyInResponse ? 'PostgreSQL COPY FROM STDIN is not supported.' : 'PostgreSQL COPY BOTH is not supported.');
               const reason = errors.sink !== null ? postgresAppendCleanupError(errors.sink, unsupported) : unsupported;
               if (errors.sink !== null) host.latchConsumerError(reason, false);
               errors.sink = null; await host.retire(reason); throw reason;
@@ -226,9 +220,7 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
             if (msg instanceof PostgresCopyDone) { stage = PortalStage.InCopyOutDone; continue; }
             throw ArkDbError.protocol('Unexpected PostgreSQL backend message during COPY TO STDOUT drain.');
           }
-          if (stage === PortalStage.InCopyOutDone && msg instanceof PostgresCommandComplete) {
-            await sendSync(); stage = PortalStage.AwaitReady; continue;
-          }
+          if (stage === PortalStage.InCopyOutDone && msg instanceof PostgresCommandComplete) { await sendSync(); stage = PortalStage.AwaitReady; continue; }
           if ((stage === PortalStage.AwaitReady || stage === PortalStage.AwaitReadyAfterError) && msg instanceof PostgresReadyForQuery) {
             const finishedAtMs = readClockMs(host.timers);
             if (drainDeadlineMs >= 0 && finishedAtMs >= drainDeadlineMs) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
@@ -243,9 +235,7 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
             if (cancellationRequested) { execution.truncationInterrupted = true; execution.synchronizationDeadlineMs = drainDeadlineMs; }
             return execution;
           }
-          throw ArkDbError.protocol(stage === PortalStage.AwaitReadyAfterError
-            ? 'Unexpected PostgreSQL backend message after ErrorResponse.'
-            : 'Unexpected PostgreSQL backend message during portal stream.');
+          throw ArkDbError.protocol(stage === PortalStage.AwaitReadyAfterError ? 'Unexpected PostgreSQL backend message after ErrorResponse.' : 'Unexpected PostgreSQL backend message during portal stream.');
         } finally { raw.payload.fill(0); scrubBackendMessage(parsed); }
       }
     } catch (err) {

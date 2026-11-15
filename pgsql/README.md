@@ -8,6 +8,9 @@ connection lifecycle (`connect()`, `ping()`, `close()`), simple-query execution
 and result streaming (`query()`, `queryStream()`), and parameterized
 extended-query execution and `PortalSuspended` streaming via
 `connection.postgresFeatures.prepared` (`execute()` and `queryStream()`, with
+`PostgresQueryResultSummary` reporting `commandTag`, exact counts, and
+`affectedRowsKnown` for empty queries and safe-integer DML tags — early portal
+close bounds client row delivery without rolling back server DML — and
 `supportsSsl`, `supportsMultipleResults`, `supportsStreamingResults`, and
 `supportsPreparedStatements` enabled). Context changes, explicit transactions,
 cancellation, metadata, server metrics, and statement deadlines are not yet

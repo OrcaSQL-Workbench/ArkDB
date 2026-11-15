@@ -2,7 +2,7 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, PostgresConnectionConfig,
   PostgresConnectionOptions, PostgresDriverCapabilities, PostgresDriverFactory,
-  QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
+  PostgresQueryResultSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
   requirePostgresFeatures
 } from '@arkdb/postgres';
 
@@ -21,6 +21,7 @@ export default function publicInterfaceTest(): void {
       expect(requirePostgresFeatures(connection).prepared === connection.postgresFeatures.prepared).assertTrue();
       expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{}}');
+      expect(new PostgresQueryResultSummary() instanceof QueryResultSummary && !new PostgresQueryResultSummary().affectedRowsKnown).assertTrue();
       expect(JSON.stringify(connection).indexOf('secret')).assertEqual(-1);
 
       for (const op of [async (): Promise<void> => { await connection.query('SELECT 1'); },

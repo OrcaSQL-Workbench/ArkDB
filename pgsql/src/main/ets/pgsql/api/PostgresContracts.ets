@@ -1,4 +1,10 @@
-import { ArkDbError, DriverCapabilities } from '@arkdb/core';
+import {
+  ArkDbError, DriverCapabilities, QueryExecutionSummary, QueryOptions, QueryResultSink
+} from '@arkdb/core';
+import { PostgresTransactionOptions } from '../features/transaction/PostgresTransactionOptions';
+import {
+  PostgresDatabaseSessionStatus, PostgresQueryResult, PostgresServerInfo
+} from '../model/PostgresModels';
 import { PostgresPreparedExecutor } from './PostgresPreparedContracts';
 
 export class PostgresDriverCapabilities extends DriverCapabilities {
@@ -10,8 +16,26 @@ export class PostgresDriverCapabilities extends DriverCapabilities {
   supportsStreamingResults: boolean = true;
 }
 
+export interface PostgresSession extends PostgresFeatureConnection {
+  readonly postgresFeatures: PostgresConnectionFeatures;
+  readonly serverInfo: PostgresServerInfo;
+  readonly sessionStatus: PostgresDatabaseSessionStatus;
+  query(sql: string): Promise<PostgresQueryResult>;
+  queryStream(sql: string, options: QueryOptions,
+    sink: QueryResultSink): Promise<QueryExecutionSummary>;
+  savepoint(name: string): Promise<void>;
+  rollbackTo(name: string): Promise<void>;
+  releaseSavepoint(name: string): Promise<void>;
+}
+
+export interface PostgresTransactionRunner {
+  run<T>(options: PostgresTransactionOptions,
+    body: (session: PostgresSession) => Promise<T>): Promise<T>;
+}
+
 export class PostgresConnectionFeatures {
   prepared?: PostgresPreparedExecutor;
+  transactions?: PostgresTransactionRunner;
 }
 
 export interface PostgresFeatureConnection {

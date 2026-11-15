@@ -13,6 +13,9 @@ import { runPostgresPortalStream } from './command/PostgresPortalStream';
 import { PostgresQueryStreamHost, runPostgresQueryStream } from './command/PostgresResultStream';
 import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery } from './command/PostgresSimpleQuery';
 import {
+  runPostgresBegin, runPostgresCommit, runPostgresRollback
+} from './command/PostgresTransactionCommand';
+import {
   PostgresConnectionLifecycle, PostgresLifecycleTransport, PostgresStartupRunner
 } from './connection/PostgresConnectionLifecycle';
 import {
@@ -133,16 +136,22 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
       });
   }
 
-  async begin(): Promise<PostgresDatabaseSessionStatus> {
-    throw ArkDbError.unsupported('PostgreSQL transactions are not implemented.');
+  begin(): Promise<PostgresDatabaseSessionStatus> {
+    return this.lifecycle.runCommand<PostgresDatabaseSessionStatus>(PostgresCommandKind.Transaction,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> =>
+        runPostgresBegin(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st));
   }
 
-  async commit(): Promise<PostgresDatabaseSessionStatus> {
-    throw ArkDbError.unsupported('PostgreSQL transactions are not implemented.');
+  commit(): Promise<PostgresDatabaseSessionStatus> {
+    return this.lifecycle.runCommand<PostgresDatabaseSessionStatus>(PostgresCommandKind.Transaction,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> =>
+        runPostgresCommit(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st));
   }
 
-  async rollback(): Promise<PostgresDatabaseSessionStatus> {
-    throw ArkDbError.unsupported('PostgreSQL transactions are not implemented.');
+  rollback(): Promise<PostgresDatabaseSessionStatus> {
+    return this.lifecycle.runCommand<PostgresDatabaseSessionStatus>(PostgresCommandKind.Transaction,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> =>
+        runPostgresRollback(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st));
   }
 
   async cancel(): Promise<QueryCancellationResult> {

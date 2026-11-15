@@ -2,9 +2,10 @@ import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionState, ContextChangeMode, DatabaseContext,
   PostgresConnectionConfig, PostgresConnectionOptions, PostgresDriverCapabilities,
-  PostgresDriverFactory, PostgresQueryResultSummary, QueryOptions, QueryResultMeta,
-  QueryResultSink, QueryResultSummary, QueryRowChunk, postgresPlaceholders,
-  quotePostgresIdentifier, requirePostgresFeatures
+  PostgresDriverFactory, PostgresQueryResultSummary, PostgresSession,
+  PostgresTransactionIsolation, PostgresTransactionOptions, PostgresTransactionRunner,
+  QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
+  postgresPlaceholders, quotePostgresIdentifier, requirePostgresFeatures
 } from '@arkdb/postgres';
 
 export default function publicInterfaceTest(): void {
@@ -26,7 +27,12 @@ export default function publicInterfaceTest(): void {
       expect(connection.contextPolicy.schemaChange).assertEqual(ContextChangeMode.InPlace);
       expect(connection.features.context!.contextPolicy.catalogChange)
         .assertEqual(ContextChangeMode.Reconnect);
-      expect(connection.postgresFeatures.prepared !== undefined).assertTrue();
+      const txRunner: PostgresTransactionRunner | undefined = connection.postgresFeatures.transactions;
+      const txSession: PostgresSession | null = null;
+      expect(connection.postgresFeatures.prepared !== undefined && txRunner === undefined &&
+        txSession === null && connection.features.transactions === undefined &&
+        new PostgresTransactionOptions().isolation === PostgresTransactionIsolation.ReadCommitted)
+        .assertTrue();
       expect(requirePostgresFeatures(connection).prepared === connection.postgresFeatures.prepared).assertTrue();
       expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{},"context":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{}}');
@@ -43,6 +49,9 @@ export default function publicInterfaceTest(): void {
         async (): Promise<void> => { await connection.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new ConsumerNoopSink()); },
         (): Promise<void> => connection.changeContext(new DatabaseContext()),
         (): Promise<void> => connection.features.context!.changeContext(new DatabaseContext()),
+        async (): Promise<void> => { await connection.begin(); },
+        async (): Promise<void> => { await connection.commit(); },
+        async (): Promise<void> => { await connection.rollback(); },
         (): Promise<void> => connection.ping(), (): Promise<void> => connection.features.health!.ping()]) {
         await expectUnconnectedProtocol(op);
       }

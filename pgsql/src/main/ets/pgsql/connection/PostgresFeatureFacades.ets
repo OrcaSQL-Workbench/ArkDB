@@ -1,7 +1,8 @@
 import {
   ArkDbError, ConnectionState, ContextChangeMode, DatabaseContext, DatabaseContextPolicy,
-  DbConnection, DbConnectionFeatures, DbConnectionHealth, DbContextController,
-  DbStreamingConnection, QueryExecutionSummary, QueryOptions, QueryResult, QueryResultSink, ServerInfo
+  DatabaseSessionStatus, DbConnection, DbConnectionFeatures, DbConnectionHealth,
+  DbContextController, DbStreamingConnection, DbTransactionController,
+  QueryExecutionSummary, QueryOptions, QueryResult, QueryResultSink, ServerInfo
 } from '@arkdb/core';
 
 type StreamRunner = (sql: string, options: QueryOptions, sink: QueryResultSink) => Promise<QueryExecutionSummary>;
@@ -13,6 +14,8 @@ interface ContextDelegate {
 }
 const contextDelegates: WeakMap<PostgresConnectionContext, ContextDelegate> =
   new WeakMap<PostgresConnectionContext, ContextDelegate>();
+const transactionDelegates: WeakMap<PostgresConnectionTransactions, DbTransactionController> =
+  new WeakMap<PostgresConnectionTransactions, DbTransactionController>();
 
 export function createPostgresContextPolicy(): DatabaseContextPolicy {
   const policy = new DatabaseContextPolicy();
@@ -58,6 +61,26 @@ export class PostgresConnectionContext implements DbContextController {
   private delegate(): ContextDelegate {
     const d = contextDelegates.get(this);
     if (d === undefined) throw ArkDbError.protocol('PostgreSQL context facade is uninitialized.');
+    return d;
+  }
+}
+
+export class PostgresConnectionTransactions implements DbTransactionController {
+  constructor(controller: DbTransactionController) {
+    if (controller === null || controller === undefined) {
+      throw ArkDbError.validation('PostgreSQL transaction controller is required.');
+    }
+    transactionDelegates.set(this, controller);
+  }
+  get sessionStatus(): DatabaseSessionStatus {
+    return this.delegate().sessionStatus.clone();
+  }
+  begin(): Promise<DatabaseSessionStatus> { return this.delegate().begin(); }
+  commit(): Promise<DatabaseSessionStatus> { return this.delegate().commit(); }
+  rollback(): Promise<DatabaseSessionStatus> { return this.delegate().rollback(); }
+  private delegate(): DbTransactionController {
+    const d = transactionDelegates.get(this);
+    if (d === undefined) throw ArkDbError.protocol('PostgreSQL transaction facade is uninitialized.');
     return d;
   }
 }

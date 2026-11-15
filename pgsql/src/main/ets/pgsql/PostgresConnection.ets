@@ -15,7 +15,10 @@ import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery } from
 import {
   PostgresConnectionLifecycle, PostgresLifecycleTransport, PostgresStartupRunner
 } from './connection/PostgresConnectionLifecycle';
-import { PostgresConnectionHealth, PostgresConnectionStreaming } from './connection/PostgresFeatureFacades';
+import {
+  PostgresConnectionContext, PostgresConnectionHealth, PostgresConnectionStreaming,
+  createPostgresContextPolicy
+} from './connection/PostgresFeatureFacades';
 import {
   PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase, PostgresCommandScope
 } from './execution/PostgresCommandGate';
@@ -23,12 +26,13 @@ import { PostgresCommandCloseSettlement } from './execution/PostgresSettlements'
 import { PostgresPreparedFrames } from './features/prepared/PostgresParameterEncoder';
 import { PostgresConnectionPreparedExecutor } from './features/prepared/PostgresPreparedExecutor';
 import {
-  PostgresConnectionConfig
+  PostgresConnectionConfig, isWellFormedPostgresText, resolvePostgresDatabaseName
 } from './model/PostgresConnectionConfig';
 import {
   PostgresDatabaseSessionStatus, PostgresQueryResult, PostgresServerInfo
 } from './model/PostgresModels';
 import { PostgresMessageChannel, PostgresReadyStatus } from './protocol/PostgresMessageChannel';
+import { quotePostgresIdentifier } from './value/PostgresSqlHelpers';
 
 export class PostgresConnection implements DbConnection, DbStreamingConnection,
   DbConnectionHealth, DbContextController, DbTransactionController,
@@ -36,7 +40,6 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
   readonly features: DbConnectionFeatures = new DbConnectionFeatures();
   readonly postgresFeatures: PostgresConnectionFeatures =
     new PostgresConnectionFeatures();
-  readonly contextPolicy: DatabaseContextPolicy = new DatabaseContextPolicy();
   private readonly lifecycle: PostgresConnectionLifecycle;
 
   constructor(config: PostgresConnectionConfig, password: string,
@@ -50,11 +53,18 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
       (sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
         this.queryStream(sql, options, sink));
     this.features.health = new PostgresConnectionHealth((): Promise<void> => this.ping());
+    this.features.context = new PostgresConnectionContext(
+      (): DatabaseContextPolicy => this.contextPolicy,
+      (context: DatabaseContext): Promise<void> => this.changeContext(context));
     this.postgresFeatures.prepared = new PostgresConnectionPreparedExecutor(
       (frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> =>
         this.executeExtendedQuery(frames, options),
       (frames: PostgresPreparedFrames, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
         this.streamPreparedQuery(frames, options, sink));
+  }
+
+  get contextPolicy(): DatabaseContextPolicy {
+    return createPostgresContextPolicy();
   }
 
   get state(): ConnectionState {
@@ -92,8 +102,35 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
         runPostgresPing(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st));
   }
 
-  async changeContext(_context: DatabaseContext): Promise<void> {
-    throw ArkDbError.unsupported('PostgreSQL context changes are not implemented.');
+  changeContext(context: DatabaseContext): Promise<void> {
+    if (context === null || context === undefined || !(context instanceof DatabaseContext) ||
+      typeof context.catalog !== 'string' || typeof context.schema !== 'string') {
+      return Promise.reject<void>(ArkDbError.validation('A PostgreSQL database context is required.'));
+    }
+    const snapshot = context.clone();
+    return this.lifecycle.runCommand<void>(PostgresCommandKind.Context,
+      async (s: PostgresCommandScope, ch: PostgresMessageChannel,
+        st: PostgresCommandCloseSettlement): Promise<void> => {
+        if (!isWellFormedPostgresText(snapshot.catalog)) {
+          throw ArkDbError.validation(
+            'PostgreSQL catalog name must not contain NUL or unpaired UTF-16 surrogates.');
+        }
+        const connectedCatalog = resolvePostgresDatabaseName(this.lifecycle.config);
+        if (snapshot.catalog.length > 0 && snapshot.catalog !== connectedCatalog) {
+          throw ArkDbError.unsupported(
+            'Changing the PostgreSQL catalog requires reconnecting to the target database.');
+        }
+        if (snapshot.schema.length === 0) {
+          throw ArkDbError.validation('A PostgreSQL schema name is required.');
+        }
+        if (snapshot.schema === '$user') {
+          throw ArkDbError.validation(
+            'PostgreSQL search_path cannot target a literal "$user" schema.');
+        }
+        const quotedSchema = quotePostgresIdentifier([snapshot.schema]);
+        await runPostgresSimpleQuery(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st,
+          'SET search_path TO ' + quotedSchema);
+      });
   }
 
   async begin(): Promise<PostgresDatabaseSessionStatus> {

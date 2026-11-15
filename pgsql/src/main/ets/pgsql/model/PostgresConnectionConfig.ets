@@ -112,16 +112,22 @@ function appendTextError(errors: ArkDbError[], label: string, value: string,
     errors.push(ArkDbError.validation(label + ' is required.'));
     return;
   }
-  if (!isWellFormedText(value)) {
+  if (!isWellFormedPostgresText(value)) {
     errors.push(ArkDbError.validation(label + ' must not contain NUL or malformed Unicode.'));
   }
+}
+
+export function resolvePostgresDatabaseName(config: PostgresConnectionConfig): string {
+  return config.database !== undefined && config.database.length > 0
+    ? config.database
+    : config.user;
 }
 
 function nonEmpty(value: string | undefined): boolean {
   return value !== undefined && value.trim().length > 0;
 }
 
-function isWellFormedText(value: string): boolean {
+export function isWellFormedPostgresText(value: string): boolean {
   for (let index = 0; index < value.length; index++) {
     const code = value.charCodeAt(index);
     if (code === 0) return false;

@@ -2,6 +2,8 @@ import { ArkDbError, DriverCapabilities } from '@arkdb/core';
 import { PostgresPreparedExecutor } from './PostgresPreparedContracts';
 
 export class PostgresDriverCapabilities extends DriverCapabilities {
+  supportsCatalogs: boolean = true;
+  supportsSchemas: boolean = true;
   supportsPreparedStatements: boolean = true;
   supportsSsl: boolean = true;
   supportsMultipleResults: boolean = true;

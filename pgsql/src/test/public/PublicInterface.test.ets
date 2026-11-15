@@ -1,19 +1,20 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
-  ArkDbError, ArkDbErrorKind, ConnectionState, CoreDatabaseSessionStatus,
-  CoreDbConnection, CoreDbDriverFactory, CoreDbExecutionController,
-  CoreDriverCapabilities, CoreMetadataProvider, CoreQueryExecutionSummary,
-  CoreQueryResultMeta, CoreQueryResultSink, CoreQueryResultSummary,
-  CoreQueryRowChunk, CoreSqlValue, DatabaseContext, DriverCapabilities,
-  PostgresColumnDef, PostgresConnection, PostgresConnectionConfig,
-  PostgresConnectionFeatures, PostgresConnectionOptions,
-  PostgresDatabaseSessionStatus, PostgresDriverCapabilities,
-  PostgresDriverFactory, PostgresError, PostgresFeatureConnection,
-  PostgresParameter, PostgresParameterType, PostgresParameterValue,
-  PostgresPreparedExecutor, PostgresQueryResult, PostgresQueryResultSummary, PostgresServerInfo,
-  PostgresSslMode, PostgresTransactionState, QueryOptions, QueryResultMeta,
-  QueryResultSink, QueryResultSummary, QueryRowChunk, QueryTruncation,
-  requirePostgresFeatures
+  ArkDbError, ArkDbErrorKind, ConnectionState, ContextChangeMode,
+  CoreDatabaseSessionStatus, CoreDbConnection, CoreDbDriverFactory,
+  CoreDbExecutionController, CoreDriverCapabilities, CoreMetadataProvider,
+  CoreQueryExecutionSummary, CoreQueryResultMeta, CoreQueryResultSink,
+  CoreQueryResultSummary, CoreQueryRowChunk, CoreSqlValue, DatabaseContext,
+  DriverCapabilities, PostgresColumnDef, PostgresConnection,
+  PostgresConnectionConfig, PostgresConnectionFeatures,
+  PostgresConnectionOptions, PostgresDatabaseSessionStatus,
+  PostgresDriverCapabilities, PostgresDriverFactory, PostgresError,
+  PostgresFeatureConnection, PostgresParameter, PostgresParameterType,
+  PostgresParameterValue, PostgresPreparedExecutor, PostgresQueryResult,
+  PostgresQueryResultSummary, PostgresServerInfo, PostgresSslMode,
+  PostgresTransactionState, QueryOptions, QueryResultMeta, QueryResultSink,
+  QueryResultSummary, QueryRowChunk, QueryTruncation, postgresPlaceholders,
+  quotePostgresIdentifier, requirePostgresFeatures
 } from '../../../Index';
 
 export default function publicInterfaceTest(): void {
@@ -119,8 +120,21 @@ export default function publicInterfaceTest(): void {
       expectAllCapabilitiesFalse(new PostgresDriverFactory().capabilities);
       expect(connection.features.streaming !== undefined).assertTrue();
       expect(connection.features.health !== undefined).assertTrue();
-      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{}}');
+      expect(connection.features.context !== undefined).assertTrue();
+      const policy = connection.contextPolicy;
+      expect(policy.catalogChange).assertEqual(ContextChangeMode.Reconnect);
+      expect(policy.schemaChange).assertEqual(ContextChangeMode.InPlace);
+      expect(policy.catalogsAreSchemas).assertFalse();
+      policy.catalogChange = ContextChangeMode.InPlace;
+      expect(connection.contextPolicy.catalogChange).assertEqual(ContextChangeMode.Reconnect);
+      expect(connection.features.context!.contextPolicy.schemaChange)
+        .assertEqual(ContextChangeMode.InPlace);
+      expect(JSON.stringify(connection.features))
+        .assertEqual('{"streaming":{},"health":{},"context":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{}}');
+      expect(quotePostgresIdentifier(['public', 'my"tbl'])).assertEqual('"public"."my""tbl"');
+      expect(postgresPlaceholders(3)).assertEqual('$1,$2,$3');
+      expect(postgresPlaceholders(2, 4)).assertEqual('$4,$5');
       expect(requirePostgresFeatures(connection) === connection.postgresFeatures).assertTrue();
       expect(requirePostgresFeatures(connection).prepared === prepared).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
@@ -156,8 +170,10 @@ export default function publicInterfaceTest(): void {
         await connection.postgresFeatures.prepared!.queryStream(
           'SELECT 1', [], new QueryOptions(), new NoopSink());
       });
-      await expectUnsupported((): Promise<void> =>
+      await expectNotConnected((): Promise<void> =>
         connection.changeContext(new DatabaseContext()));
+      await expectNotConnected((): Promise<void> =>
+        connection.features.context!.changeContext(new DatabaseContext()));
       await expectUnsupported(async (): Promise<void> => { await connection.begin(); });
       await expectUnsupported(async (): Promise<void> => { await connection.commit(); });
       await expectUnsupported(async (): Promise<void> => { await connection.rollback(); });
@@ -195,8 +211,8 @@ function expectValidation(config: PostgresConnectionConfig): void {
 
 function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): void {
   expect(capabilities.supportsSsl).assertTrue();
-  expect(capabilities.supportsCatalogs).assertFalse();
-  expect(capabilities.supportsSchemas).assertFalse();
+  expect(capabilities.supportsCatalogs).assertTrue();
+  expect(capabilities.supportsSchemas).assertTrue();
   expect(capabilities.supportsTransactions).assertFalse();
   expect(capabilities.supportsMetadata).assertFalse();
   expect(capabilities.supportsMultipleResults).assertTrue();

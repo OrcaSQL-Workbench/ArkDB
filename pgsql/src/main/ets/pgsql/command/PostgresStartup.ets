@@ -2,7 +2,7 @@ import { ArkDbError, ArkDbErrorKind } from '@arkdb/core';
 import { HarmonyPostgresAuthPlatform, PostgresAuthPlatform, PostgresScramClient, PostgresScramClientState, PostgresScramPort, buildPostgresCleartextPasswordResponse, buildPostgresMd5PasswordResponse } from '../auth/PostgresAuthCrypto';
 import { DefaultPostgresScramPort } from '../auth/PostgresSaslPrep';
 import { PostgresStartupSession, applyPostgresParameterStatus, postgresErrorFromResponse } from '../execution/PostgresSettlements';
-import { PostgresSslMode } from '../model/PostgresConnectionConfig';
+import { PostgresSslMode, resolvePostgresDatabaseName } from '../model/PostgresConnectionConfig';
 import { PostgresFrontendSerializer, PostgresStartupParameter } from '../protocol/PostgresByteCodec';
 import { PostgresAuthenticationCleartextPassword, PostgresAuthenticationMd5Password, PostgresAuthenticationOk, PostgresAuthenticationRequest, PostgresAuthenticationSasl, PostgresAuthenticationSaslContinue, PostgresAuthenticationSaslFinal, PostgresBackendKeyData, PostgresBackendMessage, PostgresBackendParser, PostgresErrorResponse, PostgresMessage, PostgresNegotiateProtocolVersion, PostgresNoticeResponse, PostgresNotificationResponse, PostgresParameterStatus, PostgresReadyForQuery } from '../protocol/PostgresMessageChannel';
 import { MAX_POSTGRES_MESSAGE_BYTES, POSTGRES_LENGTH_BYTES, POSTGRES_NORMAL_HEADER_BYTES } from '../protocol/PostgresProtocolConstants';
@@ -134,7 +134,7 @@ async function negotiateTlsIfConfigured(context: PostgresStartupSession): Promis
 
 function buildStartupParameters(context: PostgresStartupSession): PostgresStartupParameter[] {
   const config = context.config;
-  const database = config.database !== undefined && config.database.length > 0 ? config.database : config.user;
+  const database = resolvePostgresDatabaseName(config);
   const parameters: PostgresStartupParameter[] = [{ name: 'user', value: config.user }, { name: 'database', value: database }];
   if (config.applicationName.length > 0) parameters.push({ name: 'application_name', value: config.applicationName });
   parameters.push({ name: 'client_encoding', value: 'UTF8' });

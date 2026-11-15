@@ -27,20 +27,20 @@ export default function postgresTransactionControlTest(): void {
       const defaults = new PostgresTransactionOptions();
       expect(defaults.isolation === PostgresTransactionIsolation.ReadCommitted && !defaults.readOnly &&
         !defaults.deferrable && defaults.validate().length === 0).assertTrue();
-      expect(buildPostgresBeginSql(defaults)).assertEqual('BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE');
+      expect(buildPostgresBeginSql(defaults)).assertEqual('BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE NOT DEFERRABLE');
       const rrReadOnly = defaults.clone();
       rrReadOnly.isolation = PostgresTransactionIsolation.RepeatableRead; rrReadOnly.readOnly = true;
       expect(defaults.isolation === PostgresTransactionIsolation.ReadCommitted && !defaults.readOnly &&
         rrReadOnly.validate().length === 0).assertTrue();
-      expect(buildPostgresBeginSql(rrReadOnly)).assertEqual('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      expect(buildPostgresBeginSql(rrReadOnly)).assertEqual('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY NOT DEFERRABLE');
       expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.ReadCommitted, true, false)))
-        .assertEqual('BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY');
+        .assertEqual('BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY NOT DEFERRABLE');
       expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.RepeatableRead, false, false)))
-        .assertEqual('BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE');
+        .assertEqual('BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE NOT DEFERRABLE');
       expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.Serializable, false, false)))
-        .assertEqual('BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE');
+        .assertEqual('BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE NOT DEFERRABLE');
       expect(buildPostgresBeginSql(makeOpts(PostgresTransactionIsolation.Serializable, true, false)))
-        .assertEqual('BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY');
+        .assertEqual('BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY NOT DEFERRABLE');
       const serDeferrable = makeOpts(PostgresTransactionIsolation.Serializable, true, true);
       expect(serDeferrable.validate().length === 0 && buildPostgresBeginSql(serDeferrable) ===
         'BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE').assertTrue();
@@ -290,6 +290,18 @@ export default function postgresTransactionControlTest(): void {
       await closeDone;
       expect(cancelErr.kind === ArkDbErrorKind.Cancelled && hangConn.state === ConnectionState.Closed).assertTrue();
       await assertAllTxOpsProtocol(hangConn, 'PostgreSQL connection is closed.');
+
+      for (const postReadyOp of [runPostgresBegin, runPostgresCommit, runPostgresRollback]) {
+        const initReady = postReadyOp === runPostgresBegin ? 0x49 : 0x54;
+        const tag = postReadyOp === runPostgresBegin ? 'BEGIN' : (postReadyOp === runPostgresCommit ? 'COMMIT' : 'ROLLBACK');
+        const nextReady = postReadyOp === runPostgresBegin ? 0x54 : 0x49;
+        const raceLife = openLifecycle(new QueueTransport([bootFrames(initReady), concatFrames([msgCmd(tag), msgReady(nextReady)])]));
+        await raceLife.connect();
+        const retired: ArkDbError[] = [];
+        const raceErr = await asyncFail((): Promise<PostgresDatabaseSessionStatus> => runOnLifecycle(raceLife, postReadyOp, retired, true));
+        await raceLife.close();
+        expect(raceErr.kind === ArkDbErrorKind.Cancelled && retired.length === 0 && raceLife.state === ConnectionState.Closed).assertTrue();
+      }
     });
   });
 }
@@ -321,11 +333,12 @@ function openLifecycle(tp: QueueTransport): PostgresConnectionLifecycle {
   return new PostgresConnectionLifecycle(makeConfig(), '', new FixedTimers(), (): PostgresLifecycleTransport => tp);
 }
 function runOnLifecycle(life: PostgresConnectionLifecycle,
-  op: (h: PostgresSimpleQueryHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresDatabaseSessionStatus>
+  op: (h: PostgresSimpleQueryHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresDatabaseSessionStatus>,
+  retired: ArkDbError[] = [], closeAfterApply: boolean = false
 ): Promise<PostgresDatabaseSessionStatus> {
   return life.runCommand<PostgresDatabaseSessionStatus>(PostgresCommandKind.Transaction,
     (sc: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> =>
-      op(new TestSimpleHost(life, sc), ch, st));
+      op(new TestSimpleHost(life, sc, retired, closeAfterApply), ch, st));
 }
 async function assertUnknownStateRetires(
   op: (h: PostgresSimpleQueryHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresDatabaseSessionStatus>
@@ -334,10 +347,20 @@ async function assertUnknownStateRetires(
     (s: PostgresDatabaseSessionStatus): void => { s.inTransaction = true; }]) {
     const life = openLifecycle(new QueueTransport([bootFrames(0x49)]));
     await life.connect(); mutate(life.sessionStatus);
-    const err = await asyncFail((): Promise<PostgresDatabaseSessionStatus> => runOnLifecycle(life, op));
+    const retired: ArkDbError[] = [];
+    const err = await asyncFail((): Promise<PostgresDatabaseSessionStatus> => runOnLifecycle(life, op, retired));
     expect(err.kind === ArkDbErrorKind.Protocol && err.message === 'PostgreSQL transaction state is unknown.' &&
-      life.state === ConnectionState.Error).assertTrue();
+      retired.length === 1 && retired[0] === err && life.state === ConnectionState.Error).assertTrue();
   }
+  const closedLife = openLifecycle(new QueueTransport([bootFrames(0x49)]));
+  await closedLife.connect();
+  const closedRetired: ArkDbError[] = [];
+  const closedErr = await asyncFail((): Promise<PostgresDatabaseSessionStatus> =>
+    runOnLifecycle(closedLife, (h: PostgresSimpleQueryHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> => {
+      closedLife.sessionStatus.known = false; st.signalClose(ArkDbError.cancelled('closed')); return op(h, ch, st);
+    }, closedRetired));
+  expect(closedErr.kind === ArkDbErrorKind.Cancelled && closedRetired.length === 0).assertTrue();
+  await closedLife.close();
 }
 function makeOpts(isolation: PostgresTransactionIsolation, readOnly: boolean, deferrable: boolean): PostgresTransactionOptions {
   const opts = new PostgresTransactionOptions();
@@ -378,12 +401,18 @@ class CustomTxConnection extends PostgresConnection {
 }
 class TestSimpleHost implements PostgresSimpleQueryHost {
   private readonly life: PostgresConnectionLifecycle; private readonly sc: PostgresCommandScope;
-  constructor(life: PostgresConnectionLifecycle, sc: PostgresCommandScope) { this.life = life; this.sc = sc; }
+  private readonly retiredReasons: ArkDbError[]; private readonly closeAfterApply: boolean;
+  constructor(life: PostgresConnectionLifecycle, sc: PostgresCommandScope, retired: ArkDbError[], closeAfterApply: boolean) {
+    this.life = life; this.sc = sc; this.retiredReasons = retired; this.closeAfterApply = closeAfterApply;
+  }
   get serverInfo(): PostgresServerInfo { return this.life.serverInfo; }
   get sessionStatus(): PostgresDatabaseSessionStatus { return this.life.sessionStatus; }
   get timers(): ConnectionTimerPort { return this.life.timers; }
-  applyReadyStatus(ready: PostgresReadyStatus): void { this.life.applyReadyStatus(this.sc, ready); }
-  retire(reason: ArkDbError): Promise<void> { return this.life.retire(this.sc, reason); }
+  applyReadyStatus(ready: PostgresReadyStatus): void {
+    this.life.applyReadyStatus(this.sc, ready);
+    if (this.closeAfterApply) { Promise.resolve().then((): void => { void this.life.close(); }); }
+  }
+  retire(reason: ArkDbError): Promise<void> { this.retiredReasons.push(reason); return this.life.retire(this.sc, reason); }
 }
 class KindObserver implements PostgresCommandLifecycleObserver {
   private readonly kinds: PostgresCommandKind[];

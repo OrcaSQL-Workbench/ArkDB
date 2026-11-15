@@ -40,7 +40,8 @@ export function buildPostgresBeginSql(options: PostgresTransactionOptions): stri
   const snapshot = options.clone(); const errors = validatePostgresTransactionOptions(snapshot);
   if (errors.length > 0) throw errors[0];
   return 'BEGIN ISOLATION LEVEL ' + isolationSqlClause(snapshot.isolation) +
-    (snapshot.readOnly ? ' READ ONLY' : ' READ WRITE') + (snapshot.deferrable ? ' DEFERRABLE' : '');
+    (snapshot.readOnly ? ' READ ONLY' : ' READ WRITE') +
+    (snapshot.deferrable ? ' DEFERRABLE' : ' NOT DEFERRABLE');
 }
 
 function isolationSqlClause(isolation: PostgresTransactionIsolation): string {

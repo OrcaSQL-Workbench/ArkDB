@@ -8,68 +8,79 @@ import { PostgresMessageChannel } from '../protocol/PostgresMessageChannel';
 
 export async function runPostgresBegin(host: PostgresSimpleQueryHost, channel: PostgresMessageChannel,
   settlement: PostgresCommandCloseSettlement, beginSql: string = 'BEGIN'): Promise<PostgresDatabaseSessionStatus> {
-  assertKnownTransactionState(host);
+  await assertKnownTransactionState(host, settlement);
   if (typeof beginSql !== 'string' || beginSql.trim().length === 0) {
     throw ArkDbError.validation('PostgreSQL BEGIN SQL is required.');
   }
   if (host.sessionStatus.inTransaction || host.sessionStatus.transactionState !== PostgresTransactionState.Idle) {
     throw ArkDbError.validation('PostgreSQL connection is already in a transaction.');
   }
-  const result = await runPostgresSimpleQuery(host, channel, settlement, beginSql);
+  const result = await executeTransactionQuery(host, channel, settlement, beginSql);
   if (result.commandTag !== 'BEGIN' ||
     !isSynchronizedTransactionResult(result, host.sessionStatus, true, PostgresTransactionState.InTransaction)) {
-    return retireProtocol(host, 'PostgreSQL BEGIN did not enter an active transaction.');
+    return retireProtocol(host, settlement, 'PostgreSQL BEGIN did not enter an active transaction.');
   }
   return host.sessionStatus.clone();
 }
 
 export async function runPostgresCommit(host: PostgresSimpleQueryHost, channel: PostgresMessageChannel,
   settlement: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> {
-  assertKnownTransactionState(host);
+  await assertKnownTransactionState(host, settlement);
   if (!host.sessionStatus.inTransaction || host.sessionStatus.transactionState === PostgresTransactionState.Idle) {
     throw ArkDbError.validation('PostgreSQL connection is not in an active transaction.');
   }
   if (host.sessionStatus.transactionState === PostgresTransactionState.FailedTransaction) {
-    const rbResult = await runPostgresSimpleQuery(host, channel, settlement, 'ROLLBACK');
+    const rbResult = await executeTransactionQuery(host, channel, settlement, 'ROLLBACK');
     if (rbResult.commandTag !== 'ROLLBACK' ||
       !isSynchronizedTransactionResult(rbResult, host.sessionStatus, false, PostgresTransactionState.Idle)) {
-      return retireProtocol(host, 'PostgreSQL ROLLBACK did not exit the failed transaction.');
+      return retireProtocol(host, settlement, 'PostgreSQL ROLLBACK did not exit the failed transaction.');
     }
     throw createAbortedCommitError();
   }
-  const result = await runPostgresSimpleQuery(host, channel, settlement, 'COMMIT');
+  const result = await executeTransactionQuery(host, channel, settlement, 'COMMIT');
   if (!isSynchronizedTransactionResult(result, host.sessionStatus, false, PostgresTransactionState.Idle)) {
-    return retireProtocol(host, 'PostgreSQL COMMIT did not finish the active transaction.');
+    return retireProtocol(host, settlement, 'PostgreSQL COMMIT did not finish the active transaction.');
   }
   if (result.commandTag === 'ROLLBACK') throw createAbortedCommitError();
   if (result.commandTag !== 'COMMIT') {
-    return retireProtocol(host, 'Unexpected PostgreSQL COMMIT command tag: ' + result.commandTag);
+    return retireProtocol(host, settlement, 'Unexpected PostgreSQL COMMIT command tag: ' + result.commandTag);
   }
   return host.sessionStatus.clone();
 }
 
 export async function runPostgresRollback(host: PostgresSimpleQueryHost, channel: PostgresMessageChannel,
   settlement: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> {
-  assertKnownTransactionState(host);
-  const result = await runPostgresSimpleQuery(host, channel, settlement, 'ROLLBACK');
+  await assertKnownTransactionState(host, settlement);
+  const result = await executeTransactionQuery(host, channel, settlement, 'ROLLBACK');
   if (result.commandTag !== 'ROLLBACK' ||
     !isSynchronizedTransactionResult(result, host.sessionStatus, false, PostgresTransactionState.Idle)) {
-    return retireProtocol(host, 'PostgreSQL ROLLBACK did not finish the transaction.');
+    return retireProtocol(host, settlement, 'PostgreSQL ROLLBACK did not finish the transaction.');
   }
   return host.sessionStatus.clone();
 }
 
-function assertKnownTransactionState(host: PostgresSimpleQueryHost): void {
+async function executeTransactionQuery(host: PostgresSimpleQueryHost, channel: PostgresMessageChannel,
+  settlement: PostgresCommandCloseSettlement, sql: string): Promise<PostgresQueryResult> {
+  const result = await runPostgresSimpleQuery(host, channel, settlement, sql);
+  if (settlement.closeReason !== null) throw settlement.closeReason;
+  return result;
+}
+
+async function assertKnownTransactionState(host: PostgresSimpleQueryHost,
+  settlement: PostgresCommandCloseSettlement): Promise<void> {
+  if (settlement.closeReason !== null) throw settlement.closeReason;
   const status = host.sessionStatus; const state = status.transactionState;
   const validState = state === PostgresTransactionState.Idle || state === PostgresTransactionState.InTransaction ||
     state === PostgresTransactionState.FailedTransaction;
   const expectedInTx = state === PostgresTransactionState.InTransaction || state === PostgresTransactionState.FailedTransaction;
   if (!status.known || !validState || status.inTransaction !== expectedInTx) {
-    throw ArkDbError.protocol('PostgreSQL transaction state is unknown.');
+    await retireProtocol(host, settlement, 'PostgreSQL transaction state is unknown.');
   }
 }
 
-async function retireProtocol(host: PostgresSimpleQueryHost, message: string): Promise<PostgresDatabaseSessionStatus> {
+async function retireProtocol(host: PostgresSimpleQueryHost, settlement: PostgresCommandCloseSettlement,
+  message: string): Promise<PostgresDatabaseSessionStatus> {
+  if (settlement.closeReason !== null) throw settlement.closeReason;
   const err = ArkDbError.protocol(message);
   await host.retire(err);
   throw err;

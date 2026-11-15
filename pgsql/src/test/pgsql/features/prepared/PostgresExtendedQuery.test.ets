@@ -181,12 +181,24 @@ export default function postgresExtendedQueryTest(): void {
       expect(rowTrunc.rows.length === 2 && rowTrunc.rows[0][0] === 1 && rowTrunc.rows[1][0] === 2 && rowTrunc.truncated &&
         rowTrunc.truncationReason === 'rowLimit' && rowTrunc.commandTag === 'SELECT 4' && rowTrunc.rowCountExact === 4n && conn.state === ConnectionState.Ready).assertTrue();
 
-      const byteOpts = new QueryOptions(); byteOpts.maxResultBytes = 10;
+      const byteOpts = new QueryOptions(); byteOpts.maxResultBytes = 20;
       tp.enqueue([extOk([msgRowDesc([colSpec('b', 0, 0, 17, -1, -1, 0)]), msgDataRow(['\\x01020304']), msgDataRow(['\\x0102030405060708090a0b0c0d0e0f10']), msgDataRow(['\\xaa']), msgCmd('SELECT 3')])]);
       const byteTrunc = await conn.postgresFeatures.prepared!.execute('SELECT b', [], byteOpts);
       expect(byteTrunc.rows.length === 1 && byteTrunc.loadedBytes === 4 && byteTrunc.truncated &&
         byteTrunc.truncationReason === 'resultBytes' && byteTrunc.commandTag === 'SELECT 3' && conn.state === ConnectionState.Ready).assertTrue();
       assertBytes(byteTrunc.rows[0][0] as Uint8Array, new Uint8Array([1, 2, 3, 4]));
+
+      const emptyOpts = new QueryOptions(); emptyOpts.maxResultBytes = 10;
+      tp.enqueue([extOk([msgRowDesc([colSpec('s', 0, 0, 25, -1, -1, 0)]), msgDataRow(['']), msgDataRow(['']), msgDataRow(['']), msgCmd('SELECT 3')])]);
+      const emptyTrunc = await conn.postgresFeatures.prepared!.execute('SELECT s', [], emptyOpts);
+      expect(emptyTrunc.rows.length === 1 && emptyTrunc.rows[0][0] === '' && emptyTrunc.loadedBytes === 0 && emptyTrunc.truncated &&
+        emptyTrunc.truncationReason === 'resultBytes' && conn.state === ConnectionState.Ready).assertTrue();
+
+      const zeroColOpts = new QueryOptions(); zeroColOpts.maxResultBytes = 3;
+      tp.enqueue([extOk([msgRowDesc([]), msgDataRow([]), msgDataRow([]), msgCmd('SELECT 2')])]);
+      const zeroColTrunc = await conn.postgresFeatures.prepared!.execute('SELECT', [], zeroColOpts);
+      expect(zeroColTrunc.rows.length === 1 && zeroColTrunc.loadedBytes === 0 && zeroColTrunc.truncated &&
+        zeroColTrunc.truncationReason === 'resultBytes' && conn.state === ConnectionState.Ready).assertTrue();
 
       tp.enqueue([extOk([msgRowDesc([colSpec('bin', 0, 0, 23, 4, -1, 1)]), msgDataRow(['\u0000\u0000\u0000\u0001']), msgCmd('SELECT 1')])]);
       const binErr = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.execute('SELECT bin', [], new QueryOptions()));

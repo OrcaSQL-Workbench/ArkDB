@@ -26,7 +26,7 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
     await writeQueryFrame(channel, settlement, 0x53, PostgresFrontendSerializer.sync(), host.timers, -1);
 
     let stage = ExtendedQueryStage.ExpectParseComplete;
-    let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0;
+    let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0; let retainedBytes = 0;
     let draining = false; let sawServerError = false; let drainedBytes = 0; let drainDeadlineMs = -1;
     let latchedError: ArkDbError | null = null;
     const beginDrain = (): void => {
@@ -96,10 +96,11 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
                 if (!wasDraining) drainedBytes = accountDrainedBytes(drainedBytes, raw.payload.length, opts.maxDrainBytes);
               } else {
                 const row = decodePostgresDataRow(msg, activeColumns); const rowBytes = estimateSqlRowBytes(row);
-                if (currentResult.loadedBytes + rowBytes > opts.maxResultBytes) {
+                const retained = Math.max(rowBytes, raw.payload.length);
+                if (retainedBytes + retained > opts.maxResultBytes) {
                   scrubSqlRow(row); currentResult.truncated = true; currentResult.truncationReason = 'resultBytes'; beginDrain();
                   if (!wasDraining) drainedBytes = accountDrainedBytes(drainedBytes, raw.payload.length, opts.maxDrainBytes);
-                } else { currentResult.rows.push(row); currentResult.loadedBytes += rowBytes; }
+                } else { retainedBytes += retained; currentResult.rows.push(row); currentResult.loadedBytes += rowBytes; }
               }
             }
             continue;

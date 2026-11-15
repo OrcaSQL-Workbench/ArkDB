@@ -159,6 +159,7 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
             }
             if (msg instanceof PostgresPortalSuspended) {
               if (batchRows === 0) throw ArkDbError.protocol('Unexpected PostgreSQL PortalSuspended without DataRow.');
+              await flushChunk();
               if (stmtTruncationReason.length > 0 || errors.sink !== null || errors.latched !== null) {
                 beginDrain();
                 await writeQueryFrame(channel, settlement, 0x43, PostgresFrontendSerializer.close(PostgresFrontendTarget.Portal, ''), host.timers, drainDeadlineMs);

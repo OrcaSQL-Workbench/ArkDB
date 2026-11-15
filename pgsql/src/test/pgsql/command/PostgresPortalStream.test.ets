@@ -91,16 +91,21 @@ export default function postgresPortalStreamTest(): void {
 
         const bpTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), r1, msgPortalSuspended()])]);
         bpTp.hangAtEmpty = true; const bpConn = openReady(bpTp); await bpConn.connect(); bpTp.writes.length = 0;
-        const bpOpts = new QueryOptions(); bpOpts.maxChunkRows = 1; const gateSink = new GatedSink('rows');
+        const bpOpts = new QueryOptions(); bpOpts.maxChunkRows = 15000; const gateSink = new GatedSink('rows');
         const bpTask = bpConn.postgresFeatures.prepared!.queryStream('SELECT 1', [], bpOpts, gateSink);
         await gateSink.waitReached('rows', bpTask); await flushTicks(6);
-        expect(bpTp.writes.length).assertEqual(5);
-        bpTp.enqueue([concatFrames([r2, msgCmd('SELECT 2'), msgReady(0x49)])]); bpTp.hangAtEmpty = false;
+        expect(bpTp.writes.length).assertEqual(5); assertBytes(bpTp.writes[3], expectedExecute(10000));
+        bpTp.enqueue([concatFrames([r2, msgCmd('SELECT 1'), msgReady(0x49)])]); bpTp.hangAtEmpty = false;
         gateSink.release('rows'); await gateSink.waitReached('rows', bpTask);
-        expect(bpTp.writes.length).assertEqual(7); assertBytes(bpTp.writes[5], expectedExecute(1)); assertBytes(bpTp.writes[6], expectedFlush());
+        expect(bpTp.writes.length).assertEqual(7); assertBytes(bpTp.writes[5], expectedExecute(10000)); assertBytes(bpTp.writes[6], expectedFlush());
         gateSink.release('rows'); const bpExec = await bpTask;
         expect(bpExec.loadedRowCount === 2 && bpExec.rowCount === 2 && bpTp.writes.length === 8 && bpConn.state === ConnectionState.Ready).assertTrue();
         assertBytes(bpTp.writes[7], expectedSync());
+        const srTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), r1, msgPortalSuspended(), msgCloseComplete(), msgReady(0x49)]), concatFrames([msgCmd('SELECT 7'), msgReady(0x49)])]);
+        const srConn = openReady(srTp); await srConn.connect(); srTp.writes.length = 0; const srOpts = new QueryOptions(); srOpts.maxRows = 1; srOpts.maxChunkRows = 4;
+        expect((await asyncFail((): Promise<Object> => srConn.postgresFeatures.prepared!.queryStream('SUSP_REJ', [], srOpts, new FailingStageSink('rows', ArkDbError.validation('susp rows err'))))).kind === ArkDbErrorKind.Validation && srTp.writes.length === 7 && srConn.state === ConnectionState.Ready).assertTrue();
+        assertBytes(srTp.writes[5], expectedClosePortal()); assertBytes(srTp.writes[6], expectedSync());
+        expect((await srConn.query('SELECT 7')).commandTag).assertEqual('SELECT 7');
       } finally { Logger.removeSink(logSink); Logger.setLevel(prevLevel); }
     });
 

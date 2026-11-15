@@ -1,4 +1,4 @@
-import { ArkDbError, estimateSqlRowBytes, QueryOptions } from '@arkdb/core';
+import { ArkDbError, estimateSqlRowBytes, estimateSqlValueBytes, QueryOptions } from '@arkdb/core';
 import { PostgresCommandCloseSettlement, postgresErrorFromResponse } from '../execution/PostgresSettlements';
 import { PostgresPreparedFrames, scrubPostgresPreparedFrames } from '../features/prepared/PostgresParameterEncoder';
 import { PostgresColumnDef, PostgresQueryResult } from '../model/PostgresModels';
@@ -6,7 +6,7 @@ import { PostgresFrontendSerializer, PostgresFrontendTarget } from '../protocol/
 import { PostgresBackendMessage, PostgresBackendParser, PostgresBindComplete, PostgresCommandComplete, PostgresCopyBothResponse, PostgresCopyData, PostgresCopyDone, PostgresCopyInResponse, PostgresCopyOutResponse, PostgresDataRow, PostgresEmptyQueryResponse, PostgresErrorResponse, PostgresMessageChannel, PostgresNoData, PostgresParseComplete, PostgresPortalSuspended, PostgresReadyForQuery, PostgresRowDescription } from '../protocol/PostgresMessageChannel';
 import { MAX_POSTGRES_MESSAGE_BYTES, POSTGRES_NORMAL_HEADER_BYTES } from '../protocol/PostgresProtocolConstants';
 import { decodePostgresDataRow, toPostgresColumnDefs } from '../value/PostgresTextValueDecoder';
-import { accountDrainedBytes, applyCommandTag, consumeAsyncMessage, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, PostgresSimpleQueryHost, readClockMs, readQueryMessage, scrubBackendMessage, scrubQueryResult, scrubSqlRow, snapshotQueryOptions, startDrain, writeQueryFrame } from './PostgresSimpleQuery';
+import { accountDrainedBytes, consumeAsyncMessage, estimateRowDescBytes, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, parsePostgresCommandCompleteTag, PostgresSimpleQueryHost, readClockMs, readQueryMessage, scrubBackendMessage, scrubQueryResult, scrubSqlRow, snapshotQueryOptions, startDrain, writeQueryFrame } from './PostgresSimpleQuery';
 
 enum ExtendedQueryStage { ExpectParseComplete = 0, ExpectBindComplete = 1, ExpectDescribeResult = 2, ExpectRowResult = 3, ExpectNoDataResult = 4, InCopyOutData = 5, InCopyOutDone = 6, AwaitReadyAfterCommand = 7, AwaitReadyAfterError = 8 }
 export interface PostgresExtendedQueryHost extends PostgresSimpleQueryHost { enterDraining(): void; }
@@ -32,6 +32,16 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
     const beginDrain = (): void => {
       drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs);
       if (!draining) { draining = true; host.enterDraining(); }
+    };
+    const applyTag = (res: PostgresQueryResult, tag: string, wireLen: number, wasDraining: boolean): void => {
+      const tagBytes = Math.max(wireLen, estimateSqlValueBytes(tag));
+      if (retainedBytes + tagBytes <= opts.maxResultBytes || tag.length <= 64) {
+        const counts = parsePostgresCommandCompleteTag(tag);
+        res.rowCountExact = counts.rowCountExact; res.affectedRowsExact = counts.affectedRowsExact; res.affectedRows = counts.affectedRows;
+      }
+      if (retainedBytes + tagBytes <= opts.maxResultBytes) { res.commandTag = tag; retainedBytes += tagBytes; return; }
+      res.truncated = true; if (res.truncationReason.length === 0) res.truncationReason = 'resultBytes';
+      beginDrain(); if (!wasDraining) drainedBytes = accountDrainedBytes(drainedBytes, wireLen, opts.maxDrainBytes);
     };
 
     while (true) {
@@ -74,12 +84,17 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
           if (msg instanceof PostgresNoData) { stage = ExtendedQueryStage.ExpectNoDataResult; continue; }
           if (msg instanceof PostgresRowDescription) {
             activeColumnCount = msg.columns.length; const badFormat = findNonTextFormatCode(msg);
+            const descBytes = estimateRowDescBytes(raw.payload.length, msg);
             if (badFormat !== null) {
               activeColumns = [];
               if (latchedError === null) latchedError = ArkDbError.unsupported('PostgreSQL non-text result format code ' + badFormat + ' is not supported.');
               beginDrain();
+            } else if (retainedBytes + descBytes > opts.maxResultBytes) {
+              activeColumns = []; currentResult = new PostgresQueryResult();
+              currentResult.truncated = true; currentResult.truncationReason = 'resultBytes'; beginDrain();
+              if (!wasDraining) drainedBytes = accountDrainedBytes(drainedBytes, raw.payload.length, opts.maxDrainBytes);
             } else {
-              activeColumns = toPostgresColumnDefs(msg); currentResult = new PostgresQueryResult(); currentResult.columns = activeColumns;
+              retainedBytes += descBytes; activeColumns = toPostgresColumnDefs(msg); currentResult = new PostgresQueryResult(); currentResult.columns = activeColumns;
             }
             stage = ExtendedQueryStage.ExpectRowResult; continue;
           }
@@ -106,7 +121,7 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
             continue;
           }
           if (msg instanceof PostgresCommandComplete) {
-            if (currentResult !== null) applyCommandTag(currentResult, msg.tag);
+            if (currentResult !== null) applyTag(currentResult, msg.tag, raw.payload.length, wasDraining);
             activeColumns = []; activeColumnCount = 0; stage = ExtendedQueryStage.AwaitReadyAfterCommand; continue;
           }
           if (msg instanceof PostgresPortalSuspended) throw ArkDbError.protocol('Unexpected PostgreSQL PortalSuspended for unbounded Execute.');
@@ -114,7 +129,7 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
         }
         if (stage === ExtendedQueryStage.ExpectNoDataResult) {
           if (msg instanceof PostgresCommandComplete) {
-            currentResult = new PostgresQueryResult(); applyCommandTag(currentResult, msg.tag);
+            currentResult = new PostgresQueryResult(); applyTag(currentResult, msg.tag, raw.payload.length, wasDraining);
             stage = ExtendedQueryStage.AwaitReadyAfterCommand; continue;
           }
           if (msg instanceof PostgresEmptyQueryResponse) {

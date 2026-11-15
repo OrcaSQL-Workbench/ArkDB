@@ -180,40 +180,52 @@ export default function postgresExtendedQueryTest(): void {
       const rowTrunc = await conn.postgresFeatures.prepared!.execute('SELECT n', [], rowOpts);
       expect(rowTrunc.rows.length === 2 && rowTrunc.rows[0][0] === 1 && rowTrunc.rows[1][0] === 2 && rowTrunc.truncated &&
         rowTrunc.truncationReason === 'rowLimit' && rowTrunc.commandTag === 'SELECT 4' && rowTrunc.rowCountExact === 4n && conn.state === ConnectionState.Ready).assertTrue();
-
-      const byteOpts = new QueryOptions(); byteOpts.maxResultBytes = 20;
+      const byteOpts = new QueryOptions(); byteOpts.maxResultBytes = 60;
       tp.enqueue([extOk([msgRowDesc([colSpec('b', 0, 0, 17, -1, -1, 0)]), msgDataRow(['\\x01020304']), msgDataRow(['\\x0102030405060708090a0b0c0d0e0f10']), msgDataRow(['\\xaa']), msgCmd('SELECT 3')])]);
       const byteTrunc = await conn.postgresFeatures.prepared!.execute('SELECT b', [], byteOpts);
       expect(byteTrunc.rows.length === 1 && byteTrunc.loadedBytes === 4 && byteTrunc.truncated &&
         byteTrunc.truncationReason === 'resultBytes' && byteTrunc.commandTag === 'SELECT 3' && conn.state === ConnectionState.Ready).assertTrue();
       assertBytes(byteTrunc.rows[0][0] as Uint8Array, new Uint8Array([1, 2, 3, 4]));
-
-      const emptyOpts = new QueryOptions(); emptyOpts.maxResultBytes = 10;
+      const emptyOpts = new QueryOptions(); emptyOpts.maxResultBytes = 30;
       tp.enqueue([extOk([msgRowDesc([colSpec('s', 0, 0, 25, -1, -1, 0)]), msgDataRow(['']), msgDataRow(['']), msgDataRow(['']), msgCmd('SELECT 3')])]);
       const emptyTrunc = await conn.postgresFeatures.prepared!.execute('SELECT s', [], emptyOpts);
       expect(emptyTrunc.rows.length === 1 && emptyTrunc.rows[0][0] === '' && emptyTrunc.loadedBytes === 0 && emptyTrunc.truncated &&
-        emptyTrunc.truncationReason === 'resultBytes' && conn.state === ConnectionState.Ready).assertTrue();
-
-      const zeroColOpts = new QueryOptions(); zeroColOpts.maxResultBytes = 3;
+        emptyTrunc.truncationReason === 'resultBytes' && emptyTrunc.commandTag === '' && conn.state === ConnectionState.Ready).assertTrue();
+      const zeroColOpts = new QueryOptions(); zeroColOpts.maxResultBytes = 5;
       tp.enqueue([extOk([msgRowDesc([]), msgDataRow([]), msgDataRow([]), msgCmd('SELECT 2')])]);
       const zeroColTrunc = await conn.postgresFeatures.prepared!.execute('SELECT', [], zeroColOpts);
       expect(zeroColTrunc.rows.length === 1 && zeroColTrunc.loadedBytes === 0 && zeroColTrunc.truncated &&
-        zeroColTrunc.truncationReason === 'resultBytes' && conn.state === ConnectionState.Ready).assertTrue();
-
+        zeroColTrunc.truncationReason === 'resultBytes' && zeroColTrunc.commandTag === '' && conn.state === ConnectionState.Ready).assertTrue();
+      const metaOpts = new QueryOptions(); metaOpts.maxResultBytes = 16;
+      tp.enqueue([extOk([msgRowDesc([colSpec('wide_column_name', 0, 0, 25, -1, -1, 0)]), msgDataRow(['ignored']), msgCmd('SELECT 1')])]);
+      const metaTrunc = await conn.postgresFeatures.prepared!.execute('SELECT wide_column_name', [], metaOpts);
+      expect(metaTrunc.columns.length === 0 && metaTrunc.rows.length === 0 && metaTrunc.truncated &&
+        metaTrunc.truncationReason === 'resultBytes' && metaTrunc.commandTag === 'SELECT 1' && metaTrunc.rowCountExact === 1n && conn.state === ConnectionState.Ready).assertTrue();
+      const rowTagOpts = new QueryOptions(); rowTagOpts.maxResultBytes = 30;
+      tp.enqueue([extOk([msgRowDesc([colSpec('s', 0, 0, 25, -1, -1, 0)]), msgCmd('SELECT 12345')])]);
+      const rowTagTrunc = await conn.postgresFeatures.prepared!.execute('SELECT s', [], rowTagOpts);
+      expect(rowTagTrunc.columns.length === 1 && rowTagTrunc.rows.length === 0 && rowTagTrunc.truncated &&
+        rowTagTrunc.truncationReason === 'resultBytes' && rowTagTrunc.commandTag === '' && rowTagTrunc.rowCountExact === 12345n && conn.state === ConnectionState.Ready).assertTrue();
+      const tagOpts = new QueryOptions(); tagOpts.maxResultBytes = 10;
+      tp.enqueue([extOk([msgNoData(), msgCmd('INSERT 0 5')])]);
+      const tagTrunc = await conn.postgresFeatures.prepared!.execute('INSERT INTO t VALUES (1)', [], tagOpts);
+      expect(tagTrunc.affectedRows === 5 && tagTrunc.affectedRowsExact === 5n && tagTrunc.commandTag === '' &&
+        tagTrunc.truncated && tagTrunc.truncationReason === 'resultBytes' && conn.state === ConnectionState.Ready).assertTrue();
+      tp.enqueue([extOk([msgNoData(), msgCmd('INSERT 0 ' + '9'.repeat(80))])]);
+      const hugeTag = await conn.postgresFeatures.prepared!.execute('INSERT INTO t VALUES (1)', [], tagOpts);
+      expect(hugeTag.affectedRows === 0 && hugeTag.affectedRowsExact === undefined && hugeTag.rowCountExact === undefined &&
+        hugeTag.commandTag === '' && hugeTag.truncated && hugeTag.truncationReason === 'resultBytes' && conn.state === ConnectionState.Ready).assertTrue();
       tp.enqueue([extOk([msgRowDesc([colSpec('bin', 0, 0, 23, 4, -1, 1)]), msgDataRow(['\u0000\u0000\u0000\u0001']), msgCmd('SELECT 1')])]);
       const binErr = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.execute('SELECT bin', [], new QueryOptions()));
       expect(binErr.kind === ArkDbErrorKind.Unsupported && binErr.message === 'PostgreSQL non-text result format code 1 is not supported.' && conn.state === ConnectionState.Ready).assertTrue();
-
       const copyDataFrame = msgCopyData(new Uint8Array([0x51, 0x52, 0x53])); const copyPayload = copyDataFrame.slice(5);
       tp.enqueue([msgParseComplete(), msgBindComplete(), msgNoData(), msgCopyOut(), copyDataFrame.slice(0, 5), copyPayload, concatFrames([msgCopyDone(), msgCmd('COPY 1'), msgReady(0x49)])]);
       const copyOutErr = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.execute('COPY t TO STDOUT', [], new QueryOptions()));
       assertZeroed(copyPayload);
       expect(copyOutErr.kind === ArkDbErrorKind.Unsupported && copyOutErr.message === 'PostgreSQL COPY TO STDOUT is not supported.' && conn.state === ConnectionState.Ready).assertTrue();
-
       tp.enqueue([extOk([msgNoData(), msgCmd('SELECT 0')])]);
       expect((await conn.postgresFeatures.prepared!.execute('SELECT 0', [], new QueryOptions())).commandTag).assertEqual('SELECT 0');
       await conn.close();
-
       let undelivBytes = new Uint8Array(0); let closeP: Promise<void> = Promise.resolve();
       const life = new PostgresConnectionLifecycle(baseConfig(), '', new StepTimers(),
         (): PostgresLifecycleTransport => new QueueTransport([bootFrames(0x49), extOk([msgRowDesc([colSpec('b', 0, 0, 17, -1, -1, 0)]), msgDataRow(['\\xdeadbeef']), msgCmd('SELECT 1')])]));
@@ -222,10 +234,8 @@ export default function postgresExtendedQueryTest(): void {
         async (sc: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> => {
           const completed = await runPostgresExtendedQuery(new DirectExtHost(life, sc), ch, st,
             encodePostgresPreparedFrames('SELECT 1', [], '', '', [POSTGRES_PARAMETER_FORMAT_TEXT]), new QueryOptions());
-          undelivBytes = completed.rows[0][0] as Uint8Array;
-          assertBytes(undelivBytes, new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
-          closeP = life.close();
-          return completed;
+          undelivBytes = completed.rows[0][0] as Uint8Array; assertBytes(undelivBytes, new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
+          closeP = life.close(); return completed;
         }));
       await closeP;
       expect(closeRaceErr.kind === ArkDbErrorKind.Cancelled && life.state === ConnectionState.Closed).assertTrue();
@@ -267,6 +277,10 @@ export default function postgresExtendedQueryTest(): void {
       await dc.connect();
       const dbe = await asyncFail((): Promise<Object> => dc.postgresFeatures.prepared!.execute('SELECT 1', [], drainByteOpts));
       expect(dbe.kind === ArkDbErrorKind.Protocol && dbe.message === 'PostgreSQL post-error drain exceeded maxDrainBytes.' && dc.state === ConnectionState.Error).assertTrue();
+      const tagDrainOpts = new QueryOptions(); tagDrainOpts.maxResultBytes = 10; tagDrainOpts.maxDrainBytes = 12;
+      const tdc = openReady(new QueueTransport([bootFrames(0x49), extOk([msgNoData(), msgCmd('INSERT 0 12345')])])); await tdc.connect();
+      const tde = await asyncFail((): Promise<Object> => tdc.postgresFeatures.prepared!.execute('INSERT', [], tagDrainOpts));
+      expect(tde.kind === ArkDbErrorKind.Protocol && tde.message === 'PostgreSQL post-error drain exceeded maxDrainBytes.' && tdc.state === ConnectionState.Error).assertTrue();
 
       const stallTimers = new StepTimers();
       const stallTp = new QueueTransport([bootFrames(0x49), msgError('ERROR', 'ERROR', '57014', 'stalled')]); stallTp.hangAtEmpty = true;
@@ -288,10 +302,7 @@ export default function postgresExtendedQueryTest(): void {
   });
 }
 
-function extOk(mid: Uint8Array[], ready: number = 0x49): Uint8Array {
-  return concatFrames([msgParseComplete(), msgBindComplete(), ...mid, msgReady(ready)]);
-}
-
+function extOk(mid: Uint8Array[], ready: number = 0x49): Uint8Array { return concatFrames([msgParseComplete(), msgBindComplete(), ...mid, msgReady(ready)]); }
 class NoopSink implements QueryResultSink {
   async onResultStart(_m: QueryResultMeta): Promise<void> {}
   async onRows(_c: QueryRowChunk): Promise<void> {}
@@ -348,12 +359,9 @@ function backendFrame(type: number, payload: number[] | Uint8Array): Uint8Array 
   out[0] = type; new DataView(out.buffer).setInt32(1, src.length + 4, false); out.set(src, 5); return out;
 }
 function cstrFrame(type: number, text: string): Uint8Array { const p: number[] = []; pushCStr(p, text); return backendFrame(type, p); }
-function msgParseComplete(): Uint8Array { return backendFrame(0x31, []); }
-function msgBindComplete(): Uint8Array { return backendFrame(0x32, []); }
-function msgNoData(): Uint8Array { return backendFrame(0x6e, []); }
-function msgPortalSuspended(): Uint8Array { return backendFrame(0x73, []); }
-function msgEmptyQuery(): Uint8Array { return backendFrame(0x49, []); }
-function msgCmd(tag: string): Uint8Array { return cstrFrame(0x43, tag); }
+function msgParseComplete(): Uint8Array { return backendFrame(0x31, []); } function msgBindComplete(): Uint8Array { return backendFrame(0x32, []); }
+function msgNoData(): Uint8Array { return backendFrame(0x6e, []); } function msgPortalSuspended(): Uint8Array { return backendFrame(0x73, []); }
+function msgEmptyQuery(): Uint8Array { return backendFrame(0x49, []); } function msgCmd(tag: string): Uint8Array { return cstrFrame(0x43, tag); }
 function msgReady(status: number): Uint8Array { return backendFrame(0x5a, [status]); }
 function msgParam(name: string, val: string): Uint8Array { const p: number[] = []; pushCStr(p, name); pushCStr(p, val); return backendFrame(0x53, p); }
 function msgNotice(loc: string, st: string, m: string): Uint8Array { const p: number[] = [0x53]; pushCStr(p, loc); p.push(0x43); pushCStr(p, st); p.push(0x4d); pushCStr(p, m); p.push(0); return backendFrame(0x4e, p); }

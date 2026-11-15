@@ -167,7 +167,7 @@ export function consumeAsyncMessage(host: PostgresSimpleQueryHost, msg: Postgres
   if (msg instanceof PostgresParameterStatus) { applyPostgresParameterStatus(host.serverInfo, msg); return true; }
   return false;
 }
-function estimateRowDescBytes(wireLen: number, msg: PostgresRowDescription): number {
+export function estimateRowDescBytes(wireLen: number, msg: PostgresRowDescription): number {
   let decoded = 2; for (const c of msg.columns) decoded += estimateSqlValueBytes(c.name) + 18; return Math.max(wireLen, decoded);
 }
 function chargeResultBytes(current: number, add: number, cap: number): number {
@@ -189,7 +189,7 @@ function finalizeQueryResults(results: PostgresQueryResult[], status: PostgresDa
   if (results.length > 1) { const last = results[results.length - 1]; last.statusKnown = status.known; last.autocommit = status.autocommit; last.inTransaction = status.inTransaction; }
   return primary;
 }
-export function applyCommandTag(target: PostgresQueryResult, tag: string): void {
+function applyCommandTag(target: PostgresQueryResult, tag: string): void {
   const counts = parsePostgresCommandCompleteTag(tag); target.commandTag = tag; target.rowCountExact = counts.rowCountExact; target.affectedRowsExact = counts.affectedRowsExact; target.affectedRows = counts.affectedRows;
 }
 export function findNonTextFormatCode(rowDesc: PostgresRowDescription): number | null {

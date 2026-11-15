@@ -51,11 +51,8 @@ export class PostgresPreparedFrames {
 export function scrubPostgresEncodedParameters(encoded: PostgresEncodedParameters): void {
   for (const value of encoded.parameterValues) { if (value !== null) value.fill(0); }
 }
-
 export function scrubPostgresPreparedFrames(frames: PostgresPreparedFrames): void {
-  frames.parseFrame.fill(0);
-  frames.bindFrame.fill(0);
-  scrubPostgresEncodedParameters(frames.parameters);
+  frames.parseFrame.fill(0); frames.bindFrame.fill(0); scrubPostgresEncodedParameters(frames.parameters);
 }
 
 export function encodePostgresParameters(
@@ -77,26 +74,19 @@ export function encodePostgresParameters(
   try {
     for (let index = 0; index < count; index += 1) {
       const parameter = captured[index];
-      if (!(parameter instanceof PostgresParameter)) {
-        throw ArkDbError.validation('PostgreSQL parameters must be PostgresParameter instances.');
-      }
-      const type = parameter.type;
-      const value = parameter.value;
+      if (!(parameter instanceof PostgresParameter)) throw ArkDbError.validation('PostgreSQL parameters must be PostgresParameter instances.');
+      const type = parameter.type; const value = parameter.value;
       ownedBytes = value instanceof Uint8Array && takeOwnedParameterBytes(value) ? value : null;
       validatePostgresParameterValue(type, value);
       bindLengthWord += 6;
       if (bindLengthWord > MAX_POSTGRES_MESSAGE_BYTES) throw bindOverflowError();
       parameterTypeOids.push(parameterTypeOid(type));
-      parameterFormats.push(type === PostgresParameterType.Bytea
-        ? POSTGRES_PARAMETER_FORMAT_BINARY : POSTGRES_PARAMETER_FORMAT_TEXT);
-      if (value === null) {
-        parameterValues.push(null);
-      } else {
+      parameterFormats.push(type === PostgresParameterType.Bytea ? POSTGRES_PARAMETER_FORMAT_BINARY : POSTGRES_PARAMETER_FORMAT_TEXT);
+      if (value === null) { parameterValues.push(null); }
+      else {
         const encoded = encodeNonNullValue(type, value, MAX_POSTGRES_MESSAGE_BYTES - bindLengthWord, ownedBytes !== null);
-        if (encoded === ownedBytes) ownedBytes = null;
-        else if (ownedBytes !== null) { ownedBytes.fill(0); ownedBytes = null; }
-        bindLengthWord += encoded.length;
-        parameterValues.push(encoded);
+        if (encoded === ownedBytes) ownedBytes = null; else if (ownedBytes !== null) { ownedBytes.fill(0); ownedBytes = null; }
+        bindLengthWord += encoded.length; parameterValues.push(encoded);
       }
     }
   } catch (err) {
@@ -137,15 +127,12 @@ export function encodePostgresPreparedFrames(
   const encoded = encodePostgresParameters(parameters);
   let parseFrame: Uint8Array | null = null;
   try {
-    parseFrame = PostgresFrontendSerializer.parse(
-      statementName, sql, encoded.parameterTypeOids);
+    parseFrame = PostgresFrontendSerializer.parse(statementName, sql, encoded.parameterTypeOids);
     const bindFrame = PostgresFrontendSerializer.bind(portalName, statementName,
       encoded.parameterFormats, encoded.parameterValues, capturedResultFormats);
     return new PostgresPreparedFrames(encoded, parseFrame, bindFrame);
   } catch (err) {
-    if (parseFrame !== null) parseFrame.fill(0);
-    scrubPostgresEncodedParameters(encoded);
-    throw err as Error;
+    if (parseFrame !== null) parseFrame.fill(0); scrubPostgresEncodedParameters(encoded); throw err as Error;
   }
 }
 

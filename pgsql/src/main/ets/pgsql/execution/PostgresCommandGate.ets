@@ -2,7 +2,8 @@ import { ArkDbError } from '@arkdb/core';
 
 export enum PostgresCommandKind {
   Connect = 'connect', Query = 'query', QueryStream = 'query_stream', Ping = 'ping',
-  Context = 'context', Transaction = 'transaction', Prepared = 'prepared', Close = 'close'
+  Context = 'context', Transaction = 'transaction', ExtendedQuery = 'extended_query',
+  Prepared = 'prepared', Close = 'close'
 }
 export enum PostgresCommandPhase {
   Reserved = 'reserved', Connecting = 'connecting', Authenticating = 'authenticating',

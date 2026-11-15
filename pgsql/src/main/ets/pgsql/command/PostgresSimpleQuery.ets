@@ -167,7 +167,7 @@ export function consumeAsyncMessage(host: PostgresSimpleQueryHost, msg: Postgres
   if (msg instanceof PostgresParameterStatus) { applyPostgresParameterStatus(host.serverInfo, msg); return true; }
   return false;
 }
-function estimateRowDescBytes(wireLen: number, msg: PostgresRowDescription): number {
+export function estimateRowDescBytes(wireLen: number, msg: PostgresRowDescription): number {
   let decoded = 2; for (const c of msg.columns) decoded += estimateSqlValueBytes(c.name) + 18; return Math.max(wireLen, decoded);
 }
 function chargeResultBytes(current: number, add: number, cap: number): number {
@@ -205,7 +205,7 @@ export function scrubBackendMessage(msg: PostgresBackendMessage | null): void {
   if (msg instanceof PostgresDataRow) { for (const f of msg.fields) { if (f !== null) f.fill(0); } }
 }
 export function scrubSqlRow(row: SqlValue[]): void { for (const v of row) { if (v instanceof Uint8Array) v.fill(0); } }
-function scrubQueryResult(res: PostgresQueryResult): void {
+export function scrubQueryResult(res: PostgresQueryResult): void {
   for (const row of res.rows) scrubSqlRow(row); res.rows.length = 0;
   for (const extra of res.additionalResults) { for (const row of extra.rows) scrubSqlRow(row); extra.rows.length = 0; }
   res.additionalResults.length = 0;

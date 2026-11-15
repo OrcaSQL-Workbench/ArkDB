@@ -36,7 +36,7 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
     await sendExecute(firstRows);
     host.enterStreaming();
     const execution = new QueryExecutionSummary();
-    let stage = PortalStage.ExpectParse; let syncSent = false; let eofProbeActive = false;
+    let stage = PortalStage.ExpectParse; let syncSent = false; let eofProbeActive = false; let sawPortalSuspended = false;
     let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0;
     let chunkRows: SqlValue[][] = []; let chunkWireBytes = 0; let emittedRows = 0; let stmtLoadedBytes = 0;
     let wireRowCountExact = 0n; let totalExactRows = 0n; let allRowCountsKnown = true;
@@ -159,7 +159,7 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
             }
             if (msg instanceof PostgresPortalSuspended) {
               if (batchRows === 0) throw ArkDbError.protocol('Unexpected PostgreSQL PortalSuspended without DataRow.');
-              await flushChunk();
+              sawPortalSuspended = true; await flushChunk();
               if (stmtTruncationReason.length > 0 || errors.sink !== null || errors.latched !== null) {
                 beginDrain();
                 await writeQueryFrame(channel, settlement, 0x43, PostgresFrontendSerializer.close(PostgresFrontendTarget.Portal, ''), host.timers, drainDeadlineMs);
@@ -173,7 +173,9 @@ export async function runPostgresPortalStream(host: PostgresQueryStreamHost, cha
             }
             if (msg instanceof PostgresCommandComplete) {
               if (errors.sink === null && errors.latched === null && !resultEnded && await flushChunk()) {
-                const summary = buildRowResultSummary(0, parsePostgresCommandCompleteTag(msg.tag), wireRowCountExact, emittedRows, stmtLoadedBytes, stmtTruncationReason);
+                const counts = parsePostgresCommandCompleteTag(msg.tag);
+                const summary = buildRowResultSummary(0, counts, wireRowCountExact, emittedRows, stmtLoadedBytes, stmtTruncationReason);
+                if (sawPortalSuspended && counts.affectedRowsExact !== undefined && wireRowCountExact > counts.affectedRowsExact) summary.affectedRows = Number(wireRowCountExact);
                 const known = summary.rowCountKnown; const exact = known ? BigInt(summary.rowCount) : 0n;
                 resultEnded = true; await invokeSink((): Promise<void> => sink.onResultEnd(summary));
                 if (errors.sink === null) {

@@ -144,7 +144,9 @@ export default function postgresPortalStreamTest(): void {
       const badUtf8Row4 = backendFrame(0x44, [0, 1, 0, 0, 0, 1, 0xff]);
       const tp = new QueueTransport([bootFrames(0x49),
         concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), msgDataRow(['r1']), msgDataRow(['r2']), msgPortalSuspended(),
-          msgDataRow(['r3']), msgPortalSuspended(), msgCmd('SELECT 0'), msgReady(0x49)]),
+          msgDataRow(['r3']), msgPortalSuspended(), msgCmd('UPDATE 0'), msgReady(0x49)]),
+        concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), msgDataRow(['r1']), msgDataRow(['r2']), msgPortalSuspended(),
+          msgDataRow(['r3']), msgCmd('INSERT 0 1'), msgReady(0x49)]),
         concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), msgDataRow(['r1']), msgDataRow(['r2']), msgPortalSuspended(),
           msgDataRow(['r3']), msgPortalSuspended(), badUtf8Row4, msgPortalSuspended(), msgCloseComplete(), msgReady(0x49)]),
         concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgDataRow(['\\x010203040506']), msgDataRow(['\\xff']),
@@ -161,7 +163,10 @@ export default function postgresPortalStreamTest(): void {
       assertBytes(tp.writes[5], expectedExecute(1)); assertBytes(tp.writes[6], expectedFlush());
       assertBytes(tp.writes[7], expectedExecute(1)); assertBytes(tp.writes[8], expectedFlush()); assertBytes(tp.writes[9], expectedSync());
       expect(!exactSink.ends[0].truncated && exactSink.ends[0].truncationReason === '' && exactSink.ends[0].rowCountKnown && exactSink.ends[0].rowCount === 3 &&
-        exactSink.truncations.length === 0 && exactExec.rowCountKnown && exactExec.rowCount === 3 && execChunksTotal(exactSink) === 3).assertTrue();
+        exactSink.ends[0].affectedRows === 3 && exactSink.truncations.length === 0 && exactExec.rowCountKnown && exactExec.rowCount === 3 && execChunksTotal(exactSink) === 3).assertTrue();
+      tp.writes.length = 0; const retOpts = new QueryOptions(); retOpts.maxChunkRows = 2; const retSink = new RecSink();
+      const retExec = await conn.postgresFeatures.prepared!.queryStream('INS_RET_3', [], retOpts, retSink);
+      expect(retSink.ends[0].affectedRows === 3 && retSink.ends[0].rowCount === 3 && retExec.rowCount === 3 && tp.writes.length === 8).assertTrue();
 
       tp.writes.length = 0; const overSink = new RecSink();
       const overExec = await conn.postgresFeatures.prepared!.queryStream('OVER_3', [], exactOpts, overSink);

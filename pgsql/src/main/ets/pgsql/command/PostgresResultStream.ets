@@ -227,7 +227,7 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
   }
 }
 
-function buildStandaloneSummary(resultIndex: number, counts: PostgresCommandTagCounts | null): QueryResultSummary {
+export function buildStandaloneSummary(resultIndex: number, counts: PostgresCommandTagCounts | null): QueryResultSummary {
   const s = new QueryResultSummary(); s.resultIndex = resultIndex; if (counts === null) return s;
   s.affectedRows = counts.affectedRows;
   if (counts.affectedRowsExact === undefined && counts.rowCountExact !== undefined) {
@@ -236,7 +236,7 @@ function buildStandaloneSummary(resultIndex: number, counts: PostgresCommandTagC
   return s;
 }
 
-function buildRowResultSummary(resultIndex: number, counts: PostgresCommandTagCounts, wireRowCountExact: bigint,
+export function buildRowResultSummary(resultIndex: number, counts: PostgresCommandTagCounts, wireRowCountExact: bigint,
   emittedRows: number, loadedBytes: number, truncationReason: string): QueryResultSummary {
   const s = new QueryResultSummary(); s.resultIndex = resultIndex; s.loadedRowCount = emittedRows; s.loadedBytes = loadedBytes;
   s.affectedRows = counts.affectedRows; s.truncated = truncationReason.length > 0; s.truncationReason = truncationReason;
@@ -248,4 +248,4 @@ function buildRowResultSummary(resultIndex: number, counts: PostgresCommandTagCo
   return s;
 }
 
-function discardChunkRows(rows: SqlValue[][]): void { for (const row of rows) scrubSqlRow(row); rows.length = 0; }
+export function discardChunkRows(rows: SqlValue[][]): void { for (const row of rows) scrubSqlRow(row); rows.length = 0; }

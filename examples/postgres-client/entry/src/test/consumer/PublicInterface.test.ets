@@ -27,15 +27,10 @@ export default function publicInterfaceTest(): void {
         async (): Promise<void> => { await connection.queryStream('SELECT 1', new QueryOptions(), new ConsumerNoopSink()); },
         async (): Promise<void> => { await connection.features.streaming!.queryStream('SELECT 1', new QueryOptions(), new ConsumerNoopSink()); },
         async (): Promise<void> => { await connection.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()); },
+        async (): Promise<void> => { await connection.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new ConsumerNoopSink()); },
         (): Promise<void> => connection.ping(), (): Promise<void> => connection.features.health!.ping()]) {
         await expectUnconnectedProtocol(op);
       }
-      let streamErr: ArkDbError | null = null;
-      try {
-        await connection.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new ConsumerNoopSink());
-      } catch (e) { streamErr = e as ArkDbError; }
-      expect(streamErr instanceof ArkDbError && streamErr.kind === ArkDbErrorKind.Unsupported &&
-        streamErr.message === 'PostgreSQL parameterized result streaming is not implemented.').assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
       await connection.close();
       expect(connection.state).assertEqual(ConnectionState.Closed);
@@ -63,7 +58,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsStreamingResults).assertTrue();
   expect(capabilities.supportsGracefulCancel).assertFalse();
   expect(capabilities.supportsExplain).assertFalse();
-  expect(capabilities.supportsPreparedStatements).assertFalse();
+  expect(capabilities.supportsPreparedStatements).assertTrue();
   expect(capabilities.supportsServerMetrics).assertFalse();
 }
 

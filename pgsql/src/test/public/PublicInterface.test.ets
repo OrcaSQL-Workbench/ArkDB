@@ -149,7 +149,7 @@ export default function publicInterfaceTest(): void {
       await expectNotConnected(async (): Promise<void> => {
         await connection.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions());
       });
-      await expectUnsupported(async (): Promise<void> => {
+      await expectNotConnected(async (): Promise<void> => {
         await connection.postgresFeatures.prepared!.queryStream(
           'SELECT 1', [], new QueryOptions(), new NoopSink());
       });
@@ -200,7 +200,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsStreamingResults).assertTrue();
   expect(capabilities.supportsGracefulCancel).assertFalse();
   expect(capabilities.supportsExplain).assertFalse();
-  expect(capabilities.supportsPreparedStatements).assertFalse();
+  expect(capabilities.supportsPreparedStatements).assertTrue();
   expect(capabilities.supportsServerMetrics).assertFalse();
 }
 

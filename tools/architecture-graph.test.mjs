@@ -490,7 +490,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, P08, P09, P12A, P12B1, P14, P17, and P18 own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, and P19 own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -502,6 +502,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, P17, and P18 own exactly the registe
     'pgsql/src/main/ets/pgsql/auth/PostgresAuthCrypto.ets',
     'pgsql/src/main/ets/pgsql/auth/PostgresSaslPrep.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresExtendedQuery.ets',
+    'pgsql/src/main/ets/pgsql/command/PostgresPortalStream.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresResultStream.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresSimpleQuery.ets',
     'pgsql/src/main/ets/pgsql/command/PostgresStartup.ets',
@@ -2515,6 +2516,10 @@ test('enforces PostgreSQL api, parameter leaf, execution, lifecycle, and prepare
     ['command/PostgresExtendedQuery.ets', 'PostgresConnection.ets',
       /PostgreSQL command implementations must not depend on connection or driver facades/],
     ['command/PostgresExtendedQuery.ets', 'driver/PostgresDriverFactory.ets',
+      /PostgreSQL command implementations must not depend on connection or driver facades/],
+    ['command/PostgresPortalStream.ets', 'PostgresConnection.ets',
+      /PostgreSQL command implementations must not depend on connection or driver facades/],
+    ['command/PostgresPortalStream.ets', 'driver/PostgresDriverFactory.ets',
       /PostgreSQL command implementations must not depend on connection or driver facades/],
     ['command/PostgresStartup.ets', 'PostgresConnection.ets',
       /PostgreSQL command implementations must not depend on connection or driver facades/],

@@ -5,6 +5,7 @@ import { PostgresLifecycleTransport } from '../../../main/ets/pgsql/connection/P
 import { PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase } from '../../../main/ets/pgsql/execution/PostgresCommandGate';
 import { PostgresPreparedFrames } from '../../../main/ets/pgsql/features/prepared/PostgresParameterEncoder';
 import { PostgresConnectionPreparedExecutor } from '../../../main/ets/pgsql/features/prepared/PostgresPreparedExecutor';
+import { PostgresTcpSocket, PostgresTcpSocketFactory, PostgresTcpTransport, PostgresTlsSocket } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 
 export default function postgresPortalStreamTest(): void {
   describe('PostgresPortalStream', () => {
@@ -35,58 +36,43 @@ export default function postgresPortalStreamTest(): void {
       const callerBuf = new Uint8Array([0x12, 0x34]); const ownedParam = new InspectableByteaParameter(callerBuf);
       expect((await asyncFail((): Promise<Object> => scrubExec.queryStream('SELECT $1, $2', [ownedParam, new PostgresParameter(PostgresParameterType.Text, 'k€y')], new QueryOptions(), new RecSink()))).kind).assertEqual(ArkDbErrorKind.Protocol);
       assertZeroed(capFrames!.parseFrame); assertZeroed(capFrames!.bindFrame); assertZeroed(capFrames!.parameters.parameterValues[0]!); assertZeroed(capFrames!.parameters.parameterValues[1]!); assertZeroed(ownedParam.lastRead!); assertBytes(callerBuf, new Uint8Array([0x12, 0x34]));
-      const snapBytes = new Uint8Array([0xab, 0xcd]); const snapParams = [new PostgresParameter(PostgresParameterType.Bytea, snapBytes)];
-      const snapOpts = new QueryOptions(); snapOpts.maxChunkRows = 2;
+      const snapBytes = new Uint8Array([0xab, 0xcd]); const snapParams = [new PostgresParameter(PostgresParameterType.Bytea, snapBytes)]; const snapOpts = new QueryOptions(); snapOpts.maxChunkRows = 2;
       tp.enqueue([concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc([colSpec('v', 0, 0, 23, 4, -1, 0)]), msgDataRow(['7']), msgCmd('SELECT 1'), msgReady(0x49)])]);
       const sink = new RecSink(); const run = conn.postgresFeatures.prepared!.queryStream('SELECT $1', snapParams, snapOpts, sink);
       snapParams.length = 0; snapBytes.fill(0xff); snapOpts.maxRows = 0; snapOpts.maxChunkRows = 99; snapOpts.statementTimeoutMs = 500;
-      const summary = await run;
-      expect(summary.loadedRowCount === 1 && sink.chunks[0].rows[0][0] === 7 && tp.writes.length === 6).assertTrue();
+      const summary = await run; expect(summary.loadedRowCount === 1 && sink.chunks[0].rows[0][0] === 7 && tp.writes.length === 6).assertTrue();
       assertBytes(tp.writes[2], expectedDescribePortal()); assertBytes(tp.writes[3], expectedExecute(2)); assertBytes(tp.writes[4], expectedFlush()); assertBytes(tp.writes[5], expectedSync());
       for (const raw of tp.rawWrites) assertZeroed(raw);
       await conn.close(); expect(JSON.stringify(conn).indexOf('secret-p19-pw')).assertEqual(-1);
     });
-
     it('streamsMultiBatchPortalSuspendedCappingExecuteWireBytesAndBackpressure', 0, async () => {
       const logSink = new StreamLogSink(); const prevLevel = Logger.level; Logger.setLevel(LogLevel.DEBUG); Logger.addSink(logSink);
       try {
         const cols = [colSpec('t', 0, 0, 25, -1, -1, 0)]; const r1 = msgDataRow(['aa']); const r2 = msgDataRow(['bb']); const r3 = msgDataRow(['cccccc']);
         const gate = new PostgresCommandGate(); const timers = new StepTimers(); timers.stepMs = 4;
-        const tp = new PhaseTransport([bootFrames(0x49),
-          concatFrames([msgNotice('NOTICE', '00000', 'n1'), msgParseComplete(), msgNotification(12, 'sec_ch', 'sec_pay'), msgBindComplete(),
-            msgParam('TimeZone', 'UTC'), msgRowDesc(cols), r1, r2, msgPortalSuspended()]),
-          concatFrames([r3, msgDataRow(['dd']), msgPortalSuspended()]),
-          concatFrames([msgDataRow(['ee']), msgCmd('SELECT 1'), msgReady(0x54)]),
+        const tp = new PhaseTransport([bootFrames(0x49), concatFrames([msgNotice('NOTICE', '00000', 'n1'), msgParseComplete(), msgNotification(12, 'sec_ch', 'sec_pay'), msgBindComplete(), msgParam('TimeZone', 'UTC'), msgRowDesc(cols), r1, r2, msgPortalSuspended()]),
+          concatFrames([r3, msgDataRow(['dd']), msgPortalSuspended()]), concatFrames([msgDataRow(['ee']), msgCmd('SELECT 1'), msgReady(0x54)]),
           concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), r1, r2, r3, msgCmd('SELECT 3'), msgReady(0x49)]),
-          concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), r1, r2, r3, msgCmd('SELECT 9007199254740992'), msgReady(0x49)]),
-          concatFrames([msgCmd('SELECT 1'), msgReady(0x49)])], gate);
+          concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), r1, r2, r3, msgCmd('SELECT 9007199254740992'), msgReady(0x49)]), concatFrames([msgCmd('SELECT 1'), msgReady(0x49)])], gate);
         const conn = new PostgresConnection(baseConfig(), '', timers, (): PostgresLifecycleTransport => tp, undefined, gate);
         await conn.connect(); tp.writes.length = 0; tp.writePhases.length = 0;
-        const opts = new QueryOptions(); opts.maxChunkRows = 2;
-        const sink = new RecSink(gate); sink.mutateDelivered = true;
+        const opts = new QueryOptions(); opts.maxChunkRows = 2; const sink = new RecSink(gate); sink.mutateDelivered = true;
         const exec = await conn.postgresFeatures.prepared!.queryStream('SELECT $1', [new PostgresParameter(PostgresParameterType.Int4, 5)], opts, sink);
-        expect(tp.writes.length).assertEqual(10);
-        assertBytes(tp.writes[2], expectedDescribePortal()); assertBytes(tp.writes[3], expectedExecute(2)); assertBytes(tp.writes[4], expectedFlush());
-        assertBytes(tp.writes[5], expectedExecute(2)); assertBytes(tp.writes[6], expectedFlush());
-        assertBytes(tp.writes[7], expectedExecute(2)); assertBytes(tp.writes[8], expectedFlush()); assertBytes(tp.writes[9], expectedSync());
-        expect(tp.writePhases[0] === PostgresCommandKind.Prepared + ':' + PostgresCommandPhase.Executing &&
-          tp.writePhases[5] === PostgresCommandKind.Prepared + ':' + PostgresCommandPhase.Streaming &&
-          sink.phases[0] === 'prepared:streaming' && sink.events.join(',') === 'start:0:true,rows:0:0:2,rows:0:2:2,rows:0:4:1,end:0').assertTrue();
-        expect(exec.resultSetCount === 1 && exec.loadedRowCount === 5 && exec.rowCount === 5 && exec.rowCountKnown &&
-          exec.statusKnown && exec.status.inTransaction && conn.sessionStatus.transactionState === PostgresTransactionState.InTransaction &&
-          conn.serverInfo.timeZone === 'UTC' && logSink.messages.join('\n').indexOf('sec_ch') === -1 && logSink.messages.join('\n').indexOf('sec_pay') === -1).assertTrue();
-        tp.writes.length = 0; const capOpts = new QueryOptions(); capOpts.maxChunkRows = 15000;
-        const capSink = new RecSink(); const capExec = await conn.postgresFeatures.prepared!.queryStream('SELECT 1', [], capOpts, capSink);
+        expect(tp.writes.length).assertEqual(10); assertBytes(tp.writes[2], expectedDescribePortal()); assertBytes(tp.writes[3], expectedExecute(2)); assertBytes(tp.writes[4], expectedFlush());
+        assertBytes(tp.writes[5], expectedExecute(2)); assertBytes(tp.writes[6], expectedFlush()); assertBytes(tp.writes[7], expectedExecute(2)); assertBytes(tp.writes[8], expectedFlush()); assertBytes(tp.writes[9], expectedSync());
+        expect(tp.writePhases[0] === PostgresCommandKind.Prepared + ':' + PostgresCommandPhase.Executing && tp.writePhases[5] === PostgresCommandKind.Prepared + ':' + PostgresCommandPhase.Streaming && sink.phases[0] === 'prepared:streaming' && sink.events.join(',') === 'start:0:true,rows:0:0:2,rows:0:2:2,rows:0:4:1,end:0').assertTrue();
+        expect(exec.resultSetCount === 1 && exec.loadedRowCount === 5 && exec.rowCount === 5 && exec.rowCountKnown && exec.statusKnown && exec.status.inTransaction && conn.sessionStatus.transactionState === PostgresTransactionState.InTransaction && conn.serverInfo.timeZone === 'UTC' && logSink.messages.join('\n').indexOf('sec_ch') === -1 && logSink.messages.join('\n').indexOf('sec_pay') === -1).assertTrue();
+        tp.writes.length = 0; const capOpts = new QueryOptions(); capOpts.maxChunkRows = 15000; const capSink = new RecSink();
+        const capExec = await conn.postgresFeatures.prepared!.queryStream('SELECT 1', [], capOpts, capSink);
         assertBytes(tp.writes[3], expectedExecute(10000)); assertBytes(tp.writes[5], expectedSync());
         expect(tp.writes.length === 6 && capSink.chunks.length === 1 && capSink.chunks[0].rows.length === 3 && capExec.rowCount === 3).assertTrue();
-        const byteOpts = new QueryOptions(); byteOpts.maxChunkRows = 10; byteOpts.maxChunkBytes = (r1.length - 5) + (r2.length - 5);
-        const byteSink = new RecSink(); const byteExec = await conn.postgresFeatures.prepared!.queryStream('SELECT 1', [], byteOpts, byteSink);
-        expect(byteSink.chunks.length === 2 && byteSink.chunks[0].rows.length === 2 && byteSink.chunks[1].rows.length === 1 &&
-          !byteSink.ends[0].rowCountKnown && byteSink.ends[0].rowCount === 3 && !byteExec.rowCountKnown && byteExec.rowCount === 3).assertTrue();
+        const byteOpts = new QueryOptions(); byteOpts.maxChunkRows = 10; byteOpts.maxChunkBytes = (r1.length - 5) + (r2.length - 5); const byteSink = new RecSink();
+        const byteExec = await conn.postgresFeatures.prepared!.queryStream('SELECT 1', [], byteOpts, byteSink);
+        expect(byteSink.chunks.length === 2 && byteSink.chunks[0].rows.length === 2 && byteSink.chunks[1].rows.length === 1 && !byteSink.ends[0].rowCountKnown && byteSink.ends[0].rowCount === 3 && !byteExec.rowCountKnown && byteExec.rowCount === 3).assertTrue();
         expect((await conn.query('SELECT 1')).commandTag).assertEqual('SELECT 1');
 
         const bpTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), r1, msgPortalSuspended()])]);
-        bpTp.hangAtEmpty = true; const bpConn = openReady(bpTp); await bpConn.connect(); bpTp.writes.length = 0;
+        bpTp.hangAtEmpty = true; const bpConn = await connectReady(bpTp);
         const bpOpts = new QueryOptions(); bpOpts.maxChunkRows = 15000; const gateSink = new GatedSink('rows');
         const bpTask = bpConn.postgresFeatures.prepared!.queryStream('SELECT 1', [], bpOpts, gateSink);
         await gateSink.waitReached('rows', bpTask); await flushTicks(6);
@@ -98,27 +84,66 @@ export default function postgresPortalStreamTest(): void {
         expect(bpExec.loadedRowCount === 2 && bpExec.rowCount === 2 && bpTp.writes.length === 8 && bpConn.state === ConnectionState.Ready).assertTrue();
         assertBytes(bpTp.writes[7], expectedSync());
         const srTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), r1, msgPortalSuspended(), msgCloseComplete(), msgReady(0x49)]), concatFrames([msgCmd('SELECT 7'), msgReady(0x49)])]);
-        const srConn = openReady(srTp); await srConn.connect(); srTp.writes.length = 0; const srOpts = new QueryOptions(); srOpts.maxRows = 1; srOpts.maxChunkRows = 4;
+        const srConn = await connectReady(srTp); const srOpts = new QueryOptions(); srOpts.maxRows = 1; srOpts.maxChunkRows = 4;
         expect((await asyncFail((): Promise<Object> => srConn.postgresFeatures.prepared!.queryStream('SUSP_REJ', [], srOpts, new FailingStageSink('rows', ArkDbError.validation('susp rows err'))))).kind === ArkDbErrorKind.Validation && srTp.writes.length === 7 && srConn.state === ConnectionState.Ready).assertTrue();
         assertBytes(srTp.writes[5], expectedClosePortal()); assertBytes(srTp.writes[6], expectedSync());
         expect((await srConn.query('SELECT 7')).commandTag).assertEqual('SELECT 7');
+        const wbTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), msgDataRow(['x'.repeat(262144)]), msgPortalSuspended()]), concatFrames([msgCmd('SELECT 0'), msgReady(0x49)])]);
+        const wbConn = await connectReady(wbTp); const wbOpts = new QueryOptions(); wbOpts.maxResultBytes = 128 * 1024 * 1024;
+        const wbExec = await wbConn.postgresFeatures.prepared!.queryStream('WIDE_BATCH', [], wbOpts, new RecSink());
+        expect(wbExec.loadedRowCount === 1 && wbTp.writes.length === 8).assertTrue();
+        assertBytes(wbTp.writes[3], expectedExecute(200)); assertBytes(wbTp.writes[5], expectedExecute(63));
+        const peer = new CapPeerSocket(); const capTimers = new StepTimers();
+        const tcpTp = new PostgresTcpTransport(new CapPeerFactory(peer), 8192, capTimers);
+        const tcpConn = new PostgresConnection(baseConfig(), '', capTimers, (): PostgresLifecycleTransport => tcpTp);
+        const connecting = tcpConn.connect(); await peer.waitWrites(1, connecting); peer.emit(bootFrames(0x49)); await connecting; peer.writes.length = 0;
+        const row1k = msgDataRow(['y'.repeat(1024)]); const capOpts2 = new QueryOptions(); capOpts2.maxResultBytes = 65536; capOpts2.maxChunkBytes = 1024;
+        const startGate = new GatedSink('start'); const startTask = tcpConn.postgresFeatures.prepared!.queryStream('BLOCKED_START', [], capOpts2, startGate);
+        await peer.waitWrites(5, startTask); peer.emit(concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols)]));
+        await startGate.waitReached('start', startTask);
+        for (let i = 0; i < 20; i += 1) { peer.emit(row1k); await flushTicks(24); }
+        peer.emit(msgCmd('SELECT 20')); await flushTicks(24); expect(peer.writes.length === 5 && startGate.rowCount === 0).assertTrue();
+        startGate.open('start'); await peer.waitWrites(6, startTask);
+        expect(peer.writes.length === 6 && startGate.rowCount === 20).assertTrue(); assertBytes(peer.writes[5], expectedSync());
+        peer.emit(msgReady(0x49)); expect((await startTask).loadedRowCount === 20 && tcpConn.state === ConnectionState.Ready).assertTrue();
+        peer.writes.length = 0; const rowsGate = new GatedSink('rows');
+        const rowsTask = tcpConn.postgresFeatures.prepared!.queryStream('BLOCKED_ROWS', [], capOpts2, rowsGate);
+        await peer.waitWrites(5, rowsTask); peer.emit(concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols), row1k, row1k]));
+        await rowsGate.waitReached('rows', rowsTask);
+        for (let i = 0; i < 18; i += 1) { peer.emit(row1k); await flushTicks(24); }
+        peer.emit(msgPortalSuspended()); await flushTicks(24); expect(peer.writes.length === 5 && rowsGate.rowCount === 1).assertTrue();
+        rowsGate.open('rows'); await peer.waitWrites(7, rowsTask);
+        expect(peer.writes.length === 7 && rowsGate.rowCount === 20).assertTrue(); assertBytes(peer.writes[5], expectedExecute(200));
+        peer.emit(msgCmd('SELECT 0')); await peer.waitWrites(8, rowsTask); assertBytes(peer.writes[7], expectedSync()); peer.emit(msgReady(0x49));
+        expect((await rowsTask).loadedRowCount === 20 && tcpConn.state === ConnectionState.Ready).assertTrue(); await tcpConn.close();
+        const wakeTimers = new StepTimers(); const wakeTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols)])]);
+        wakeTp.hangAtEmpty = true; const wakeConn = await connectReady(wakeTp, wakeTimers);
+        const wakeOpts = new QueryOptions(); wakeOpts.maxDrainTimeMs = 20; const wakeSink = new GatedSink('start');
+        const wakeTask = wakeConn.postgresFeatures.prepared!.queryStream('ASYNC_SINK_WAKE', [], wakeOpts, wakeSink);
+        await wakeSink.waitReached('start', wakeTask); await flushTicks(6); wakeSink.fail('start', ArkDbError.validation('async start boom')); await flushTicks(6);
+        wakeTimers.now += 25; wakeTimers.fireAll(); const wakeErr = await asyncFail((): Promise<Object> => wakeTask);
+        expect(wakeErr.kind === ArkDbErrorKind.Validation && wakeErr.message.indexOf('async start boom') === 0 && wakeErr.message.indexOf('maxDrainTimeMs') > 0 && wakeConn.state === ConnectionState.Error).assertTrue();
+        const dbTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols)])]); dbTp.hangAtEmpty = true;
+        const dbConn = await connectReady(dbTp); const dbOpts = new QueryOptions(); dbOpts.maxDrainBytes = 16; const dbSink = new GatedSink('start'); let dbDone = false;
+        const dbTask = dbConn.postgresFeatures.prepared!.queryStream('ASYNC_DRAIN_CAP', [], dbOpts, dbSink); dbTask.then((): void => { dbDone = true; }, (): void => { dbDone = true; });
+        await dbSink.waitReached('start', dbTask); await flushTicks(6); dbSink.fail('start', ArkDbError.validation('hdr cap boom')); await flushTicks(6);
+        dbTp.enqueue([new Uint8Array([0x44, 0, 1, 0, 0])]); await flushTicks(24); expect(dbDone).assertTrue();
+        const dbErr = await asyncFail((): Promise<Object> => dbTask); expect(dbErr.kind === ArkDbErrorKind.Validation && dbErr.message.indexOf('hdr cap boom') === 0 && dbConn.state === ConnectionState.Error).assertTrue();
+        const ckTimers = new StepTimers(); const ckTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(cols)])]); ckTp.hangAtEmpty = true;
+        const ckConn = await connectReady(ckTp, ckTimers); const ckSink = new GatedSink('start'); let ckDone = false;
+        const ckTask = ckConn.postgresFeatures.prepared!.queryStream('ASYNC_CLK_FAIL', [], new QueryOptions(), ckSink); ckTask.then((): void => { ckDone = true; }, (): void => { ckDone = true; });
+        await ckSink.waitReached('start', ckTask); await flushTicks(6); ckTimers.now = -100; ckSink.fail('start', ArkDbError.validation('clk boom')); await flushTicks(24); expect(ckDone).assertTrue();
+        const ckErr = await asyncFail((): Promise<Object> => ckTask); expect(ckErr.kind === ArkDbErrorKind.Validation && ckErr.message.indexOf('clk boom') === 0 && ckErr.message.indexOf('Connection clock') > 0 && ckConn.state === ConnectionState.Error).assertTrue();
       } finally { Logger.removeSink(logSink); Logger.setLevel(prevLevel); }
     });
-
     it('handlesNoDataPortalAndRejectsUnexpectedFramesFailClosed', 0, async () => {
-      const tp = new QueueTransport([bootFrames(0x49),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('INSERT 0 4'), msgReady(0x49)]),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgEmptyQuery(), msgReady(0x49)]),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('MOVE 9007199254740992'), msgReady(0x49)]),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('UPDATE 9007199254740993'), msgReady(0x49)]),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('COPY 5'), msgReady(0x49)]),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd(''), msgReady(0x49)]),
-        concatFrames([msgCmd('SELECT 1'), msgReady(0x49)])]);
-      const conn = openReady(tp); await conn.connect(); tp.writes.length = 0;
-      const sIns = new RecSink(); const eIns = await conn.postgresFeatures.prepared!.queryStream('INSERT', [], new QueryOptions(), sIns);
+      const tp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('INSERT 0 4'), msgReady(0x49)]),
+        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgEmptyQuery(), msgReady(0x49)]), concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('MOVE 9007199254740992'), msgReady(0x49)]),
+        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('UPDATE 9007199254740993'), msgReady(0x49)]), concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('COPY 5'), msgReady(0x49)]),
+        concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd(''), msgReady(0x49)]), concatFrames([msgCmd('SELECT 1'), msgReady(0x49)])]);
+      const conn = await connectReady(tp); const sIns = new RecSink(); const eIns = await conn.postgresFeatures.prepared!.queryStream('INSERT', [], new QueryOptions(), sIns);
       expect(sIns.events.join(',') === 'start:0:false,end:0' && sIns.ends[0].affectedRows === 4 && pgSum(sIns.ends[0]).affectedRowsKnown && pgSum(sIns.ends[0]).affectedRowsExact === 4n && pgSum(sIns.ends[0]).rowCountExact === undefined && pgSum(sIns.ends[0]).commandTag === 'INSERT 0 4' && sIns.ends[0].rowCount === 0 && eIns.rowCount === 0 && tp.writes.length === 6).assertTrue();
-      assertBytes(tp.writes[5], expectedSync());
-      const sEmp = new RecSink(); await conn.postgresFeatures.prepared!.queryStream('', [], new QueryOptions(), sEmp);
+      assertBytes(tp.writes[5], expectedSync()); const sEmp = new RecSink(); await conn.postgresFeatures.prepared!.queryStream('', [], new QueryOptions(), sEmp);
       expect(sEmp.events.join(',') === 'start:0:false,end:0' && sEmp.ends[0].affectedRows === 0 && pgSum(sEmp.ends[0]).affectedRowsKnown && pgSum(sEmp.ends[0]).affectedRowsExact === undefined && pgSum(sEmp.ends[0]).rowCountExact === undefined && pgSum(sEmp.ends[0]).commandTag === '').assertTrue();
       const sMove = new RecSink(); const eMove = await conn.postgresFeatures.prepared!.queryStream('MOVE', [], new QueryOptions(), sMove);
       expect(!sMove.ends[0].rowCountKnown && !pgSum(sMove.ends[0]).affectedRowsKnown && pgSum(sMove.ends[0]).rowCountExact === 9007199254740992n && !eMove.rowCountKnown && conn.state === ConnectionState.Ready).assertTrue();
@@ -127,16 +152,12 @@ export default function postgresPortalStreamTest(): void {
       const sCopy = new RecSink(); await conn.postgresFeatures.prepared!.queryStream('COPY_FILE', [], new QueryOptions(), sCopy);
       expect(!pgSum(sCopy.ends[0]).affectedRowsKnown && sCopy.ends[0].affectedRows === 0 && pgSum(sCopy.ends[0]).affectedRowsExact === undefined && pgSum(sCopy.ends[0]).rowCountExact === undefined && pgSum(sCopy.ends[0]).commandTag === 'COPY 5').assertTrue();
       const sBlank = new RecSink(); await conn.postgresFeatures.prepared!.queryStream('BLANK_TAG', [], new QueryOptions(), sBlank);
-      expect(!pgSum(sBlank.ends[0]).affectedRowsKnown && sBlank.ends[0].affectedRows === 0 && pgSum(sBlank.ends[0]).commandTag === '').assertTrue();
-      expect((await conn.query('SELECT 1')).commandTag).assertEqual('SELECT 1');
-
-      const badFrames: Uint8Array[] = [concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgPortalSuspended()]),
-        concatFrames([msgParseComplete(), msgBindComplete(), backendFrame(0x74, [0, 0])]), concatFrames([msgBindComplete()]),
-        concatFrames([msgParseComplete(), msgRowDesc([colSpec('v', 0, 0, 23, 4, -1, 0)])]),
+      expect(!pgSum(sBlank.ends[0]).affectedRowsKnown && sBlank.ends[0].affectedRows === 0 && pgSum(sBlank.ends[0]).commandTag === '' && (await conn.query('SELECT 1')).commandTag === 'SELECT 1').assertTrue();
+      for (const bad of [concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgPortalSuspended()]), concatFrames([msgParseComplete(), msgBindComplete(), backendFrame(0x74, [0, 0])]),
+        concatFrames([msgBindComplete()]), concatFrames([msgParseComplete(), msgRowDesc([colSpec('v', 0, 0, 23, 4, -1, 0)])]),
         concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc([colSpec('v', 0, 0, 23, 4, -1, 0)]), msgPortalSuspended()]),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc([colSpec('v', 0, 0, 23, 4, -1, 0)]), msgDataRow(['1', '2'])])];
-      for (const bad of badFrames) {
-        const bConn = openReady(new QueueTransport([bootFrames(0x49), bad])); await bConn.connect();
+        concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc([colSpec('v', 0, 0, 23, 4, -1, 0)]), msgDataRow(['1', '2'])])]) {
+        const bConn = await connectReady(new QueueTransport([bootFrames(0x49), bad]));
         expect((await asyncFail((): Promise<Object> => bConn.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new RecSink()))).kind === ArkDbErrorKind.Protocol && bConn.state === ConnectionState.Error).assertTrue();
       }
     });
@@ -150,20 +171,17 @@ export default function postgresPortalStreamTest(): void {
         concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgDataRow(['\\x010203040506']), msgCmd('SELECT 2'), msgReady(0x49)]),
         concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc([colSpec('bin', 0, 0, 23, 4, -1, 1)]), msgDataRow(['1']), msgPortalSuspended(), msgCloseComplete(), msgReady(0x49)]),
         concatFrames([msgCmd('SELECT 9'), msgReady(0x49)])]);
-      const conn = openReady(tp); await conn.connect(); tp.writes.length = 0;
-      const exactOpts = new QueryOptions(); exactOpts.maxRows = 3; exactOpts.maxChunkRows = 2;
+      const conn = await connectReady(tp); const exactOpts = new QueryOptions(); exactOpts.maxRows = 3; exactOpts.maxChunkRows = 2;
       const exactSink = new RecSink(); const exactExec = await conn.postgresFeatures.prepared!.queryStream('EXACT_3', [], exactOpts, exactSink);
       expect(tp.writes.length).assertEqual(10); assertBytes(tp.writes[3], expectedExecute(2)); assertBytes(tp.writes[4], expectedFlush());
       assertBytes(tp.writes[5], expectedExecute(1)); assertBytes(tp.writes[6], expectedFlush()); assertBytes(tp.writes[7], expectedExecute(1)); assertBytes(tp.writes[8], expectedFlush()); assertBytes(tp.writes[9], expectedSync());
-      expect(!exactSink.ends[0].truncated && exactSink.ends[0].truncationReason === '' && exactSink.ends[0].rowCountKnown && exactSink.ends[0].rowCount === 3 && exactSink.ends[0].affectedRows === 3 &&
-        pgSum(exactSink.ends[0]).affectedRowsKnown && pgSum(exactSink.ends[0]).affectedRowsExact === 3n && pgSum(exactSink.ends[0]).commandTag === 'UPDATE 0' && exactSink.truncations.length === 0 && exactExec.rowCountKnown && exactExec.rowCount === 3 && execChunksTotal(exactSink) === 3).assertTrue();
+      expect(!exactSink.ends[0].truncated && exactSink.ends[0].truncationReason === '' && exactSink.ends[0].rowCountKnown && exactSink.ends[0].rowCount === 3 && exactSink.ends[0].affectedRows === 3 && pgSum(exactSink.ends[0]).affectedRowsKnown && pgSum(exactSink.ends[0]).affectedRowsExact === 3n && pgSum(exactSink.ends[0]).commandTag === 'UPDATE 0' && exactSink.truncations.length === 0 && exactExec.rowCountKnown && exactExec.rowCount === 3 && execChunksTotal(exactSink) === 3).assertTrue();
       tp.writes.length = 0; const retOpts = new QueryOptions(); retOpts.maxChunkRows = 2; const retSink = new RecSink();
       const retExec = await conn.postgresFeatures.prepared!.queryStream('INS_RET_3', [], retOpts, retSink);
       expect(retSink.ends[0].affectedRows === 3 && pgSum(retSink.ends[0]).affectedRowsKnown && pgSum(retSink.ends[0]).affectedRowsExact === 3n && retSink.ends[0].rowCount === 3 && retExec.rowCount === 3 && tp.writes.length === 8).assertTrue();
       tp.writes.length = 0; const overSink = new RecSink(); const overExec = await conn.postgresFeatures.prepared!.queryStream('OVER_3', [], exactOpts, overSink);
       expect(tp.writes.length).assertEqual(11); assertBytes(tp.writes[3], expectedExecute(2)); assertBytes(tp.writes[5], expectedExecute(1)); assertBytes(tp.writes[7], expectedExecute(1)); assertBytes(tp.writes[9], expectedClosePortal()); assertBytes(tp.writes[10], expectedSync());
-      expect(overSink.events.join(',') === 'start:0:true,rows:0:0:2,rows:0:2:1,trunc:0:rowLimit:3,end:0' && overSink.ends[0].truncated && overSink.ends[0].truncationReason === 'rowLimit' && !overSink.ends[0].rowCountKnown && overSink.ends[0].rowCount === 3 &&
-        !pgSum(overSink.ends[0]).affectedRowsKnown && overSink.ends[0].affectedRows === 0 && pgSum(overSink.ends[0]).affectedRowsExact === undefined && pgSum(overSink.ends[0]).commandTag === '' && !overExec.rowCountKnown && overExec.rowCount === 3 && overExec.loadedRowCount === 3).assertTrue();
+      expect(overSink.events.join(',') === 'start:0:true,rows:0:0:2,rows:0:2:1,trunc:0:rowLimit:3,end:0' && overSink.ends[0].truncated && overSink.ends[0].truncationReason === 'rowLimit' && !overSink.ends[0].rowCountKnown && overSink.ends[0].rowCount === 3 && !pgSum(overSink.ends[0]).affectedRowsKnown && overSink.ends[0].affectedRows === 0 && pgSum(overSink.ends[0]).affectedRowsExact === undefined && pgSum(overSink.ends[0]).commandTag === '' && !overExec.rowCountKnown && overExec.rowCount === 3 && overExec.loadedRowCount === 3).assertTrue();
       tp.writes.length = 0; const byteOpts = new QueryOptions(); byteOpts.maxChunkRows = 3; byteOpts.maxResultBytes = 4;
       const bSink1 = new RecSink(); bSink1.cancelOnTruncation = true; const bExec1 = await conn.postgresFeatures.prepared!.queryStream('BYTES_SUSP', [], byteOpts, bSink1);
       assertBytes(tp.writes[5], expectedClosePortal()); assertBytes(tp.writes[6], expectedSync());
@@ -183,7 +201,7 @@ export default function postgresPortalStreamTest(): void {
         const reads: Uint8Array[] = sc[0] === 'end' ? [bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), r1, msgCmd('SELECT 1'), msgReady(0x49)]), concatFrames([msgCmd('SELECT 4'), msgReady(0x49)])]
           : sc[0] === 'trunc' ? [bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol)]), r1.slice(0, 5), ownedR1, msgPortalSuspended(), r2.slice(0, 5), ownedR2, concatFrames([msgPortalSuspended(), msgCloseComplete(), msgReady(0x49)]), concatFrames([msgCmd('SELECT 4'), msgReady(0x49)])]
             : [bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol)]), r1.slice(0, 5), ownedR1, r2.slice(0, 5), ownedR2, concatFrames([msgPortalSuspended(), msgCloseComplete(), msgReady(0x49)]), concatFrames([msgCmd('SELECT 4'), msgReady(0x49)])];
-        const sTp = new QueueTransport(reads); const sConn = openReady(sTp); await sConn.connect(); sTp.writes.length = 0;
+        const sTp = new QueueTransport(reads); const sConn = await connectReady(sTp);
         const sOpts = new QueryOptions(); sOpts.maxChunkRows = 2; if (sc[0] === 'trunc') sOpts.maxRows = 1;
         const fSink = new FailingStageSink(sc[0], sc[1]);
         const caught = await asyncFail((): Promise<Object> => sConn.postgresFeatures.prepared!.queryStream('SINK_' + sc[0], [], sOpts, fSink));
@@ -191,18 +209,16 @@ export default function postgresPortalStreamTest(): void {
         if (sc[0] !== 'end') { const ci = sc[0] === 'trunc' ? 7 : 5; assertBytes(sTp.writes[ci], expectedClosePortal()); assertBytes(sTp.writes[ci + 1], expectedSync()); assertZeroed(ownedR1); assertZeroed(ownedR2); }
         expect((await sConn.query('SELECT 4')).commandTag).assertEqual('SELECT 4');
       }
-      const srvStages: Array<[Uint8Array, number, ArkDbErrorKind]> = [
-        [concatFrames([msgError('ERROR', 'ERROR', '42601', 'parse err'), msgReady(0x49)]), 6, ArkDbErrorKind.Server],
+      for (const st of [[concatFrames([msgError('ERROR', 'ERROR', '42601', 'parse err'), msgReady(0x49)]), 6, ArkDbErrorKind.Server],
         [concatFrames([msgParseComplete(), msgError('ERROR', 'ERROR', '22P02', 'bind err'), msgReady(0x49)]), 6, ArkDbErrorKind.Server],
         [concatFrames([msgParseComplete(), msgBindComplete(), msgError('ERROR', 'ERROR', '42P01', 'desc err'), msgReady(0x49)]), 6, ArkDbErrorKind.Server],
         [concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgError('ERROR', 'ERROR', '23505', 'nodata err'), msgReady(0x49)]), 6, ArkDbErrorKind.Server],
         [concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCopyOut(), msgError('ERROR', 'ERROR', '57014', 'copyout err'), msgReady(0x49)]), 6, ArkDbErrorKind.Unsupported],
         [concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('INSERT 0 1'), msgError('ERROR', 'ERROR', '40001', 'commit err'), msgReady(0x49)]), 6, ArkDbErrorKind.Server],
         [concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgError('ERROR', 'ERROR', '22012', 'exec1 err'), msgReady(0x49)]), 6, ArkDbErrorKind.Server],
-        [concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgError('ERROR', 'ERROR', '22012', 'exec2 err'), msgReady(0x49)]), 8, ArkDbErrorKind.Server]];
-      for (const st of srvStages) {
-        const eTp = new QueueTransport([bootFrames(0x49), st[0], concatFrames([msgCmd('SELECT 2'), msgReady(0x49)])]);
-        const eConn = openReady(eTp); await eConn.connect(); eTp.writes.length = 0; const pIn = new InspectableByteaParameter(new Uint8Array([0x55, 0x66])); const o = new QueryOptions(); o.maxChunkRows = 1;
+        [concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgError('ERROR', 'ERROR', '22012', 'exec2 err'), msgReady(0x49)]), 8, ArkDbErrorKind.Server]] as Array<[Uint8Array, number, ArkDbErrorKind]>) {
+        const eTp = new QueueTransport([bootFrames(0x49), st[0], concatFrames([msgCmd('SELECT 2'), msgReady(0x49)])]); const eConn = await connectReady(eTp);
+        const pIn = new InspectableByteaParameter(new Uint8Array([0x55, 0x66])); const o = new QueryOptions(); o.maxChunkRows = 1;
         const err = await asyncFail((): Promise<Object> => eConn.postgresFeatures.prepared!.queryStream('SELECT $1', [pIn], o, new RecSink()));
         expect(err.kind === st[2] && eTp.writes.length === st[1] && eConn.state === ConnectionState.Ready).assertTrue();
         assertBytes(eTp.writes[st[1] - 1], expectedSync()); assertZeroed(pIn.lastRead!); expect((await eConn.query('SELECT 2')).commandTag).assertEqual('SELECT 2');
@@ -211,48 +227,46 @@ export default function postgresPortalStreamTest(): void {
         concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgError('ERROR', 'ERROR', '34000', 'close portal err'), msgReady(0x49)]),
         concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgDataRow(['\\xbb']), msgPortalSuspended(), msgError('ERROR', 'ERROR', '57014', 'canceled during close'), msgReady(0x49)]),
         concatFrames([msgCmd('SELECT 8'), msgReady(0x49)])]);
-      const cpConn = openReady(closePortalErrTp); await cpConn.connect(); closePortalErrTp.writes.length = 0; const cpOpts = new QueryOptions(); cpOpts.maxChunkRows = 1;
+      const cpConn = await connectReady(closePortalErrTp); const cpOpts = new QueryOptions(); cpOpts.maxChunkRows = 1;
       const cpErr = await asyncFail((): Promise<Object> => cpConn.postgresFeatures.prepared!.queryStream('CLOSE_ERR', [], cpOpts, new FailingStageSink('rows', ArkDbError.validation('sink primary'))));
       expect(cpErr.kind === ArkDbErrorKind.Validation && cpErr.message.indexOf('sink primary') === 0 && cpErr.message.indexOf('close portal err') > 0 && closePortalErrTp.writes.length === 7 && cpConn.state === ConnectionState.Ready).assertTrue();
       assertBytes(closePortalErrTp.writes[5], expectedClosePortal()); assertBytes(closePortalErrTp.writes[6], expectedSync());
-      closePortalErrTp.writes.length = 0; const cancelSink = new RecSink(); cancelSink.cancelOnTruncation = true;
-      const cancelOpts = new QueryOptions(); cancelOpts.maxRows = 1; cancelOpts.maxChunkRows = 2;
+      closePortalErrTp.writes.length = 0; const cancelSink = new RecSink(); cancelSink.cancelOnTruncation = true; const cancelOpts = new QueryOptions(); cancelOpts.maxRows = 1; cancelOpts.maxChunkRows = 2;
       const cancelExec = await cpConn.postgresFeatures.prepared!.queryStream('CANCEL_57014', [], cancelOpts, cancelSink);
       expect(cancelSink.ends.length === 1 && cancelSink.ends[0].truncated && !cancelSink.ends[0].rowCountKnown && !pgSum(cancelSink.ends[0]).affectedRowsKnown && cancelExec.truncationInterrupted && closePortalErrTp.writes.length === 9 && cpConn.state === ConnectionState.Ready).assertTrue();
       expect((await cpConn.query('SELECT 8')).commandTag).assertEqual('SELECT 8');
-      const fatalConn = openReady(new QueueTransport([bootFrames(0x49), concatFrames([msgError('FATAL', 'FATAL', '57P01', 'terminating')])])); await fatalConn.connect();
+      const fatalConn = await connectReady(new QueueTransport([bootFrames(0x49), concatFrames([msgError('FATAL', 'FATAL', '57P01', 'terminating')])]));
       expect((await asyncFail((): Promise<Object> => fatalConn.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new RecSink()))).kind === ArkDbErrorKind.Server && fatalConn.state === ConnectionState.Error).assertTrue();
-      const dupConn = openReady(new QueueTransport([bootFrames(0x49), concatFrames([msgError('ERROR', 'ERROR', '22012', 'e1'), msgError('ERROR', 'ERROR', '22012', 'e2'), msgReady(0x49)])])); await dupConn.connect();
+      const dupConn = await connectReady(new QueueTransport([bootFrames(0x49), concatFrames([msgError('ERROR', 'ERROR', '22012', 'e1'), msgError('ERROR', 'ERROR', '22012', 'e2'), msgReady(0x49)])]));
       expect((await asyncFail((): Promise<Object> => dupConn.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new RecSink()))).kind === ArkDbErrorKind.Protocol && dupConn.state === ConnectionState.Error).assertTrue();
       const pureDbOpts = new QueryOptions(); pureDbOpts.maxRows = 1; pureDbOpts.maxDrainBytes = 8;
-      const pureDbConn = openReady(new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgDataRow(['\\x0102030405']), msgPortalSuspended()])])); await pureDbConn.connect();
+      const pureDbConn = await connectReady(new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgDataRow(['\\x0102030405']), msgPortalSuspended()])]));
       expect((await asyncFail((): Promise<Object> => pureDbConn.postgresFeatures.prepared!.queryStream('PURE_DRAIN_BYTES', [], pureDbOpts, new RecSink()))).kind === ArkDbErrorKind.Protocol && pureDbConn.state === ConnectionState.Error).assertTrue();
       const dbOpts = new QueryOptions(); dbOpts.maxRows = 1; dbOpts.maxDrainBytes = 25;
       const dbTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgDataRow(['\\x0102030405']), msgPortalSuspended()])]);
-      dbTp.abortFailure = ArkDbError.network('abort boom'); const dbConn = openReady(dbTp); await dbConn.connect();
+      dbTp.abortFailure = ArkDbError.network('abort boom'); const dbConn = await connectReady(dbTp);
       const dbErr = await asyncFail((): Promise<Object> => dbConn.postgresFeatures.prepared!.queryStream('DRAIN_BYTES', [], dbOpts, new FailingStageSink('trunc', ArkDbError.validation('trunc primary'))));
       expect(dbErr.kind === ArkDbErrorKind.Validation && dbErr.message.indexOf('trunc primary') === 0 && dbErr.message.indexOf('maxDrainBytes') > 0 && dbErr.message.indexOf('abort boom') > 0 && dbConn.state === ConnectionState.Error).assertTrue();
-      const rfqTimers = new StepTimers(); rfqTimers.stepMs = 15;
-      const rfqConn = openReady(new QueueTransport([bootFrames(0x49), concatFrames([msgError('ERROR', 'ERROR', '22012', 'slow drain'), msgReady(0x49)])]), rfqTimers);
-      await rfqConn.connect(); const rfqOpts = new QueryOptions(); rfqOpts.maxDrainTimeMs = 10;
+      const rfqTimers = new StepTimers(); rfqTimers.stepMs = 15; const rfqOpts = new QueryOptions(); rfqOpts.maxDrainTimeMs = 10;
+      const rfqConn = await connectReady(new QueueTransport([bootFrames(0x49), concatFrames([msgError('ERROR', 'ERROR', '22012', 'slow drain'), msgReady(0x49)])]), rfqTimers);
       expect((await asyncFail((): Promise<Object> => rfqConn.postgresFeatures.prepared!.queryStream('RFQ_DEADLINE', [], rfqOpts, new RecSink()))).kind === ArkDbErrorKind.Protocol && rfqConn.state === ConnectionState.Error).assertTrue();
-      const hTimers = new StepTimers(); const hTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgDataRow(['\\xbb']), msgPortalSuspended(), msgCloseComplete(), msgReady(0x49)])]);
-      const hConn = openReady(hTp, hTimers); await hConn.connect(); const hOpts = new QueryOptions(); hOpts.maxRows = 1; hOpts.maxDrainTimeMs = 20;
-      const hSink = new GatedSink('trunc'); const hTask = hConn.postgresFeatures.prepared!.queryStream('DEADLINE_SINK', [], hOpts, hSink);
+      const hTimers = new StepTimers(); const hOpts = new QueryOptions(); hOpts.maxRows = 1; hOpts.maxDrainTimeMs = 20; const hSink = new GatedSink('trunc');
+      const hConn = await connectReady(new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended(), msgDataRow(['\\xbb']), msgPortalSuspended(), msgCloseComplete(), msgReady(0x49)])]), hTimers);
+      const hTask = hConn.postgresFeatures.prepared!.queryStream('DEADLINE_SINK', [], hOpts, hSink);
       await hSink.waitReached('trunc', hTask); hTimers.now += 25; hTimers.fireAll(); hSink.fail('trunc', ArkDbError.validation('late sink after deadline'));
       expect((await asyncFail((): Promise<Object> => hTask)).kind === ArkDbErrorKind.Protocol && hConn.state === ConnectionState.Error).assertTrue();
-      const closeTp = new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended()])]);
-      const closeConn = openReady(closeTp); await closeConn.connect(); const closeSink = new GatedSink('rows'); const closeOpts = new QueryOptions(); closeOpts.maxChunkRows = 1;
+      const closeConn = await connectReady(new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(byteaCol), msgDataRow(['\\xaa']), msgPortalSuspended()])]));
+      const closeSink = new GatedSink('rows'); const closeOpts = new QueryOptions(); closeOpts.maxChunkRows = 1;
       const closeTask = closeConn.postgresFeatures.prepared!.queryStream('CLOSE_SINK', [], closeOpts, closeSink);
       await closeSink.waitReached('rows', closeTask); const closing = closeConn.close(); closeSink.fail('rows', ArkDbError.validation('late sink after close'));
       expect((await asyncFail((): Promise<Object> => closeTask)).kind === ArkDbErrorKind.Cancelled && closeConn.state === ConnectionState.Closed).assertTrue(); await closing;
       const copyFrame = msgCopyData(new Uint8Array([4, 3, 2, 1])); const ownedCopyPayload = copyFrame.slice(5);
       const cpOutTp = new QueueTransport([bootFrames(0x49), msgParseComplete(), msgBindComplete(), msgNoData(), msgCopyOut(), copyFrame.slice(0, 5), ownedCopyPayload, concatFrames([msgCopyDone(), msgCmd('COPY 1'), msgReady(0x49)]), concatFrames([msgCmd('SELECT 6'), msgReady(0x49)])]);
-      const cpOutConn = openReady(cpOutTp); await cpOutConn.connect(); cpOutTp.writes.length = 0;
+      const cpOutConn = await connectReady(cpOutTp);
       expect((await asyncFail((): Promise<Object> => cpOutConn.postgresFeatures.prepared!.queryStream('COPY_OUT', [], new QueryOptions(), new RecSink()))).kind === ArkDbErrorKind.Unsupported && cpOutTp.writes.length === 6 && cpOutConn.state === ConnectionState.Ready).assertTrue();
       assertBytes(cpOutTp.writes[5], expectedSync()); assertZeroed(ownedCopyPayload); expect((await cpOutConn.query('SELECT 6')).commandTag).assertEqual('SELECT 6');
       for (const copyFailClosed of [msgCopyIn(), msgCopyBoth()]) {
-        const fcConn = openReady(new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), copyFailClosed])])); await fcConn.connect();
+        const fcConn = await connectReady(new QueueTransport([bootFrames(0x49), concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), copyFailClosed])]));
         expect((await asyncFail((): Promise<Object> => fcConn.postgresFeatures.prepared!.queryStream('COPY_FC', [], new QueryOptions(), new RecSink()))).kind === ArkDbErrorKind.Unsupported && fcConn.state === ConnectionState.Error).assertTrue();
       }
     });
@@ -263,15 +277,15 @@ function pgSum(s: QueryResultSummary): PostgresQueryResultSummary { expect(s ins
 function execChunksTotal(s: RecSink): number { let n = 0; for (const c of s.chunks) n += c.rows.length; return n; }
 class QueueTransport implements PostgresLifecycleTransport {
   readonly writes: Uint8Array[] = []; readonly rawWrites: Uint8Array[] = []; abortFailure: ArkDbError | null = null; hangAtEmpty: boolean = false;
-  private rejectHungRead: ((e: Object) => void) | null = null; private readonly reads: Uint8Array[]; constructor(reads: Uint8Array[]) { this.reads = reads.slice(); }
-  enqueue(chunks: Uint8Array[]): void { for (const c of chunks) this.reads.push(c); }
+  private pendMax: number = 0; private resHung: ((v: Uint8Array | null) => void) | null = null; private rejHung: ((e: Object) => void) | null = null; private readonly reads: Uint8Array[]; constructor(reads: Uint8Array[]) { this.reads = reads.slice(); }
+  enqueue(chunks: Uint8Array[]): void { for (const c of chunks) this.reads.push(c); if (this.resHung !== null && this.reads.length > 0) { const r = this.resHung; const m = this.pendMax; this.resHung = null; this.rejHung = null; const h = this.reads[0]; if (h.length <= m) r(this.reads.shift()!); else { this.reads[0] = h.subarray(m); r(h.subarray(0, m)); } } }
   async connect(_h: string, _p: number, _t: number): Promise<void> {} async close(): Promise<void> {}
   async read(max: number): Promise<Uint8Array | null> {
-    if (this.reads.length === 0) return !this.hangAtEmpty ? null : new Promise<Uint8Array | null>((_r: (v: Uint8Array | null) => void, rej: (e: Object) => void): void => { this.rejectHungRead = rej; });
+    if (this.reads.length === 0) return !this.hangAtEmpty ? null : new Promise<Uint8Array | null>((res: (v: Uint8Array | null) => void, rej: (e: Object) => void): void => { this.pendMax = max; this.resHung = res; this.rejHung = rej; });
     const head = this.reads[0]; if (head.length <= max) return this.reads.shift()!; this.reads[0] = head.subarray(max); return head.subarray(0, max);
   }
   write(data: Uint8Array): Promise<number> { this.rawWrites.push(data); const cp = new Uint8Array(data.length); cp.set(data); this.writes.push(cp); return Promise.resolve(data.length); }
-  async abort(e: ArkDbError): Promise<void> { if (this.rejectHungRead !== null) { const r = this.rejectHungRead; this.rejectHungRead = null; r(e); } if (this.abortFailure !== null) throw this.abortFailure; }
+  async abort(e: ArkDbError): Promise<void> { if (this.rejHung !== null) { const r = this.rejHung; this.resHung = null; this.rejHung = null; r(e); } if (this.abortFailure !== null) throw this.abortFailure; }
 }
 class PhaseTransport extends QueueTransport {
   readonly writePhases: string[] = []; private readonly gate: PostgresCommandGate; constructor(reads: Uint8Array[], gate: PostgresCommandGate) { super(reads); this.gate = gate; }
@@ -289,22 +303,31 @@ class RecSink implements QueryResultSink {
   async onResultEnd(s: QueryResultSummary): Promise<void> { this.recPhase(); this.ends.push(s); this.events.push('end:' + s.resultIndex); }
 }
 class GatedSink implements QueryResultSink {
-  private readonly reached: Map<string, () => void> = new Map<string, () => void>(); private readonly arrived: Set<string> = new Set<string>();
-  private readonly gates: Map<string, [() => void, (e: Object) => void]> = new Map<string, [() => void, (e: Object) => void]>(); private readonly onlyStage: string;
-  constructor(onlyStage: string = '') { this.onlyStage = onlyStage; }
+  rowCount: number = 0; private readonly reached: Map<string, () => void> = new Map<string, () => void>(); private readonly arrived: Set<string> = new Set<string>();
+  private readonly passthrough: Set<string> = new Set<string>(); private readonly gates: Map<string, [() => void, (e: Object) => void]> = new Map<string, [() => void, (e: Object) => void]>();
+  private readonly onlyStage: string; constructor(onlyStage: string = '') { this.onlyStage = onlyStage; }
   waitReached(stage: string, inflight: Promise<Object>): Promise<void> {
-    if (this.arrived.has(stage)) return Promise.resolve();
-    return Promise.race([new Promise<void>((r: () => void): void => { this.reached.set(stage, r); }), inflight.then((): void => { throw new Error('settled before ' + stage); })]);
+    return this.arrived.has(stage) ? Promise.resolve() : Promise.race([new Promise<void>((r: () => void): void => { this.reached.set(stage, r); }), inflight.then((): void => { throw new Error('settled before ' + stage); })]);
   }
   release(stage: string): void { const p = this.gates.get(stage); if (p !== undefined) { this.gates.delete(stage); this.arrived.delete(stage); p[0](); } }
+  open(stage: string): void { this.passthrough.add(stage); this.release(stage); }
   fail(stage: string, err: Object): void { const p = this.gates.get(stage); if (p !== undefined) { this.gates.delete(stage); this.arrived.delete(stage); p[1](err); } }
   private hold(stage: string): Promise<void> {
-    if (this.onlyStage.length > 0 && this.onlyStage !== stage) return Promise.resolve();
+    if (this.passthrough.has(stage) || (this.onlyStage.length > 0 && this.onlyStage !== stage)) return Promise.resolve();
     return new Promise<void>((res: () => void, rej: (e: Object) => void): void => { this.gates.set(stage, [res, rej]); this.arrived.add(stage); const n = this.reached.get(stage); if (n !== undefined) { this.reached.delete(stage); n(); } });
   }
-  onResultStart(_m: QueryResultMeta): Promise<void> { return this.hold('start'); } onRows(_c: QueryRowChunk): Promise<void> { return this.hold('rows'); }
+  onResultStart(_m: QueryResultMeta): Promise<void> { return this.hold('start'); } onRows(c: QueryRowChunk): Promise<void> { this.rowCount += c.rows.length; return this.hold('rows'); }
   onTruncation(_t: QueryTruncation): Promise<boolean> { return this.hold('trunc').then((): boolean => false); } onResultEnd(_s: QueryResultSummary): Promise<void> { return this.hold('end'); }
 }
+class CapPeerSocket implements PostgresTcpSocket {
+  readonly writes: Uint8Array[] = []; private onMsg: ((d: Uint8Array) => void) | null = null;
+  listen(m: (d: Uint8Array) => void, _c: () => void, _e: (f: Object) => void): void { this.onMsg = m; }
+  clearListeners(): void { this.onMsg = null; } prepareUpgrade(): void {} upgrade(): PostgresTlsSocket { throw new Error('unused'); }
+  async connect(_h: string, _p: number, _t: number): Promise<void> {} async send(d: Uint8Array): Promise<void> { this.writes.push(d.slice()); }
+  async close(): Promise<void> {} emit(d: Uint8Array): void { if (this.onMsg !== null) this.onMsg(d); }
+  async waitWrites<T>(n: number, task: Promise<T>): Promise<void> { for (let i = 0; i < 500 && this.writes.length < n; i += 1) await Promise.race([task.then((): void => {}), Promise.resolve()]); expect(this.writes.length >= n).assertTrue(); }
+}
+class CapPeerFactory implements PostgresTcpSocketFactory { private readonly s: CapPeerSocket; constructor(s: CapPeerSocket) { this.s = s; } create(): PostgresTcpSocket { return this.s; } }
 class FailingStageSink implements QueryResultSink {
   private failed: boolean = false; callsAfterFailure: number = 0; private readonly stage: string; private readonly err: Object;
   constructor(stage: string, err: Object) { this.stage = stage; this.err = err; }
@@ -322,15 +345,13 @@ class InspectableByteaParameter extends PostgresParameter { lastRead: Uint8Array
 async function flushTicks(count: number): Promise<void> { for (let i = 0; i < count; i += 1) await Promise.resolve(); }
 function baseConfig(): PostgresConnectionConfig { const c = new PostgresConnectionConfig(); c.host = 'pg.local'; c.user = 'postgres'; c.ssl.mode = PostgresSslMode.DISABLED; return c; }
 function openReady(tp: QueueTransport, timers: ConnectionTimerPort = new StepTimers(), pw: string = ''): PostgresConnection { return new PostgresConnection(baseConfig(), pw, timers, (): PostgresLifecycleTransport => tp); }
+async function connectReady(tp: QueueTransport, timers: ConnectionTimerPort = new StepTimers()): Promise<PostgresConnection> { const c = openReady(tp, timers); await c.connect(); tp.writes.length = 0; return c; }
 function bootFrames(ready: number): Uint8Array { return concatFrames([backendFrame(0x52, [0, 0, 0, 0]), msgParam('client_encoding', 'UTF8'), msgReady(ready)]); }
 function backendFrame(type: number, payload: number[] | Uint8Array): Uint8Array { const src = payload instanceof Uint8Array ? payload : new Uint8Array(payload); const out = new Uint8Array(src.length + 5); out[0] = type; new DataView(out.buffer).setInt32(1, src.length + 4, false); out.set(src, 5); return out; }
-function pushCStr(dst: number[], text: string): void { for (let i = 0; i < text.length; i += 1) dst.push(text.charCodeAt(i)); dst.push(0); }
-function cstrFrame(type: number, text: string): Uint8Array { const p: number[] = []; pushCStr(p, text); return backendFrame(type, p); }
-function expectedDescribePortal(): Uint8Array { return new Uint8Array([0x44, 0, 0, 0, 6, 0x50, 0]); }
+function pushCStr(dst: number[], text: string): void { for (let i = 0; i < text.length; i += 1) dst.push(text.charCodeAt(i)); dst.push(0); } function cstrFrame(type: number, text: string): Uint8Array { const p: number[] = []; pushCStr(p, text); return backendFrame(type, p); }
+function expectedDescribePortal(): Uint8Array { return new Uint8Array([0x44, 0, 0, 0, 6, 0x50, 0]); } function expectedFlush(): Uint8Array { return new Uint8Array([0x48, 0, 0, 0, 4]); }
+function expectedClosePortal(): Uint8Array { return new Uint8Array([0x43, 0, 0, 0, 6, 0x50, 0]); } function expectedSync(): Uint8Array { return new Uint8Array([0x53, 0, 0, 0, 4]); }
 function expectedExecute(maxRows: number): Uint8Array { const f = new Uint8Array([0x45, 0, 0, 0, 9, 0, 0, 0, 0, 0]); new DataView(f.buffer).setInt32(6, maxRows, false); return f; }
-function expectedFlush(): Uint8Array { return new Uint8Array([0x48, 0, 0, 0, 4]); }
-function expectedClosePortal(): Uint8Array { return new Uint8Array([0x43, 0, 0, 0, 6, 0x50, 0]); }
-function expectedSync(): Uint8Array { return new Uint8Array([0x53, 0, 0, 0, 4]); }
 function msgParseComplete(): Uint8Array { return backendFrame(0x31, []); } function msgBindComplete(): Uint8Array { return backendFrame(0x32, []); }
 function msgCloseComplete(): Uint8Array { return backendFrame(0x33, []); } function msgNoData(): Uint8Array { return backendFrame(0x6e, []); }
 function msgPortalSuspended(): Uint8Array { return backendFrame(0x73, []); } function msgEmptyQuery(): Uint8Array { return backendFrame(0x49, []); }
@@ -340,8 +361,7 @@ function msgNotice(loc: string, st: string, m: string): Uint8Array { const p: nu
 function msgError(loc: string, sev: string, st: string, m: string): Uint8Array { const p: number[] = [0x53]; pushCStr(p, loc); p.push(0x56); pushCStr(p, sev); p.push(0x43); pushCStr(p, st); p.push(0x4d); pushCStr(p, m); p.push(0); return backendFrame(0x45, p); }
 function msgNotification(pid: number, ch: string, pay: string): Uint8Array { const h = new Uint8Array(4); new DataView(h.buffer).setInt32(0, pid, false); const p = Array.from(h); pushCStr(p, ch); pushCStr(p, pay); return backendFrame(0x41, p); }
 function colSpec(name: string, tbl: number, attr: number, oid: number, sz: number, mod: number, fmt: number): Uint8Array {
-  const p: number[] = []; pushCStr(p, name); const t = new Uint8Array(18); const v = new DataView(t.buffer);
-  v.setUint32(0, tbl, false); v.setInt16(4, attr, false); v.setUint32(6, oid, false); v.setInt16(10, sz, false); v.setInt32(12, mod, false); v.setInt16(16, fmt, false);
+  const p: number[] = []; pushCStr(p, name); const t = new Uint8Array(18); const v = new DataView(t.buffer); v.setUint32(0, tbl, false); v.setInt16(4, attr, false); v.setUint32(6, oid, false); v.setInt16(10, sz, false); v.setInt32(12, mod, false); v.setInt16(16, fmt, false);
   const out = new Uint8Array(p.length + 18); out.set(p, 0); out.set(t, p.length); return out;
 }
 function msgRowDesc(cols: Uint8Array[]): Uint8Array { let len = 2; for (const c of cols) len += c.length; const p = new Uint8Array(len); new DataView(p.buffer).setInt16(0, cols.length, false); let off = 2; for (const c of cols) { p.set(c, off); off += c.length; } return backendFrame(0x54, p); }
@@ -350,11 +370,9 @@ function msgDataRow(vals: Array<string | null>): Uint8Array {
   let off = 2; for (const v of vals) { if (v === null) { dv.setInt32(off, -1, false); off += 4; } else { dv.setInt32(off, v.length, false); for (let i = 0; i < v.length; i += 1) p[off + 4 + i] = v.charCodeAt(i); off += 4 + v.length; } }
   return backendFrame(0x44, p);
 }
-function msgCopyIn(): Uint8Array { return backendFrame(0x47, [0, 0, 0]); } function msgCopyOut(): Uint8Array { return backendFrame(0x48, [0, 0, 0]); }
-function msgCopyBoth(): Uint8Array { return backendFrame(0x57, [0, 0, 0]); } function msgCopyData(bytes: Uint8Array): Uint8Array { return backendFrame(0x64, bytes); }
-function msgCopyDone(): Uint8Array { return backendFrame(0x63, []); }
+function msgCopyIn(): Uint8Array { return backendFrame(0x47, [0, 0, 0]); } function msgCopyOut(): Uint8Array { return backendFrame(0x48, [0, 0, 0]); } function msgCopyBoth(): Uint8Array { return backendFrame(0x57, [0, 0, 0]); }
+function msgCopyData(bytes: Uint8Array): Uint8Array { return backendFrame(0x64, bytes); } function msgCopyDone(): Uint8Array { return backendFrame(0x63, []); } function assertZeroed(buf: Uint8Array): void { for (let i = 0; i < buf.length; i += 1) expect(buf[i]).assertEqual(0); }
 function concatFrames(frames: Uint8Array[]): Uint8Array { let len = 0; for (const f of frames) len += f.length; const out = new Uint8Array(len); let off = 0; for (const f of frames) { out.set(f, off); off += f.length; } return out; }
 function assertBytes(actual: Uint8Array, expected: Uint8Array): void { expect(actual.length).assertEqual(expected.length); for (let i = 0; i < expected.length; i += 1) expect(actual[i]).assertEqual(expected[i]); }
-function assertZeroed(buf: Uint8Array): void { for (let i = 0; i < buf.length; i += 1) expect(buf[i]).assertEqual(0); }
 function asQueryOpts(v: QueryOptions | null): QueryOptions { return v as QueryOptions; } function asSink(v: Object | null | undefined): QueryResultSink { return v as QueryResultSink; }
 async function asyncFail<T>(op: () => Promise<T>): Promise<ArkDbError> { let err: Object | null = null; try { await op(); } catch (e) { err = e as Object; } expect(err instanceof ArkDbError).assertTrue(); return err as ArkDbError; }

@@ -388,7 +388,7 @@ export class PostgresMessageChannel {
 
   constructor(transport: PostgresByteTransport) { this.transport = transport; }
 
-  readMessage(maxFrameBytes: number = MAX_POSTGRES_MESSAGE_BYTES + 1): Promise<PostgresMessage> {
+  readMessage(maxFrameBytes: number | ((frameBytes: number) => number) = MAX_POSTGRES_MESSAGE_BYTES + 1): Promise<PostgresMessage> {
     return this.runExclusive(async (): Promise<PostgresMessage> => {
       const header = await this.readExact(POSTGRES_NORMAL_HEADER_BYTES);
       let type = 0; let length = 0;
@@ -396,7 +396,8 @@ export class PostgresMessageChannel {
         const reader = new PostgresByteReader(header, POSTGRES_NORMAL_HEADER_BYTES);
         type = reader.readUInt8(); length = reader.readInt32();
       } finally { header.fill(0); }
-      if (length < POSTGRES_LENGTH_BYTES || length > MAX_POSTGRES_MESSAGE_BYTES || length + 1 > maxFrameBytes) {
+      const limit = typeof maxFrameBytes === 'function' ? maxFrameBytes(length + 1) : maxFrameBytes;
+      if (length < POSTGRES_LENGTH_BYTES || length > MAX_POSTGRES_MESSAGE_BYTES || length + 1 > limit) {
         throw this.failure('Invalid PostgreSQL message length');
       }
       return { type: type, payload: await this.readExact(length - POSTGRES_LENGTH_BYTES) };

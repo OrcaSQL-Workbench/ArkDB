@@ -5,21 +5,20 @@ A headless ArkTS PostgreSQL HAR for HarmonyOS 6.1.1 / API 24, tablet and
 
 **Source status:** The 1.0.0 package provides PostgreSQL 3.0 startup/TLS
 connection lifecycle (`connect()`, `ping()`, `close()`), simple-query execution
-and result streaming (`query()`, `queryStream()`), parameterized
+and result streaming (`query()`, `queryStream()`), and parameterized
 extended-query execution and `PortalSuspended` streaming via
 `connection.postgresFeatures.prepared` (`execute()` and `queryStream()`, with
 `PostgresQueryResultSummary` reporting `commandTag`, exact counts, and
 `affectedRowsKnown` for empty queries and safe-integer DML tags — early portal
-close bounds client row delivery without rolling back server DML), in-place
-schema context switching (`changeContext()`), explicit and scoped transactions
-(`begin()`, `commit()`, `rollback()`, and
-`connection.postgresFeatures.transactions.run()`), and protocol `CancelRequest`
-query cancellation (`cancel()`, `isInterruptionError()`, and
-`connection.features.cancellation`, with `supportsSsl`, `supportsCatalogs`,
+close bounds client row delivery without rolling back server DML), plus schema
+context switching (`changeContext()`), explicit and scoped transactions
+(`begin()`, `commit()`, `rollback()`, `postgresFeatures.transactions.run()`),
+and protocol `CancelRequest` cancellation (`cancel()`, `isInterruptionError()`,
+`features.cancellation`, with `supportsSsl`, `supportsCatalogs`,
 `supportsSchemas`, `supportsTransactions`, `supportsMultipleResults`,
 `supportsStreamingResults`, `supportsPreparedStatements`, and
 `supportsGracefulCancel` enabled). Metadata, server metrics, and statement
-deadlines are not yet implemented and reject with `ArkDbErrorKind.Unsupported`.
+deadlines remain unimplemented (`ArkDbErrorKind.Unsupported`).
 
 The package depends on `@arkdb/core` 1.1.0 in the source workspace. Driver
 delivery will compile the selected source dependency closure into one
@@ -33,9 +32,8 @@ passed separately through transient `PostgresConnectionOptions`.
 ## Compile-only skeleton usage
 
 The factory constructs an idle connection that can be closed offline; calling
-querying, streaming, prepared execution, schema context changes, transactions,
-or health checks before `connect()` rejects with `ArkDbErrorKind.Protocol`,
-calling `cancel()` when no query is running resolves
+querying, streaming, prepared execution, or health checks before `connect()`
+rejects with `ArkDbErrorKind.Protocol`, calling `cancel()` while idle resolves
 `CancellationOutcome.NotRunning`, and unimplemented metadata, server metrics, or
 statement deadlines reject with `ArkDbErrorKind.Unsupported`.
 

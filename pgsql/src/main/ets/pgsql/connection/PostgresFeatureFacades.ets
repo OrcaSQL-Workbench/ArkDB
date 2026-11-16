@@ -90,15 +90,11 @@ export class PostgresConnectionTransactions implements DbTransactionController {
 
 export class PostgresConnectionCancellation implements DbExecutionController {
   constructor(controller: DbExecutionController) {
-    if (controller === null || controller === undefined) {
-      throw ArkDbError.validation('PostgreSQL execution controller is required.');
-    }
+    if (controller === null || controller === undefined) throw ArkDbError.validation('PostgreSQL execution controller is required.');
     cancellationDelegates.set(this, controller);
   }
   cancel(): Promise<QueryCancellationResult> { return this.delegate().cancel(); }
-  isInterruptionError(error: ArkDbError): boolean {
-    return this.delegate().isInterruptionError(error);
-  }
+  isInterruptionError(error: ArkDbError): boolean { return this.delegate().isInterruptionError(error); }
   private delegate(): DbExecutionController {
     const d = cancellationDelegates.get(this);
     if (d === undefined) throw ArkDbError.protocol('PostgreSQL cancellation facade is uninitialized.');

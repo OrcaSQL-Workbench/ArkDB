@@ -59,12 +59,9 @@ export default function publicInterfaceTest(): void {
         await expectUnconnectedProtocol(op);
       }
       const idleCancel = await connection.features.cancellation!.cancel();
-      const pgInterrupt = new PostgresError(ArkDbErrorKind.Server, 'canceled', '57014', '57014');
-      pgInterrupt.severity = 'ERROR';
-      expect(idleCancel.outcome === CancellationOutcome.NotRunning &&
-        idleCancel.connectionReuse === ConnectionReuse.NotReady &&
-        connection.features.cancellation!.isInterruptionError(pgInterrupt) &&
-        !connection.isInterruptionError(ArkDbError.cancelled('cancelled'))).assertTrue();
+      const pgInterrupt = new PostgresError(ArkDbErrorKind.Server, 'canceled', '57014', '57014'); pgInterrupt.severity = 'ERROR';
+      expect(idleCancel.outcome === CancellationOutcome.NotRunning && idleCancel.connectionReuse === ConnectionReuse.NotReady &&
+        connection.features.cancellation!.isInterruptionError(pgInterrupt) && !connection.isInterruptionError(ArkDbError.cancelled('cancelled'))).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
       await connection.close();
       expect((await connection.cancel()).connectionReuse).assertEqual(ConnectionReuse.Closed);

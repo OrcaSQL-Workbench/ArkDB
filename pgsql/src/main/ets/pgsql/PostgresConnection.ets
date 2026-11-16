@@ -216,4 +216,5 @@ class TransactionRunnerLifecycleHost extends QueryStreamLifecycleHost implements
   enterExecuting(): void { this.setPhase(PostgresCommandPhase.Executing); }
   clearConsumerError(): void { this.lifecycle.clearConsumerError(this.scope); }
   isSynchronized(): boolean { return this.lifecycle.isCommandSynchronized(this.scope); }
+  waitBeforeStep(settlement: PostgresCommandCloseSettlement): Promise<void> | null { return this.lifecycle.waitForStepReady(this.scope, settlement); }
 }

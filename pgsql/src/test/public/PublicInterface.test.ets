@@ -189,23 +189,17 @@ export default function publicInterfaceTest(): void {
       await expectNotConnected(async (): Promise<void> => {
         await connection.postgresFeatures.transactions!.run(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => {});
       });
-      const idleCancel = await connection.cancel();
-      const facadeCancel = await connection.features.cancellation!.cancel();
-      const pgInterrupt = new PostgresError(ArkDbErrorKind.Server, 'canceled', '57014', '57014');
-      pgInterrupt.severity = 'ERROR';
-      expect(idleCancel.outcome === CancellationOutcome.NotRunning &&
-        idleCancel.connectionReuse === ConnectionReuse.NotReady &&
-        facadeCancel.outcome === CancellationOutcome.NotRunning &&
-        facadeCancel.connectionReuse === ConnectionReuse.NotReady &&
-        connection.isInterruptionError(pgInterrupt) &&
-        connection.features.cancellation!.isInterruptionError(pgInterrupt) &&
+      const idleCancel = await connection.cancel(); const facadeCancel = await connection.features.cancellation!.cancel();
+      const pgInterrupt = new PostgresError(ArkDbErrorKind.Server, 'canceled', '57014', '57014'); pgInterrupt.severity = 'ERROR';
+      expect(idleCancel.outcome === CancellationOutcome.NotRunning && idleCancel.connectionReuse === ConnectionReuse.NotReady &&
+        facadeCancel.outcome === CancellationOutcome.NotRunning && facadeCancel.connectionReuse === ConnectionReuse.NotReady &&
+        connection.isInterruptionError(pgInterrupt) && connection.features.cancellation!.isInterruptionError(pgInterrupt) &&
         !connection.isInterruptionError(ArkDbError.cancelled('cancelled'))).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
       await connection.close();
       await connection.close();
       const closedCancel = await connection.cancel();
-      expect(closedCancel.outcome === CancellationOutcome.NotRunning &&
-        closedCancel.connectionReuse === ConnectionReuse.Closed).assertTrue();
+      expect(closedCancel.outcome === CancellationOutcome.NotRunning && closedCancel.connectionReuse === ConnectionReuse.Closed).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Closed);
     });
 

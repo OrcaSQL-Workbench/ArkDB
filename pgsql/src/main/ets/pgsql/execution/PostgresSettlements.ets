@@ -23,6 +23,7 @@ export class PostgresCommandCloseSettlement {
   readonly closeRequested: Promise<ArkDbError>;
   readonly settled: Promise<void>;
   private closeError: ArkDbError | null = null;
+  private closedByUser: boolean = false;
   private abandonError: ArkDbError | null = null;
   private abandonClaimed: boolean = false;
   private settledNow: boolean = false;
@@ -40,7 +41,7 @@ export class PostgresCommandCloseSettlement {
     this.settled = new Promise<void>(
       (resolve: () => void): void => { this.resolveSettled = resolve; });
   }
-  get isCloseRequested(): boolean { return this.closeError !== null; }
+  get isCloseRequested(): boolean { return this.closedByUser; }
   get closeReason(): ArkDbError | null { return this.closeError; }
   get consumerAbandonReason(): ArkDbError | null { return this.abandonError; }
   get isConsumerAbandonClaimed(): boolean { return this.abandonClaimed; }
@@ -60,15 +61,12 @@ export class PostgresCommandCloseSettlement {
   }
   discardUndelivered(): void { const fn = this.undeliveredCleanup; this.undeliveredCleanup = null; if (!this.delivered && fn !== null) fn(); }
   markDelivered(): void { this.delivered = true; this.undeliveredCleanup = null; }
-  signalClose(error: ArkDbError): void {
-    if (this.settledNow || this.closeError !== null) return;
-    this.closeError = error; this.abandonListeners.clear();
-    this.discardUndelivered();
-    this.resolveClose(error);
+  signalClose(error: ArkDbError): void { if (!this.settledNow && this.closeError === null) { this.closedByUser = true; this.abortWith(error); } }
+  signalFatal(error: ArkDbError): void { if (!this.settledNow && this.closeError === null) this.abortWith(error); }
+  private abortWith(error: ArkDbError): void {
+    this.closeError = error; this.abandonListeners.clear(); this.discardUndelivered(); this.resolveClose(error);
     const ls = this.closeListeners; this.closeListeners = new Set<(error: ArkDbError) => void>(); for (const fn of ls) fn(error);
-    const pending = this.waiters;
-    this.waiters = new Set<(error: ArkDbError) => void>();
-    for (const waiter of pending) waiter(error);
+    const pending = this.waiters; this.waiters = new Set<(error: ArkDbError) => void>(); for (const waiter of pending) waiter(error);
   }
   markSettled(preservePendingDelivery: boolean = false): void {
     if (this.settledNow) return;

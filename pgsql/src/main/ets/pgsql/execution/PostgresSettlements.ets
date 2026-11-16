@@ -28,6 +28,7 @@ export class PostgresCommandCloseSettlement {
   private undeliveredCleanup: (() => void) | null = null;
   private resolveClose: (error: ArkDbError) => void = (_error: ArkDbError): void => {};
   private resolveSettled: () => void = (): void => {};
+  private closeListeners: Set<(error: ArkDbError) => void> = new Set<(error: ArkDbError) => void>();
   private waiters: Set<(error: ArkDbError) => void> = new Set<(error: ArkDbError) => void>();
   constructor(scope: PostgresCommandScope) {
     this.scope = scope;
@@ -39,6 +40,10 @@ export class PostgresCommandCloseSettlement {
   get isCloseRequested(): boolean { return this.closeError !== null; }
   get closeReason(): ArkDbError | null { return this.closeError; }
   get isSettled(): boolean { return this.settledNow; }
+  onCloseRequested(listener: (error: ArkDbError) => void): void {
+    if (this.closeError !== null) { listener(this.closeError); return; }
+    if (!this.settledNow) this.closeListeners.add(listener);
+  }
   deferUndeliveredCleanup(cleanup: () => void): void {
     const safe = (): void => { try { cleanup(); } catch (_e) {} };
     if (this.closeError !== null || this.settledNow || this.delivered) { safe(); return; }
@@ -51,13 +56,17 @@ export class PostgresCommandCloseSettlement {
     this.closeError = error;
     this.discardUndelivered();
     this.resolveClose(error);
+    const listeners = this.closeListeners;
+    this.closeListeners = new Set<(error: ArkDbError) => void>();
+    for (const listener of listeners) listener(error);
     const pending = this.waiters;
     this.waiters = new Set<(error: ArkDbError) => void>();
     for (const waiter of pending) waiter(error);
   }
   markSettled(preservePendingDelivery: boolean = false): void {
     if (this.settledNow) return;
-    this.settledNow = true; if (!preservePendingDelivery) this.discardUndelivered();
+    this.settledNow = true; this.closeListeners.clear();
+    if (!preservePendingDelivery) this.discardUndelivered();
     const pending = this.waiters;
     this.waiters = new Set<(error: ArkDbError) => void>();
     if (pending.size > 0) {

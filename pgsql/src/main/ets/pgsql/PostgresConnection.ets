@@ -20,7 +20,7 @@ import {
 } from './connection/PostgresConnectionLifecycle';
 import {
   PostgresConnectionContext, PostgresConnectionHealth, PostgresConnectionStreaming,
-  createPostgresContextPolicy
+  PostgresConnectionTransactions, createPostgresContextPolicy
 } from './connection/PostgresFeatureFacades';
 import {
   PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase, PostgresCommandScope
@@ -28,6 +28,9 @@ import {
 import { PostgresCommandCloseSettlement } from './execution/PostgresSettlements';
 import { PostgresPreparedFrames } from './features/prepared/PostgresParameterEncoder';
 import { PostgresConnectionPreparedExecutor } from './features/prepared/PostgresPreparedExecutor';
+import {
+  PostgresConnectionTransactionRunner, PostgresTransactionCommandHost, PostgresTransactionFailure
+} from './features/transaction/PostgresTransactionRunner';
 import {
   PostgresConnectionConfig, isWellFormedPostgresText, resolvePostgresDatabaseName
 } from './model/PostgresConnectionConfig';
@@ -59,11 +62,16 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
     this.features.context = new PostgresConnectionContext(
       (): DatabaseContextPolicy => this.contextPolicy,
       (context: DatabaseContext): Promise<void> => this.changeContext(context));
+    this.features.transactions = new PostgresConnectionTransactions(this);
     this.postgresFeatures.prepared = new PostgresConnectionPreparedExecutor(
       (frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> =>
         this.executeExtendedQuery(frames, options),
       (frames: PostgresPreparedFrames, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
         this.streamPreparedQuery(frames, options, sink));
+    this.postgresFeatures.transactions = new PostgresConnectionTransactionRunner(
+      (op: (host: PostgresTransactionCommandHost, channel: PostgresMessageChannel,
+        settlement: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>): Promise<PostgresTransactionFailure | null> =>
+        this.runTransactionScope(op));
   }
 
   get contextPolicy(): DatabaseContextPolicy {
@@ -179,6 +187,15 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
       (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> =>
         runPostgresPortalStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, options, sink));
   }
+
+  private runTransactionScope(
+    op: (host: PostgresTransactionCommandHost, channel: PostgresMessageChannel,
+      settlement: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>
+  ): Promise<PostgresTransactionFailure | null> {
+    return this.lifecycle.runCommand<PostgresTransactionFailure | null>(PostgresCommandKind.Transaction,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresTransactionFailure | null> =>
+        op(new TransactionRunnerLifecycleHost(this.lifecycle, s), ch, st));
+  }
 }
 
 class SimpleQueryLifecycleHost implements PostgresSimpleQueryHost {
@@ -194,10 +211,16 @@ class SimpleQueryLifecycleHost implements PostgresSimpleQueryHost {
 
 class QueryStreamLifecycleHost extends SimpleQueryLifecycleHost
   implements PostgresQueryStreamHost, PostgresExtendedQueryHost {
-  private setPhase(phase: PostgresCommandPhase): void {
+  protected setPhase(phase: PostgresCommandPhase): void {
     if (this.lifecycle.commandGate.isOwner(this.scope) && this.scope.phase !== PostgresCommandPhase.Closing) this.lifecycle.commandGate.setPhase(this.scope, phase);
   }
   enterStreaming(): void { this.setPhase(PostgresCommandPhase.Streaming); }
   enterDraining(): void { this.setPhase(PostgresCommandPhase.Draining); }
   latchConsumerError(error: ArkDbError, synchronized: boolean = false): void { this.lifecycle.latchConsumerError(this.scope, error, synchronized); }
+}
+
+class TransactionRunnerLifecycleHost extends QueryStreamLifecycleHost implements PostgresTransactionCommandHost {
+  enterExecuting(): void { this.setPhase(PostgresCommandPhase.Executing); }
+  clearConsumerError(): void { this.lifecycle.clearConsumerError(this.scope); }
+  isSynchronized(): boolean { return this.lifecycle.isCommandSynchronized(this.scope); }
 }

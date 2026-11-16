@@ -111,17 +111,13 @@ export default function publicInterfaceTest(): void {
       expectAllCapabilitiesFalse(capabilities);
       const connection = new PostgresDriverFactory().create(
         new PostgresConnectionOptions(validConfig(), 'secret'));
-      const prepared: PostgresPreparedExecutor | undefined =
-        connection.postgresFeatures.prepared;
-      const txRunner: PostgresTransactionRunner | undefined =
-        connection.postgresFeatures.transactions;
-      const txSession: PostgresSession | null = null;
-      const txOptions = new PostgresTransactionOptions();
+      const prepared: PostgresPreparedExecutor | undefined = connection.postgresFeatures.prepared;
+      const txRunner: PostgresTransactionRunner | undefined = connection.postgresFeatures.transactions;
+      const txSession: PostgresSession | null = null; const txOptions = new PostgresTransactionOptions();
       const paramValue: PostgresParameterValue = new Uint8Array([0x01, 0x02]);
       const param = new PostgresParameter(PostgresParameterType.Bytea, paramValue);
-      expect(prepared !== undefined && txRunner === undefined && txSession === null &&
-        connection.features.transactions === undefined &&
-        txOptions.isolation === PostgresTransactionIsolation.ReadCommitted).assertTrue();
+      expect(prepared !== undefined && txRunner !== undefined && txSession === null &&
+        connection.features.transactions !== undefined && txOptions.isolation === PostgresTransactionIsolation.ReadCommitted).assertTrue();
       expect(param.type).assertEqual('bytea');
       expect((param.value as Uint8Array).length).assertEqual(2);
       expectAllCapabilitiesFalse(new PostgresDriverFactory().capabilities);
@@ -137,13 +133,14 @@ export default function publicInterfaceTest(): void {
       expect(connection.features.context!.contextPolicy.schemaChange)
         .assertEqual(ContextChangeMode.InPlace);
       expect(JSON.stringify(connection.features))
-        .assertEqual('{"streaming":{},"health":{},"context":{}}');
-      expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{}}');
+        .assertEqual('{"streaming":{},"health":{},"context":{},"transactions":{}}');
+      expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{},"transactions":{}}');
       expect(quotePostgresIdentifier(['public', 'my"tbl'])).assertEqual('"public"."my""tbl"');
       expect(postgresPlaceholders(3)).assertEqual('$1,$2,$3');
       expect(postgresPlaceholders(2, 4)).assertEqual('$4,$5');
       expect(requirePostgresFeatures(connection) === connection.postgresFeatures).assertTrue();
       expect(requirePostgresFeatures(connection).prepared === prepared).assertTrue();
+      expect(requirePostgresFeatures(connection).transactions === txRunner).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
     });
 
@@ -184,6 +181,13 @@ export default function publicInterfaceTest(): void {
       await expectNotConnected(async (): Promise<void> => { await connection.begin(); });
       await expectNotConnected(async (): Promise<void> => { await connection.commit(); });
       await expectNotConnected(async (): Promise<void> => { await connection.rollback(); });
+      expect(connection.features.transactions !== undefined).assertTrue();
+      await expectNotConnected(async (): Promise<void> => { await connection.features.transactions!.begin(); });
+      await expectNotConnected(async (): Promise<void> => { await connection.features.transactions!.commit(); });
+      await expectNotConnected(async (): Promise<void> => { await connection.features.transactions!.rollback(); });
+      await expectNotConnected(async (): Promise<void> => {
+        await connection.postgresFeatures.transactions!.run(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => {});
+      });
       await expectUnsupported(async (): Promise<void> => { await connection.cancel(); });
       expectSyncUnsupported((): void => {
         connection.isInterruptionError(ArkDbError.cancelled('cancelled'));
@@ -220,7 +224,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsSsl).assertTrue();
   expect(capabilities.supportsCatalogs).assertTrue();
   expect(capabilities.supportsSchemas).assertTrue();
-  expect(capabilities.supportsTransactions).assertFalse();
+  expect(capabilities.supportsTransactions).assertTrue();
   expect(capabilities.supportsMetadata).assertFalse();
   expect(capabilities.supportsMultipleResults).assertTrue();
   expect(capabilities.supportsStreamingResults).assertTrue();

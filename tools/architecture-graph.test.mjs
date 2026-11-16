@@ -371,6 +371,12 @@ const ARCHITECTURE_POLICY = {
       message: 'PostgreSQL prepared feature must not depend on connection, driver, or byte transport implementations.'
     },
     {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/features\/transaction\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|connection\/|driver\/|transport\/)/,
+      transitive: true,
+      message: 'PostgreSQL transaction feature must not depend on connection, driver, or byte transport implementations.'
+    },
+    {
       from: /^pgsql\/src\/main\/ets\/pgsql\/(?:protocol|transport)\//,
       to: /^pgsql\/src\/main\/ets\/pgsql\/features\//,
       transitive: true,
@@ -491,7 +497,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, and P20A own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, P20A, and P20B own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -518,6 +524,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, and P20A own exactly 
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameterEncoder.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresPreparedExecutor.ets',
     'pgsql/src/main/ets/pgsql/features/transaction/PostgresTransactionOptions.ets',
+    'pgsql/src/main/ets/pgsql/features/transaction/PostgresTransactionRunner.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresConnectionConfig.ets',
     'pgsql/src/main/ets/pgsql/model/PostgresModels.ets',
     'pgsql/src/main/ets/pgsql/protocol/PostgresByteCodec.ets',
@@ -2535,7 +2542,19 @@ test('enforces PostgreSQL api, parameter leaf, execution, lifecycle, and prepare
     ['command/PostgresTransactionCommand.ets', 'PostgresConnection.ets',
       /PostgreSQL command implementations must not depend on connection or driver facades/],
     ['command/PostgresTransactionCommand.ets', 'driver/PostgresDriverFactory.ets',
-      /PostgreSQL command implementations must not depend on connection or driver facades/]
+      /PostgreSQL command implementations must not depend on connection or driver facades/],
+    ['api/PostgresTransactionContracts.ets', 'features/transaction/PostgresTransactionRunner.ets',
+      /PostgreSQL api may import only contract and model leaves/],
+    ['features/transaction/PostgresTransactionOptions.ets', 'features/transaction/PostgresTransactionRunner.ets',
+      /PostgreSQL contract and model leaves must not depend on implementations/],
+    ['features/transaction/PostgresTransactionRunner.ets', 'transport/PostgresTcpTransport.ets',
+      /PostgreSQL transaction feature must not depend on connection, driver, or byte transport implementations/],
+    ['features/transaction/PostgresTransactionRunner.ets', 'connection/PostgresConnectionLifecycle.ets',
+      /PostgreSQL transaction feature must not depend on connection, driver, or byte transport implementations/],
+    ['features/transaction/PostgresTransactionRunner.ets', 'driver/PostgresDriverFactory.ets',
+      /PostgreSQL transaction feature must not depend on connection, driver, or byte transport implementations/],
+    ['features/transaction/PostgresTransactionRunner.ets', 'PostgresConnection.ets',
+      /PostgreSQL transaction feature must not depend on connection, driver, or byte transport implementations/]
   ];
   for (const [fromRel, toRel, expected] of cases) {
     const source = `pgsql/src/main/ets/pgsql/${fromRel}`;

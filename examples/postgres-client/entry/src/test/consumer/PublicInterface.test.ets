@@ -29,13 +29,14 @@ export default function publicInterfaceTest(): void {
         .assertEqual(ContextChangeMode.Reconnect);
       const txRunner: PostgresTransactionRunner | undefined = connection.postgresFeatures.transactions;
       const txSession: PostgresSession | null = null;
-      expect(connection.postgresFeatures.prepared !== undefined && txRunner === undefined &&
-        txSession === null && connection.features.transactions === undefined &&
+      expect(connection.postgresFeatures.prepared !== undefined && txRunner !== undefined &&
+        txSession === null && connection.features.transactions !== undefined &&
         new PostgresTransactionOptions().isolation === PostgresTransactionIsolation.ReadCommitted)
         .assertTrue();
-      expect(requirePostgresFeatures(connection).prepared === connection.postgresFeatures.prepared).assertTrue();
-      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{},"context":{}}');
-      expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{}}');
+      expect(requirePostgresFeatures(connection).prepared === connection.postgresFeatures.prepared &&
+        requirePostgresFeatures(connection).transactions === txRunner).assertTrue();
+      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{},"context":{},"transactions":{}}');
+      expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{},"transactions":{}}');
       expect(quotePostgresIdentifier(['public', 'my"tbl'])).assertEqual('"public"."my""tbl"');
       expect(postgresPlaceholders(3)).assertEqual('$1,$2,$3');
       expect(postgresPlaceholders(2, 4)).assertEqual('$4,$5');
@@ -49,9 +50,10 @@ export default function publicInterfaceTest(): void {
         async (): Promise<void> => { await connection.postgresFeatures.prepared!.queryStream('SELECT 1', [], new QueryOptions(), new ConsumerNoopSink()); },
         (): Promise<void> => connection.changeContext(new DatabaseContext()),
         (): Promise<void> => connection.features.context!.changeContext(new DatabaseContext()),
-        async (): Promise<void> => { await connection.begin(); },
-        async (): Promise<void> => { await connection.commit(); },
-        async (): Promise<void> => { await connection.rollback(); },
+        async (): Promise<void> => { await connection.begin(); }, async (): Promise<void> => { await connection.commit(); },
+        async (): Promise<void> => { await connection.rollback(); }, async (): Promise<void> => { await connection.features.transactions!.begin(); },
+        async (): Promise<void> => { await connection.features.transactions!.commit(); }, async (): Promise<void> => { await connection.features.transactions!.rollback(); },
+        async (): Promise<void> => { await connection.postgresFeatures.transactions!.run(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => {}); },
         (): Promise<void> => connection.ping(), (): Promise<void> => connection.features.health!.ping()]) {
         await expectUnconnectedProtocol(op);
       }
@@ -76,7 +78,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsSsl).assertTrue();
   expect(capabilities.supportsCatalogs).assertTrue();
   expect(capabilities.supportsSchemas).assertTrue();
-  expect(capabilities.supportsTransactions).assertFalse();
+  expect(capabilities.supportsTransactions).assertTrue();
   expect(capabilities.supportsMetadata).assertFalse();
   expect(capabilities.supportsMultipleResults).assertTrue();
   expect(capabilities.supportsStreamingResults).assertTrue();

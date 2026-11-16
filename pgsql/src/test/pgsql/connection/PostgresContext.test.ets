@@ -37,7 +37,7 @@ export default function postgresContextTest(): void {
         p2.schemaChange === ContextChangeMode.InPlace && !p2.catalogsAreSchemas).assertTrue();
       p2.schemaChange = ContextChangeMode.Reconnect;
       expect(conn.contextPolicy.schemaChange).assertEqual(ContextChangeMode.InPlace);
-      expect(JSON.stringify(conn.features)).assertEqual('{"streaming":{},"health":{},"context":{}}');
+      expect(JSON.stringify(conn.features)).assertEqual('{"streaming":{},"health":{},"context":{},"transactions":{}}');
       expect(JSON.stringify(conn).indexOf('secret-pw')).assertEqual(-1);
 
       const sub = new CustomContextConnection(explicitCfg);

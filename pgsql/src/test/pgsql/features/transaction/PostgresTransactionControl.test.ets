@@ -72,7 +72,7 @@ export default function postgresTransactionControlTest(): void {
       const conn = new PostgresDriverFactory().create(new PostgresConnectionOptions(makeConfig(), 'pw'));
       const caps: PostgresDriverCapabilities = new PostgresDriverFactory().capabilities;
       const txRunner: PostgresTransactionRunner | undefined = conn.postgresFeatures.transactions;
-      expect(!caps.supportsTransactions && conn.features.transactions === undefined && txRunner === undefined).assertTrue();
+      expect(caps.supportsTransactions && conn.features.transactions !== undefined && txRunner !== undefined).assertTrue();
       const ranTag = await new StubTransactionRunner().run<string>(serDeferrable, async (s: PostgresSession): Promise<string> => {
         await s.savepoint('sp1'); await s.rollbackTo('sp1'); await s.releaseSavepoint('sp1');
         return s.serverInfo.driverId;
@@ -98,8 +98,8 @@ export default function postgresTransactionControlTest(): void {
       const conn = openReady(tp, new PostgresCommandGate(new KindObserver(kinds)));
       await conn.connect();
       const facade = new PostgresConnectionTransactions(conn);
-      expect(JSON.stringify(facade) === '{}' && conn.features.transactions === undefined &&
-        conn.postgresFeatures.transactions === undefined).assertTrue();
+      expect(JSON.stringify(facade) === '{}' && conn.features.transactions !== undefined &&
+        conn.postgresFeatures.transactions !== undefined).assertTrue();
       tp.writes.length = 0; tp.rawWrites.length = 0;
 
       tp.enqueue([concatFrames([msgCmd('BEGIN'), msgReady(0x54)])]);

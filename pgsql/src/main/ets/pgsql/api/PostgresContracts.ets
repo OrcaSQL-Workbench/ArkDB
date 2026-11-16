@@ -8,6 +8,7 @@ import {
 import { PostgresPreparedExecutor } from './PostgresPreparedContracts';
 
 export class PostgresDriverCapabilities extends DriverCapabilities {
+  supportsTransactions: boolean = true;
   supportsCatalogs: boolean = true;
   supportsSchemas: boolean = true;
   supportsPreparedStatements: boolean = true;

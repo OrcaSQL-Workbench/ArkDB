@@ -8,6 +8,26 @@ import { decodePostgresDataRow, POSTGRES_TEXT_FORMAT_CODE, toPostgresColumnDefs 
 
 const DEFAULT_QUERY_OPTIONS: QueryOptions = new QueryOptions();
 enum SimpleQuerySubState { BetweenStatements = 0, InRowResult = 1, InCopyInAbort = 2, InCopyOutData = 3, InCopyOutDone = 4 }
+export class PostgresBufferedDrain {
+  private readonly settlement: PostgresCommandCloseSettlement; private readonly getDeadline: () => number;
+  private onWake: (() => void) | null = null; abandon: ArkDbError | null = null; fatal: ArkDbError | null = null; latched: ArkDbError | null = null;
+  readonly setWake: (w: (() => void) | null, check: boolean) => number;
+  constructor(settlement: PostgresCommandCloseSettlement, getDeadline: () => number, onAbandon: () => void) {
+    this.settlement = settlement; this.getDeadline = getDeadline;
+    this.setWake = (w: (() => void) | null, check: boolean): number => { this.onWake = w; if (check) this.throwIfAborted(); return this.getDeadline(); };
+    if (settlement.consumerAbandonReason !== null) { settlement.markConsumerAbandonClaimed(); throw settlement.consumerAbandonReason; }
+    settlement.onConsumerAbandoned((abErr: ArkDbError): void => {
+      if (this.abandon !== null || this.latched !== null || this.fatal !== null || settlement.closeReason !== null) return;
+      settlement.markConsumerAbandonClaimed(); this.abandon = abErr;
+      try { onAbandon(); this.wake(); } catch (te) { const rf = postgresAppendCleanupError(abErr, toPostgresArkDbError(te as Object)); this.fatal = rf; this.abandon = rf; this.wake(); }
+    });
+  }
+  wake(): void { if (this.onWake !== null) { const w = this.onWake; this.onWake = null; w(); } }
+  record(e: ArkDbError): void { if (this.abandon !== null) this.abandon = postgresAppendCleanupError(this.abandon, e); else if (this.latched === null) this.latched = e; }
+  throwIfAborted(): void { if (this.fatal !== null) throw this.fatal; if (this.settlement.closeReason !== null) throw this.settlement.closeReason; }
+  throwIfFailed(): void { if (this.abandon !== null) { const out = this.abandon; this.abandon = null; throw out; } if (this.latched !== null) throw this.latched; this.throwIfAborted(); }
+  toError(err: Object): ArkDbError { const typed = toPostgresArkDbError(err); return this.abandon !== null && typed !== this.abandon ? postgresAppendCleanupError(this.abandon, typed) : typed; }
+}
 
 export interface PostgresCommandTagCounts {
   readonly rowCountExact: bigint | undefined; readonly affectedRowsExact: bigint | undefined; readonly affectedRows: number;
@@ -30,17 +50,23 @@ export function parsePostgresCommandCompleteTag(tag: string): PostgresCommandTag
 }
 
 export async function runPostgresSimpleQuery(host: PostgresSimpleQueryHost, channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, sql: string, options: QueryOptions = DEFAULT_QUERY_OPTIONS): Promise<PostgresQueryResult> {
-  const opts = snapshotQueryOptions(options); const startedAtMs = readClockMs(host.timers);
-  await writeQueryFrame(channel, settlement, 0x51, PostgresFrontendSerializer.query(sql), host.timers, -1);
+  const opts = snapshotQueryOptions(options);
   let subState = SimpleQuerySubState.BetweenStatements; const results: PostgresQueryResult[] = [];
   let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0; let currentResult: PostgresQueryResult | null = null; let totalResultBytes = 0;
-  let draining = false; let sawServerError = false; let drainedBytes = 0; let drainDeadlineMs = -1; let latchedError: ArkDbError | null = null;
+  let draining = false; let sawServerError = false; let drainedBytes = 0; let drainDeadlineMs = -1;
+  const drain = new PostgresBufferedDrain(settlement, (): number => drainDeadlineMs, (): void => {
+    discardResults(results, currentResult); currentResult = null; activeColumns = []; drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs); draining = true;
+  });
+  const startedAtMs = readClockMs(host.timers);
   try {
+    await writeQueryFrame(channel, settlement, 0x51, PostgresFrontendSerializer.query(sql), host.timers, drainDeadlineMs, drain.setWake);
     while (true) {
-      const raw = await readQueryMessage(channel, settlement, host.timers, drainDeadlineMs, draining ? opts.maxDrainBytes - drainedBytes : MAX_POSTGRES_MESSAGE_BYTES + 1);
+      const wasDrainingBefore = draining;
+      const raw = await readWakeableQueryMessage(channel, settlement, host.timers, (): boolean => draining, (): number => opts.maxDrainBytes - drainedBytes, drain.setWake);
+      const wasDraining = wasDrainingBefore || draining;
       let parsed: PostgresBackendMessage | null = null;
       try {
-        if (draining) drainedBytes = accountDrainedBytes(drainedBytes, raw.payload.length, opts.maxDrainBytes);
+        if (wasDraining) drainedBytes = accountDrainedBytes(drainedBytes, raw.payload.length, opts.maxDrainBytes);
         if (subState === SimpleQuerySubState.InCopyOutData && raw.type === 0x64) continue;
         if (!isSimpleQueryFrameType(raw.type)) throw ArkDbError.protocol('Unexpected PostgreSQL backend message during simple query.');
         const msg = PostgresBackendParser.parse(raw); parsed = msg;
@@ -51,7 +77,7 @@ export async function runPostgresSimpleQuery(host: PostgresSimpleQueryHost, chan
           sawServerError = true; drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs);
           if (subState === SimpleQuerySubState.InCopyInAbort) { subState = SimpleQuerySubState.BetweenStatements; continue; }
           discardResults(results, currentResult); currentResult = null; activeColumns = []; activeColumnCount = 0;
-          draining = true; subState = SimpleQuerySubState.BetweenStatements; if (latchedError === null) latchedError = pgErr; continue;
+          draining = true; subState = SimpleQuerySubState.BetweenStatements; drain.record(pgErr); continue;
         }
         if (subState === SimpleQuerySubState.BetweenStatements) {
           if (sawServerError && !(msg instanceof PostgresReadyForQuery)) throw ArkDbError.protocol('Unexpected PostgreSQL backend message after ErrorResponse.');
@@ -68,7 +94,7 @@ export async function runPostgresSimpleQuery(host: PostgresSimpleQueryHost, chan
             if (badFormat !== null) {
               discardResults(results, currentResult); currentResult = null; activeColumns = []; activeColumnCount = msg.columns.length;
               draining = true; drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs);
-              if (latchedError === null) latchedError = ArkDbError.unsupported('PostgreSQL non-text result format code ' + badFormat + ' is not supported.');
+              drain.record(ArkDbError.unsupported('PostgreSQL non-text result format code ' + badFormat + ' is not supported.'));
             } else if (draining) { activeColumns = []; activeColumnCount = msg.columns.length; }
             else {
               if (results.length + 1 > opts.maxResultSets) throw ArkDbError.protocol('PostgreSQL buffered query exceeded maxResultSets.');
@@ -80,20 +106,20 @@ export async function runPostgresSimpleQuery(host: PostgresSimpleQueryHost, chan
           }
           if (msg instanceof PostgresCopyInResponse) {
             discardResults(results, currentResult); currentResult = null; draining = true; drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs);
-            if (latchedError === null) latchedError = ArkDbError.unsupported('PostgreSQL COPY FROM STDIN is not supported.');
-            await writeQueryFrame(channel, settlement, 0x66, PostgresFrontendSerializer.copyFail('PostgreSQL COPY is not supported.'), host.timers, drainDeadlineMs);
+            drain.record(ArkDbError.unsupported('PostgreSQL COPY FROM STDIN is not supported.'));
+            await writeQueryFrame(channel, settlement, 0x66, PostgresFrontendSerializer.copyFail('PostgreSQL COPY is not supported.'), host.timers, drainDeadlineMs, drain.setWake);
             subState = SimpleQuerySubState.InCopyInAbort; continue;
           }
           if (msg instanceof PostgresCopyOutResponse) {
             discardResults(results, currentResult); currentResult = null; draining = true; drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs);
-            if (latchedError === null) latchedError = ArkDbError.unsupported('PostgreSQL COPY TO STDOUT is not supported.');
+            drain.record(ArkDbError.unsupported('PostgreSQL COPY TO STDOUT is not supported.'));
             subState = SimpleQuerySubState.InCopyOutData; continue;
           }
           if (msg instanceof PostgresCopyBothResponse) { const unsupported = ArkDbError.unsupported('PostgreSQL COPY BOTH is not supported.'); await host.retire(unsupported); throw unsupported; }
           if (msg instanceof PostgresReadyForQuery) {
             const finishedAtMs = readClockMs(host.timers);
             if (drainDeadlineMs >= 0 && finishedAtMs >= drainDeadlineMs) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
-            host.applyReadyStatus(msg.status); if (latchedError !== null) throw latchedError; if (settlement.closeReason !== null) throw settlement.closeReason;
+            host.applyReadyStatus(msg.status); drain.throwIfFailed();
             const primary = finalizeQueryResults(results, host.sessionStatus, Math.max(0, finishedAtMs - startedAtMs));
             settlement.deferUndeliveredCleanup((): void => scrubQueryResult(primary)); return primary;
           }
@@ -127,7 +153,7 @@ export async function runPostgresSimpleQuery(host: PostgresSimpleQueryHost, chan
         throw ArkDbError.protocol('Unexpected PostgreSQL backend message during simple query.');
       } finally { raw.payload.fill(0); scrubBackendMessage(parsed); }
     }
-  } catch (err) { discardResults(results, currentResult); throw err as Error; }
+  } catch (err) { discardResults(results, currentResult); throw drain.toError(err as Object); }
 }
 
 export async function runPostgresPing(host: PostgresSimpleQueryHost, channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, options: QueryOptions = DEFAULT_QUERY_OPTIONS): Promise<void> {
@@ -240,10 +266,17 @@ export function raceDrainDeadline<T>(timers: ConnectionTimerPort, deadlineMs: nu
     } catch (e) { if (!done) { done = true; reject(scheduled ? cancelDrainTimer(timers, tid, e as Object)! : toPostgresArkDbError(e as Object)); } }
   });
 }
-export async function writeQueryFrame(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, type: number, frame: Uint8Array, timers: ConnectionTimerPort, drainDeadlineMs: number): Promise<void> {
+export async function writeQueryFrame(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, type: number, frame: Uint8Array, timers: ConnectionTimerPort, drainDeadlineMs: number, setDrainWake?: (w: (() => void) | null, check: boolean) => number): Promise<void> {
   try {
     if (settlement.closeReason !== null) throw settlement.closeReason;
-    await raceDrainDeadline<void>(timers, drainDeadlineMs, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => channel.writeMessage(type, frame.subarray(5))));
+    const dl0 = setDrainWake !== undefined ? setDrainWake(null, true) : drainDeadlineMs;
+    if (dl0 >= 0 || setDrainWake === undefined) { await raceDrainDeadline<void>(timers, dl0, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => { const t = channel.writeMessage(type, frame.subarray(5)); t.then((): void => {}, (): void => {}); return t; })); return; }
+    const task = channel.writeMessage(type, frame.subarray(5)); task.then((): void => {}, (): void => {});
+    let woke = false; const wake = new Promise<void>((res: () => void): void => { setDrainWake((): void => { woke = true; res(); }, false); });
+    try {
+      await settlement.raceClose<void>((): Promise<void> => Promise.race<void>([task, wake])); const dl = setDrainWake(null, true);
+      if (woke) await raceDrainDeadline<void>(timers, dl, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => task));
+    } finally { setDrainWake(null, false); }
   } finally { frame.fill(0); }
 }
 export async function readQueryMessage(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, timers: ConnectionTimerPort, drainDeadlineMs: number, maxFrameBytes: number): Promise<PostgresMessage> {
@@ -256,6 +289,24 @@ export async function readQueryMessage(channel: PostgresMessageChannel, settleme
   } catch (err) {
     abandoned = true; if (hasResolved) { resolvedPayload.fill(0); resolvedPayload = new Uint8Array(0); } throw err as Error;
   }
+}
+export async function readWakeableQueryMessage(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, timers: ConnectionTimerPort,
+  isDraining: () => boolean, getDrainRem: () => number, setDrainWake: (w: (() => void) | null, check: boolean) => number): Promise<PostgresMessage> {
+  const dl0 = setDrainWake(null, true);
+  if (isDraining()) {
+    const rem = getDrainRem(); if (rem < POSTGRES_NORMAL_HEADER_BYTES) throw ArkDbError.protocol('PostgreSQL post-error drain exceeded maxDrainBytes.');
+    return readQueryMessage(channel, settlement, timers, dl0, rem);
+  }
+  let abandoned = false; let hasRes = false; let resBuf = new Uint8Array(0); let inFlight = 0;
+  const task = channel.readMessage((fb: number): number => { inFlight = fb; return isDraining() ? getDrainRem() : MAX_POSTGRES_MESSAGE_BYTES + 1; });
+  task.then((m: PostgresMessage): void => { if (abandoned) m.payload.fill(0); else { hasRes = true; resBuf = m.payload; } }, (): void => {});
+  const wake = new Promise<PostgresMessage | null>((res: (v: PostgresMessage | null) => void): void => { setDrainWake((): void => res(null), false); });
+  try {
+    const first = await settlement.raceClose<PostgresMessage | null>((): Promise<PostgresMessage | null> => Promise.race<PostgresMessage | null>([task, wake]));
+    const dl = setDrainWake(null, true); if (first !== null) return first;
+    if (isDraining() && Math.max(POSTGRES_NORMAL_HEADER_BYTES, inFlight) > getDrainRem()) throw ArkDbError.protocol('PostgreSQL post-error drain exceeded maxDrainBytes.');
+    return await raceDrainDeadline<PostgresMessage>(timers, dl, (): Promise<PostgresMessage> => settlement.raceClose<PostgresMessage>((): Promise<PostgresMessage> => task));
+  } catch (e) { setDrainWake(null, false); abandoned = true; if (hasRes) { resBuf.fill(0); resBuf = new Uint8Array(0); } throw e as Error; }
 }
 export function snapshotQueryOptions(options: QueryOptions): QueryOptions {
   if (options === DEFAULT_QUERY_OPTIONS) return DEFAULT_QUERY_OPTIONS;

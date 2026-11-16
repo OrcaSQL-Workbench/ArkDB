@@ -177,6 +177,13 @@ export class PostgresConnectionLifecycle {
   latchConsumerError(scope: PostgresCommandScope, error: ArkDbError, synchronized: boolean = false): void {
     this.commandGate.assertOwner(scope); this.latchedPrimaryError = error; if (synchronized) this.synchronizedConsumerError = error;
   }
+  clearConsumerError(scope: PostgresCommandScope): void {
+    if (this.commandGate.isOwner(scope)) { this.latchedPrimaryError = null; this.synchronizedConsumerError = null; }
+  }
+  isCommandSynchronized(scope: PostgresCommandScope): boolean {
+    return this.commandGate.isOwner(scope) && !this.closeRequested && this.currentState === ConnectionState.Querying &&
+      !this.unsynchronized && this.pendingIoCount === 0 && !this.awaitingReadyForQuery && this.readySynchronized && this.transport !== null;
+  }
   applyReadyStatus(scope: PostgresCommandScope, ready: PostgresReadyStatus): void {
     this.commandGate.assertOwner(scope);
     if (this.unsynchronized || this.pendingIoCount > 0 || scope.kind === PostgresCommandKind.Connect) {

@@ -11,7 +11,7 @@ export default function postgresPortalStreamTest(): void {
   describe('PostgresPortalStream', () => {
     it('validatesGuardsSnapshotsScrubsAndPreservesCycleFreeJson', 0, async () => {
       const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp, new StepTimers(), 'secret-p19-pw');
-      expect(JSON.stringify(conn.postgresFeatures) === '{"prepared":{}}' && JSON.stringify(conn).indexOf('secret-p19-pw') === -1).assertTrue();
+      expect(JSON.stringify(conn.postgresFeatures) === '{"prepared":{},"transactions":{}}' && JSON.stringify(conn).indexOf('secret-p19-pw') === -1).assertTrue();
       await conn.connect(); tp.writes.length = 0; tp.rawWrites.length = 0;
       const uninit = new PostgresConnectionPreparedExecutor((_f: PostgresPreparedFrames, _o: QueryOptions): Promise<PostgresQueryResult> => Promise.resolve(new PostgresQueryResult()));
       expect((await asyncFail((): Promise<Object> => uninit.queryStream('SELECT 1', [], new QueryOptions(), new RecSink()))).kind).assertEqual(ArkDbErrorKind.Protocol);

@@ -1,12 +1,11 @@
 import { ArkDbError, estimateSqlRowBytes, estimateSqlValueBytes, QueryOptions } from '@arkdb/core';
-import { PostgresCommandCloseSettlement, postgresErrorFromResponse } from '../execution/PostgresSettlements';
+import { PostgresCommandCloseSettlement, postgresErrorFromResponse, toPostgresArkDbError } from '../execution/PostgresSettlements';
 import { PostgresPreparedFrames, scrubPostgresPreparedFrames } from '../features/prepared/PostgresParameterEncoder';
 import { PostgresColumnDef, PostgresQueryResult } from '../model/PostgresModels';
 import { PostgresFrontendSerializer, PostgresFrontendTarget } from '../protocol/PostgresByteCodec';
 import { PostgresBackendMessage, PostgresBackendParser, PostgresBindComplete, PostgresCommandComplete, PostgresCopyBothResponse, PostgresCopyData, PostgresCopyDone, PostgresCopyInResponse, PostgresCopyOutResponse, PostgresDataRow, PostgresEmptyQueryResponse, PostgresErrorResponse, PostgresMessageChannel, PostgresNoData, PostgresParseComplete, PostgresPortalSuspended, PostgresReadyForQuery, PostgresRowDescription } from '../protocol/PostgresMessageChannel';
-import { MAX_POSTGRES_MESSAGE_BYTES, POSTGRES_NORMAL_HEADER_BYTES } from '../protocol/PostgresProtocolConstants';
 import { decodePostgresDataRow, toPostgresColumnDefs } from '../value/PostgresTextValueDecoder';
-import { accountDrainedBytes, consumeAsyncMessage, estimateRowDescBytes, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, parsePostgresCommandCompleteTag, PostgresSimpleQueryHost, readClockMs, readQueryMessage, scrubBackendMessage, scrubQueryResult, scrubSqlRow, snapshotQueryOptions, startDrain, writeQueryFrame } from './PostgresSimpleQuery';
+import { accountDrainedBytes, consumeAsyncMessage, estimateRowDescBytes, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, parsePostgresCommandCompleteTag, PostgresBufferedDrain, PostgresSimpleQueryHost, readClockMs, readWakeableQueryMessage, scrubBackendMessage, scrubQueryResult, scrubSqlRow, snapshotQueryOptions, startDrain, writeQueryFrame } from './PostgresSimpleQuery';
 
 enum ExtendedQueryStage { ExpectParseComplete = 0, ExpectBindComplete = 1, ExpectDescribeResult = 2, ExpectRowResult = 3, ExpectNoDataResult = 4, InCopyOutData = 5, InCopyOutDone = 6, AwaitReadyAfterCommand = 7, AwaitReadyAfterError = 8 }
 export interface PostgresExtendedQueryHost extends PostgresSimpleQueryHost { enterDraining(): void; }
@@ -14,25 +13,25 @@ function isExtendedQueryFrameType(type: number): boolean { return isSimpleQueryF
 
 export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, channel: PostgresMessageChannel,
   settlement: PostgresCommandCloseSettlement, frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> {
-  let currentResult: PostgresQueryResult | null = null;
+  let currentResult: PostgresQueryResult | null = null; let drain: PostgresBufferedDrain | null = null;
   try {
     const opts = snapshotQueryOptions(options);
     if (opts.statementTimeoutMs > 0) throw ArkDbError.unsupported('PostgreSQL statement deadlines are not implemented.');
-    const startedAtMs = readClockMs(host.timers);
-    await writeQueryFrame(channel, settlement, 0x50, frames.parseFrame, host.timers, -1);
-    await writeQueryFrame(channel, settlement, 0x42, frames.bindFrame, host.timers, -1);
-    await writeQueryFrame(channel, settlement, 0x44, PostgresFrontendSerializer.describe(PostgresFrontendTarget.Portal, ''), host.timers, -1);
-    await writeQueryFrame(channel, settlement, 0x45, PostgresFrontendSerializer.execute('', 0), host.timers, -1);
-    await writeQueryFrame(channel, settlement, 0x53, PostgresFrontendSerializer.sync(), host.timers, -1);
-
     let stage = ExtendedQueryStage.ExpectParseComplete;
     let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0; let retainedBytes = 0;
     let draining = false; let sawServerError = false; let drainedBytes = 0; let drainDeadlineMs = -1;
-    let latchedError: ArkDbError | null = null;
     const beginDrain = (): void => {
       drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs);
-      if (!draining) { draining = true; host.enterDraining(); }
+      if (!draining) { draining = true; host.enterDraining(); if (drain !== null) drain.wake(); }
     };
+    const d = new PostgresBufferedDrain(settlement, (): number => drainDeadlineMs, (): void => {
+      if (currentResult !== null) { scrubQueryResult(currentResult); currentResult = null; } activeColumns = []; beginDrain();
+    });
+    drain = d; const startedAtMs = readClockMs(host.timers);
+    const send = (code: number, f: Uint8Array): Promise<void> => writeQueryFrame(channel, settlement, code, f, host.timers, drainDeadlineMs, d.setWake);
+    await send(0x50, frames.parseFrame); await send(0x42, frames.bindFrame);
+    await send(0x44, PostgresFrontendSerializer.describe(PostgresFrontendTarget.Portal, ''));
+    await send(0x45, PostgresFrontendSerializer.execute('', 0)); await send(0x53, PostgresFrontendSerializer.sync());
     const applyTag = (res: PostgresQueryResult, tag: string, wireLen: number, wasDraining: boolean): void => {
       const tagBytes = Math.max(wireLen, estimateSqlValueBytes(tag));
       if (retainedBytes + tagBytes <= opts.maxResultBytes || tag.length <= 64) {
@@ -45,12 +44,9 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
     };
 
     while (true) {
-      const wasDraining = draining;
-      if (wasDraining && opts.maxDrainBytes - drainedBytes < POSTGRES_NORMAL_HEADER_BYTES) {
-        throw ArkDbError.protocol('PostgreSQL post-error drain exceeded maxDrainBytes.');
-      }
-      const raw = await readQueryMessage(channel, settlement, host.timers, drainDeadlineMs,
-        wasDraining ? opts.maxDrainBytes - drainedBytes : MAX_POSTGRES_MESSAGE_BYTES + 1);
+      const wasDrainingBefore = draining;
+      const raw = await readWakeableQueryMessage(channel, settlement, host.timers, (): boolean => draining, (): number => opts.maxDrainBytes - drainedBytes, d.setWake);
+      const wasDraining = wasDrainingBefore || draining;
       let parsed: PostgresBackendMessage | null = null;
       try {
         if (wasDraining) drainedBytes = accountDrainedBytes(drainedBytes, raw.payload.length, opts.maxDrainBytes);
@@ -64,13 +60,13 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
           const pgErr = postgresErrorFromResponse(msg);
           if (isFatalPostgresError(pgErr)) throw pgErr;
           if (sawServerError) throw ArkDbError.protocol('Unexpected duplicate PostgreSQL ErrorResponse.');
-          sawServerError = true; if (latchedError === null) latchedError = pgErr;
+          sawServerError = true; d.record(pgErr);
           beginDrain(); stage = ExtendedQueryStage.AwaitReadyAfterError; continue;
         }
         if (stage === ExtendedQueryStage.AwaitReadyAfterError) {
           if (!(msg instanceof PostgresReadyForQuery)) throw ArkDbError.protocol('Unexpected PostgreSQL backend message after ErrorResponse.');
           if (drainDeadlineMs >= 0 && readClockMs(host.timers) >= drainDeadlineMs) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
-          host.applyReadyStatus(msg.status); throw latchedError!;
+          host.applyReadyStatus(msg.status); d.throwIfFailed();
         }
         if (stage === ExtendedQueryStage.ExpectParseComplete) {
           if (msg instanceof PostgresParseComplete) { stage = ExtendedQueryStage.ExpectBindComplete; continue; }
@@ -86,10 +82,10 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
             activeColumnCount = msg.columns.length; const badFormat = findNonTextFormatCode(msg);
             const descBytes = estimateRowDescBytes(raw.payload.length, msg);
             if (badFormat !== null) {
-              activeColumns = [];
-              if (latchedError === null) latchedError = ArkDbError.unsupported('PostgreSQL non-text result format code ' + badFormat + ' is not supported.');
+              activeColumns = []; d.record(ArkDbError.unsupported('PostgreSQL non-text result format code ' + badFormat + ' is not supported.'));
               beginDrain();
-            } else if (retainedBytes + descBytes > opts.maxResultBytes) {
+            } else if (draining) { activeColumns = []; }
+            else if (retainedBytes + descBytes > opts.maxResultBytes) {
               activeColumns = []; currentResult = new PostgresQueryResult();
               currentResult.truncated = true; currentResult.truncationReason = 'resultBytes'; beginDrain();
               if (!wasDraining) drainedBytes = accountDrainedBytes(drainedBytes, raw.payload.length, opts.maxDrainBytes);
@@ -129,15 +125,16 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
         }
         if (stage === ExtendedQueryStage.ExpectNoDataResult) {
           if (msg instanceof PostgresCommandComplete) {
-            currentResult = new PostgresQueryResult(); applyTag(currentResult, msg.tag, raw.payload.length, wasDraining);
+            if (!draining) { currentResult = new PostgresQueryResult(); applyTag(currentResult, msg.tag, raw.payload.length, wasDraining); }
             stage = ExtendedQueryStage.AwaitReadyAfterCommand; continue;
           }
           if (msg instanceof PostgresEmptyQueryResponse) {
-            currentResult = new PostgresQueryResult(); stage = ExtendedQueryStage.AwaitReadyAfterCommand; continue;
+            if (!draining) currentResult = new PostgresQueryResult();
+            stage = ExtendedQueryStage.AwaitReadyAfterCommand; continue;
           }
           if (msg instanceof PostgresCopyOutResponse) {
             if (currentResult !== null) { scrubQueryResult(currentResult); currentResult = null; }
-            if (latchedError === null) latchedError = ArkDbError.unsupported('PostgreSQL COPY TO STDOUT is not supported.');
+            d.record(ArkDbError.unsupported('PostgreSQL COPY TO STDOUT is not supported.'));
             beginDrain(); stage = ExtendedQueryStage.InCopyOutData; continue;
           }
           if (msg instanceof PostgresCopyInResponse || msg instanceof PostgresCopyBothResponse) {
@@ -159,9 +156,7 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
         if (stage === ExtendedQueryStage.AwaitReadyAfterCommand && msg instanceof PostgresReadyForQuery) {
           const finishedAtMs = readClockMs(host.timers);
           if (drainDeadlineMs >= 0 && finishedAtMs >= drainDeadlineMs) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
-          host.applyReadyStatus(msg.status);
-          if (latchedError !== null) throw latchedError;
-          if (settlement.closeReason !== null) throw settlement.closeReason;
+          host.applyReadyStatus(msg.status); d.throwIfFailed();
           const finalResult = currentResult ?? new PostgresQueryResult();
           finalResult.executionTimeMs = Math.max(0, finishedAtMs - startedAtMs);
           finalResult.statusKnown = host.sessionStatus.known;
@@ -176,6 +171,6 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
     }
   } catch (err) {
     if (currentResult !== null) { scrubQueryResult(currentResult); currentResult = null; }
-    throw err as Error;
+    throw drain !== null ? drain.toError(err as Object) : toPostgresArkDbError(err as Object);
   } finally { scrubPostgresPreparedFrames(frames); }
 }

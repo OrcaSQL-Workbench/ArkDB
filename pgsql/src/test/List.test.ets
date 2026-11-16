@@ -11,6 +11,7 @@ import postgresCommandGateTest from './pgsql/execution/PostgresCommandGate.test'
 import postgresExtendedQueryTest from './pgsql/features/prepared/PostgresExtendedQuery.test';
 import postgresParameterEncoderTest from './pgsql/features/prepared/PostgresParameterEncoder.test';
 import postgresTransactionControlTest from './pgsql/features/transaction/PostgresTransactionControl.test';
+import postgresTransactionRunnerTest from './pgsql/features/transaction/PostgresTransactionRunner.test';
 import postgresBackendParserTest from './pgsql/protocol/PostgresBackendParser.test';
 import postgresFrontendSerializerTest from './pgsql/protocol/PostgresFrontendSerializer.test';
 import postgresProtocolTest from './pgsql/protocol/PostgresProtocol.test';
@@ -42,4 +43,5 @@ export default function testsuite(): void {
   postgresParameterEncoderTest();
   postgresExtendedQueryTest();
   postgresTransactionControlTest();
+  postgresTransactionRunnerTest();
 }

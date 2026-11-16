@@ -19,7 +19,7 @@ export default function postgresExtendedQueryTest(): void {
       const timers = new StepTimers(); const tp = new QueueTransport([bootFrames(0x49)]);
       const conn = openReady(tp, timers, 'secret-pw-p18');
       expect(conn.postgresFeatures.prepared !== undefined && requirePostgresFeatures(conn).prepared === conn.postgresFeatures.prepared &&
-        JSON.stringify(conn.postgresFeatures) === '{"prepared":{}}' && JSON.stringify(conn).indexOf('secret-pw-p18') === -1).assertTrue();
+        JSON.stringify(conn.postgresFeatures) === '{"prepared":{},"transactions":{}}' && JSON.stringify(conn).indexOf('secret-pw-p18') === -1).assertTrue();
       await conn.connect(); tp.writes.length = 0; tp.rawWrites.length = 0; timers.stepMs = 9;
       const byteaIn = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
       const sql = 'SELECT $1, $2::int4, $3::bytea, $4::bool, $5::int8, $6::numeric, $7::float4, $8::timestamp, $9::jsonb, $10::uuid';

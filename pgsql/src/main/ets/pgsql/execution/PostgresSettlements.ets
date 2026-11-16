@@ -23,12 +23,15 @@ export class PostgresCommandCloseSettlement {
   readonly closeRequested: Promise<ArkDbError>;
   readonly settled: Promise<void>;
   private closeError: ArkDbError | null = null;
+  private abandonError: ArkDbError | null = null;
+  private abandonClaimed: boolean = false;
   private settledNow: boolean = false;
   private delivered: boolean = false;
   private undeliveredCleanup: (() => void) | null = null;
   private resolveClose: (error: ArkDbError) => void = (_error: ArkDbError): void => {};
   private resolveSettled: () => void = (): void => {};
   private closeListeners: Set<(error: ArkDbError) => void> = new Set<(error: ArkDbError) => void>();
+  private abandonListeners: Set<(error: ArkDbError) => void> = new Set<(error: ArkDbError) => void>();
   private waiters: Set<(error: ArkDbError) => void> = new Set<(error: ArkDbError) => void>();
   constructor(scope: PostgresCommandScope) {
     this.scope = scope;
@@ -39,10 +42,16 @@ export class PostgresCommandCloseSettlement {
   }
   get isCloseRequested(): boolean { return this.closeError !== null; }
   get closeReason(): ArkDbError | null { return this.closeError; }
+  get consumerAbandonReason(): ArkDbError | null { return this.abandonError; }
+  get isConsumerAbandonClaimed(): boolean { return this.abandonClaimed; }
   get isSettled(): boolean { return this.settledNow; }
-  onCloseRequested(listener: (error: ArkDbError) => void): void {
-    if (this.closeError !== null) { listener(this.closeError); return; }
-    if (!this.settledNow) this.closeListeners.add(listener);
+  markConsumerAbandonClaimed(): void { this.abandonClaimed = true; }
+  onCloseRequested(fn: (error: ArkDbError) => void): void { if (this.closeError !== null) fn(this.closeError); else if (!this.settledNow) this.closeListeners.add(fn); }
+  onConsumerAbandoned(fn: (error: ArkDbError) => void): void { if (this.abandonError !== null) fn(this.abandonError); else if (!this.settledNow && this.closeError === null) this.abandonListeners.add(fn); }
+  abandonConsumer(error: ArkDbError): void {
+    if (this.settledNow || this.closeError !== null || this.abandonError !== null) return;
+    this.abandonError = error; const ls = this.abandonListeners; this.abandonListeners = new Set<(error: ArkDbError) => void>();
+    for (const fn of ls) fn(error);
   }
   deferUndeliveredCleanup(cleanup: () => void): void {
     const safe = (): void => { try { cleanup(); } catch (_e) {} };
@@ -53,20 +62,17 @@ export class PostgresCommandCloseSettlement {
   markDelivered(): void { this.delivered = true; this.undeliveredCleanup = null; }
   signalClose(error: ArkDbError): void {
     if (this.settledNow || this.closeError !== null) return;
-    this.closeError = error;
+    this.closeError = error; this.abandonListeners.clear();
     this.discardUndelivered();
     this.resolveClose(error);
-    const listeners = this.closeListeners;
-    this.closeListeners = new Set<(error: ArkDbError) => void>();
-    for (const listener of listeners) listener(error);
+    const ls = this.closeListeners; this.closeListeners = new Set<(error: ArkDbError) => void>(); for (const fn of ls) fn(error);
     const pending = this.waiters;
     this.waiters = new Set<(error: ArkDbError) => void>();
     for (const waiter of pending) waiter(error);
   }
   markSettled(preservePendingDelivery: boolean = false): void {
     if (this.settledNow) return;
-    this.settledNow = true; this.closeListeners.clear();
-    if (!preservePendingDelivery) this.discardUndelivered();
+    this.settledNow = true; this.closeListeners.clear(); this.abandonListeners.clear(); if (!preservePendingDelivery) this.discardUndelivered();
     const pending = this.waiters;
     this.waiters = new Set<(error: ArkDbError) => void>();
     if (pending.size > 0) {
@@ -107,11 +113,31 @@ export class PostgresCommandCloseSettlement {
       } catch (error) { fail(error as Object); }
     });
   }
+  raceConsumer<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.closeError !== null || this.abandonError !== null) return Promise.reject<T>(this.closeError !== null ? this.closeError : this.abandonError!);
+    return this.raceClose<T>((): Promise<T> => new Promise<T>((res: (v: T | PromiseLike<T>) => void, rej: (e?: Object) => void): void => {
+      let done = false; const fail = (e: Object): void => { if (!done) { done = true; this.abandonListeners.delete(fail); rej(e); } };
+      this.onConsumerAbandoned(fail); if (done) return;
+      try { operation().then((v: T): void => { if (!done) { done = true; this.abandonListeners.delete(fail); res(v); } }, fail); } catch (e) { fail(e as Object); }
+    }));
+  }
+}
+
+const composedErrorParts = new WeakMap<ArkDbError, Set<ArkDbError>>();
+const composedErrorRoots = new WeakMap<ArkDbError, ArkDbError>();
+function registerComposedError<E extends ArkDbError>(copy: E, primary: ArkDbError, cleanup: ArkDbError): E {
+  const prev = composedErrorParts.get(primary); const cParts = composedErrorParts.get(cleanup); const root = composedErrorRoots.get(primary);
+  const parts = new Set<ArkDbError>(); parts.add(primary); parts.add(cleanup);
+  if (prev !== undefined) prev.forEach((p: ArkDbError): void => { parts.add(p); });
+  if (cParts !== undefined) cParts.forEach((p: ArkDbError): void => { parts.add(p); });
+  composedErrorParts.set(copy, parts); composedErrorRoots.set(copy, root !== undefined ? root : primary); return copy;
 }
 
 export function postgresAppendCleanupError(
   primary: ArkDbError, cleanup: ArkDbError): ArkDbError {
-  if (cleanup === primary) return primary;
+  const prev = composedErrorParts.get(primary);
+  if (cleanup === primary || (prev !== undefined && prev.has(cleanup))) return primary;
+  if (prev === undefined && composedErrorRoots.get(cleanup) === primary) return cleanup;
   const message = primary.message + ' (cleanup failed: ' + cleanup.message + ')';
   if (primary instanceof PostgresError) {
     const copy = new PostgresError(primary.kind, message, primary.nativeCode, primary.sqlState);
@@ -124,11 +150,11 @@ export function postgresAppendCleanupError(
     copy.columnName = primary.columnName; copy.dataTypeName = primary.dataTypeName;
     copy.constraintName = primary.constraintName; copy.sourceFile = primary.sourceFile;
     copy.sourceLine = primary.sourceLine; copy.sourceRoutine = primary.sourceRoutine;
-    return copy;
+    return registerComposedError<PostgresError>(copy, primary, cleanup);
   }
   const copy = new ArkDbError(primary.kind, message, primary.nativeCode, primary.sqlState);
   if (primary.code !== undefined) copy.code = primary.code;
-  return copy;
+  return registerComposedError<ArkDbError>(copy, primary, cleanup);
 }
 
 export function toPostgresArkDbError(

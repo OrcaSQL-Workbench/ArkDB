@@ -5,19 +5,18 @@ import { PostgresFrontendSerializer } from '../protocol/PostgresByteCodec';
 import {
   PostgresBackendMessage, PostgresBackendParser, PostgresCommandComplete, PostgresCopyBothResponse, PostgresCopyData,
   PostgresCopyDone, PostgresCopyInResponse, PostgresCopyOutResponse, PostgresDataRow, PostgresEmptyQueryResponse,
-  PostgresErrorResponse, PostgresMessageChannel, PostgresReadyForQuery, PostgresRowDescription
+  PostgresErrorResponse, PostgresMessage, PostgresMessageChannel, PostgresReadyForQuery, PostgresRowDescription
 } from '../protocol/PostgresMessageChannel';
-import { MAX_POSTGRES_MESSAGE_BYTES, POSTGRES_NORMAL_HEADER_BYTES } from '../protocol/PostgresProtocolConstants';
 import { decodePostgresDataRow, toPostgresColumnDefs } from '../value/PostgresTextValueDecoder';
 import {
   accountDrainedBytes, consumeAsyncMessage, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType,
   parsePostgresCommandCompleteTag, PostgresCommandTagCounts, PostgresSimpleQueryHost, raceDrainDeadline, readClockMs,
-  readQueryMessage, scrubBackendMessage, scrubSqlRow, snapshotQueryOptions, writeQueryFrame
+  readWakeableQueryMessage, scrubBackendMessage, scrubSqlRow, snapshotQueryOptions, writeQueryFrame
 } from './PostgresSimpleQuery';
 
 const MAX_SAFE_BIGINT: bigint = BigInt(Number.MAX_SAFE_INTEGER);
 enum StreamSubState { BetweenStatements = 0, InRowResult = 1, InCopyInAbort = 2, InCopyOutData = 3, InCopyOutDone = 4 }
-class StreamErrors { sink: ArkDbError | null = null; latched: ArkDbError | null = null; }
+class StreamErrors { sink: ArkDbError | null = null; latched: ArkDbError | null = null; readFatal: ArkDbError | null = null; }
 
 export interface PostgresQueryStreamHost extends PostgresSimpleQueryHost {
   enterStreaming(): void; enterDraining(): void; latchConsumerError(error: ArkDbError, synchronized?: boolean): void;
@@ -27,23 +26,31 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
   settlement: PostgresCommandCloseSettlement, sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> {
   const opts = snapshotQueryOptions(options);
   if (opts.statementTimeoutMs > 0) throw ArkDbError.unsupported('PostgreSQL statement deadlines are not implemented.');
+  if (settlement.consumerAbandonReason !== null) { settlement.markConsumerAbandonClaimed(); throw settlement.consumerAbandonReason; }
   const startedAtMs = readClockMs(host.timers);
-  await writeQueryFrame(channel, settlement, 0x51, PostgresFrontendSerializer.query(sql), host.timers, -1);
-  host.enterStreaming();
   const execution = new QueryExecutionSummary();
   let subState = StreamSubState.BetweenStatements; let resultIndex = 0; let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0;
   let chunkRows: SqlValue[][] = []; let chunkWireBytes = 0; let emittedRows = 0; let stmtLoadedBytes = 0; let totalLoadedBytes = 0;
   let wireRowCountExact = 0n; let totalExactRows = 0n; let allRowCountsKnown = true;
   let truncationActive = false; let globalTruncationReason = ''; let stmtTruncationReason = ''; let cancellationRequested = false;
   let draining = false; let sawServerError = false; let drainedBytes = 0; let drainStartedAtMs = -1; let drainDeadlineMs = -1;
-  const errors = new StreamErrors();
+  const errors = new StreamErrors(); let onDrainWake: (() => void) | null = null;
+  const throwIfAborted = (): void => { if (errors.readFatal !== null) throw errors.readFatal; if (settlement.closeReason !== null) throw settlement.closeReason; };
+  const wakeRead = (): void => { if (onDrainWake !== null) { const w = onDrainWake; onDrainWake = null; w(); } };
+  const setDrainWake = (w: (() => void) | null, check: boolean): number => { onDrainWake = w; if (check) throwIfAborted(); return drainDeadlineMs; };
   const beginDrain = (recordStart: boolean): void => {
     if (drainDeadlineMs < 0) {
       const now = readClockMs(host.timers); if (recordStart && drainStartedAtMs < 0) drainStartedAtMs = now;
       drainDeadlineMs = Math.min(Number.MAX_SAFE_INTEGER, now + opts.maxDrainTimeMs);
     } else if (recordStart && drainStartedAtMs < 0) drainStartedAtMs = readClockMs(host.timers);
-    if (!draining) { draining = true; host.enterDraining(); }
+    if (!draining) { draining = true; host.enterDraining(); wakeRead(); }
   };
+  settlement.onConsumerAbandoned((abErr: ArkDbError): void => {
+    if (errors.sink === null && errors.latched === null && settlement.closeReason === null) {
+      settlement.markConsumerAbandonClaimed(); errors.sink = abErr; host.latchConsumerError(abErr, false); discardChunkRows(chunkRows); chunkWireBytes = 0;
+      try { beginDrain(false); } catch (te) { const rf = postgresAppendCleanupError(abErr, toPostgresArkDbError(te as Object)); errors.readFatal = rf; errors.sink = rf; host.latchConsumerError(rf, false); wakeRead(); }
+    }
+  });
   const recordStreamError = (err: ArkDbError): void => {
     if (errors.sink !== null) { errors.sink = postgresAppendCleanupError(errors.sink, err); host.latchConsumerError(errors.sink, false); }
     else if (errors.latched === null) errors.latched = err;
@@ -53,16 +60,19 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
     if (settlement.closeReason !== null) throw settlement.closeReason;
     let caught: ArkDbError | null = null;
     try {
-      return await raceDrainDeadline<T>(host.timers, drainDeadlineMs, (): Promise<T> => settlement.raceClose<T>(async (): Promise<T> => {
+      return await raceDrainDeadline<T>(host.timers, drainDeadlineMs, (): Promise<T> => settlement.raceConsumer<T>(async (): Promise<T> => {
         try { return await op(); } catch (e) { const se = toPostgresArkDbError(e as Object); caught = se; throw se; }
       }));
     } catch (err) {
-      if (caught !== null && err === caught && settlement.closeReason === null) {
-        errors.sink = caught; host.latchConsumerError(caught, false); discardChunkRows(chunkRows); chunkWireBytes = 0; beginDrain(false); return undefined;
+      if (settlement.closeReason === null && ((caught !== null && err === caught) || (settlement.consumerAbandonReason !== null && err === settlement.consumerAbandonReason))) {
+        const isAbandon = caught === null; const se = caught !== null ? caught : settlement.consumerAbandonReason!;
+        if (errors.sink === null) { if (isAbandon) settlement.markConsumerAbandonClaimed(); errors.sink = se; host.latchConsumerError(se, false); discardChunkRows(chunkRows); chunkWireBytes = 0; beginDrain(false); }
+        return undefined;
       }
       throw err as Error;
     }
   };
+  const readNextFrame = (): Promise<PostgresMessage> => readWakeableQueryMessage(channel, settlement, host.timers, (): boolean => draining, (): number => opts.maxDrainBytes - drainedBytes, setDrainWake);
   const flushChunk = async (): Promise<boolean> => {
     if (chunkRows.length === 0) return errors.sink === null && errors.latched === null;
     await invokeSink((): Promise<void> => {
@@ -80,10 +90,10 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
     if ((await invokeSink((): Promise<boolean> => sink.onTruncation!(trunc))) === true) cancellationRequested = true;
   };
   try {
+    await writeQueryFrame(channel, settlement, 0x51, PostgresFrontendSerializer.query(sql), host.timers, drainDeadlineMs, setDrainWake);
+    if (!draining) host.enterStreaming();
     while (true) {
-      const wasDraining = draining;
-      if (wasDraining && opts.maxDrainBytes - drainedBytes < POSTGRES_NORMAL_HEADER_BYTES) throw ArkDbError.protocol('PostgreSQL post-error drain exceeded maxDrainBytes.');
-      const raw = await readQueryMessage(channel, settlement, host.timers, drainDeadlineMs, wasDraining ? opts.maxDrainBytes - drainedBytes : MAX_POSTGRES_MESSAGE_BYTES + 1);
+      const wasDrainingBefore = draining; const raw = await readNextFrame(); const wasDraining = wasDrainingBefore || draining;
       let parsed: PostgresBackendMessage | null = null;
       try {
         if (wasDraining) drainedBytes = accountDrainedBytes(drainedBytes, raw.payload.length, opts.maxDrainBytes);

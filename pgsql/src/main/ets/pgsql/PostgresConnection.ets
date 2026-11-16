@@ -28,9 +28,7 @@ import {
 import { PostgresCommandCloseSettlement } from './execution/PostgresSettlements';
 import { PostgresPreparedFrames } from './features/prepared/PostgresParameterEncoder';
 import { PostgresConnectionPreparedExecutor } from './features/prepared/PostgresPreparedExecutor';
-import {
-  PostgresConnectionTransactionRunner, PostgresTransactionCommandHost, PostgresTransactionFailure
-} from './features/transaction/PostgresTransactionRunner';
+import { PostgresConnectionTransactionRunner, PostgresTransactionCommandHost, PostgresTransactionFailure } from './features/transaction/PostgresTransactionRunner';
 import {
   PostgresConnectionConfig, isWellFormedPostgresText, resolvePostgresDatabaseName
 } from './model/PostgresConnectionConfig';
@@ -69,9 +67,7 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
       (frames: PostgresPreparedFrames, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
         this.streamPreparedQuery(frames, options, sink));
     this.postgresFeatures.transactions = new PostgresConnectionTransactionRunner(
-      (op: (host: PostgresTransactionCommandHost, channel: PostgresMessageChannel,
-        settlement: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>): Promise<PostgresTransactionFailure | null> =>
-        this.runTransactionScope(op));
+      (op: (h: PostgresTransactionCommandHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>): Promise<PostgresTransactionFailure | null> => this.runTransactionScope(op));
   }
 
   get contextPolicy(): DatabaseContextPolicy {
@@ -188,13 +184,9 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
         runPostgresPortalStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, options, sink));
   }
 
-  private runTransactionScope(
-    op: (host: PostgresTransactionCommandHost, channel: PostgresMessageChannel,
-      settlement: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>
-  ): Promise<PostgresTransactionFailure | null> {
+  private runTransactionScope(op: (h: PostgresTransactionCommandHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>): Promise<PostgresTransactionFailure | null> {
     return this.lifecycle.runCommand<PostgresTransactionFailure | null>(PostgresCommandKind.Transaction,
-      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresTransactionFailure | null> =>
-        op(new TransactionRunnerLifecycleHost(this.lifecycle, s), ch, st));
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresTransactionFailure | null> => op(new TransactionRunnerLifecycleHost(this.lifecycle, s), ch, st));
   }
 }
 

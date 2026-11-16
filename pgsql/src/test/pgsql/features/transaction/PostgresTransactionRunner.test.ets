@@ -2,101 +2,59 @@ import { describe, expect, it } from '@ohos/hypium';
 import { ArkDbError, ArkDbErrorKind, ConnectionState, ConnectionTimerPort, QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk, SqlValue } from '@arkdb/core';
 import { PostgresConnection, PostgresConnectionConfig, PostgresDatabaseSessionStatus, PostgresError, PostgresParameter, PostgresParameterType, PostgresPreparedExecutor, PostgresQueryResult, PostgresSession, PostgresSslMode, PostgresTransactionIsolation, PostgresTransactionOptions, PostgresTransactionState, requirePostgresFeatures } from '../../../../../Index';
 import { PostgresLifecycleTransport } from '../../../../main/ets/pgsql/connection/PostgresConnectionLifecycle';
+import { PostgresBufferedDrain, writeQueryFrame } from '../../../../main/ets/pgsql/command/PostgresSimpleQuery';
 import { PostgresCommandGate, PostgresCommandKind, PostgresCommandLifecycleObserver, PostgresCommandScope } from '../../../../main/ets/pgsql/execution/PostgresCommandGate';
+import { PostgresCommandCloseSettlement } from '../../../../main/ets/pgsql/execution/PostgresSettlements';
+import { PostgresMessageChannel } from '../../../../main/ets/pgsql/protocol/PostgresMessageChannel';
 
 export default function postgresTransactionRunnerTest(): void {
   describe('PostgreSQL transaction runner and scoped session', () => {
     it('runsHappyPathSessionQueriesStreamsAndPreparedUnderSingleTransactionScope', 0, async () => {
-      const kinds: PostgresCommandKind[] = []; const tp = new QueueTransport([bootFrames(0x49)]);
-      const conn = openReady(tp, new PostgresCommandGate(new KindObserver(kinds)));
-      expect(conn.postgresFeatures.transactions !== undefined && conn.features.transactions !== undefined).assertTrue();
-      await conn.connect(); tp.writes.length = 0;
-      for (const badRun of [
-        (): Promise<void> => conn.postgresFeatures.transactions!.run<void>(asTxOpts(null), async (_s: PostgresSession): Promise<void> => {}),
-        (): Promise<void> => conn.postgresFeatures.transactions!.run<void>(makeOpts(PostgresTransactionIsolation.ReadCommitted, false, true), async (_s: PostgresSession): Promise<void> => {}),
-        (): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), ('bad' as Object) as (s: PostgresSession) => Promise<void>)
-      ]) expect((await asyncFail<void>(badRun)).kind === ArkDbErrorKind.Validation && tp.writes.length === 0 && kinds.length === 1).assertTrue();
-
+      const kinds: PostgresCommandKind[] = []; const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp, new PostgresCommandGate(new KindObserver(kinds)));
+      expect(conn.postgresFeatures.transactions !== undefined && conn.features.transactions !== undefined).assertTrue(); await conn.connect(); tp.writes.length = 0;
+      for (const badRun of [(): Promise<void> => conn.postgresFeatures.transactions!.run<void>(asTxOpts(null), async (_s: PostgresSession): Promise<void> => {}), (): Promise<void> => conn.postgresFeatures.transactions!.run<void>(makeOpts(PostgresTransactionIsolation.ReadCommitted, false, true), async (_s: PostgresSession): Promise<void> => {}), (): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), ('bad' as Object) as (s: PostgresSession) => Promise<void>)]) expect((await asyncFail<void>(badRun)).kind === ArkDbErrorKind.Validation && tp.writes.length === 0 && kinds.length === 1).assertTrue();
       const opts = makeOpts(PostgresTransactionIsolation.Serializable, true, true); const col = [colSpec('v', 25)];
-      tp.enqueue([rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(col), msgDataRow(['q1']), msgCmd('SELECT 1'), msgReady(0x54)]),
-        concatFrames([msgRowDesc(col), msgDataRow(['s1']), msgCmd('SELECT 1'), msgReady(0x54)]),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(col), msgDataRow(['p1']), msgCmd('SELECT 1'), msgReady(0x54)]),
-        concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(col), msgDataRow(['ps1']), msgCmd('SELECT 1'), msgReady(0x54)]), rxCmd('COMMIT', 0x49)]);
+      tp.enqueue([rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(col), msgDataRow(['q1']), msgCmd('SELECT 1'), msgReady(0x54)]), concatFrames([msgRowDesc(col), msgDataRow(['s1']), msgDataRow(['s2']), msgCmd('SELECT 2'), msgReady(0x54)]), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(col), msgDataRow(['p1']), msgCmd('SELECT 1'), msgReady(0x54)]), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(col), msgDataRow(['ps1']), msgDataRow(['ps2']), msgCmd('SELECT 2'), msgReady(0x54)]), rxCmd('COMMIT', 0x49)]);
       const out = await conn.postgresFeatures.transactions!.run<string>(opts, async (s: PostgresSession): Promise<string> => {
-        opts.isolation = PostgresTransactionIsolation.ReadCommitted; opts.readOnly = false; opts.deferrable = false;
-        const st: PostgresDatabaseSessionStatus = s.sessionStatus; st.inTransaction = false;
-        expect(s.sessionStatus.inTransaction && s.sessionStatus.transactionState === PostgresTransactionState.InTransaction &&
-          s.serverInfo.driverId === 'pgsql' && requirePostgresFeatures(s).prepared !== undefined &&
-          s.postgresFeatures.transactions === undefined && JSON.stringify(s.postgresFeatures) === '{"prepared":{}}').assertTrue();
-        const r1 = await s.query('SELECT 1'); const sink1 = new CollectSink();
-        const sum1 = await s.queryStream('SELECT 2', new QueryOptions(), sink1);
+        opts.isolation = PostgresTransactionIsolation.ReadCommitted; opts.readOnly = false; opts.deferrable = false; const st: PostgresDatabaseSessionStatus = s.sessionStatus; st.inTransaction = false;
+        expect(s.sessionStatus.inTransaction && s.sessionStatus.transactionState === PostgresTransactionState.InTransaction && s.serverInfo.driverId === 'pgsql' && requirePostgresFeatures(s).prepared !== undefined && s.postgresFeatures.transactions === undefined && JSON.stringify(s.postgresFeatures) === '{"prepared":{}}').assertTrue();
+        const r1 = await s.query('SELECT 1'); const sink1 = new CollectSink(); const qsOpts = new QueryOptions(); qsOpts.maxRows = 1;
+        const qsTask = s.queryStream('SELECT 2', qsOpts, sink1); qsOpts.maxRows = 0; qsOpts.statementTimeoutMs = 999; const sum1 = await qsTask;
         const r2 = await s.postgresFeatures.prepared!.execute('SELECT $1', [new PostgresParameter(PostgresParameterType.Text, 'a')], new QueryOptions());
-        const sink2 = new CollectSink();
-        const sum2 = await s.postgresFeatures.prepared!.queryStream('SELECT $1', [new PostgresParameter(PostgresParameterType.Text, 'b')], new QueryOptions(), sink2);
-        expect(sum1.loadedRowCount === 1 && sum2.loadedRowCount === 1).assertTrue();
+        const sink2 = new CollectSink(); const pqsOpts = new QueryOptions(); pqsOpts.maxRows = 1;
+        const pqsTask = s.postgresFeatures.prepared!.queryStream('SELECT $1', [new PostgresParameter(PostgresParameterType.Text, 'b')], pqsOpts, sink2); pqsOpts.maxRows = 0; pqsOpts.statementTimeoutMs = 999; const sum2 = await pqsTask;
+        expect(sum1.loadedRowCount === 1 && sum2.loadedRowCount === 1 && sink1.values.length === 1 && sink2.values.length === 1).assertTrue();
         return String(r1.rows[0][0]) + ',' + sink1.values[0] + ',' + String(r2.rows[0][0]) + ',' + sink2.values[0];
       });
-      expect(out).assertEqual('q1,s1,p1,ps1');
-      assertBytes(tp.writes[0], expectedQueryFrame('BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE'));
-      assertBytes(tp.writes[tp.writes.length - 1], expectedQueryFrame('COMMIT'));
+      expect(out).assertEqual('q1,s1,p1,ps1'); assertBytes(tp.writes[0], expectedQueryFrame('BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE')); assertBytes(tp.writes[tp.writes.length - 1], expectedQueryFrame('COMMIT'));
       expect(kinds.length === 2 && kinds[1] === PostgresCommandKind.Transaction && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
-
       tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('ROLLBACK', 0x49)]); await conn.features.transactions!.begin();
       const activeErr = await asyncFail<void>((): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => {}));
       expect(activeErr.kind === ArkDbErrorKind.Validation && conn.state === ConnectionState.Ready && conn.sessionStatus.transactionState === PostgresTransactionState.InTransaction).assertTrue();
       await conn.features.transactions!.rollback(); await conn.close();
     });
-
     it('preservesExactCallbackErrorIdentityOnRollbackAndHandlesAbortedOrManualEndings', 0, async () => {
-      const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect(); tp.writes.length = 0;
-      const domainErr = new TypeError('domain failure');
-      tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('INSERT 0 1', 0x54), rxCmd('ROLLBACK', 0x49),
-        concatFrames([msgRowDesc([colSpec('ok', 25)]), msgDataRow(['yes']), msgCmd('SELECT 1'), msgReady(0x49)])]);
-      const caughtDomain = await rawFail<void>((): Promise<void> =>
-        conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => {
-          await s.query('INSERT INTO t VALUES (1)'); throw domainErr;
-        }));
+      const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect(); tp.writes.length = 0; const domainErr = new TypeError('domain failure');
+      tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('INSERT 0 1', 0x54), rxCmd('ROLLBACK', 0x49), concatFrames([msgRowDesc([colSpec('ok', 25)]), msgDataRow(['yes']), msgCmd('SELECT 1'), msgReady(0x49)])]);
+      const caughtDomain = await rawFail<void>((): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { await s.query('INSERT INTO t VALUES (1)'); throw domainErr; }));
       expect(caughtDomain === domainErr && tp.writes.length === 3 && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
-      assertBytes(tp.writes[2], expectedQueryFrame('ROLLBACK'));
-      expect((await conn.query('SELECT 9')).rows[0][0]).assertEqual('yes');
-
-      const userProtoErr = ArkDbError.protocol('caller protocol style error');
-      tp.enqueue([rxCmd('BEGIN', 0x54), rxErr('23505', 'dup', 0x45), rxCmd('ROLLBACK', 0x49)]);
-      const caughtProto = await rawFail<void>((): Promise<void> =>
-        conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => {
-          try { await s.query('INSERT dup'); } catch (_e) {}
-          expect(s.sessionStatus.transactionState).assertEqual(PostgresTransactionState.FailedTransaction); throw userProtoErr;
-        }));
+      assertBytes(tp.writes[2], expectedQueryFrame('ROLLBACK')); expect((await conn.query('SELECT 9')).rows[0][0]).assertEqual('yes');
+      const userProtoErr = ArkDbError.protocol('caller protocol style error'); tp.enqueue([rxCmd('BEGIN', 0x54), rxErr('23505', 'dup', 0x45), rxCmd('ROLLBACK', 0x49)]);
+      const caughtProto = await rawFail<void>((): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { try { await s.query('INSERT dup'); } catch (_e) {} expect(s.sessionStatus.transactionState).assertEqual(PostgresTransactionState.FailedTransaction); throw userProtoErr; }));
       expect(caughtProto === userProtoErr && conn.state === ConnectionState.Ready && conn.sessionStatus.transactionState === PostgresTransactionState.Idle).assertTrue();
-
       const manualErr = new Error('after manual rollback'); tp.writes.length = 0; tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('ROLLBACK', 0x49)]);
-      const caughtManual = await rawFail<void>((): Promise<void> =>
-        conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { await s.query('ROLLBACK'); throw manualErr; }));
+      const caughtManual = await rawFail<void>((): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { await s.query('ROLLBACK'); throw manualErr; }));
       expect(caughtManual === manualErr && tp.writes.length === 2 && conn.state === ConnectionState.Ready).assertTrue();
-
       tp.writes.length = 0; tp.enqueue([rxCmd('BEGIN', 0x54), rxErr('22012', 'div zero', 0x45), rxCmd('ROLLBACK', 0x49)]);
-      const abortedCommit = await asyncFail<string>((): Promise<string> =>
-        conn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => {
-          try { await s.query('SELECT 1/0'); } catch (_e) {} return 'swallowed';
-        }));
-      expect(abortedCommit instanceof PostgresError && abortedCommit.sqlState === '25P02' && abortedCommit.kind === ArkDbErrorKind.Server &&
-        tp.writes.length === 3 && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
-      assertBytes(tp.writes[2], expectedQueryFrame('ROLLBACK'));
-
-      tp.writes.length = 0; tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('COMMIT', 0x49)]);
-      const manualCommitErr = await asyncFail<void>((): Promise<void> =>
-        conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => {
-          await s.query('COMMIT');
-          expect((await asyncFail<PostgresQueryResult>((): Promise<PostgresQueryResult> => s.query('SELECT escape'))).kind).assertEqual(ArkDbErrorKind.Validation);
-        }));
-      expect(manualCommitErr.kind === ArkDbErrorKind.Validation && tp.writes.length === 2 && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
-      await conn.close();
+      const abortedCommit = await asyncFail<string>((): Promise<string> => conn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { try { await s.query('SELECT 1/0'); } catch (_e) {} return 'swallowed'; }));
+      expect(abortedCommit instanceof PostgresError && abortedCommit.sqlState === '25P02' && abortedCommit.kind === ArkDbErrorKind.Server && tp.writes.length === 3 && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
+      assertBytes(tp.writes[2], expectedQueryFrame('ROLLBACK')); tp.writes.length = 0; tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('COMMIT', 0x49)]);
+      const manualCommitErr = await asyncFail<void>((): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { await s.query('COMMIT'); expect((await asyncFail<PostgresQueryResult>((): Promise<PostgresQueryResult> => s.query('SELECT escape'))).kind).assertEqual(ArkDbErrorKind.Validation); }));
+      expect(manualCommitErr.kind === ArkDbErrorKind.Validation && tp.writes.length === 2 && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue(); await conn.close();
     });
-
     it('supportsSavepointLifecycleFailedStateRecoveryAndIdentifierValidation', 0, async () => {
       const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect(); tp.writes.length = 0;
-      tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('SAVEPOINT', 0x54), rxErr('23505', 'dup', 0x45), rxErr('25P02', 'aborted', 0x45),
-        rxCmd('ROLLBACK', 0x54), rxCmd('INSERT 0 1', 0x54), rxCmd('RELEASE', 0x54), rxCmd('COMMIT', 0x49)]);
+      tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('SAVEPOINT', 0x54), rxErr('23505', 'dup', 0x45), rxErr('25P02', 'aborted', 0x45), rxCmd('ROLLBACK', 0x54), rxCmd('INSERT 0 1', 0x54), rxCmd('RELEASE', 0x54), rxCmd('COMMIT', 0x49)]);
       const res = await conn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => {
         const writesBefore = tp.writes.length;
         for (const badName of ['', 'bad\u0000sp', 'x'.repeat(64), (123 as Object) as string]) {
@@ -104,271 +62,156 @@ export default function postgresTransactionRunnerTest(): void {
           expect((await asyncFail<void>((): Promise<void> => s.rollbackTo(badName))).kind).assertEqual(ArkDbErrorKind.Validation);
           expect((await asyncFail<void>((): Promise<void> => s.releaseSavepoint(badName))).kind).assertEqual(ArkDbErrorKind.Validation);
         }
-        expect(tp.writes.length).assertEqual(writesBefore); await s.savepoint('sp"1');
-        try { await s.query('INSERT dup'); } catch (_e) {}
+        expect(tp.writes.length).assertEqual(writesBefore); await s.savepoint('sp"1'); try { await s.query('INSERT dup'); } catch (_e) {}
         expect(s.sessionStatus.transactionState).assertEqual(PostgresTransactionState.FailedTransaction);
-        const spInErr = await asyncFail<void>((): Promise<void> => s.savepoint('sp2'));
-        expect(spInErr instanceof PostgresError && spInErr.sqlState === '25P02').assertTrue();
-        await s.rollbackTo('sp"1'); expect(s.sessionStatus.transactionState).assertEqual(PostgresTransactionState.InTransaction);
-        await s.query('INSERT good'); await s.releaseSavepoint('sp"1'); return 'recovered';
+        const spInErr = await asyncFail<void>((): Promise<void> => s.savepoint('sp2')); expect(spInErr instanceof PostgresError && spInErr.sqlState === '25P02').assertTrue();
+        await s.rollbackTo('sp"1'); expect(s.sessionStatus.transactionState).assertEqual(PostgresTransactionState.InTransaction); await s.query('INSERT good'); await s.releaseSavepoint('sp"1'); return 'recovered';
       });
-      expect(res).assertEqual('recovered');
-      assertBytes(tp.writes[1], expectedQueryFrame('SAVEPOINT "sp""1"'));
-      assertBytes(tp.writes[4], expectedQueryFrame('ROLLBACK TO SAVEPOINT "sp""1"'));
-      assertBytes(tp.writes[6], expectedQueryFrame('RELEASE SAVEPOINT "sp""1"'));
-      expect(conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
-
+      expect(res === 'recovered' && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
+      assertBytes(tp.writes[1], expectedQueryFrame('SAVEPOINT "sp""1"')); assertBytes(tp.writes[4], expectedQueryFrame('ROLLBACK TO SAVEPOINT "sp""1"')); assertBytes(tp.writes[6], expectedQueryFrame('RELEASE SAVEPOINT "sp""1"'));
       tp.writes.length = 0; tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('ROLLBACK', 0x49)]);
-      const spIdleErr = await asyncFail<void>((): Promise<void> =>
-        conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => {
-          await s.query('ROLLBACK');
-          const e = await asyncFail<void>((): Promise<void> => s.savepoint('sp_idle'));
-          expect(e.kind === ArkDbErrorKind.Validation && e.message === 'PostgreSQL savepoints require an active transaction.').assertTrue();
-          throw e;
-        }));
-      expect(spIdleErr.kind === ArkDbErrorKind.Validation && tp.writes.length === 2).assertTrue();
-      await conn.close();
+      const spIdleErr = await asyncFail<void>((): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { await s.query('ROLLBACK'); const e = await asyncFail<void>((): Promise<void> => s.savepoint('sp_idle')); expect(e.kind === ArkDbErrorKind.Validation && e.message === 'PostgreSQL savepoints require an active transaction.').assertTrue(); throw e; }));
+      expect(spIdleErr.kind === ArkDbErrorKind.Validation && tp.writes.length === 2).assertTrue(); await conn.close();
     });
-
     it('handlesDeferredCommitErrorsRollbackCleanupCompositionAndStreamSinkErrors', 0, async () => {
-      const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect();
-      tp.enqueue([rxCmd('BEGIN', 0x54), rxErr('23505', 'deferred fk', 0x49)]);
+      const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect(); tp.enqueue([rxCmd('BEGIN', 0x54), rxErr('23505', 'deferred fk', 0x49)]);
       const defErr = await asyncFail<void>((): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => {}));
       expect(defErr instanceof PostgresError && defErr.sqlState === '23505' && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
-
       const sinkBoom = ArkDbError.protocol('sink boom'); const col = [colSpec('v', 25)];
-      tp.enqueue([rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(col), msgDataRow(['a']), msgCmd('SELECT 1'), msgReady(0x54)]),
-        rxCmd('SELECT 1', 0x54), rxCmd('COMMIT', 0x49), rxCmd('BEGIN', 0x54),
-        concatFrames([msgRowDesc(col), msgDataRow(['b']), msgCmd('SELECT 1'), msgReady(0x54)]), rxCmd('ROLLBACK', 0x49)]);
-      const recovered = await conn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => {
-        const caught = await rawFail<void>(async (): Promise<void> => { await s.queryStream('SELECT 1', new QueryOptions(), new ThrowingSink(sinkBoom)); });
-        expect(caught === sinkBoom).assertTrue(); await s.query('SELECT 1'); return 'ok';
-      });
+      tp.enqueue([rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(col), msgDataRow(['a']), msgCmd('SELECT 1'), msgReady(0x54)]), rxCmd('SELECT 1', 0x54), rxCmd('COMMIT', 0x49), rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(col), msgDataRow(['b']), msgCmd('SELECT 1'), msgReady(0x54)]), rxCmd('ROLLBACK', 0x49)]);
+      const recovered = await conn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { expect((await rawFail<void>(async (): Promise<void> => { await s.queryStream('SELECT 1', new QueryOptions(), new ThrowingSink(sinkBoom)); })) === sinkBoom).assertTrue(); await s.query('SELECT 1'); return 'ok'; });
       expect(recovered === 'ok' && conn.state === ConnectionState.Ready).assertTrue();
-
-      const uncaughtSink = await rawFail<void>((): Promise<void> =>
-        conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => {
-          await s.queryStream('SELECT 1', new QueryOptions(), new ThrowingSink(sinkBoom));
-        }));
-      expect(uncaughtSink === sinkBoom && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
-      await conn.close();
-
-      const failRbConn = openReady(new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), rxErr('XX000', 'rollback disk error', 0x45)]));
-      await failRbConn.connect();
-      const composed = await asyncFail<void>((): Promise<void> =>
-        failRbConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => { throw new Error('callback boom'); }));
-      expect(composed.message.indexOf('callback boom (cleanup failed:') === 0 && failRbConn.state === ConnectionState.Error).assertTrue();
-      await failRbConn.close();
-
-      const eofConn = openReady(new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(col), msgDataRow(['z'])])]));
-      await eofConn.connect(); const oneRowOpts = new QueryOptions(); oneRowOpts.maxChunkRows = 1;
-      const eofErr = await asyncFail<string>((): Promise<string> =>
-        eofConn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => {
-          try { await s.queryStream('SELECT 1', oneRowOpts, new ThrowingSink(sinkBoom)); }
-          catch (_e) { try { await s.rollbackTo('sp_after_eof'); } catch (_e2) {} }
-          return 'swallowed';
-        }));
-      expect(eofErr.message.indexOf('sink boom (cleanup failed:') === 0 && eofConn.state === ConnectionState.Error).assertTrue();
-      await eofConn.close();
+      const uncaughtSink = await rawFail<void>((): Promise<void> => conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { await s.queryStream('SELECT 1', new QueryOptions(), new ThrowingSink(sinkBoom)); }));
+      expect(uncaughtSink === sinkBoom && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue(); await conn.close();
+      const failRbTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), rxCmd('SELECT 1', 0x54)]); failRbTp.abortErr = new Error('abort boom'); const failRbConn = openReady(failRbTp); await failRbConn.connect();
+      const composed = await asyncFail<void>((): Promise<void> => failRbConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => { throw new Error('callback boom'); }));
+      expect(composed.message.indexOf('callback boom (cleanup failed:') === 0 && composed.message.indexOf('abort boom') > 0 && composed.message.indexOf('abort boom') === composed.message.lastIndexOf('abort boom') && failRbConn.state === ConnectionState.Error).assertTrue(); await failRbConn.close();
+      const eofConn = openReady(new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(col), msgDataRow(['z'])])])); await eofConn.connect(); const oneRowOpts = new QueryOptions(); oneRowOpts.maxChunkRows = 1;
+      const eofErr = await asyncFail<string>((): Promise<string> => eofConn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { try { await s.queryStream('SELECT 1', oneRowOpts, new ThrowingSink(sinkBoom)); } catch (_e) { try { await s.rollbackTo('sp_after_eof'); } catch (_e2) {} } return 'swallowed'; }));
+      expect(eofErr.message.indexOf('sink boom (cleanup failed:') === 0 && eofConn.state === ConnectionState.Error).assertTrue(); await eofConn.close();
     });
-
     it('enforcesSessionExpiryOverlapGuardsAbandonedCommandWaitAndCloseIsolation', 0, async () => {
-      const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect();
-      let leakedSession: PostgresSession | null = null; let leakedPrep: PostgresPreparedExecutor | null = null;
+      const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect(); let leakedSession: PostgresSession | null = null; let leakedPrep: PostgresPreparedExecutor | null = null;
       tp.enqueue([rxCmd('BEGIN', 0x54), rxCmd('COMMIT', 0x49)]);
       await conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => {
         leakedSession = s; leakedPrep = s.postgresFeatures.prepared!;
-        for (const op of [
-          async (): Promise<void> => { await conn.query('SELECT 1'); }, async (): Promise<void> => { await conn.begin(); },
-          async (): Promise<void> => { await conn.commit(); }, async (): Promise<void> => { await conn.rollback(); }, (): Promise<void> => conn.ping(),
-          async (): Promise<void> => { await conn.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()); },
-          async (): Promise<void> => { await conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (_n: PostgresSession): Promise<void> => {}); }
-        ]) expect((await asyncFail<void>(op)).kind).assertEqual(ArkDbErrorKind.Protocol);
+        for (const op of [async (): Promise<void> => { await conn.query('SELECT 1'); }, async (): Promise<void> => { await conn.begin(); }, async (): Promise<void> => { await conn.commit(); }, async (): Promise<void> => { await conn.rollback(); }, (): Promise<void> => conn.ping(), async (): Promise<void> => { await conn.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()); }, async (): Promise<void> => { await conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (_n: PostgresSession): Promise<void> => {}); }]) expect((await asyncFail<void>(op)).kind).assertEqual(ArkDbErrorKind.Protocol);
       });
       const writesAfterCommit = tp.writes.length;
-      for (const acc of [(): void => { const _f = leakedSession!.postgresFeatures; }, (): void => { const _i = leakedSession!.serverInfo; }, (): void => { const _st = leakedSession!.sessionStatus; }]) {
-        expect(syncFail(acc).kind).assertEqual(ArkDbErrorKind.Validation);
-      }
-      for (const op of [
-        async (): Promise<void> => { await leakedSession!.query('SELECT 1'); }, async (): Promise<void> => { await leakedSession!.queryStream('SELECT 1', new QueryOptions(), new CollectSink()); },
-        (): Promise<void> => leakedSession!.savepoint('sp'), (): Promise<void> => leakedSession!.rollbackTo('sp'), (): Promise<void> => leakedSession!.releaseSavepoint('sp'),
-        async (): Promise<void> => { await leakedPrep!.execute('SELECT 1', [], new QueryOptions()); }, async (): Promise<void> => { await leakedPrep!.queryStream('SELECT 1', [], new QueryOptions(), new CollectSink()); }
-      ]) {
-        const err = await asyncFail<void>(op);
-        expect(err.kind === ArkDbErrorKind.Validation && err.message === 'PostgreSQL transaction session is no longer active.').assertTrue();
-      }
-      expect(tp.writes.length).assertEqual(writesAfterCommit);
-
-      tp.writes.length = 0; tp.hangAtEmpty = true; tp.enqueue([rxCmd('BEGIN', 0x54)]);
-      let releaseAbandoned: (() => void) | null = null;
+      for (const acc of [(): void => { const _f = leakedSession!.postgresFeatures; }, (): void => { const _i = leakedSession!.serverInfo; }, (): void => { const _st = leakedSession!.sessionStatus; }]) expect(syncFail(acc).kind).assertEqual(ArkDbErrorKind.Validation);
+      for (const op of [async (): Promise<void> => { await leakedSession!.query('SELECT 1'); }, async (): Promise<void> => { await leakedSession!.queryStream('SELECT 1', new QueryOptions(), new CollectSink()); }, (): Promise<void> => leakedSession!.savepoint('sp'), (): Promise<void> => leakedSession!.rollbackTo('sp'), (): Promise<void> => leakedSession!.releaseSavepoint('sp'), async (): Promise<void> => { await leakedPrep!.execute('SELECT 1', [], new QueryOptions()); }, async (): Promise<void> => { await leakedPrep!.queryStream('SELECT 1', [], new QueryOptions(), new CollectSink()); }]) { const err = await asyncFail<void>(op); expect(err.kind === ArkDbErrorKind.Validation && err.message === 'PostgreSQL transaction session is no longer active.').assertTrue(); }
+      expect(tp.writes.length).assertEqual(writesAfterCommit); tp.writes.length = 0; tp.hangAtEmpty = true; tp.enqueue([rxCmd('BEGIN', 0x54)]); let releaseAbandoned: (() => void) | null = null;
       const raceTask = conn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => {
         s.query('SELECT slow'); await waitUntil((): boolean => tp.waitingRead);
-        const o1 = await asyncFail<PostgresQueryResult>((): Promise<PostgresQueryResult> => s.query('SELECT overlap'));
-        const o2 = await asyncFail<void>((): Promise<void> => s.savepoint('sp_overlap'));
-        const o3 = await asyncFail<PostgresQueryResult>((): Promise<PostgresQueryResult> => s.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()));
+        const o1 = await asyncFail<PostgresQueryResult>((): Promise<PostgresQueryResult> => s.query('SELECT overlap')); const o2 = await asyncFail<void>((): Promise<void> => s.savepoint('sp_overlap')); const o3 = await asyncFail<PostgresQueryResult>((): Promise<PostgresQueryResult> => s.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()));
         expect(o1.kind === ArkDbErrorKind.Protocol && o2.kind === ArkDbErrorKind.Protocol && o3.kind === ArkDbErrorKind.Protocol).assertTrue();
-        releaseAbandoned = (): void => { tp.hangAtEmpty = false; tp.deliverHung(rxCmd('SELECT 1', 0x54)); };
-        return 'early';
+        releaseAbandoned = (): void => { tp.hangAtEmpty = false; tp.deliverHung(rxCmd('SELECT 1', 0x54)); }; return 'early';
       });
-      await waitUntil((): boolean => releaseAbandoned !== null);
-      expect(tp.writes.length).assertEqual(2);
-      tp.enqueue([rxCmd('ROLLBACK', 0x49)]); releaseAbandoned!();
+      await waitUntil((): boolean => releaseAbandoned !== null); expect(tp.writes.length).assertEqual(2); tp.enqueue([rxCmd('ROLLBACK', 0x49)]); releaseAbandoned!();
       const abandonedErr = await asyncFail<string>((): Promise<string> => raceTask);
-      expect(abandonedErr.kind === ArkDbErrorKind.Protocol && tp.writes.length === 3 &&
-        abandonedErr.message === 'PostgreSQL transaction callback settled while a session command was still active.' &&
-        conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
-      await conn.close();
-
-      const closeIoTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54),
-        concatFrames([msgRowDesc([colSpec('b', 17)]), msgDataRow(['\\xdead']), msgCmd('SELECT 1'), msgReady(0x54)])]);
-      closeIoTp.hangAtEmpty = true; const closeIoConn = openReady(closeIoTp); await closeIoConn.connect();
-      let deliveredResult: PostgresQueryResult | null = null;
-      const closeIoRun = closeIoConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => {
-        deliveredResult = await s.query('SELECT bytea_row'); await s.query('SELECT hung_row');
-      });
-      await waitUntil((): boolean => deliveredResult !== null && closeIoTp.waitingRead);
-      const closeIoDone = closeIoConn.close(); const closeIoErr = await asyncFail<void>((): Promise<void> => closeIoRun); await closeIoDone;
-      const keptBytes = deliveredResult!.rows[0][0] as Uint8Array;
-      expect(closeIoErr.kind === ArkDbErrorKind.Cancelled && closeIoConn.state === ConnectionState.Closed &&
-        keptBytes.length === 2 && keptBytes[0] === 0xde && keptBytes[1] === 0xad).assertTrue();
-
-      const idleCloseTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54)]);
-      const idleCloseConn = openReady(idleCloseTp); await idleCloseConn.connect(); idleCloseTp.writes.length = 0;
-      let capturedIdleSession: PostgresSession | null = null; let wakeExternal: (() => void) | null = null;
-      const idleCloseRun = idleCloseConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => {
-        capturedIdleSession = s; await new Promise<void>((res: () => void): void => { wakeExternal = res; });
-      });
-      await waitUntil((): boolean => wakeExternal !== null);
-      const idleClosing = idleCloseConn.close();
-      expect(syncFail((): void => { const _s = capturedIdleSession!.sessionStatus; }).kind).assertEqual(ArkDbErrorKind.Validation);
-      await idleClosing;
-      const idleCloseErr = await asyncFail<void>((): Promise<void> => idleCloseRun);
-      wakeExternal!();
+      expect(abandonedErr.kind === ArkDbErrorKind.Protocol && tp.writes.length === 3 && abandonedErr.message === 'PostgreSQL transaction callback settled while a session command was still active.' && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
+      tp.writes.length = 0; tp.hangAtEmpty = true; tp.enqueue([rxCmd('BEGIN', 0x54)]); let releaseServerErr: (() => void) | null = null;
+      const badAbTask = conn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { s.query('SELECT bad_abandoned'); await waitUntil((): boolean => tp.waitingRead); releaseServerErr = (): void => { tp.hangAtEmpty = false; tp.deliverHung(rxErr('42P01', 'missing_tbl', 0x45)); }; return 'early'; });
+      await waitUntil((): boolean => releaseServerErr !== null); tp.enqueue([rxCmd('ROLLBACK', 0x49)]); releaseServerErr!();
+      const badAbErr = await asyncFail<string>((): Promise<string> => badAbTask);
+      expect(badAbErr.kind === ArkDbErrorKind.Protocol && badAbErr.message.indexOf('PostgreSQL transaction callback settled while a session command was still active.') === 0 && badAbErr.message.indexOf('cleanup failed: missing_tbl') > 0 && conn.state === ConnectionState.Ready).assertTrue();
+      const sCol = [colSpec('v', 25)]; const chunk1Opts = new QueryOptions(); chunk1Opts.maxChunkRows = 1; chunk1Opts.maxDrainTimeMs = 25;
+      tp.writes.length = 0; tp.enqueue([rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(sCol), msgDataRow(['r1']), msgDataRow(['r2']), msgCmd('SELECT 2'), msgReady(0x54)]), rxCmd('ROLLBACK', 0x49)]);
+      const stalledQs = new StalledSink(); const stalledQsRun = conn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { s.queryStream('SELECT stalled', chunk1Opts, stalledQs); await waitUntil((): boolean => stalledQs.calls === 1); return 'early'; });
+      await assertSettlesSoon(stalledQsRun, conn); const stalledQsErr = await asyncFail<string>((): Promise<string> => stalledQsRun);
+      expect(stalledQsErr.kind === ArkDbErrorKind.Protocol && stalledQs.calls === 1 && tp.writes.length === 3 && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue(); assertBytes(tp.writes[2], expectedQueryFrame('ROLLBACK'));
+      tp.writes.length = 0; tp.enqueue([rxCmd('BEGIN', 0x54), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(sCol), msgDataRow(['p1']), backendFrame(0x73, [])]), concatFrames([backendFrame(0x33, []), msgReady(0x54)]), rxCmd('ROLLBACK', 0x49)]);
+      const stalledPortal = new StalledSink(); const stalledPortalRun = conn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { s.postgresFeatures.prepared!.queryStream('SELECT $1', [new PostgresParameter(PostgresParameterType.Int4, 1)], chunk1Opts, stalledPortal); await waitUntil((): boolean => stalledPortal.calls === 1); throw new TypeError('portal callback abort'); });
+      await assertSettlesSoon(stalledPortalRun, conn); const stalledPortalErr = await asyncFail<void>((): Promise<void> => stalledPortalRun);
+      expect(stalledPortalErr.kind === ArkDbErrorKind.Protocol && stalledPortalErr.message.indexOf('portal callback abort') >= 0 && stalledPortalErr.message.indexOf('cleanup failed: PostgreSQL transaction callback settled while a session command was still active.') >= 0 && stalledPortal.calls === 1 && conn.state === ConnectionState.Ready && !conn.sessionStatus.inTransaction).assertTrue();
+      assertBytes(tp.writes[tp.writes.length - 1], expectedQueryFrame('ROLLBACK')); await conn.close();
+      const drainTimers = new FixedTimers(); const drainTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(sCol), msgDataRow(['d1'])])]); drainTp.hangAtEmpty = true; const drainConn = openReady(drainTp, undefined, drainTimers); await drainConn.connect(); const stalledDrain = new StalledSink();
+      const stalledDrainRun = drainConn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { s.queryStream('SELECT stalled_drain', chunk1Opts, stalledDrain); await waitUntil((): boolean => stalledDrain.calls === 1); return 'early'; });
+      await waitUntil((): boolean => drainTimers.pendingCount > 0); drainTimers.fireAll(50); await assertSettlesSoon(stalledDrainRun, drainConn); const stalledDrainErr = await asyncFail<string>((): Promise<string> => stalledDrainRun);
+      expect(stalledDrainErr.kind === ArkDbErrorKind.Protocol && stalledDrainErr.message.indexOf('maxDrainTimeMs') >= 0 && drainConn.state === ConnectionState.Error).assertTrue();
+      const writeTimers = new FixedTimers(); const writeTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54)]); const writeConn = openReady(writeTp, undefined, writeTimers); await writeConn.connect();
+      const stalledWriteRun = writeConn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { writeTp.hangNextWrite = true; s.postgresFeatures.prepared!.queryStream('SELECT $1', [new PostgresParameter(PostgresParameterType.Int4, 1)], chunk1Opts, new CollectSink()); await waitUntil((): boolean => writeTp.waitingWrite); return 'early'; });
+      for (let i = 0; i < 512 && writeTimers.pendingCount === 0; i += 1) await Promise.resolve();
+      const hasWriteTimer = writeTimers.pendingCount > 0; if (!hasWriteTimer) await writeConn.close(); expect(hasWriteTimer).assertTrue(); writeTimers.fireAll(50); await assertSettlesSoon(stalledWriteRun, writeConn); const stalledWriteErr = await asyncFail<string>((): Promise<string> => stalledWriteRun);
+      expect(stalledWriteErr.kind === ArkDbErrorKind.Protocol && stalledWriteErr.message.indexOf('PostgreSQL transaction callback settled while a session command was still active.') === 0 && stalledWriteErr.message.indexOf('maxDrainTimeMs') > 0 && writeConn.state === ConnectionState.Error).assertTrue();
+      const closeIoTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc([colSpec('b', 17)]), msgDataRow(['\\xdead']), msgCmd('SELECT 1'), msgReady(0x54)])]); closeIoTp.hangAtEmpty = true; const closeIoConn = openReady(closeIoTp); await closeIoConn.connect(); let deliveredResult: PostgresQueryResult | null = null;
+      const closeIoRun = closeIoConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { deliveredResult = await s.query('SELECT bytea_row'); await s.query('SELECT hung_row'); });
+      await waitUntil((): boolean => deliveredResult !== null && closeIoTp.waitingRead); const closeIoDone = closeIoConn.close(); const closeIoErr = await asyncFail<void>((): Promise<void> => closeIoRun); await closeIoDone; const keptBytes = deliveredResult!.rows[0][0] as Uint8Array;
+      expect(closeIoErr.kind === ArkDbErrorKind.Cancelled && closeIoConn.state === ConnectionState.Closed && keptBytes.length === 2 && keptBytes[0] === 0xde && keptBytes[1] === 0xad).assertTrue();
+      const idleCloseTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54)]); const idleCloseConn = openReady(idleCloseTp); await idleCloseConn.connect(); idleCloseTp.writes.length = 0; let capturedIdleSession: PostgresSession | null = null; let wakeExternal: (() => void) | null = null;
+      const idleCloseRun = idleCloseConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { capturedIdleSession = s; await new Promise<void>((res: () => void): void => { wakeExternal = res; }); });
+      await waitUntil((): boolean => wakeExternal !== null); const idleClosing = idleCloseConn.close(); expect(syncFail((): void => { const _s = capturedIdleSession!.sessionStatus; }).kind).assertEqual(ArkDbErrorKind.Validation); await idleClosing; const idleCloseErr = await asyncFail<void>((): Promise<void> => idleCloseRun); wakeExternal!();
       expect(idleCloseErr.kind === ArkDbErrorKind.Cancelled && idleCloseConn.state === ConnectionState.Closed && idleCloseTp.writes.length === 1).assertTrue();
+      const cbCloseTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), concatFrames([msgRowDesc(sCol), msgDataRow(['x']), msgCmd('SELECT 1'), msgReady(0x54)])]); cbCloseTp.hangAtEmpty = true; const cbCloseConn = openReady(cbCloseTp); await cbCloseConn.connect(); let readyToThrow = false; let goThrow: (() => void) | null = null;
+      const cbCloseRun = cbCloseConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { const stSink = new StalledSink(); s.queryStream('SELECT 1', chunk1Opts, stSink); await waitUntil((): boolean => stSink.calls === 1); readyToThrow = true; await new Promise<void>((res: () => void): void => { goThrow = res; }); throw ArkDbError.validation('cb_primary'); });
+      await waitUntil((): boolean => readyToThrow); goThrow!(); await waitUntil((): boolean => cbCloseTp.waitingRead); const cbClosing = cbCloseConn.close(); const cbCloseErr = await asyncFail<void>((): Promise<void> => cbCloseRun); await cbClosing;
+      expect(cbCloseErr.kind === ArkDbErrorKind.Validation && cbCloseErr.message.indexOf('cb_primary') === 0 && cbCloseErr.message.indexOf('cleanup failed: PostgreSQL connection closed during operation.') > 0 && cbCloseConn.state === ConnectionState.Closed).assertTrue();
+      const prepDrainTimers = new FixedTimers(); const prepDrainTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54)]); prepDrainTp.hangAtEmpty = true; const prepDrainConn = openReady(prepDrainTp, undefined, prepDrainTimers); await prepDrainConn.connect();
+      const prepDrainRun = prepDrainConn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { s.postgresFeatures.prepared!.execute('SELECT $1', [new PostgresParameter(PostgresParameterType.Int4, 1)], chunk1Opts); await waitUntil((): boolean => prepDrainTp.waitingRead); return 'early'; });
+      for (let i = 0; i < 512 && prepDrainTimers.pendingCount === 0; i += 1) await Promise.resolve();
+      const hasPrepTimer = prepDrainTimers.pendingCount > 0; if (!hasPrepTimer) await prepDrainConn.close(); expect(hasPrepTimer).assertTrue(); prepDrainTimers.fireAll(50); await assertSettlesSoon(prepDrainRun, prepDrainConn); const prepDrainErr = await asyncFail<string>((): Promise<string> => prepDrainRun);
+      expect(prepDrainErr.kind === ArkDbErrorKind.Protocol && prepDrainErr.message.indexOf('maxDrainTimeMs') > 0 && prepDrainConn.state === ConnectionState.Error).assertTrue();
+      const qAbTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54)]); qAbTp.hangAtEmpty = true; const qAbConn = openReady(qAbTp); await qAbConn.connect(); let detachedQ: Promise<PostgresQueryResult> | null = null; let relQ: (() => void) | null = null;
+      const qAbRun = qAbConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<void> => { detachedQ = s.query('SELECT 1'); await waitUntil((): boolean => qAbTp.waitingRead); relQ = (): void => { qAbTp.hangAtEmpty = false; qAbTp.deliverHung(concatFrames([msgRowDesc(sCol), msgDataRow(['secret']), msgCmd('SELECT 1'), msgReady(0x54)])); }; throw new TypeError('q_abort'); });
+      await waitUntil((): boolean => relQ !== null); qAbTp.enqueue([rxCmd('ROLLBACK', 0x49)]); relQ!(); const qDetachedErr = await asyncFail<PostgresQueryResult>((): Promise<PostgresQueryResult> => detachedQ!); const qAbErr = await asyncFail<void>((): Promise<void> => qAbRun);
+      expect(qDetachedErr.kind === ArkDbErrorKind.Protocol && qAbErr.kind === ArkDbErrorKind.Protocol && qAbErr.message.indexOf('q_abort') >= 0 && qAbErr.message.indexOf('cleanup failed: PostgreSQL transaction callback settled while a session command was still active.') > 0 && qAbConn.state === ConnectionState.Ready).assertTrue(); await qAbConn.close();
+      const clkTimers = new FixedTimers(); const clkTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), concatFrames([msgParseComplete(), msgBindComplete(), msgRowDesc(sCol), msgDataRow(['p1']), backendFrame(0x73, [])])]); clkTp.hangAtEmpty = true; const clkConn = openReady(clkTp, undefined, clkTimers); await clkConn.connect(); const clkSink = new StalledSink();
+      const clkRun = clkConn.postgresFeatures.transactions!.run<string>(new PostgresTransactionOptions(), async (s: PostgresSession): Promise<string> => { s.postgresFeatures.prepared!.queryStream('SELECT $1', [new PostgresParameter(PostgresParameterType.Int4, 1)], chunk1Opts, clkSink); await waitUntil((): boolean => clkSink.calls === 1); clkTimers.brokenClock = true; return 'early'; });
+      await assertSettlesSoon(clkRun, clkConn); const clkErr = await asyncFail<string>((): Promise<string> => clkRun);
+      expect(clkErr.message.lastIndexOf('PostgreSQL transaction callback settled while a session command was still active.') === 0 && clkErr.message.indexOf('Connection clock is unavailable.') > 0 && clkConn.state === ConnectionState.Error).assertTrue();
+      const wTp = new QueueTransport([]); wTp.hangNextWrite = true; const wSt = new PostgresCommandCloseSettlement(new PostgresCommandGate().reserve(PostgresCommandKind.ExtendedQuery)); const wDrain = new PostgresBufferedDrain(wSt, (): number => -1, (): void => { throw ArkDbError.protocol('clock dead'); }); wSt.abandonConsumer(ArkDbError.protocol('abandoned'));
+      const wTask = writeQueryFrame(new PostgresMessageChannel(wTp), wSt, 0x53, backendFrame(0x53, []), new FixedTimers(), -1, wDrain.setWake); if (wTp.waitingWrite) wSt.signalClose(ArkDbError.cancelled('hung')); const wErr = await asyncFail<void>((): Promise<void> => wTask);
+      expect(wTp.writes.length === 0 && !wTp.waitingWrite && wErr.message.indexOf('abandoned') === 0 && wErr.message.indexOf('clock dead') > 0).assertTrue();
+      const gapTimers = new FixedTimers(); const gapTp = new QueueTransport([bootFrames(0x49), rxCmd('BEGIN', 0x54), rxCmd('ROLLBACK', 0x49)]); const gapConn = openReady(gapTp, undefined, gapTimers); await gapConn.connect(); let gapClosing: Promise<void> | null = null; let rbTicks = 0;
+      const gapRun = gapConn.postgresFeatures.transactions!.run<void>(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => { gapTimers.onNow = (): void => { rbTicks += 1; if (rbTicks === 2) Promise.resolve().then((): Promise<void> => Promise.resolve()).then((): Promise<void> => Promise.resolve()).then((): void => { gapClosing = gapConn.close(); }); }; throw ArkDbError.validation('gap_primary'); });
+      const gapErr = await asyncFail<void>((): Promise<void> => gapRun); if (gapClosing !== null) await gapClosing; expect(gapErr.kind === ArkDbErrorKind.Validation && gapErr.message.indexOf('gap_primary') === 0).assertTrue();
     });
   });
 }
 
 function asTxOpts(v: PostgresTransactionOptions | null): PostgresTransactionOptions { return v as PostgresTransactionOptions; }
-function makeOpts(iso: PostgresTransactionIsolation, ro: boolean, def: boolean): PostgresTransactionOptions {
-  const o = new PostgresTransactionOptions(); o.isolation = iso; o.readOnly = ro; o.deferrable = def; return o;
-}
-class CollectSink implements QueryResultSink {
-  readonly values: string[] = [];
-  async onResultStart(_m: QueryResultMeta): Promise<void> {}
-  async onRows(chunk: QueryRowChunk): Promise<void> { for (const r of chunk.rows) this.values.push(String(r[0] as SqlValue)); }
-  async onResultEnd(_s: QueryResultSummary): Promise<void> {}
-}
-class ThrowingSink implements QueryResultSink {
-  private readonly err: ArkDbError;
-  constructor(err: ArkDbError) { this.err = err; }
-  async onResultStart(_m: QueryResultMeta): Promise<void> {}
-  async onRows(_c: QueryRowChunk): Promise<void> { throw this.err; }
-  async onResultEnd(_s: QueryResultSummary): Promise<void> {}
-}
-class KindObserver implements PostgresCommandLifecycleObserver {
-  private readonly kinds: PostgresCommandKind[];
-  constructor(kinds: PostgresCommandKind[]) { this.kinds = kinds; }
-  onStart(scope: PostgresCommandScope): void { this.kinds.push(scope.kind); }
-  onTerminal(_s: PostgresCommandScope): void {}
-}
+function makeOpts(iso: PostgresTransactionIsolation, ro: boolean, def: boolean): PostgresTransactionOptions { const o = new PostgresTransactionOptions(); o.isolation = iso; o.readOnly = ro; o.deferrable = def; return o; }
+class CollectSink implements QueryResultSink { readonly values: string[] = []; async onResultStart(_m: QueryResultMeta): Promise<void> {} async onResultEnd(_s: QueryResultSummary): Promise<void> {} async onRows(c: QueryRowChunk): Promise<void> { for (const r of c.rows) this.values.push(String(r[0] as SqlValue)); } }
+class ThrowingSink implements QueryResultSink { private readonly err: ArkDbError; constructor(err: ArkDbError) { this.err = err; } async onResultStart(_m: QueryResultMeta): Promise<void> {} async onRows(_c: QueryRowChunk): Promise<void> { throw this.err; } async onResultEnd(_s: QueryResultSummary): Promise<void> {} }
+class StalledSink implements QueryResultSink { calls: number = 0; async onResultStart(_m: QueryResultMeta): Promise<void> {} async onResultEnd(_s: QueryResultSummary): Promise<void> { this.calls += 10; } onRows(_c: QueryRowChunk): Promise<void> { this.calls += 1; return new Promise<void>((_r: () => void): void => {}); } }
+class KindObserver implements PostgresCommandLifecycleObserver { private readonly kinds: PostgresCommandKind[]; constructor(kinds: PostgresCommandKind[]) { this.kinds = kinds; } onStart(s: PostgresCommandScope): void { this.kinds.push(s.kind); } onTerminal(_s: PostgresCommandScope): void {} }
 class FixedTimers implements ConnectionTimerPort {
-  private now: number = 100; private id: number = 1;
-  nowMs(): number { return ++this.now; }
-  schedule(_h: () => void, _ms: number): number { return this.id++; }
-  cancel(_id: number): void {}
+  brokenClock: boolean = false; onNow: ((calls: number) => void) | null = null; private nowCalls: number = 0; private now: number = 100; private id: number = 1; private readonly tasks: Map<number, () => void> = new Map<number, () => void>();
+  get pendingCount(): number { return this.tasks.size; }
+  nowMs(): number { if (this.brokenClock) return -1; this.nowCalls += 1; if (this.onNow !== null) this.onNow(this.nowCalls); return ++this.now; }
+  schedule(h: () => void, _ms: number): number { const tid = this.id++; this.tasks.set(tid, h); return tid; } cancel(id: number): void { this.tasks.delete(id); }
+  fireAll(ms: number): void { this.now += ms; const ls = Array.from(this.tasks.values()); this.tasks.clear(); for (const fn of ls) fn(); }
 }
 class QueueTransport implements PostgresLifecycleTransport {
-  readonly writes: Uint8Array[] = []; hangAtEmpty: boolean = false; waitingRead: boolean = false;
-  private hungMax: number = 0;
-  private resolveHung: ((v: Uint8Array | null) => void) | null = null;
-  private rejectHung: ((e: Object) => void) | null = null; private readonly reads: Uint8Array[];
-  constructor(reads: Uint8Array[]) { this.reads = reads.slice(); }
-  enqueue(chunks: Uint8Array[]): void { for (const c of chunks) this.reads.push(c); }
-  deliverHung(chunk: Uint8Array): void {
-    if (this.resolveHung !== null) {
-      const r = this.resolveHung; const m = this.hungMax;
-      this.resolveHung = null; this.rejectHung = null; this.waitingRead = false;
-      if (chunk.length <= m) r(chunk); else { this.reads.unshift(chunk.subarray(m)); r(chunk.subarray(0, m)); }
-    }
-  }
-  async connect(_h: string, _p: number, _t: number): Promise<void> {}
+  readonly writes: Uint8Array[] = []; hangAtEmpty: boolean = false; waitingRead: boolean = false; hangNextWrite: boolean = false; waitingWrite: boolean = false; abortErr: Error | null = null;
+  private hungMax: number = 0; private resolveHung: ((v: Uint8Array | null) => void) | null = null; private rejectHung: ((e: Object) => void) | null = null; private rejectHungWrite: ((e: Object) => void) | null = null; private readonly reads: Uint8Array[];
+  constructor(reads: Uint8Array[]) { this.reads = reads.slice(); } enqueue(chunks: Uint8Array[]): void { for (const c of chunks) this.reads.push(c); }
+  deliverHung(chunk: Uint8Array): void { if (this.resolveHung === null) return; const r = this.resolveHung; const m = this.hungMax; this.resolveHung = null; this.rejectHung = null; this.waitingRead = false; if (chunk.length <= m) r(chunk); else { this.reads.unshift(chunk.subarray(m)); r(chunk.subarray(0, m)); } }
+  async connect(_h: string, _p: number, _t: number): Promise<void> {} async close(): Promise<void> {}
   async read(max: number): Promise<Uint8Array | null> {
-    if (this.reads.length === 0) {
-      if (!this.hangAtEmpty) return null;
-      this.waitingRead = true; this.hungMax = max;
-      return new Promise<Uint8Array | null>((res: (v: Uint8Array | null) => void, rej: (e: Object) => void): void => {
-        this.resolveHung = res; this.rejectHung = rej;
-      });
-    }
-    const head = this.reads[0]; if (head.length <= max) return this.reads.shift()!;
-    this.reads[0] = head.subarray(max); return head.subarray(0, max);
+    if (this.reads.length === 0) { if (!this.hangAtEmpty) return null; this.waitingRead = true; this.hungMax = max; return new Promise<Uint8Array | null>((res: (v: Uint8Array | null) => void, rej: (e: Object) => void): void => { this.resolveHung = res; this.rejectHung = rej; }); }
+    const head = this.reads[0]; if (head.length <= max) return this.reads.shift()!; this.reads[0] = head.subarray(max); return head.subarray(0, max);
   }
-  write(data: Uint8Array): Promise<number> { const cp = new Uint8Array(data.length); cp.set(data); this.writes.push(cp); return Promise.resolve(data.length); }
-  async close(): Promise<void> {}
-  async abort(e: ArkDbError): Promise<void> {
-    if (this.rejectHung !== null) { const r = this.rejectHung; this.resolveHung = null; this.rejectHung = null; this.waitingRead = false; r(e); }
-  }
+  write(data: Uint8Array): Promise<number> { const cp = new Uint8Array(data.length); cp.set(data); this.writes.push(cp); if (this.hangNextWrite) { this.hangNextWrite = false; this.waitingWrite = true; return new Promise<number>((_r: (n: number) => void, rej: (e: Object) => void): void => { this.rejectHungWrite = rej; }); } return Promise.resolve(data.length); }
+  async abort(e: ArkDbError): Promise<void> { if (this.rejectHung !== null) { const r = this.rejectHung; this.resolveHung = null; this.rejectHung = null; this.waitingRead = false; r(e); } if (this.rejectHungWrite !== null) { const rw = this.rejectHungWrite; this.rejectHungWrite = null; this.waitingWrite = false; rw(e); } if (this.abortErr !== null) { const ae = this.abortErr; this.abortErr = null; throw ae; } }
 }
-function openReady(tp: QueueTransport, gate?: PostgresCommandGate): PostgresConnection {
-  const c = new PostgresConnectionConfig(); c.host = 'pg.local'; c.user = 'alice'; c.database = 'app_db'; c.ssl.mode = PostgresSslMode.DISABLED;
-  return new PostgresConnection(c, '', new FixedTimers(), (): PostgresLifecycleTransport => tp, undefined, gate);
-}
+function openReady(tp: QueueTransport, gate?: PostgresCommandGate, timers?: FixedTimers): PostgresConnection { const c = new PostgresConnectionConfig(); c.host = 'pg.local'; c.user = 'alice'; c.database = 'app_db'; c.ssl.mode = PostgresSslMode.DISABLED; return new PostgresConnection(c, '', timers !== undefined ? timers : new FixedTimers(), (): PostgresLifecycleTransport => tp, undefined, gate); }
+async function assertSettlesSoon<T>(p: Promise<T>, conn: PostgresConnection): Promise<void> { let done = false; p.then((_v: T): void => { done = true; }, (_e: Object): void => { done = true; }); for (let i = 0; i < 512 && !done; i += 1) await Promise.resolve(); if (!done) await conn.close(); expect(done).assertTrue(); }
 function bootFrames(ready: number): Uint8Array { return concatFrames([backendFrame(0x52, [0, 0, 0, 0]), msgParam('client_encoding', 'UTF8'), msgReady(ready)]); }
-function backendFrame(type: number, payload: number[] | Uint8Array): Uint8Array {
-  const src = payload instanceof Uint8Array ? payload : new Uint8Array(payload); const out = new Uint8Array(src.length + 5);
-  out[0] = type; new DataView(out.buffer).setInt32(1, src.length + 4, false); out.set(src, 5); return out;
-}
+function backendFrame(type: number, payload: number[] | Uint8Array): Uint8Array { const src = payload instanceof Uint8Array ? payload : new Uint8Array(payload); const out = new Uint8Array(src.length + 5); out[0] = type; new DataView(out.buffer).setInt32(1, src.length + 4, false); out.set(src, 5); return out; }
 function expectedQueryFrame(sql: string): Uint8Array { const p: number[] = []; pushCStr(p, sql); return backendFrame(0x51, p); }
-function msgParseComplete(): Uint8Array { return backendFrame(0x31, []); }
-function msgBindComplete(): Uint8Array { return backendFrame(0x32, []); }
-function msgCmd(tag: string): Uint8Array { const p: number[] = []; pushCStr(p, tag); return backendFrame(0x43, p); }
-function msgReady(status: number): Uint8Array { return backendFrame(0x5a, [status]); }
-function rxCmd(tag: string, ready: number): Uint8Array { return concatFrames([msgCmd(tag), msgReady(ready)]); }
-function rxErr(st: string, m: string, ready: number): Uint8Array { return concatFrames([msgError(st, m), msgReady(ready)]); }
+function msgParseComplete(): Uint8Array { return backendFrame(0x31, []); } function msgBindComplete(): Uint8Array { return backendFrame(0x32, []); }
+function msgCmd(tag: string): Uint8Array { const p: number[] = []; pushCStr(p, tag); return backendFrame(0x43, p); } function msgReady(status: number): Uint8Array { return backendFrame(0x5a, [status]); }
+function rxCmd(tag: string, ready: number): Uint8Array { return concatFrames([msgCmd(tag), msgReady(ready)]); } function rxErr(st: string, m: string, ready: number): Uint8Array { return concatFrames([msgError(st, m), msgReady(ready)]); }
 function msgParam(n: string, v: string): Uint8Array { const p: number[] = []; pushCStr(p, n); pushCStr(p, v); return backendFrame(0x53, p); }
-function msgError(st: string, m: string): Uint8Array {
-  const p: number[] = [0x53]; pushCStr(p, 'ERROR'); p.push(0x56); pushCStr(p, 'ERROR'); p.push(0x43); pushCStr(p, st); p.push(0x4d); pushCStr(p, m); p.push(0); return backendFrame(0x45, p);
-}
-function colSpec(name: string, oid: number): Uint8Array {
-  const p: number[] = []; pushCStr(p, name); const t = new Uint8Array(18); const v = new DataView(t.buffer);
-  v.setUint32(6, oid, false); v.setInt16(10, -1, false); v.setInt32(12, -1, false); v.setInt16(16, 0, false);
-  const out = new Uint8Array(p.length + 18); out.set(p, 0); out.set(t, p.length); return out;
-}
-function msgRowDesc(cols: Uint8Array[]): Uint8Array {
-  let len = 2; for (const c of cols) len += c.length; const p = new Uint8Array(len); new DataView(p.buffer).setInt16(0, cols.length, false);
-  let off = 2; for (const c of cols) { p.set(c, off); off += c.length; } return backendFrame(0x54, p);
-}
-function msgDataRow(vals: Array<string | null>): Uint8Array {
-  let len = 2; for (const v of vals) len += v === null ? 4 : 4 + v.length; const p = new Uint8Array(len); const dv = new DataView(p.buffer); dv.setInt16(0, vals.length, false);
-  let off = 2;
-  for (const v of vals) {
-    if (v === null) { dv.setInt32(off, -1, false); off += 4; }
-    else { dv.setInt32(off, v.length, false); for (let i = 0; i < v.length; i += 1) p[off + 4 + i] = v.charCodeAt(i); off += 4 + v.length; }
-  }
-  return backendFrame(0x44, p);
-}
+function msgError(st: string, m: string): Uint8Array { const p: number[] = [0x53]; pushCStr(p, 'ERROR'); p.push(0x56); pushCStr(p, 'ERROR'); p.push(0x43); pushCStr(p, st); p.push(0x4d); pushCStr(p, m); p.push(0); return backendFrame(0x45, p); }
+function colSpec(name: string, oid: number): Uint8Array { const p: number[] = []; pushCStr(p, name); const t = new Uint8Array(18); const v = new DataView(t.buffer); v.setUint32(6, oid, false); v.setInt16(10, -1, false); v.setInt32(12, -1, false); v.setInt16(16, 0, false); const out = new Uint8Array(p.length + 18); out.set(p, 0); out.set(t, p.length); return out; }
+function msgRowDesc(cols: Uint8Array[]): Uint8Array { let len = 2; for (const c of cols) len += c.length; const p = new Uint8Array(len); new DataView(p.buffer).setInt16(0, cols.length, false); let off = 2; for (const c of cols) { p.set(c, off); off += c.length; } return backendFrame(0x54, p); }
+function msgDataRow(vals: Array<string | null>): Uint8Array { let len = 2; for (const v of vals) len += v === null ? 4 : 4 + v.length; const p = new Uint8Array(len); const dv = new DataView(p.buffer); dv.setInt16(0, vals.length, false); let off = 2; for (const v of vals) { if (v === null) { dv.setInt32(off, -1, false); off += 4; } else { dv.setInt32(off, v.length, false); for (let i = 0; i < v.length; i += 1) p[off + 4 + i] = v.charCodeAt(i); off += 4 + v.length; } } return backendFrame(0x44, p); }
 function pushCStr(dst: number[], text: string): void { for (let i = 0; i < text.length; i += 1) dst.push(text.charCodeAt(i)); dst.push(0); }
-function concatFrames(frames: Uint8Array[]): Uint8Array {
-  let len = 0; for (const f of frames) len += f.length; const out = new Uint8Array(len); let off = 0;
-  for (const f of frames) { out.set(f, off); off += f.length; } return out;
-}
-function assertBytes(actual: Uint8Array, expected: Uint8Array): void {
-  expect(actual.length).assertEqual(expected.length); for (let i = 0; i < expected.length; i += 1) expect(actual[i]).assertEqual(expected[i]);
-}
-async function waitUntil(pred: () => boolean): Promise<void> {
-  for (let i = 0; i < 512 && !pred(); i += 1) await Promise.resolve();
-  expect(pred()).assertTrue();
-}
-function syncFail(op: () => void): ArkDbError {
-  let err: Object | null = null; try { op(); } catch (e) { err = e as Object; }
-  expect(err instanceof ArkDbError).assertTrue(); return err as ArkDbError;
-}
-async function rawFail<T>(op: () => Promise<T>): Promise<Object> {
-  let caught = false; let err: Object | null = null;
-  try { await op(); } catch (e) { caught = true; err = e as Object; }
-  expect(caught).assertTrue(); return err as Object;
-}
-async function asyncFail<T>(op: () => Promise<T>): Promise<ArkDbError> {
-  const err = await rawFail<T>(op); expect(err instanceof ArkDbError).assertTrue(); return err as ArkDbError;
-}
+function concatFrames(frames: Uint8Array[]): Uint8Array { let len = 0; for (const f of frames) len += f.length; const out = new Uint8Array(len); let off = 0; for (const f of frames) { out.set(f, off); off += f.length; } return out; }
+function assertBytes(actual: Uint8Array, expected: Uint8Array): void { expect(actual.length).assertEqual(expected.length); for (let i = 0; i < expected.length; i += 1) expect(actual[i]).assertEqual(expected[i]); }
+async function waitUntil(pred: () => boolean): Promise<void> { for (let i = 0; i < 512 && !pred(); i += 1) await Promise.resolve(); expect(pred()).assertTrue(); }
+function syncFail(op: () => void): ArkDbError { let err: Object | null = null; try { op(); } catch (e) { err = e as Object; } expect(err instanceof ArkDbError).assertTrue(); return err as ArkDbError; }
+async function rawFail<T>(op: () => Promise<T>): Promise<Object> { let ok = false; let err: Object | null = null; try { await op(); } catch (e) { ok = true; err = e as Object; } expect(ok).assertTrue(); return err as Object; }
+async function asyncFail<T>(op: () => Promise<T>): Promise<ArkDbError> { const err = await rawFail<T>(op); expect(err instanceof ArkDbError).assertTrue(); return err as ArkDbError; }

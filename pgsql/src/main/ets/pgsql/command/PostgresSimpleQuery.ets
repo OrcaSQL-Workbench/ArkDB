@@ -270,8 +270,8 @@ export async function writeQueryFrame(channel: PostgresMessageChannel, settlemen
   try {
     if (settlement.closeReason !== null) throw settlement.closeReason;
     const dl0 = setDrainWake !== undefined ? setDrainWake(null, true) : drainDeadlineMs;
+    if (dl0 >= 0 || setDrainWake === undefined) { await raceDrainDeadline<void>(timers, dl0, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => { const t = channel.writeMessage(type, frame.subarray(5)); t.then((): void => {}, (): void => {}); return t; })); return; }
     const task = channel.writeMessage(type, frame.subarray(5)); task.then((): void => {}, (): void => {});
-    if (dl0 >= 0 || setDrainWake === undefined) { await raceDrainDeadline<void>(timers, dl0, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => task)); return; }
     let woke = false; const wake = new Promise<void>((res: () => void): void => { setDrainWake((): void => { woke = true; res(); }, false); });
     try {
       await settlement.raceClose<void>((): Promise<void> => Promise.race<void>([task, wake])); const dl = setDrainWake(null, true);

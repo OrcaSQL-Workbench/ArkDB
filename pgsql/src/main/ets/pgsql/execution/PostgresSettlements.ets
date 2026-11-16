@@ -157,6 +157,8 @@ export function postgresAppendCleanupError(
   return registerComposedError<ArkDbError>(copy, primary, cleanup);
 }
 
+export function isPostgresComposedError(error: ArkDbError): boolean { return composedErrorParts.has(error); }
+
 export function toPostgresArkDbError(
   error: Object, fallbackKind: ArkDbErrorKind = ArkDbErrorKind.Protocol): ArkDbError {
   if (error instanceof ArkDbError) return error;

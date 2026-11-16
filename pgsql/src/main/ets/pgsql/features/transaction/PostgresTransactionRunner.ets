@@ -63,14 +63,14 @@ class ScopedPostgresTransactionSession implements PostgresSession {
   get sessionStatus(): PostgresDatabaseSessionStatus { this.assertActive(); return this.host.sessionStatus.clone(); } get hasActiveCommand(): boolean { return this.activeSettlementTask !== null; }
   assertActive(): void { if (this.expired) throw ArkDbError.validation(SESSION_EXPIRED_MSG); } expire(): void { this.expired = true; }
   waitForActiveCommand(): Promise<ArkDbError | null> { return this.activeSettlementTask !== null ? this.activeSettlementTask : Promise.resolve<ArkDbError | null>(null); }
-  private runActiveStep<R>(op: (sh: StepCommandHost, ss: PostgresCommandCloseSettlement) => Promise<R>): Promise<R> { return this.runSerialized<R>((): Promise<R> => this.executeStep<R>(async (sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<R> => { await ensureActiveTransaction(sh, ss, false); return op(sh, ss); })); }
+  private runActiveStep<R>(op: (sh: StepCommandHost, ss: PostgresCommandCloseSettlement) => Promise<R>): Promise<R> { return this.runSerialized<R>((): Promise<R> => this.executeStep<R>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<R> => { const fail = checkActiveTransaction<R>(sh, ss, false); return fail !== null ? fail : op(sh, ss); })); }
   query(sql: string): Promise<PostgresQueryResult> { return this.runActiveStep<PostgresQueryResult>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> => runPostgresSimpleQuery(sh, this.channel, ss, sql)); }
   queryStream(sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> {
     return this.runSerialized<QueryExecutionSummary>((): Promise<QueryExecutionSummary> => {
       if (!(options instanceof QueryOptions)) throw ArkDbError.validation('QueryOptions is required.');
       if (sink === null || sink === undefined || typeof sink !== 'object') throw ArkDbError.validation('QueryResultSink is required.');
       const snap = snapshotQueryOptions(options);
-      return this.executeStep<QueryExecutionSummary>(async (sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> => { await ensureActiveTransaction(sh, ss, false); return runPostgresQueryStream(sh, this.channel, ss, sql, snap, sink); });
+      return this.executeStep<QueryExecutionSummary>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> => { const fail = checkActiveTransaction<QueryExecutionSummary>(sh, ss, false); return fail !== null ? fail : runPostgresQueryStream(sh, this.channel, ss, sql, snap, sink); });
     });
   }
   savepoint(name: string): Promise<void> { return this.runSavepoint(name, 'SAVEPOINT ', 'SAVEPOINT'); } rollbackTo(name: string): Promise<void> { return this.runSavepoint(name, 'ROLLBACK TO SAVEPOINT ', 'ROLLBACK'); } releaseSavepoint(name: string): Promise<void> { return this.runSavepoint(name, 'RELEASE SAVEPOINT ', 'RELEASE'); }
@@ -79,7 +79,7 @@ class ScopedPostgresTransactionSession implements PostgresSession {
       if (typeof name !== 'string') throw ArkDbError.validation('PostgreSQL savepoint name must be a non-empty string.');
       const quoted = quotePostgresIdentifier([name]);
       return this.executeStep<void>(async (sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<void> => {
-        await ensureActiveTransaction(sh, ss, true); const res = await runPostgresSimpleQuery(sh, this.channel, ss, sqlPrefix + quoted); throwIfClosed(ss);
+        const fail = checkActiveTransaction<void>(sh, ss, true); if (fail !== null) return fail; const res = await runPostgresSimpleQuery(sh, this.channel, ss, sqlPrefix + quoted); throwIfClosed(ss);
         if (res.commandTag !== expectedTag || res.columns.length !== 0 || res.rows.length !== 0 || res.additionalResults.length !== 0 || !sh.sessionStatus.known || !sh.sessionStatus.inTransaction || sh.sessionStatus.transactionState !== PostgresTransactionState.InTransaction) { const err = ArkDbError.protocol('Unexpected PostgreSQL savepoint completion state.'); await sh.retire(err); throw err; }
       });
     });
@@ -155,10 +155,11 @@ async function runRollbackCleanup(host: PostgresTransactionCommandHost, channel:
   }
   return host.isSynchronized() && isIdleTransactionState(host.sessionStatus);
 }
-async function ensureActiveTransaction(sh: StepCommandHost, ss: PostgresCommandCloseSettlement, savepointMode: boolean): Promise<void> {
+function checkActiveTransaction<R>(sh: StepCommandHost, ss: PostgresCommandCloseSettlement, savepointMode: boolean): Promise<R> | null {
   if (ss.consumerAbandonReason !== null) { ss.markConsumerAbandonClaimed(); throw ss.consumerAbandonReason; }
-  if (!isKnownTransactionState(sh.sessionStatus)) { const err = ArkDbError.protocol('PostgreSQL transaction state is unknown.'); await sh.retire(err); throw err; }
+  if (!isKnownTransactionState(sh.sessionStatus)) { const err = ArkDbError.protocol('PostgreSQL transaction state is unknown.'); return sh.retire(err).then((): Promise<R> => Promise.reject<R>(err)); }
   if (!sh.sessionStatus.inTransaction || sh.sessionStatus.transactionState === PostgresTransactionState.Idle) throw ArkDbError.validation(savepointMode ? 'PostgreSQL savepoints require an active transaction.' : 'PostgreSQL connection is not in an active transaction.');
+  return null;
 }
 function throwIfClosed(settlement: PostgresCommandCloseSettlement): void { if (settlement.closeReason !== null) throw settlement.closeReason; }
 function observePromise<R>(p: Promise<R>): Promise<R> { p.then((_v: R): void => {}, (_e: Object): void => {}); return p; }

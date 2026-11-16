@@ -19,8 +19,8 @@ import {
   PostgresConnectionLifecycle, PostgresLifecycleTransport, PostgresStartupRunner
 } from './connection/PostgresConnectionLifecycle';
 import {
-  PostgresConnectionContext, PostgresConnectionHealth, PostgresConnectionStreaming,
-  PostgresConnectionTransactions, createPostgresContextPolicy
+  PostgresConnectionCancellation, PostgresConnectionContext, PostgresConnectionHealth,
+  PostgresConnectionStreaming, PostgresConnectionTransactions, createPostgresContextPolicy
 } from './connection/PostgresFeatureFacades';
 import {
   PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase, PostgresCommandScope
@@ -61,6 +61,7 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
       (): DatabaseContextPolicy => this.contextPolicy,
       (context: DatabaseContext): Promise<void> => this.changeContext(context));
     this.features.transactions = new PostgresConnectionTransactions(this);
+    this.features.cancellation = new PostgresConnectionCancellation(this);
     this.postgresFeatures.prepared = new PostgresConnectionPreparedExecutor(
       (frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> =>
         this.executeExtendedQuery(frames, options),
@@ -158,12 +159,12 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
         runPostgresRollback(new SimpleQueryLifecycleHost(this.lifecycle, s), ch, st));
   }
 
-  async cancel(): Promise<QueryCancellationResult> {
-    throw ArkDbError.unsupported('PostgreSQL cancellation is not implemented.');
+  cancel(): Promise<QueryCancellationResult> {
+    return this.lifecycle.cancel();
   }
 
-  isInterruptionError(_error: ArkDbError): boolean {
-    throw ArkDbError.unsupported('PostgreSQL interruption classification is not implemented.');
+  isInterruptionError(error: ArkDbError): boolean {
+    return this.lifecycle.isInterruptionError(error);
   }
 
   close(): Promise<void> {

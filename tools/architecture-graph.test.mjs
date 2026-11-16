@@ -396,7 +396,7 @@ const ARCHITECTURE_POLICY = {
     },
     {
       from: /^pgsql\/src\/main\/ets\/pgsql\/execution\//,
-      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|driver\/|connection\/)/,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|driver\/|connection\/|transport\/)/,
       transitive: true,
       message: 'PostgreSQL execution primitives must not depend on connection or driver facades.'
     },
@@ -497,7 +497,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, P20A, and P20B own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, P20A, P20B, and P22 own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -519,6 +519,7 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, P20A, and P20B own ex
     'pgsql/src/main/ets/pgsql/connection/PostgresFeatureFacades.ets',
     'pgsql/src/main/ets/pgsql/driver/PostgresDriverFactory.ets',
     'pgsql/src/main/ets/pgsql/execution/PostgresCommandGate.ets',
+    'pgsql/src/main/ets/pgsql/execution/PostgresExecutionController.ets',
     'pgsql/src/main/ets/pgsql/execution/PostgresSettlements.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameter.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameterEncoder.ets',
@@ -2512,6 +2513,12 @@ test('enforces PostgreSQL api, parameter leaf, execution, lifecycle, and prepare
     ['execution/PostgresSettlements.ets', 'driver/PostgresDriverFactory.ets',
       /PostgreSQL execution primitives must not depend on connection or driver facades/],
     ['execution/PostgresSettlements.ets', 'connection/PostgresConnectionLifecycle.ets',
+      /PostgreSQL execution primitives must not depend on connection or driver facades/],
+    ['execution/PostgresExecutionController.ets', 'PostgresConnection.ets',
+      /PostgreSQL execution primitives must not depend on connection or driver facades/],
+    ['execution/PostgresExecutionController.ets', 'connection/PostgresConnectionLifecycle.ets',
+      /PostgreSQL execution primitives must not depend on connection or driver facades/],
+    ['execution/PostgresExecutionController.ets', 'transport/PostgresTcpTransport.ets',
       /PostgreSQL execution primitives must not depend on connection or driver facades/],
     ['connection/PostgresConnectionLifecycle.ets', 'PostgresConnection.ets',
       /PostgreSQL connection lifecycle must not depend on connection or driver facades/],

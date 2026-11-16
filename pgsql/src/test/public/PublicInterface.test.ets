@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
-  ArkDbError, ArkDbErrorKind, ConnectionState, ContextChangeMode,
-  CoreDatabaseSessionStatus, CoreDbConnection, CoreDbDriverFactory,
+  ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionReuse, ConnectionState,
+  ContextChangeMode, CoreDatabaseSessionStatus, CoreDbConnection, CoreDbDriverFactory,
   CoreDbExecutionController, CoreDriverCapabilities, CoreMetadataProvider,
   CoreQueryExecutionSummary, CoreQueryResultMeta, CoreQueryResultSink,
   CoreQueryResultSummary, CoreQueryRowChunk, CoreSqlValue, DatabaseContext,
@@ -36,7 +36,7 @@ export default function publicInterfaceTest(): void {
       expect(value).assertEqual(1);
       expect(sink !== null).assertTrue();
       expect(metadata === undefined).assertTrue();
-      expect(cancellation === undefined).assertTrue();
+      expect(cancellation !== undefined).assertTrue();
       expect(new CoreDatabaseSessionStatus().known).assertFalse();
       expect(new CoreQueryResultMeta().resultIndex).assertEqual(0);
       expect(new CoreQueryRowChunk().rows.length).assertEqual(0);
@@ -124,6 +124,7 @@ export default function publicInterfaceTest(): void {
       expect(connection.features.streaming !== undefined).assertTrue();
       expect(connection.features.health !== undefined).assertTrue();
       expect(connection.features.context !== undefined).assertTrue();
+      expect(connection.features.cancellation !== undefined).assertTrue();
       const policy = connection.contextPolicy;
       expect(policy.catalogChange).assertEqual(ContextChangeMode.Reconnect);
       expect(policy.schemaChange).assertEqual(ContextChangeMode.InPlace);
@@ -133,7 +134,7 @@ export default function publicInterfaceTest(): void {
       expect(connection.features.context!.contextPolicy.schemaChange)
         .assertEqual(ContextChangeMode.InPlace);
       expect(JSON.stringify(connection.features))
-        .assertEqual('{"streaming":{},"health":{},"context":{},"transactions":{}}');
+        .assertEqual('{"streaming":{},"health":{},"context":{},"transactions":{},"cancellation":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{},"transactions":{}}');
       expect(quotePostgresIdentifier(['public', 'my"tbl'])).assertEqual('"public"."my""tbl"');
       expect(postgresPlaceholders(3)).assertEqual('$1,$2,$3');
@@ -188,13 +189,23 @@ export default function publicInterfaceTest(): void {
       await expectNotConnected(async (): Promise<void> => {
         await connection.postgresFeatures.transactions!.run(new PostgresTransactionOptions(), async (_s: PostgresSession): Promise<void> => {});
       });
-      await expectUnsupported(async (): Promise<void> => { await connection.cancel(); });
-      expectSyncUnsupported((): void => {
-        connection.isInterruptionError(ArkDbError.cancelled('cancelled'));
-      });
+      const idleCancel = await connection.cancel();
+      const facadeCancel = await connection.features.cancellation!.cancel();
+      const pgInterrupt = new PostgresError(ArkDbErrorKind.Server, 'canceled', '57014', '57014');
+      pgInterrupt.severity = 'ERROR';
+      expect(idleCancel.outcome === CancellationOutcome.NotRunning &&
+        idleCancel.connectionReuse === ConnectionReuse.NotReady &&
+        facadeCancel.outcome === CancellationOutcome.NotRunning &&
+        facadeCancel.connectionReuse === ConnectionReuse.NotReady &&
+        connection.isInterruptionError(pgInterrupt) &&
+        connection.features.cancellation!.isInterruptionError(pgInterrupt) &&
+        !connection.isInterruptionError(ArkDbError.cancelled('cancelled'))).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
       await connection.close();
       await connection.close();
+      const closedCancel = await connection.cancel();
+      expect(closedCancel.outcome === CancellationOutcome.NotRunning &&
+        closedCancel.connectionReuse === ConnectionReuse.Closed).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Closed);
     });
 
@@ -228,7 +239,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsMetadata).assertFalse();
   expect(capabilities.supportsMultipleResults).assertTrue();
   expect(capabilities.supportsStreamingResults).assertTrue();
-  expect(capabilities.supportsGracefulCancel).assertFalse();
+  expect(capabilities.supportsGracefulCancel).assertTrue();
   expect(capabilities.supportsExplain).assertFalse();
   expect(capabilities.supportsPreparedStatements).assertTrue();
   expect(capabilities.supportsServerMetrics).assertFalse();
@@ -239,17 +250,6 @@ async function expectNotConnected(operation: () => Promise<void>): Promise<void>
   try { await operation(); } catch (error) { failure = error as ArkDbError; }
   expect(failure instanceof ArkDbError && failure.kind === ArkDbErrorKind.Protocol &&
     failure.message === 'PostgreSQL connection is not connected.').assertTrue();
-}
-
-async function expectUnsupported(operation: () => Promise<void>): Promise<void> {
-  let failure: ArkDbError | null = null;
-  try {
-    await operation();
-  } catch (error) {
-    failure = error as ArkDbError;
-  }
-  expect(failure instanceof ArkDbError).assertTrue();
-  expect(failure!.kind).assertEqual(ArkDbErrorKind.Unsupported);
 }
 
 function expectSyncUnsupported(operation: () => void): void {

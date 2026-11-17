@@ -659,25 +659,19 @@ export class PostgresConnectionLifecycle {
   private canCancelExecution(scope: PostgresCommandScope, wireEpoch: number): boolean {
     if (this.closeRequested || this.currentState !== ConnectionState.Querying || this.unsynchronized || this.transport === null || !this.commandGate.isOwner(scope)) return false;
     if (scope.kind !== PostgresCommandKind.Query && scope.kind !== PostgresCommandKind.QueryStream && scope.kind !== PostgresCommandKind.ExtendedQuery && scope.kind !== PostgresCommandKind.Prepared && scope.kind !== PostgresCommandKind.Transaction) return false;
-    if (scope.phase !== PostgresCommandPhase.Executing && scope.phase !== PostgresCommandPhase.Streaming && scope.phase !== PostgresCommandPhase.Draining) return false;
-    return this.wireEpochActive && this.wireExecutionEpoch === wireEpoch && (this.awaitingReadyForQuery || this.pendingIoCount > 0);
+    return (scope.phase === PostgresCommandPhase.Executing || scope.phase === PostgresCommandPhase.Streaming || scope.phase === PostgresCommandPhase.Draining) && this.wireEpochActive && this.wireExecutionEpoch === wireEpoch && (this.awaitingReadyForQuery || this.pendingIoCount > 0);
   }
   private reuseState(): ConnectionReuse {
     if (this.currentState === ConnectionState.Closed || this.closeRequested) return ConnectionReuse.Closed;
     if (this.currentState === ConnectionState.Querying) return ConnectionReuse.AwaitingCompletion;
-    if (this.currentState === ConnectionState.Ready) {
-      if (this.commandGate.current !== null || this.hasBlockingCancels()) return ConnectionReuse.AwaitingCompletion;
-      return this.sessionStatus.known && this.readySynchronized && !this.unsynchronized && !this.awaitingReadyForQuery ? ConnectionReuse.Ready : ConnectionReuse.RequiresSynchronization;
-    }
-    return ConnectionReuse.NotReady;
+    if (this.currentState !== ConnectionState.Ready) return ConnectionReuse.NotReady;
+    if (this.commandGate.current !== null || this.hasBlockingCancels()) return ConnectionReuse.AwaitingCompletion;
+    return this.sessionStatus.known && this.readySynchronized && !this.unsynchronized && !this.awaitingReadyForQuery ? ConnectionReuse.Ready : ConnectionReuse.RequiresSynchronization;
   }
   private hasBlockingCancels(): boolean { let b = false; this.activeCancels.forEach((h: PostgresCancelHandle): void => { if (h.blocksPrimary) b = true; }); return b; }
   private waitBlockingCancelsSettled(): Promise<void> {
     if (!this.hasBlockingCancels() || this.unsynchronized || this.closeRequested) return Promise.resolve();
-    return new Promise<void>((resolve: () => void): void => {
-      const check = (): void => { if (!this.hasBlockingCancels() || this.unsynchronized || this.closeRequested) { this.cancelSettleWaiters.delete(check); resolve(); } };
-      this.cancelSettleWaiters.add(check);
-    });
+    return new Promise<void>((resolve: () => void): void => { const check = (): void => { if (!this.hasBlockingCancels() || this.unsynchronized || this.closeRequested) { this.cancelSettleWaiters.delete(check); resolve(); } }; this.cancelSettleWaiters.add(check); });
   }
   private wakeCancelSettleWaiters(): void { wakeWaiterSet(this.cancelSettleWaiters); }
   private retireAfterUnconfirmedCancel(reason: ArkDbError): Promise<ArkDbError | null> {
@@ -698,8 +692,7 @@ export class PostgresConnectionLifecycle {
   private wakeWireDispatchWaiters(): void { wakeWaiterSet(this.wireDispatchWaiters); }
   private async abortActiveCancels(reason: ArkDbError): Promise<ArkDbError | null> {
     this.wakeWireDispatchWaiters(); this.wakeCancelSettleWaiters(); if (this.activeCancels.size === 0) return null;
-    const handles: PostgresCancelHandle[] = []; this.activeCancels.forEach((h: PostgresCancelHandle): void => { handles.push(h); });
-    for (const h of handles) h.abort(reason);
+    const handles: PostgresCancelHandle[] = []; this.activeCancels.forEach((h: PostgresCancelHandle): void => { handles.push(h); h.abort(reason); });
     let combined: ArkDbError | null = null; for (const h of handles) combined = composeOptionalErrors(combined, await h.cleanupSettled); return combined;
   }
 }

@@ -1,8 +1,9 @@
 import {
   ArkDbError, ConnectionState, ContextChangeMode, DatabaseContext, DatabaseContextPolicy,
   DatabaseSessionStatus, DbConnection, DbConnectionFeatures, DbConnectionHealth,
-  DbContextController, DbStreamingConnection, DbTransactionController,
-  QueryExecutionSummary, QueryOptions, QueryResult, QueryResultSink, ServerInfo
+  DbContextController, DbExecutionController, DbStreamingConnection,
+  DbTransactionController, QueryCancellationResult, QueryExecutionSummary,
+  QueryOptions, QueryResult, QueryResultSink, ServerInfo
 } from '@arkdb/core';
 
 type StreamRunner = (sql: string, options: QueryOptions, sink: QueryResultSink) => Promise<QueryExecutionSummary>;
@@ -16,6 +17,8 @@ const contextDelegates: WeakMap<PostgresConnectionContext, ContextDelegate> =
   new WeakMap<PostgresConnectionContext, ContextDelegate>();
 const transactionDelegates: WeakMap<PostgresConnectionTransactions, DbTransactionController> =
   new WeakMap<PostgresConnectionTransactions, DbTransactionController>();
+const cancellationDelegates: WeakMap<PostgresConnectionCancellation, DbExecutionController> =
+  new WeakMap<PostgresConnectionCancellation, DbExecutionController>();
 
 export function createPostgresContextPolicy(): DatabaseContextPolicy {
   const policy = new DatabaseContextPolicy();
@@ -81,6 +84,20 @@ export class PostgresConnectionTransactions implements DbTransactionController {
   private delegate(): DbTransactionController {
     const d = transactionDelegates.get(this);
     if (d === undefined) throw ArkDbError.protocol('PostgreSQL transaction facade is uninitialized.');
+    return d;
+  }
+}
+
+export class PostgresConnectionCancellation implements DbExecutionController {
+  constructor(controller: DbExecutionController) {
+    if (controller === null || controller === undefined) throw ArkDbError.validation('PostgreSQL execution controller is required.');
+    cancellationDelegates.set(this, controller);
+  }
+  cancel(): Promise<QueryCancellationResult> { return this.delegate().cancel(); }
+  isInterruptionError(error: ArkDbError): boolean { return this.delegate().isInterruptionError(error); }
+  private delegate(): DbExecutionController {
+    const d = cancellationDelegates.get(this);
+    if (d === undefined) throw ArkDbError.protocol('PostgreSQL cancellation facade is uninitialized.');
     return d;
   }
 }

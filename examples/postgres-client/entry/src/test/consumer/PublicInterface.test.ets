@@ -1,9 +1,9 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
-  ArkDbError, ArkDbErrorKind, ConnectionState, ContextChangeMode, DatabaseContext,
-  PostgresConnectionConfig, PostgresConnectionOptions, PostgresDriverCapabilities,
-  PostgresDriverFactory, PostgresQueryResultSummary, PostgresSession,
-  PostgresTransactionIsolation, PostgresTransactionOptions, PostgresTransactionRunner,
+  ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionReuse, ConnectionState,
+  ContextChangeMode, DatabaseContext, PostgresConnectionConfig, PostgresConnectionOptions,
+  PostgresDriverCapabilities, PostgresDriverFactory, PostgresError, PostgresQueryResultSummary,
+  PostgresSession, PostgresTransactionIsolation, PostgresTransactionOptions, PostgresTransactionRunner,
   QueryOptions, QueryResultMeta, QueryResultSink, QueryResultSummary, QueryRowChunk,
   postgresPlaceholders, quotePostgresIdentifier, requirePostgresFeatures
 } from '@arkdb/postgres';
@@ -34,8 +34,9 @@ export default function publicInterfaceTest(): void {
         new PostgresTransactionOptions().isolation === PostgresTransactionIsolation.ReadCommitted)
         .assertTrue();
       expect(requirePostgresFeatures(connection).prepared === connection.postgresFeatures.prepared &&
-        requirePostgresFeatures(connection).transactions === txRunner).assertTrue();
-      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{},"context":{},"transactions":{}}');
+        requirePostgresFeatures(connection).transactions === txRunner &&
+        connection.features.cancellation !== undefined).assertTrue();
+      expect(JSON.stringify(connection.features)).assertEqual('{"streaming":{},"health":{},"context":{},"transactions":{},"cancellation":{}}');
       expect(JSON.stringify(connection.postgresFeatures)).assertEqual('{"prepared":{},"transactions":{}}');
       expect(quotePostgresIdentifier(['public', 'my"tbl'])).assertEqual('"public"."my""tbl"');
       expect(postgresPlaceholders(3)).assertEqual('$1,$2,$3');
@@ -57,8 +58,13 @@ export default function publicInterfaceTest(): void {
         (): Promise<void> => connection.ping(), (): Promise<void> => connection.features.health!.ping()]) {
         await expectUnconnectedProtocol(op);
       }
+      const idleCancel = await connection.features.cancellation!.cancel();
+      const pgInterrupt = new PostgresError(ArkDbErrorKind.Server, 'canceled', '57014', '57014'); pgInterrupt.severity = 'ERROR';
+      expect(idleCancel.outcome === CancellationOutcome.NotRunning && idleCancel.connectionReuse === ConnectionReuse.NotReady &&
+        connection.features.cancellation!.isInterruptionError(pgInterrupt) && !connection.isInterruptionError(ArkDbError.cancelled('cancelled'))).assertTrue();
       expect(connection.state).assertEqual(ConnectionState.Idle);
       await connection.close();
+      expect((await connection.cancel()).connectionReuse).assertEqual(ConnectionReuse.Closed);
       expect(connection.state).assertEqual(ConnectionState.Closed);
     });
   });
@@ -82,7 +88,7 @@ function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): v
   expect(capabilities.supportsMetadata).assertFalse();
   expect(capabilities.supportsMultipleResults).assertTrue();
   expect(capabilities.supportsStreamingResults).assertTrue();
-  expect(capabilities.supportsGracefulCancel).assertFalse();
+  expect(capabilities.supportsGracefulCancel).assertTrue();
   expect(capabilities.supportsExplain).assertFalse();
   expect(capabilities.supportsPreparedStatements).assertTrue();
   expect(capabilities.supportsServerMetrics).assertFalse();

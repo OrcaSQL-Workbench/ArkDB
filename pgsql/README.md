@@ -10,11 +10,15 @@ extended-query execution and `PortalSuspended` streaming via
 `connection.postgresFeatures.prepared` (`execute()` and `queryStream()`, with
 `PostgresQueryResultSummary` reporting `commandTag`, exact counts, and
 `affectedRowsKnown` for empty queries and safe-integer DML tags — early portal
-close bounds client row delivery without rolling back server DML — and
-`supportsSsl`, `supportsMultipleResults`, `supportsStreamingResults`, and
-`supportsPreparedStatements` enabled). Context changes, explicit transactions,
-cancellation, metadata, server metrics, and statement deadlines are not yet
-implemented and reject with `ArkDbErrorKind.Unsupported`.
+close bounds client row delivery without rolling back server DML), plus schema
+context switching (`changeContext()`), explicit and scoped transactions
+(`begin()`, `commit()`, `rollback()`, `postgresFeatures.transactions.run()`),
+and protocol `CancelRequest` cancellation (`cancel()`, `isInterruptionError()`,
+`features.cancellation`, with `supportsSsl`, `supportsCatalogs`,
+`supportsSchemas`, `supportsTransactions`, `supportsMultipleResults`,
+`supportsStreamingResults`, `supportsPreparedStatements`, and
+`supportsGracefulCancel` enabled). Metadata, server metrics, and statement
+deadlines remain unimplemented (`ArkDbErrorKind.Unsupported`).
 
 The package depends on `@arkdb/core` 1.1.0 in the source workspace. Driver
 delivery will compile the selected source dependency closure into one
@@ -29,8 +33,9 @@ passed separately through transient `PostgresConnectionOptions`.
 
 The factory constructs an idle connection that can be closed offline; calling
 querying, streaming, prepared execution, or health checks before `connect()`
-rejects with `ArkDbErrorKind.Protocol`, while unimplemented context changes,
-transactions, or cancellation reject with `ArkDbErrorKind.Unsupported`.
+rejects with `ArkDbErrorKind.Protocol`, calling `cancel()` while idle resolves
+`CancellationOutcome.NotRunning`, and unimplemented metadata, server metrics, or
+statement deadlines reject with `ArkDbErrorKind.Unsupported`.
 
 <!-- arkts-example: skeleton -->
 ```typescript

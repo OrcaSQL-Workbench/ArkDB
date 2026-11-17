@@ -8,6 +8,7 @@ import postgresStartupTest from './pgsql/command/PostgresStartup.test';
 import postgresConnectionLifecycleTest from './pgsql/connection/PostgresConnectionLifecycle.test';
 import postgresContextTest from './pgsql/connection/PostgresContext.test';
 import postgresCommandGateTest from './pgsql/execution/PostgresCommandGate.test';
+import postgresCancellationTest from './pgsql/execution/PostgresCancellation.test';
 import postgresExtendedQueryTest from './pgsql/features/prepared/PostgresExtendedQuery.test';
 import postgresParameterEncoderTest from './pgsql/features/prepared/PostgresParameterEncoder.test';
 import postgresTransactionControlTest from './pgsql/features/transaction/PostgresTransactionControl.test';
@@ -32,6 +33,7 @@ export default function testsuite(): void {
   postgresConnectionLifecycleTest();
   postgresContextTest();
   postgresCommandGateTest();
+  postgresCancellationTest();
   postgresBackendParserTest();
   postgresFrontendSerializerTest();
   postgresProtocolTest();

@@ -191,7 +191,7 @@ export class PostgresTcpTransport implements PostgresByteTransport {
   private tailLength: number = 0;
   private pending: PendingRead | null = null;
   private fatal: ArkDbError | null = null;
-  private pendingSends: number = 0; private unwindingSends: number = 0; private pendingCloseTls: number = 0; private probingClose: boolean = false;
+  private pendingSends: number = 0; private unwindingSends: number = 0; private pendingCloseTls: number = 0; private pendingCloseTimer: number = 0;
   private closeTask: Promise<void> = Promise.resolve();
   private closeFailure: ArkDbError | null = null;
   private operationFailures: Array<(error: ArkDbError) => void> = [];
@@ -334,7 +334,7 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     return new Promise<Uint8Array | null>(
       (resolve: (value: Uint8Array | null | PromiseLike<Uint8Array | null>) => void,
         reject: (reason?: Object) => void): void => {
-        if (this.pendingCloseTls !== 0 && this.unwindingSends === 0) this.flushPendingClose();
+        if (this.pendingCloseTls !== 0 && this.pendingSends === 0 && this.unwindingSends === 0) this.flushPendingClose();
         if (this.fatal !== null) {
           reject(this.fatal);
           return;
@@ -376,13 +376,14 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     try {
       if (current === null) throw ArkDbError.network('PostgreSQL socket is not connected');
       await this.runWhileOpen((): Promise<void> => {
-        const raw = current.send(data); if (this.fatal !== null) return raw; this.pendingSends += 1; sendPending = true;
+        this.pendingSends += 1; sendPending = true;
+        const raw = current.send(data); if (this.fatal !== null) { this.pendingSends -= 1; sendPending = false; return raw; }
         return raw.then((): void => { if (sendPending) { this.pendingSends -= 1; sendPending = false; } if (this.fatal === null) { this.unwindingSends += 1; counted = true; } });
       });
       if (counted) { this.unwindingSends -= 1; counted = false; }
       if (this.fatal !== null) throw this.fatal;
     } catch (error) {
-      if (sendPending) this.pendingSends -= 1; if (counted) this.unwindingSends -= 1;
+      if (sendPending) { this.pendingSends -= 1; sendPending = false; } if (counted) { this.unwindingSends -= 1; counted = false; }
       const failure = error instanceof ArkDbError ? error :
         isTls ?
           ArkDbError.tls(
@@ -393,8 +394,7 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       await this.closeTask;
       throw this.fatal!;
     }
-    if (this.unwindingSends === 0 && this.pendingCloseTls !== 0) Promise.resolve().then((): void => this.flushPendingClose());
-    if (this.closeFailure !== null) throw this.closeFailure;
+    if (this.pendingSends === 0 && this.unwindingSends === 0 && this.pendingCloseTls !== 0) { this.clearPendingCloseTimer(); Promise.resolve().then((): void => this.flushPendingClose()); }
     return data.length;
   }
   runWhileOpen<T>(operation: () => Promise<T>): Promise<T> {
@@ -452,15 +452,13 @@ export class PostgresTcpTransport implements PostgresByteTransport {
   }
   private onClose(tls: boolean): void {
     if (this.fatal !== null || this.pendingCloseTls !== 0) return;
-    if (this.unwindingSends > 0) { this.pendingCloseTls = tls ? 2 : 1; return; }
-    if (this.pendingSends > 0) {
-      if (!this.probingClose) {
-        this.probingClose = true;
-        Promise.resolve().then((): void => {
-          this.probingClose = false; if (this.fatal !== null || this.pendingCloseTls !== 0) return;
-          if (this.unwindingSends > 0) { this.pendingCloseTls = tls ? 2 : 1; return; }
-          this.fail(tls ? ArkDbError.tls('PostgreSQL TLS socket closed by server') : ArkDbError.network('PostgreSQL socket closed by server'), true);
-        });
+    if (this.pendingSends > 0 || this.unwindingSends > 0) {
+      this.pendingCloseTls = tls ? 2 : 1;
+      if (this.pendingSends > 0 && this.pendingCloseTimer === 0) {
+        try {
+          let sync = false; const id = this.timers.schedule((): void => { sync = true; this.pendingCloseTimer = 0; this.flushPendingClose(); }, SOCKET_CLOSE_TIMEOUT_MS);
+          if (!sync) { if (this.fatal === null && this.pendingCloseTls !== 0 && this.pendingSends > 0) this.pendingCloseTimer = id; else try { this.timers.cancel(id); } catch (e) { if (this.closeFailure === null) this.closeFailure = ArkDbError.protocol(asMessage(e as Object)); } }
+        } catch (_e) { this.flushPendingClose(); }
       }
       return;
     }
@@ -468,8 +466,9 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       ArkDbError.tls('PostgreSQL TLS socket closed by server') :
       ArkDbError.network('PostgreSQL socket closed by server'), true);
   }
+  private clearPendingCloseTimer(): void { if (this.pendingCloseTimer !== 0) { const id = this.pendingCloseTimer; this.pendingCloseTimer = 0; try { this.timers.cancel(id); } catch (e) { if (this.closeFailure === null) this.closeFailure = ArkDbError.protocol(asMessage(e as Object)); } } }
   private flushPendingClose(): void {
-    const mode = this.pendingCloseTls; if (mode === 0) return; this.pendingCloseTls = 0;
+    this.clearPendingCloseTimer(); const mode = this.pendingCloseTls; if (mode === 0) return; this.pendingCloseTls = 0;
     this.fail(mode === 2 ? ArkDbError.tls('PostgreSQL TLS socket closed by server') : ArkDbError.network('PostgreSQL socket closed by server'), true);
   }
   private onError(error: Object, tls: boolean): void {
@@ -536,8 +535,9 @@ export class PostgresTcpTransport implements PostgresByteTransport {
   }
   private fail(error: ArkDbError, alreadyClosed: boolean = false): void {
     if (this.fatal !== null) return;
-    const closedByPeer = alreadyClosed || this.pendingCloseTls !== 0 || this.probingClose;
-    this.pendingCloseTls = 0; this.probingClose = false;
+    this.clearPendingCloseTimer();
+    const closedByPeer = alreadyClosed || this.pendingCloseTls !== 0;
+    this.pendingCloseTls = 0;
     this.fatal = error;
     for (const chunk of this.chunks) chunk.fill(0);
     this.chunks = [];
@@ -560,7 +560,7 @@ export class PostgresTcpTransport implements PostgresByteTransport {
   }
   private async releaseSocket(current: PostgresStreamSocket,
     alreadyClosed: boolean): Promise<void> {
-    let cleanupFailure: ArkDbError | null = null;
+    let cleanupFailure: ArkDbError | null = this.closeFailure;
     try {
       current.clearListeners();
     } catch (error) {
@@ -595,7 +595,7 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     if (index >= 0) this.operationFailures.splice(index, 1);
   }
   private throwIfFailed(): void {
-    if (this.pendingCloseTls !== 0 && this.unwindingSends === 0) this.flushPendingClose();
+    if (this.pendingCloseTls !== 0 && this.pendingSends === 0 && this.unwindingSends === 0) this.flushPendingClose();
     if (this.fatal !== null) throw this.fatal;
   }
 }

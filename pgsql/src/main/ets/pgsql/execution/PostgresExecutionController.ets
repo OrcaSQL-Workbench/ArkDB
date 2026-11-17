@@ -49,7 +49,7 @@ export async function dispatchPostgresCancelRequest(options: PostgresCancelReque
           let fullWriteSettled = false; let peerEarlyEof = false; let peerEarlyError: ArkDbError | null = null; const peerRead = options.transport.read(1);
           peerRead.then((eof: Uint8Array | null): void => { if (eof !== null) { eof.fill(0); unexpectedPeerReply = true; } else if (!fullWriteSettled) peerEarlyEof = true; },
             (e: Object): void => { if (!fullWriteSettled) { if (isServerPeerClose(e as Object)) peerEarlyEof = true; else peerEarlyError = toPostgresArkDbError(e as Object, ArkDbErrorKind.Network); } });
-          const checkPeer = (): void => { if (unexpectedPeerReply) throw unexpectedCancelReply(); if (peerEarlyError !== null) throw peerEarlyError; if (peerEarlyEof) throw prematureCancelClose(); };
+          const checkPeer = (checkEof: boolean): void => { if (unexpectedPeerReply) throw unexpectedCancelReply(); if (peerEarlyError !== null) throw peerEarlyError; if (checkEof && peerEarlyEof) throw prematureCancelClose(); };
           const pendingPrimary = options.awaitTargetDispatched(); if (pendingPrimary !== null) await waitBudget<void>(budget, options.handle, (): Promise<void> => pendingPrimary); await Promise.resolve();
           if (options.isStillRunning() && options.handle.abortReason === null) {
             cancelFrame = PostgresFrontendSerializer.cancelRequest(options.processId, options.secretKeyInt32);
@@ -96,13 +96,13 @@ async function negotiateCancelTls(transport: PostgresCancelTransport, config: Po
   if (transport.prepareTlsUpgrade === undefined || transport.upgradeToTls === undefined) throw ArkDbError.tls('PostgreSQL TLS upgrade is unavailable during cancellation.', SSL_HANDSHAKE_FAILED);
   try { transport.prepareTlsUpgrade(); await waitBudget<void>(budget, handle, (): Promise<void> => transport.upgradeToTls!(config.host, config.port, config.ssl, budget.remainingMs())); } catch (error) { throw toPostgresArkDbError(error as Object, ArkDbErrorKind.Tls); }
 }
-async function writeCancelFrame(options: PostgresCancelRequestOptions, frame: Uint8Array, budget: ConnectionDeadline, setUnconfirmed: (active: boolean) => void, checkPeer: () => void, markFullWrite: () => void): Promise<boolean> {
+async function writeCancelFrame(options: PostgresCancelRequestOptions, frame: Uint8Array, budget: ConnectionDeadline, setUnconfirmed: (active: boolean) => void, checkPeer: (checkEof: boolean) => void, markFullWrite: () => void): Promise<boolean> {
   let inFlightWrite: Promise<number> | null = null; let scrubDeferred = false;
   try {
     for (let offset = 0; offset < frame.length;) {
       if (offset > 0) await Promise.resolve();
       if (options.handle.abortReason !== null || !options.isStillRunning()) return false;
-      checkPeer(); const chunk = offset === 0 ? frame : frame.subarray(offset);
+      checkPeer(true); const chunk = offset === 0 ? frame : frame.subarray(offset);
       const written = await waitBudget<number>(budget, options.handle, (): Promise<number> => {
         setUnconfirmed(true); const writeCall = options.transport.write(chunk); inFlightWrite = writeCall;
         const settle = (): void => { if (inFlightWrite === writeCall) inFlightWrite = null; if (scrubDeferred) frame.fill(0); };
@@ -112,7 +112,7 @@ async function writeCancelFrame(options: PostgresCancelRequestOptions, frame: Ui
       if (!Number.isSafeInteger(written) || written <= 0 || written > chunk.length) { if (Number.isSafeInteger(written) && written === 0 && offset < frame.length) setUnconfirmed(false); throw new ArkDbError(ArkDbErrorKind.Network, 'PostgreSQL cancel transport wrote 0 bytes.', CONNECTION_EXCEPTION); }
       offset += written; if (offset < frame.length) setUnconfirmed(false);
     }
-    checkPeer(); return true;
+    checkPeer(false); return true;
   } finally { if (inFlightWrite === null) frame.fill(0); else scrubDeferred = true; }
 }
 async function awaitCancelPeerClose(peerRead: Promise<Uint8Array | null>, hasUnexpectedReply: () => boolean, budget: ConnectionDeadline, handle: PostgresCancelHandle): Promise<void> {

@@ -83,13 +83,11 @@ export default function postgresExtendedQueryTest(): void {
       const tp = new QueueTransport([bootFrames(0x49)]); const conn = openReady(tp); await conn.connect(); tp.writes.length = 0;
       const nonOptsErr = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.execute('SELECT 1', [], asQueryOpts(null)));
       expect(nonOptsErr.kind === ArkDbErrorKind.Validation && nonOptsErr.message === 'QueryOptions is required.').assertTrue();
-      for (const mut of [(o: QueryOptions): void => { o.maxRows = -1; }, (o: QueryOptions): void => { o.maxResultBytes = 0; }, (o: QueryOptions): void => { o.maxDrainBytes = 0; }, (o: QueryOptions): void => { o.maxDrainTimeMs = 0; }]) {
+      for (const mut of [(o: QueryOptions): void => { o.maxRows = -1; }, (o: QueryOptions): void => { o.maxResultBytes = 0; }, (o: QueryOptions): void => { o.maxDrainBytes = 0; }, (o: QueryOptions): void => { o.maxDrainTimeMs = 0; }, (o: QueryOptions): void => { o.statementTimeoutMs = -1; }]) {
         const bad = new QueryOptions(); mut(bad);
         expect((await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.execute('SELECT 1', [], bad))).kind).assertEqual(ArkDbErrorKind.Validation);
       }
       const deadlineOpts = new QueryOptions(); deadlineOpts.statementTimeoutMs = 50;
-      const dlErr = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.execute('SELECT 1', [], deadlineOpts));
-      expect(dlErr.kind === ArkDbErrorKind.Unsupported && dlErr.message === 'PostgreSQL statement deadlines are not implemented.').assertTrue();
       const tooMany = new Array<PostgresParameter>(65536);
       const inspectedErr = new InspectableByteaParameter(new Uint8Array([0xde, 0xad]));
       for (const badCall of [
@@ -111,6 +109,8 @@ export default function postgresExtendedQueryTest(): void {
       const snapRes = await pending;
       expect(snapRes.rows.length === 2 && !snapRes.truncated && conn.state === ConnectionState.Ready).assertTrue();
       assertBytes(tp.writes[1], PostgresFrontendSerializer.bind('', '', [1, 0], [new Uint8Array([0xca, 0xfe]), ascii('9')], [0]));
+      tp.enqueue([extOk([msgNoData(), msgCmd('SELECT 0')])]);
+      expect((await conn.postgresFeatures.prepared!.execute('SELECT 1', [], deadlineOpts)).commandTag).assertEqual('SELECT 0');
 
       await conn.close(); const closedWrites = tp.writes.length;
       const closedErr = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.execute('SELECT 1', [], new QueryOptions()));

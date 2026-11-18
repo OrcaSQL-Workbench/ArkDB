@@ -123,13 +123,14 @@ function waitBudget<T>(budget: ConnectionDeadline, handle: PostgresCancelHandle,
   if (handle.abortReason !== null) return Promise.reject<T>(handle.abortReason);
   return new Promise<T>((res: (v: T) => void, rej: (e: Object) => void): void => { budget.wait<T>(op).then(res, rej); handle.aborted.then(res, rej); });
 }
-function awaitBoundedCleanup(op: () => Promise<ArkDbError | null>, timers: ConnectionTimerPort): Promise<ArkDbError | null> {
+export function awaitBoundedCleanup(op: () => Promise<ArkDbError | null>, timers: ConnectionTimerPort,
+  timeoutMessage: string = 'PostgreSQL cancel transport cleanup timed out.'): Promise<ArkDbError | null> {
   return new Promise<ArkDbError | null>((resolve: (err: ArkDbError | null) => void): void => {
     let settled = false; let timerId = 0; let task: Promise<ArkDbError | null>;
     const finish = (err: ArkDbError | null): void => { if (settled) return; settled = true; let out = err; if (timerId !== 0) { const id = timerId; timerId = 0; try { timers.cancel(id); } catch (e) { out = composeCleanup(out, toPostgresArkDbError(e as Object, ArkDbErrorKind.Protocol)); } } resolve(out); };
     try { task = op(); } catch (e) { finish(toPostgresArkDbError(e as Object, ArkDbErrorKind.Network)); return; }
     task.then((err: ArkDbError | null): void => finish(err), (e: Object): void => finish(toPostgresArkDbError(e, ArkDbErrorKind.Network)));
-    if (!settled) { try { const id = timers.schedule((): void => { timerId = 0; finish(new ArkDbError(ArkDbErrorKind.Network, 'PostgreSQL cancel transport cleanup timed out.', CONNECTION_EXCEPTION)); }, CANCEL_CLEANUP_TIMEOUT_MS); if (!settled) timerId = id; } catch (e) { finish(toPostgresArkDbError(e as Object, ArkDbErrorKind.Protocol)); } }
+    if (!settled) { try { const id = timers.schedule((): void => { timerId = 0; finish(new ArkDbError(ArkDbErrorKind.Network, timeoutMessage, CONNECTION_EXCEPTION)); }, CANCEL_CLEANUP_TIMEOUT_MS); if (!settled) timerId = id; } catch (e) { finish(toPostgresArkDbError(e as Object, ArkDbErrorKind.Protocol)); } }
   });
 }
 function isServerPeerClose(error: Object): boolean { return error instanceof ArkDbError && ((error.kind === ArkDbErrorKind.Network && error.message === 'PostgreSQL socket closed by server') || (error.kind === ArkDbErrorKind.Tls && error.message === 'PostgreSQL TLS socket closed by server')); }

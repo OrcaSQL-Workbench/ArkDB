@@ -13,12 +13,14 @@ extended-query execution and `PortalSuspended` streaming via
 close bounds client row delivery without rolling back server DML), plus schema
 context switching (`changeContext()`), explicit and scoped transactions
 (`begin()`, `commit()`, `rollback()`, `postgresFeatures.transactions.run()`),
-and protocol `CancelRequest` cancellation (`cancel()`, `isInterruptionError()`,
+and protocol `CancelRequest` cancellation and `QueryOptions.statementTimeoutMs`
+statement deadlines with bounded cancellation-grace convergence and
+unknown-outcome retirement (`cancel()`, `isInterruptionError()`,
 `features.cancellation`, with `supportsSsl`, `supportsCatalogs`,
 `supportsSchemas`, `supportsTransactions`, `supportsMultipleResults`,
 `supportsStreamingResults`, `supportsPreparedStatements`, and
-`supportsGracefulCancel` enabled). Metadata, server metrics, and statement
-deadlines remain unimplemented (`ArkDbErrorKind.Unsupported`).
+`supportsGracefulCancel` enabled). Metadata and server metrics remain
+unimplemented (`ArkDbErrorKind.Unsupported`).
 
 The package depends on `@arkdb/core` 1.1.0 in the source workspace. Driver
 delivery will compile the selected source dependency closure into one
@@ -34,8 +36,8 @@ passed separately through transient `PostgresConnectionOptions`.
 The factory constructs an idle connection that can be closed offline; calling
 querying, streaming, prepared execution, or health checks before `connect()`
 rejects with `ArkDbErrorKind.Protocol`, calling `cancel()` while idle resolves
-`CancellationOutcome.NotRunning`, and unimplemented metadata, server metrics, or
-statement deadlines reject with `ArkDbErrorKind.Unsupported`.
+`CancellationOutcome.NotRunning`, and unimplemented metadata or server metrics
+reject with `ArkDbErrorKind.Unsupported`.
 
 <!-- arkts-example: skeleton -->
 ```typescript

@@ -5,7 +5,7 @@ import { PostgresColumnDef, PostgresQueryResult } from '../model/PostgresModels'
 import { PostgresFrontendSerializer, PostgresFrontendTarget } from '../protocol/PostgresByteCodec';
 import { PostgresBackendMessage, PostgresBackendParser, PostgresBindComplete, PostgresCommandComplete, PostgresCopyBothResponse, PostgresCopyData, PostgresCopyDone, PostgresCopyInResponse, PostgresCopyOutResponse, PostgresDataRow, PostgresEmptyQueryResponse, PostgresErrorResponse, PostgresMessageChannel, PostgresNoData, PostgresParseComplete, PostgresPortalSuspended, PostgresReadyForQuery, PostgresRowDescription } from '../protocol/PostgresMessageChannel';
 import { decodePostgresDataRow, toPostgresColumnDefs } from '../value/PostgresTextValueDecoder';
-import { accountDrainedBytes, consumeAsyncMessage, estimateRowDescBytes, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, parsePostgresCommandCompleteTag, PostgresBufferedDrain, PostgresSimpleQueryHost, readClockMs, readWakeableQueryMessage, scrubBackendMessage, scrubQueryResult, scrubSqlRow, snapshotQueryOptions, startDrain, writeQueryFrame } from './PostgresSimpleQuery';
+import { accountDrainedBytes, consumeAsyncMessage, estimateRowDescBytes, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, parsePostgresCommandCompleteTag, PostgresBufferedDrain, PostgresSimpleQueryHost, readClockMs, readWakeableQueryMessage, refreshDrain, scrubBackendMessage, scrubQueryResult, scrubSqlRow, sendQueryFrame, snapshotQueryOptions, startDrain } from './PostgresSimpleQuery';
 
 enum ExtendedQueryStage { ExpectParseComplete = 0, ExpectBindComplete = 1, ExpectDescribeResult = 2, ExpectRowResult = 3, ExpectNoDataResult = 4, InCopyOutData = 5, InCopyOutDone = 6, AwaitReadyAfterCommand = 7, AwaitReadyAfterError = 8 }
 export interface PostgresExtendedQueryHost extends PostgresSimpleQueryHost { enterDraining(): void; }
@@ -16,7 +16,6 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
   let currentResult: PostgresQueryResult | null = null; let drain: PostgresBufferedDrain | null = null;
   try {
     const opts = snapshotQueryOptions(options);
-    if (opts.statementTimeoutMs > 0) throw ArkDbError.unsupported('PostgreSQL statement deadlines are not implemented.');
     let stage = ExtendedQueryStage.ExpectParseComplete;
     let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0; let retainedBytes = 0;
     let draining = false; let sawServerError = false; let drainedBytes = 0; let drainDeadlineMs = -1;
@@ -25,13 +24,17 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
       if (!draining) { draining = true; host.enterDraining(); if (drain !== null) drain.wake(); }
     };
     const d = new PostgresBufferedDrain(settlement, (): number => drainDeadlineMs, (): void => {
-      if (currentResult !== null) { scrubQueryResult(currentResult); currentResult = null; } activeColumns = []; beginDrain();
+      if (currentResult !== null) { scrubQueryResult(currentResult); currentResult = null; }
+      activeColumns = []; if (settlement.isDeadlineAbandoned) { drainedBytes = 0; drainDeadlineMs = refreshDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs); } beginDrain();
     });
     drain = d; const startedAtMs = readClockMs(host.timers);
-    const send = (code: number, f: Uint8Array): Promise<void> => writeQueryFrame(channel, settlement, code, f, host.timers, drainDeadlineMs, d.setWake);
-    await send(0x50, frames.parseFrame); await send(0x42, frames.bindFrame);
-    await send(0x44, PostgresFrontendSerializer.describe(PostgresFrontendTarget.Portal, ''));
-    await send(0x45, PostgresFrontendSerializer.execute('', 0)); await send(0x53, PostgresFrontendSerializer.sync());
+    const send = (code: number, f: Uint8Array): Promise<boolean> => sendQueryFrame(channel, settlement, code, f, host.timers, drainDeadlineMs, d.setWake);
+    if (settlement.pollDeadline()) d.throwIfFailed();
+    await send(0x50, frames.parseFrame);
+    const sentBind = !draining && await send(0x42, frames.bindFrame);
+    const sentDesc = sentBind && !draining && await send(0x44, PostgresFrontendSerializer.describe(PostgresFrontendTarget.Portal, ''));
+    const sentExec = sentDesc && !draining && await send(0x45, PostgresFrontendSerializer.execute('', 0));
+    await send(0x53, PostgresFrontendSerializer.sync());
     const applyTag = (res: PostgresQueryResult, tag: string, wireLen: number, wasDraining: boolean): void => {
       const tagBytes = Math.max(wireLen, estimateSqlValueBytes(tag));
       if (retainedBytes + tagBytes <= opts.maxResultBytes || tag.length <= 64) {
@@ -65,7 +68,14 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
         }
         if (stage === ExtendedQueryStage.AwaitReadyAfterError) {
           if (!(msg instanceof PostgresReadyForQuery)) throw ArkDbError.protocol('Unexpected PostgreSQL backend message after ErrorResponse.');
-          if (drainDeadlineMs >= 0 && readClockMs(host.timers) >= drainDeadlineMs) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
+          const endAt = readClockMs(host.timers); if (drainDeadlineMs >= 0 && endAt >= drainDeadlineMs && !(settlement.pollDeadline() && endAt < drainDeadlineMs)) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
+          host.applyReadyStatus(msg.status); d.throwIfFailed();
+        }
+        const canFinishEarly = (!sentBind && stage === ExtendedQueryStage.ExpectBindComplete) ||
+          (sentBind && !sentDesc && stage === ExtendedQueryStage.ExpectDescribeResult) ||
+          (sentDesc && !sentExec && (stage === ExtendedQueryStage.ExpectRowResult || stage === ExtendedQueryStage.ExpectNoDataResult));
+        if (canFinishEarly && msg instanceof PostgresReadyForQuery) {
+          const endAt = readClockMs(host.timers); if (drainDeadlineMs >= 0 && endAt >= drainDeadlineMs && !(settlement.pollDeadline() && endAt < drainDeadlineMs)) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
           host.applyReadyStatus(msg.status); d.throwIfFailed();
         }
         if (stage === ExtendedQueryStage.ExpectParseComplete) {
@@ -155,7 +165,7 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
         }
         if (stage === ExtendedQueryStage.AwaitReadyAfterCommand && msg instanceof PostgresReadyForQuery) {
           const finishedAtMs = readClockMs(host.timers);
-          if (drainDeadlineMs >= 0 && finishedAtMs >= drainDeadlineMs) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
+          if (drainDeadlineMs >= 0 && finishedAtMs >= drainDeadlineMs && !(settlement.pollDeadline() && finishedAtMs < drainDeadlineMs)) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
           host.applyReadyStatus(msg.status); d.throwIfFailed();
           const finalResult = currentResult ?? new PostgresQueryResult();
           finalResult.executionTimeMs = Math.max(0, finishedAtMs - startedAtMs);

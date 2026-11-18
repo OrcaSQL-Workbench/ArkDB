@@ -1,8 +1,9 @@
-import { ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionDeadline, ConnectionReuse, ConnectionState, ConnectionTimerPort, QueryCancellationResult, SystemConnectionTimerPort } from '@arkdb/core';
+import { ArkDbError, ArkDbErrorKind, CancellationOutcome, ConnectionDeadline, ConnectionReuse, ConnectionState, ConnectionTimerPort, QueryCancellationResult, QueryOptions, SystemConnectionTimerPort } from '@arkdb/core';
 import { createDefaultPostgresStartupRunner } from '../command/PostgresStartup';
 import { PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase, PostgresCommandScope } from '../execution/PostgresCommandGate';
-import { PostgresCancelHandle, PostgresCancelTransport, dispatchPostgresCancelRequest, isPostgresInterruptionError } from '../execution/PostgresExecutionController';
+import { PostgresCancelHandle, PostgresCancelTransport, awaitBoundedCleanup, dispatchPostgresCancelRequest, isPostgresInterruptionError } from '../execution/PostgresExecutionController';
 import { PostgresCommandCloseSettlement, PostgresStartupSession, applyPostgresReadyStatus, postgresAppendCleanupError, resetPostgresSessionStatus, toPostgresArkDbError } from '../execution/PostgresSettlements';
+import { PostgresStatementDeadlineHost, runPostgresStatementDeadline } from '../execution/PostgresStatementDeadline';
 import { PostgresConnectionConfig, PostgresSslConfig } from '../model/PostgresConnectionConfig';
 import { PostgresDatabaseSessionStatus, PostgresError, PostgresServerInfo } from '../model/PostgresModels';
 import { PostgresFrontendSerializer } from '../protocol/PostgresByteCodec';
@@ -10,6 +11,7 @@ import { PostgresByteTransport, PostgresMessage, PostgresMessageChannel, Postgre
 import { PostgresTcpTransport } from '../transport/PostgresTcpTransport';
 
 export const POSTGRES_TERMINATE_TIMEOUT_MS: number = 1000;
+const MISSING_BACKEND_KEY_MSG: string = 'PostgreSQL server did not provide a backend cancellation key.';
 const postgresLifecyclePasswords: WeakMap<PostgresConnectionLifecycle, string> = new WeakMap<PostgresConnectionLifecycle, string>();
 const postgresBackendSecrets: WeakMap<PostgresConnectionLifecycle, PostgresBackendCancellationKey> = new WeakMap<PostgresConnectionLifecycle, PostgresBackendCancellationKey>();
 
@@ -162,11 +164,12 @@ export class PostgresConnectionLifecycle {
   private readySynchronized: boolean = false;
   private pendingIoCount: number = 0; private pendingIoWaiters: Array<() => void> = [];
   private awaitingReadyForQuery: boolean = false; private unsynchronized: boolean = false;
+  private deadlineRetiredScope: PostgresCommandScope | null = null; private deadlineAbortReason: ArkDbError | null = null;
   private wireExecutionEpoch: number = 0; private wireEpochActive: boolean = false; private wireEpochReading: boolean = false; private activeWireWriteCount: number = 0;
   private readonly wireDispatchWaiters: Set<() => void> = new Set<() => void>(); private readonly cancelSettleWaiters: Set<() => void> = new Set<() => void>();
   private readonly activeCancels: Set<PostgresCancelHandle> = new Set<PostgresCancelHandle>();
   private activeCancelScope: PostgresCommandScope | null = null; private activeCancelEpoch: number = 0; private activeCancelTask: Promise<QueryCancellationResult> | null = null;
-  private latchedPrimaryError: ArkDbError | null = null; private synchronizedConsumerError: ArkDbError | null = null;
+  private latchedPrimaryError: ArkDbError | null = null; private lastConsumerError: ArkDbError | null = null; private synchronizedConsumerError: ArkDbError | null = null; private deadlineRootError: ArkDbError | null = null;
   private retiredReason: ArkDbError | null = null; private retiredCleanup: ArkDbError | null = null; private retiredComposed: ArkDbError | null = null;
   constructor(config: PostgresConnectionConfig, password: string, timers: ConnectionTimerPort = new SystemConnectionTimerPort(),
     transportFactory?: () => PostgresLifecycleTransport, startupRunner?: PostgresStartupRunner,
@@ -180,19 +183,41 @@ export class PostgresConnectionLifecycle {
   }
   get config(): PostgresConnectionConfig { return this.storedConfig.clone(); }
   get state(): ConnectionState { return this.currentState; }
+  get currentWireEpoch(): number { return this.wireExecutionEpoch; }
   readBackendKeyData(): PostgresBackendCancellationKey | null {
     const stored = postgresBackendSecrets.get(this);
     return stored === undefined ? null : new PostgresBackendCancellationKey(stored.processId, copySecretBytes(stored.secretKey), stored.secretKeyInt32);
   }
   latchConsumerError(scope: PostgresCommandScope, error: ArkDbError, synchronized: boolean = false): void {
-    this.commandGate.assertOwner(scope); this.latchedPrimaryError = error; if (synchronized) this.synchronizedConsumerError = error;
+    this.commandGate.assertOwner(scope); this.lastConsumerError = error;
+    if (this.deadlineRootError !== null) {
+      const root = this.deadlineRootError;
+      const next = error === root || isPostgresInterruptionError(error) ? root :
+        (error.kind === ArkDbErrorKind.Timeout && error.message.startsWith(root.message) ? error : postgresAppendCleanupError(root, error));
+      this.latchedPrimaryError = next; if (synchronized) this.synchronizedConsumerError = next; return;
+    }
+    this.latchedPrimaryError = error; if (synchronized) this.synchronizedConsumerError = error;
   }
+  latchDeadlineError(scope: PostgresCommandScope, error: ArkDbError): void {
+    this.commandGate.assertOwner(scope);
+    if (this.deadlineRootError === null) this.deadlineRootError = error;
+    const prev = this.latchedPrimaryError;
+    this.latchedPrimaryError = prev !== null && prev !== error && !isPostgresInterruptionError(prev) ? postgresAppendCleanupError(error, prev) : error;
+  }
+  readDeadlineBase(scope: PostgresCommandScope, root: ArkDbError): ArkDbError { return this.commandGate.isOwner(scope) && this.latchedPrimaryError !== null && this.latchedPrimaryError.kind === ArkDbErrorKind.Timeout ? this.latchedPrimaryError : root; }
+  isLatchedConsumerError(error: ArkDbError): boolean { return this.lastConsumerError === error; }
+  syncDeadlineError(scope: PostgresCommandScope, error: ArkDbError, synchronized: boolean): void {
+    if (!this.commandGate.isOwner(scope)) return;
+    this.latchedPrimaryError = error; this.synchronizedConsumerError = synchronized ? error : null;
+  }
+  isSynchronizedConsumerError(error: ArkDbError): boolean { return this.synchronizedConsumerError === error; }
+  awaitBounded(op: () => Promise<ArkDbError | null>, msg: string): Promise<ArkDbError | null> { return awaitBoundedCleanup(op, this.timers, msg); }
   clearConsumerError(scope: PostgresCommandScope): void {
-    if (this.commandGate.isOwner(scope)) { this.latchedPrimaryError = null; this.synchronizedConsumerError = null; }
+    if (this.commandGate.isOwner(scope)) { this.latchedPrimaryError = null; this.lastConsumerError = null; this.synchronizedConsumerError = null; this.deadlineRootError = null; }
   }
   isCommandSynchronized(scope: PostgresCommandScope): boolean {
     return this.commandGate.isOwner(scope) && !this.closeRequested && this.currentState === ConnectionState.Querying &&
-      !this.unsynchronized && this.pendingIoCount === 0 && !this.awaitingReadyForQuery && this.readySynchronized && this.transport !== null;
+      !this.unsynchronized && this.pendingIoCount === 0 && !this.awaitingReadyForQuery && this.readySynchronized && this.sessionStatus.known === true && this.transport !== null;
   }
   waitForStepReady(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement): Promise<void> | null {
     this.commandGate.assertOwner(scope); this.throwIfRetiredOrClosing(settlement);
@@ -270,22 +295,57 @@ export class PostgresConnectionLifecycle {
       throw failure;
     }
   }
-  async runCommand<T>(kind: PostgresCommandKind, runner: PostgresCommandRunner<T>): Promise<T> {
-    if (kind === PostgresCommandKind.Connect || kind === PostgresCommandKind.Close) throw ArkDbError.protocol('Invalid PostgreSQL command kind for session execution.');
+  runCommand<T>(kind: PostgresCommandKind, runner: PostgresCommandRunner<T>): Promise<T> {
+    return this.executeCommand<T>(kind, undefined, (scope: PostgresCommandScope, channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, _opts: QueryOptions | null): Promise<T> => runner(scope, channel, settlement));
+  }
+  runDeadlineCommand<T>(kind: PostgresCommandKind, prepareOptions: () => QueryOptions,
+    runner: (scope: PostgresCommandScope, channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, opts: QueryOptions) => Promise<T>,
+    scrubValue?: (value: T) => void): Promise<T> {
+    return this.executeCommand<T>(kind, prepareOptions, (scope: PostgresCommandScope, channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, opts: QueryOptions | null): Promise<T> => runner(scope, channel, settlement, opts!), scrubValue);
+  }
+  runStepWithDeadline<R>(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement, options: QueryOptions,
+    operation: () => Promise<R>, scrubValue?: (value: R) => void, canLatch?: () => boolean): Promise<R> {
+    const clearRoot = (): void => { if (this.commandGate.isOwner(scope)) this.deadlineRootError = null; };
+    return runPostgresStatementDeadline<R>(new LifecycleDeadlineHost(this, scope, settlement, canLatch), settlement, options, operation, scrubValue)
+      .then((val: R): R => { clearRoot(); return val; }, (err: Object): Promise<R> => { clearRoot(); return Promise.reject<R>(err); });
+  }
+  assertCommandDispatchable(): void {
     if (this.closeRequested || this.currentState === ConnectionState.Closed) throw ArkDbError.protocol('PostgreSQL connection is closed.');
     if (this.currentState === ConnectionState.Idle) throw ArkDbError.protocol('PostgreSQL connection is not connected.');
     if (this.currentState === ConnectionState.Error || this.unsynchronized) throw ArkDbError.protocol('PostgreSQL connection is retired after an unrecoverable error.');
+    if (this.commandGate.current !== null) throw ArkDbError.protocol('Another command already owns this PostgreSQL connection.');
+  }
+  private async executeCommand<T>(kind: PostgresCommandKind, prepareOptions: (() => QueryOptions) | undefined,
+    runner: (scope: PostgresCommandScope, channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, opts: QueryOptions | null) => Promise<T>,
+    scrubValue?: (value: T) => void): Promise<T> {
+    if (kind === PostgresCommandKind.Connect || kind === PostgresCommandKind.Close) throw ArkDbError.protocol('Invalid PostgreSQL command kind for session execution.');
+    this.assertCommandDispatchable();
     const scope = this.commandGate.reserve(kind); const settlement = new PostgresCommandCloseSettlement(scope);
     this.activeSettlement = settlement; this.activeReleaseScope = null; this.activeScopeRelease = null; this.closedScope = null;
     let failure: ArkDbError | null = null; let output: T | undefined = undefined; let delivered = false;
-    this.latchedPrimaryError = null; this.synchronizedConsumerError = null; this.retiredCleanup = null; this.retiredComposed = null;
+    this.latchedPrimaryError = null; this.lastConsumerError = null; this.synchronizedConsumerError = null; this.deadlineRootError = null; this.retiredCleanup = null; this.retiredComposed = null;
     try {
       this.commandGate.start(scope); this.throwIfRetiredOrClosing(settlement);
-      if (this.hasBlockingCancels()) { await settlement.raceClose<void>((): Promise<void> => this.waitBlockingCancelsSettled()); this.throwIfRetiredOrClosing(settlement); }
-      if (this.currentState !== ConnectionState.Ready || this.transport === null) throw ArkDbError.protocol('PostgreSQL connection channel is unavailable.');
-      const channel = this.createScopedChannel(scope, this.transport);
-      this.commandGate.setPhase(scope, PostgresCommandPhase.Executing); this.currentState = ConnectionState.Querying;
-      const result = await settlement.raceClose<T>((): Promise<T> => runner(scope, channel, settlement));
+      const opts = prepareOptions !== undefined ? prepareOptions() : null;
+      const useDeadline = opts !== null && opts.statementTimeoutMs > 0;
+      const runCore = async (): Promise<T> => {
+        if (this.hasBlockingCancels()) {
+          await (useDeadline ? settlement.raceConsumer<void>((): Promise<void> => this.waitBlockingCancelsSettled()) : settlement.raceClose<void>((): Promise<void> => this.waitBlockingCancelsSettled()));
+          this.throwIfRetiredOrClosing(settlement);
+        }
+        if ((this.currentState !== ConnectionState.Ready && this.currentState !== ConnectionState.Querying) || this.transport === null) throw ArkDbError.protocol('PostgreSQL connection channel is unavailable.');
+        const channel = this.createScopedChannel(scope, this.transport);
+        this.commandGate.setPhase(scope, PostgresCommandPhase.Executing); this.currentState = ConnectionState.Querying;
+        return runner(scope, channel, settlement, opts);
+      };
+      let result: T;
+      if (useDeadline) {
+        if (this.currentState !== ConnectionState.Ready || this.transport === null) throw ArkDbError.protocol('PostgreSQL connection channel is unavailable.');
+        this.commandGate.setPhase(scope, PostgresCommandPhase.Executing); this.currentState = ConnectionState.Querying;
+        result = await this.runStepWithDeadline<T>(scope, settlement, opts!, runCore, scrubValue);
+      } else {
+        result = await settlement.raceClose<T>(runCore);
+      }
       this.throwIfRetiredOrClosing(settlement);
       if (this.pendingIoCount > 0 || this.awaitingReadyForQuery || !this.readySynchronized || this.transport === null) throw ArkDbError.protocol('PostgreSQL command completed without ReadyForQuery synchronization.');
       this.currentState = ConnectionState.Ready; output = result; delivered = true;
@@ -300,7 +360,9 @@ export class PostgresConnectionLifecycle {
         this.markStreamDamaged(primary); failure = await this.abortScopeFailure(scope, primary, alreadyAppended, ConnectionState.Error);
       } else { this.currentState = ConnectionState.Ready; failure = primary; }
     } finally {
-      this.latchedPrimaryError = null; this.synchronizedConsumerError = null; this.retiredCleanup = null; this.retiredComposed = null;
+      this.latchedPrimaryError = null; this.lastConsumerError = null; this.synchronizedConsumerError = null; this.deadlineRootError = null; this.retiredCleanup = null; this.retiredComposed = null;
+      if (this.deadlineRetiredScope === scope) this.deadlineRetiredScope = null;
+      this.deadlineAbortReason = null;
       failure = this.finishScope(scope, settlement, failure, delivered && failure === null);
       if (delivered && failure === null) settlement.markDelivered(); else settlement.discardUndelivered();
     }
@@ -330,7 +392,7 @@ export class PostgresConnectionLifecycle {
     if (scope === null || !this.canCancelExecution(scope, epoch)) return Promise.resolve<QueryCancellationResult>(new QueryCancellationResult(CancellationOutcome.NotRunning, this.reuseState()));
     if (this.activeCancelTask !== null && this.activeCancelScope === scope && this.activeCancelEpoch === epoch) return this.activeCancelTask;
     const key = this.readBackendKeyData();
-    if (key === null || key.processId === 0) { if (key !== null) key.secretKey.fill(0); return Promise.reject<QueryCancellationResult>(ArkDbError.unsupported('PostgreSQL server did not provide a backend cancellation key.')); }
+    if (key === null || key.processId === 0) { if (key !== null) key.secretKey.fill(0); return Promise.reject<QueryCancellationResult>(ArkDbError.unsupported(MISSING_BACKEND_KEY_MSG)); }
     let cancelTransport: PostgresLifecycleTransport;
     try { cancelTransport = this.transportFactory(); } catch (e) { key.secretKey.fill(0); return Promise.reject<QueryCancellationResult>(toPostgresArkDbError(e as Object, ArkDbErrorKind.Network)); }
     if (cancelTransport === null || cancelTransport === undefined || cancelTransport === this.transport) { key.secretKey.fill(0); return Promise.reject<QueryCancellationResult>(ArkDbError.validation('PostgreSQL cancellation requires a distinct transport instance.')); }
@@ -342,8 +404,8 @@ export class PostgresConnectionLifecycle {
       onSettled: (): void => { this.activeCancels.delete(handle); this.wakeCancelSettleWaiters(); }, handle: handle
     }).then((outcome: CancellationOutcome): QueryCancellationResult => new QueryCancellationResult(outcome, this.reuseState()));
     this.activeCancelScope = scope; this.activeCancelEpoch = epoch; this.activeCancelTask = task;
-    const clearActive = (): void => { if (this.activeCancelTask === task) { this.activeCancelTask = null; this.activeCancelScope = null; this.activeCancelEpoch = 0; } };
-    task.then(clearActive, clearActive);
+    const clearActive = (): void => { if (this.activeCancelTask === task) this.clearActiveCancel(); };
+    task.then((res: QueryCancellationResult): void => { if (res.outcome !== CancellationOutcome.Requested) clearActive(); }, clearActive);
     return task;
   }
   close(): Promise<void> {
@@ -382,14 +444,12 @@ export class PostgresConnectionLifecycle {
         const activeDeadline = this.opening; this.opening = null;
         timerErr = safeCancelDeadline(activeDeadline, closeReason);
         if (settlement !== null) settlement.signalClose(closeReason);
-        cleanup = await this.releaseTransport(closeReason);
+        const rawCloseRelease = this.releaseTransport(closeReason);
         if (settlement !== null) {
           await settlement.settled;
-          if (this.activeReleaseScope === activeScope && this.activeScopeRelease !== null) {
-            cleanup = composeOptionalErrors(cleanup, await this.activeScopeRelease);
-          }
+          cleanup = await (this.activeReleaseScope === activeScope && this.activeScopeRelease !== null ? this.activeScopeRelease : rawCloseRelease);
           if (this.closedSettlement === settlement) terminalErr = this.closedSettlementTerminalError;
-        }
+        } else cleanup = await rawCloseRelease;
         cleanup = composeOptionalErrors(cleanup, await cancelCleanupTask);
       } finally {
         this.awaitingClosedSettlement = false;
@@ -485,8 +545,9 @@ export class PostgresConnectionLifecycle {
     this.clearSecretsAndChannel(); this.currentState = targetState;
     if (scope.phase !== PostgresCommandPhase.Closing) this.commandGate.setPhase(scope, PostgresCommandPhase.Closing);
     this.commandGate.advanceGenerationOnRelease(scope);
-    const cleanup = await this.releaseTransport(primary);
-    await this.waitPendingIoIdle();
+    const skipBoundedWait = this.deadlineRetiredScope === scope;
+    const cleanup = skipBoundedWait ? null : await this.releaseTransport(primary);
+    if (!skipBoundedWait) await this.waitPendingIoIdle();
     this.clearSecretsAndChannel(); this.currentState = this.closeRequested ? ConnectionState.Closed : targetState;
     const base = alreadyAppended ? primary : this.composeRetiredCleanup(primary);
     return !alreadyAppended && cleanup !== null && cleanup !== base && cleanup !== this.retiredCleanup ? postgresAppendCleanupError(base, cleanup) : base;
@@ -529,7 +590,7 @@ export class PostgresConnectionLifecycle {
       const typed = toPostgresArkDbError(e as Object); this.markStreamDamaged(typed); throw typed;
     }
     this.readySynchronized = true; this.awaitingReadyForQuery = false; this.wireEpochActive = false; this.wireEpochReading = false;
-    this.wakeWireDispatchWaiters();
+    this.clearActiveCancel(); this.wakeWireDispatchWaiters();
   }
   private storeBackendKeyData(processId: number, secretKey: Uint8Array, targetInfo: PostgresServerInfo): void {
     if (!Number.isInteger(processId) || processId < -2147483648 || processId > 2147483647) throw ArkDbError.protocol('Invalid PostgreSQL backend process ID.');
@@ -543,7 +604,7 @@ export class PostgresConnectionLifecycle {
   private markStreamDamaged(reason: ArkDbError): void {
     if (!this.unsynchronized) this.retiredReason = reason;
     this.unsynchronized = true; this.readySynchronized = false; this.wireEpochActive = false; resetPostgresSessionStatus(this.sessionStatus);
-    this.wakeWireDispatchWaiters();
+    this.clearActiveCancel(); this.wakeWireDispatchWaiters();
   }
   private throwIfRetiredOrClosing(settlement: PostgresCommandCloseSettlement): void {
     if (this.unsynchronized) throw this.retiredReason !== null ? this.retiredReason : ArkDbError.protocol('PostgreSQL connection synchronization was lost.');
@@ -582,9 +643,10 @@ export class PostgresConnectionLifecycle {
     let scopeEndErr: ArkDbError | null = null;
     try { settlement.markSettled(preservePendingDelivery); } catch (e) { scopeEndErr = toPostgresArkDbError(e as Object); }
     scopeEndErr = this.releaseScopeSafe(scope, scopeEndErr);
+    if (this.activeCancelScope === scope) this.clearActiveCancel();
     this.wakeWireDispatchWaiters();
     if (this.closedSettlement === settlement) {
-      if (this.awaitingClosedSettlement) this.closedSettlementTerminalError = scopeEndErr;
+      if (this.awaitingClosedSettlement) this.closedSettlementTerminalError = composeOptionalErrors(this.closedSettlementTerminalError, scopeEndErr);
       else {
         this.closedSettlement = null; this.closedSettlementTerminalError = null;
         if (this.closedScope === scope) this.closedScope = null;
@@ -650,11 +712,12 @@ export class PostgresConnectionLifecycle {
       offset += written;
     }
   }
+  private clearActiveCancel(): void { this.activeCancelTask = null; this.activeCancelScope = null; this.activeCancelEpoch = 0; }
   private clearSecretsAndChannel(): void {
     postgresLifecyclePasswords.delete(this); const storedKey = postgresBackendSecrets.get(this);
     if (storedKey !== undefined) { storedKey.secretKey.fill(0); postgresBackendSecrets.delete(this); }
     resetPostgresSessionStatus(this.sessionStatus); commitServerInfo(defaultPostgresServerInfo(), this.serverInfo);
-    this.readySynchronized = false; this.awaitingReadyForQuery = false; this.wireEpochActive = false; this.wireEpochReading = false; this.wakeWireDispatchWaiters();
+    this.readySynchronized = false; this.awaitingReadyForQuery = false; this.wireEpochActive = false; this.wireEpochReading = false; this.clearActiveCancel(); this.wakeWireDispatchWaiters();
   }
   private canCancelExecution(scope: PostgresCommandScope, wireEpoch: number): boolean {
     if (this.closeRequested || this.currentState !== ConnectionState.Querying || this.unsynchronized || this.transport === null || !this.commandGate.isOwner(scope)) return false;
@@ -668,8 +731,37 @@ export class PostgresConnectionLifecycle {
     if (this.commandGate.current !== null || this.hasBlockingCancels()) return ConnectionReuse.AwaitingCompletion;
     return this.sessionStatus.known && this.readySynchronized && !this.unsynchronized && !this.awaitingReadyForQuery ? ConnectionReuse.Ready : ConnectionReuse.RequiresSynchronization;
   }
-  private hasBlockingCancels(): boolean { let b = false; this.activeCancels.forEach((h: PostgresCancelHandle): void => { if (h.blocksPrimary) b = true; }); return b; }
-  private waitBlockingCancelsSettled(): Promise<void> {
+  cancelForDeadline(scope: PostgresCommandScope, epochBefore: number): Promise<ArkDbError | null> {
+    if (this.closeRequested || this.wireExecutionEpoch <= epochBefore || !this.canCancelExecution(scope, this.wireExecutionEpoch)) return Promise.resolve<ArkDbError | null>(null);
+    return this.cancel().then((): ArkDbError | null => null, (err: Object): ArkDbError | null => { const typed = toPostgresArkDbError(err, ArkDbErrorKind.Network); return (typed.kind === ArkDbErrorKind.Unsupported && typed.message === MISSING_BACKEND_KEY_MSG) || this.closeRequested || typed === this.deadlineAbortReason ? null : typed; });
+  }
+  async beginPortalBatch(scope: PostgresCommandScope, settlement: PostgresCommandCloseSettlement): Promise<void> {
+    if (!this.commandGate.isOwner(scope) || this.unsynchronized || this.closeRequested) return;
+    const stale = ArkDbError.cancelled('PostgreSQL portal batch completed before cancellation dispatched.'); this.wireExecutionEpoch += 1; this.wireEpochActive = true; this.wireEpochReading = false; this.clearActiveCancel(); this.wakeWireDispatchWaiters();
+    this.activeCancels.forEach((h: PostgresCancelHandle): void => { if (!h.blocksPrimary) h.abort(stale); });
+    if (this.hasBlockingCancels()) { await settlement.raceConsumer<void>((): Promise<void> => this.waitBlockingCancelsSettled()); this.throwIfRetiredOrClosing(settlement); }
+  }
+  recordClosedTimerError(scope: PostgresCommandScope, error: ArkDbError): void {
+    if (this.awaitingClosedSettlement && this.closedScope === scope) this.closedSettlementTerminalError = composeOptionalErrors(this.closedSettlementTerminalError, error);
+  }
+  async retireFromDeadline(scope: PostgresCommandScope, stepSettlement: PostgresCommandCloseSettlement, reason: ArkDbError): Promise<ArkDbError | null> {
+    this.deadlineAbortReason = reason; const cancelCleanupTask = this.abortActiveCancels(reason);
+    this.deadlineRetiredScope = scope; this.markStreamDamaged(reason); this.clearSecretsAndChannel();
+    this.currentState = this.closeRequested || this.currentState === ConnectionState.Closed ? ConnectionState.Closed : ConnectionState.Error;
+    if (this.commandGate.isOwner(scope)) this.commandGate.advanceGenerationOnRelease(scope);
+    stepSettlement.signalFatal(reason); const rawRelease = this.releaseTask !== null ? this.releaseTask : this.releaseTransport(reason);
+    const boundedRelease = awaitBoundedCleanup(async (): Promise<ArkDbError | null> => { const err = await rawRelease; await this.waitPendingIoIdle(); return err; }, this.timers, 'PostgreSQL primary transport retirement timed out.');
+    this.activeReleaseScope = scope; this.activeScopeRelease = boundedRelease;
+    const transportCleanup = await boundedRelease; if (this.releaseTask === rawRelease) this.releaseTask = null;
+    return composeOptionalErrors(await cancelCleanupTask, transportCleanup);
+  }
+  async settleConvergedCancels(reason: ArkDbError): Promise<ArkDbError | null> {
+    this.deadlineAbortReason = reason; this.wakeWireDispatchWaiters(); this.wakeCancelSettleWaiters(); if (this.activeCancels.size === 0) return null;
+    const handles: PostgresCancelHandle[] = []; this.activeCancels.forEach((h: PostgresCancelHandle): void => { if (!h.blocksPrimary) { handles.push(h); h.abort(reason); } });
+    let combined: ArkDbError | null = null; for (const h of handles) combined = composeOptionalErrors(combined, await h.cleanupSettled); return combined;
+  }
+  hasBlockingCancels(): boolean { let b = false; this.activeCancels.forEach((h: PostgresCancelHandle): void => { if (h.blocksPrimary) b = true; }); return b; }
+  waitBlockingCancelsSettled(): Promise<void> {
     if (!this.hasBlockingCancels() || this.unsynchronized || this.closeRequested) return Promise.resolve();
     return new Promise<void>((resolve: () => void): void => { const check = (): void => { if (!this.hasBlockingCancels() || this.unsynchronized || this.closeRequested) { this.cancelSettleWaiters.delete(check); resolve(); } }; this.cancelSettleWaiters.add(check); });
   }
@@ -729,4 +821,20 @@ function shouldRetireAfterError(error: ArkDbError): boolean {
 }
 function copySecretBytes(source: Uint8Array): Uint8Array {
   const copy = new Uint8Array(source.length); copy.set(source); return copy;
+}
+class LifecycleDeadlineHost implements PostgresStatementDeadlineHost {
+  private readonly lc: PostgresConnectionLifecycle; private readonly scope: PostgresCommandScope; private readonly st: PostgresCommandCloseSettlement; private readonly canLatch?: () => boolean;
+  constructor(lc: PostgresConnectionLifecycle, scope: PostgresCommandScope, st: PostgresCommandCloseSettlement, canLatch?: () => boolean) { this.lc = lc; this.scope = scope; this.st = st; this.canLatch = canLatch; }
+  get timers(): ConnectionTimerPort { return this.lc.timers; } get currentWireEpoch(): number { return this.lc.currentWireEpoch; }
+  isSynchronized(): boolean { return this.lc.isCommandSynchronized(this.scope); } isSynchronizedConsumerError(error: ArkDbError): boolean { return this.lc.isSynchronizedConsumerError(error); }
+  hasBlockingCancels(): boolean { return this.lc.hasBlockingCancels(); } waitBlockingCancelsSettled(): Promise<void> { return this.lc.waitBlockingCancelsSettled(); }
+  settleConvergedCancels(reason: ArkDbError): Promise<ArkDbError | null> { return this.lc.settleConvergedCancels(reason); }
+  latchDeadlineError(error: ArkDbError): void { if (this.canLatch === undefined || this.canLatch()) this.lc.latchDeadlineError(this.scope, error); }
+  readDeadlineBase(root: ArkDbError): ArkDbError { return this.canLatch === undefined || this.canLatch() ? this.lc.readDeadlineBase(this.scope, root) : root; }
+  isLatchedConsumerError(error: ArkDbError): boolean { return (this.canLatch === undefined || this.canLatch()) && this.lc.isLatchedConsumerError(error); }
+  syncDeadlineError(error: ArkDbError, synchronized: boolean): void { if (this.canLatch === undefined || this.canLatch()) this.lc.syncDeadlineError(this.scope, error, synchronized); }
+  triggerDeadlineCancel(epochBefore: number): Promise<ArkDbError | null> { return this.lc.cancelForDeadline(this.scope, epochBefore); }
+  retireOnDeadlineFailure(reason: ArkDbError): Promise<ArkDbError | null> { return this.lc.retireFromDeadline(this.scope, this.st, reason); }
+  awaitBounded(op: () => Promise<ArkDbError | null>, msg: string): Promise<ArkDbError | null> { return this.lc.awaitBounded(op, msg); }
+  reportCloseTimerError(error: ArkDbError): void { this.lc.recordClosedTimerError(this.scope, error); }
 }

@@ -26,6 +26,8 @@ export class PostgresCommandCloseSettlement {
   private closedByUser: boolean = false;
   private abandonError: ArkDbError | null = null;
   private abandonClaimed: boolean = false;
+  private deadlineAbandoned: boolean = false;
+  private deadlineCheck: (() => void) | null = null;
   private settledNow: boolean = false;
   private delivered: boolean = false;
   private undeliveredCleanup: (() => void) | null = null;
@@ -45,13 +47,22 @@ export class PostgresCommandCloseSettlement {
   get closeReason(): ArkDbError | null { return this.closeError; }
   get consumerAbandonReason(): ArkDbError | null { return this.abandonError; }
   get isConsumerAbandonClaimed(): boolean { return this.abandonClaimed; }
+  get isDeadlineAbandoned(): boolean { return this.deadlineAbandoned; }
   get isSettled(): boolean { return this.settledNow; }
   markConsumerAbandonClaimed(): void { this.abandonClaimed = true; }
+  setDeadlineCheck(fn: (() => void) | null): void { this.deadlineCheck = fn; }
+  pollDeadline(): boolean { if (this.deadlineCheck !== null) this.deadlineCheck(); return this.abandonError !== null || this.closeError !== null; }
+  throwIfAbandoned(): void { if (this.closeError !== null) throw this.closeError; if (this.abandonError !== null) { this.abandonClaimed = true; throw this.abandonError; } }
   onCloseRequested(fn: (error: ArkDbError) => void): void { if (this.closeError !== null) fn(this.closeError); else if (!this.settledNow) this.closeListeners.add(fn); }
   onConsumerAbandoned(fn: (error: ArkDbError) => void): void { if (this.abandonError !== null) fn(this.abandonError); else if (!this.settledNow && this.closeError === null) this.abandonListeners.add(fn); }
-  abandonConsumer(error: ArkDbError): void {
-    if (this.settledNow || this.closeError !== null || this.abandonError !== null) return;
-    this.abandonError = error; const ls = this.abandonListeners; this.abandonListeners = new Set<(error: ArkDbError) => void>();
+  abandonConsumer(error: ArkDbError, isDeadline: boolean = false): void {
+    if (this.settledNow || this.closeError !== null) return;
+    const notifyDeadline = isDeadline && !this.deadlineAbandoned;
+    if (isDeadline) this.deadlineAbandoned = true;
+    if (this.abandonError !== null && !notifyDeadline) return;
+    if (this.abandonError === null) this.abandonError = error;
+    const ls: Array<(error: ArkDbError) => void> = [];
+    this.abandonListeners.forEach((fn: (error: ArkDbError) => void): void => { ls.push(fn); });
     for (const fn of ls) fn(error);
   }
   deferUndeliveredCleanup(cleanup: () => void): void {
@@ -64,13 +75,13 @@ export class PostgresCommandCloseSettlement {
   signalClose(error: ArkDbError): void { if (!this.settledNow && this.closeError === null) { this.closedByUser = true; this.abortWith(error); } }
   signalFatal(error: ArkDbError): void { if (!this.settledNow && this.closeError === null) this.abortWith(error); }
   private abortWith(error: ArkDbError): void {
-    this.closeError = error; this.abandonListeners.clear(); this.discardUndelivered(); this.resolveClose(error);
+    this.closeError = error; this.deadlineCheck = null; this.abandonListeners.clear(); this.discardUndelivered(); this.resolveClose(error);
     const ls = this.closeListeners; this.closeListeners = new Set<(error: ArkDbError) => void>(); for (const fn of ls) fn(error);
     const pending = this.waiters; this.waiters = new Set<(error: ArkDbError) => void>(); for (const waiter of pending) waiter(error);
   }
   markSettled(preservePendingDelivery: boolean = false): void {
     if (this.settledNow) return;
-    this.settledNow = true; this.closeListeners.clear(); this.abandonListeners.clear(); if (!preservePendingDelivery) this.discardUndelivered();
+    this.settledNow = true; this.deadlineCheck = null; this.closeListeners.clear(); this.abandonListeners.clear(); if (!preservePendingDelivery) this.discardUndelivered();
     const pending = this.waiters;
     this.waiters = new Set<(error: ArkDbError) => void>();
     if (pending.size > 0) {
@@ -131,11 +142,12 @@ function registerComposedError<E extends ArkDbError>(copy: E, primary: ArkDbErro
   composedErrorParts.set(copy, parts); composedErrorRoots.set(copy, root !== undefined ? root : primary); return copy;
 }
 
-export function postgresAppendCleanupError(
-  primary: ArkDbError, cleanup: ArkDbError): ArkDbError {
+export function postgresAppendCleanupError(primary: ArkDbError, cleanup: ArkDbError): ArkDbError {
   const prev = composedErrorParts.get(primary);
   if (cleanup === primary || (prev !== undefined && prev.has(cleanup))) return primary;
-  if (prev === undefined && composedErrorRoots.get(cleanup) === primary) return cleanup;
+  const root = prev !== undefined ? composedErrorRoots.get(primary) : primary;
+  const cParts = composedErrorParts.get(cleanup);
+  if (root !== undefined && composedErrorRoots.get(cleanup) === root && (prev === undefined || (cParts !== undefined && cParts.has(primary)))) return cleanup;
   const message = primary.message + ' (cleanup failed: ' + cleanup.message + ')';
   if (primary instanceof PostgresError) {
     const copy = new PostgresError(primary.kind, message, primary.nativeCode, primary.sqlState);

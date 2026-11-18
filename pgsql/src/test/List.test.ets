@@ -11,6 +11,7 @@ import postgresCommandGateTest from './pgsql/execution/PostgresCommandGate.test'
 import postgresCancellationTest from './pgsql/execution/PostgresCancellation.test';
 import postgresDeadlineTest from './pgsql/execution/PostgresDeadline.test';
 import postgresExtendedQueryTest from './pgsql/features/prepared/PostgresExtendedQuery.test';
+import postgresMetadataObjectsTest from './pgsql/features/metadata/PostgresMetadataObjects.test';
 import postgresParameterEncoderTest from './pgsql/features/prepared/PostgresParameterEncoder.test';
 import postgresTransactionControlTest from './pgsql/features/transaction/PostgresTransactionControl.test';
 import postgresTransactionRunnerTest from './pgsql/features/transaction/PostgresTransactionRunner.test';
@@ -46,6 +47,7 @@ export default function testsuite(): void {
   postgresTextValueDecoderTest();
   postgresParameterEncoderTest();
   postgresExtendedQueryTest();
+  postgresMetadataObjectsTest();
   postgresTransactionControlTest();
   postgresTransactionRunnerTest();
 }

@@ -191,7 +191,7 @@ const OWNED_SOURCE_ROOTS = [
   },
   {
     root: 'pgsql/src/main/ets/pgsql/features',
-    directories: ['prepared', 'transaction']
+    directories: ['metadata', 'prepared', 'transaction']
   },
   {
     root: 'tools',
@@ -365,6 +365,12 @@ const ARCHITECTURE_POLICY = {
       message: 'PostgreSQL auth primitives may depend only on auth, model, and protocol layers.'
     },
     {
+      from: /^pgsql\/src\/main\/ets\/pgsql\/features\/metadata\//,
+      to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|connection\/|driver\/|transport\/)/,
+      transitive: true,
+      message: 'PostgreSQL metadata feature must not depend on connection, driver, or byte transport implementations.'
+    },
+    {
       from: /^pgsql\/src\/main\/ets\/pgsql\/features\/prepared\//,
       to: /^pgsql\/src\/main\/ets\/pgsql\/(?:PostgresConnection\.ets$|connection\/|driver\/|transport\/)/,
       transitive: true,
@@ -497,7 +503,7 @@ test('includes workspace and package Hvigor entry points in the tooling graph', 
   }
 });
 
-test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, P20A, P20B, and P22 own exactly the registered PostgreSQL primitive sources', () => {
+test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, P20A, P20B, P22, P23, and P24 own exactly the registered PostgreSQL primitive sources', () => {
   const graph = readArkTsGraph(ROOT);
 
   assert.deepEqual(graph.files.filter((file) => file.startsWith('pgsql/')).sort(), [
@@ -522,6 +528,8 @@ test('P04, P07, P08, P09, P12A, P12B1, P14, P17, P18, P19, P20A, P20B, and P22 o
     'pgsql/src/main/ets/pgsql/execution/PostgresExecutionController.ets',
     'pgsql/src/main/ets/pgsql/execution/PostgresSettlements.ets',
     'pgsql/src/main/ets/pgsql/execution/PostgresStatementDeadline.ets',
+    'pgsql/src/main/ets/pgsql/features/metadata/PostgresMetadataProvider.ets',
+    'pgsql/src/main/ets/pgsql/features/metadata/PostgresMetadataSql.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameter.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresParameterEncoder.ets',
     'pgsql/src/main/ets/pgsql/features/prepared/PostgresPreparedExecutor.ets',
@@ -2568,7 +2576,15 @@ test('enforces PostgreSQL api, parameter leaf, execution, lifecycle, and prepare
     ['features/transaction/PostgresTransactionRunner.ets', 'driver/PostgresDriverFactory.ets',
       /PostgreSQL transaction feature must not depend on connection, driver, or byte transport implementations/],
     ['features/transaction/PostgresTransactionRunner.ets', 'PostgresConnection.ets',
-      /PostgreSQL transaction feature must not depend on connection, driver, or byte transport implementations/]
+      /PostgreSQL transaction feature must not depend on connection, driver, or byte transport implementations/],
+    ['features/metadata/PostgresMetadataProvider.ets', 'transport/PostgresTcpTransport.ets',
+      /PostgreSQL metadata feature must not depend on connection, driver, or byte transport implementations/],
+    ['features/metadata/PostgresMetadataProvider.ets', 'connection/PostgresConnectionLifecycle.ets',
+      /PostgreSQL metadata feature must not depend on connection, driver, or byte transport implementations/],
+    ['features/metadata/PostgresMetadataProvider.ets', 'driver/PostgresDriverFactory.ets',
+      /PostgreSQL metadata feature must not depend on connection, driver, or byte transport implementations/],
+    ['features/metadata/PostgresMetadataProvider.ets', 'PostgresConnection.ets',
+      /PostgreSQL metadata feature must not depend on connection, driver, or byte transport implementations/]
   ];
   for (const [fromRel, toRel, expected] of cases) {
     const source = `pgsql/src/main/ets/pgsql/${fromRel}`;

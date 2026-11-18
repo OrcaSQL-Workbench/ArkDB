@@ -214,7 +214,7 @@ class QueryStreamLifecycleHost extends SimpleQueryLifecycleHost
   enterStreaming(): void { this.setPhase(PostgresCommandPhase.Streaming); }
   enterDraining(): void { this.setPhase(PostgresCommandPhase.Draining); }
   latchConsumerError(error: ArkDbError, synchronized: boolean = false): void { this.lifecycle.latchConsumerError(this.scope, error, synchronized); }
-  beginPortalBatch(settlement: PostgresCommandCloseSettlement): Promise<void> { return this.lifecycle.beginPortalBatch(this.scope, settlement); }
+  beginPortalBatch(settlement: PostgresCommandCloseSettlement, prepareNext: boolean = true): Promise<void> { return this.lifecycle.beginPortalBatch(this.scope, settlement, prepareNext); }
 }
 
 class TransactionRunnerLifecycleHost extends QueryStreamLifecycleHost implements PostgresTransactionCommandHost {

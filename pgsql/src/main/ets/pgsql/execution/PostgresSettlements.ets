@@ -26,8 +26,8 @@ export class PostgresCommandCloseSettlement {
   private closedByUser: boolean = false;
   private abandonError: ArkDbError | null = null;
   private abandonClaimed: boolean = false;
-  private deadlineAbandoned: boolean = false;
-  private deadlineCheck: (() => void) | null = null;
+  private deadlineAbandoned: boolean = false; private deadlineCutoffMs: number = -1;
+  private deadlineCheck: (() => void) | null = null; private readonly backendInterrupts: Set<ArkDbError> = new Set<ArkDbError>();
   private settledNow: boolean = false;
   private delivered: boolean = false;
   private undeliveredCleanup: (() => void) | null = null;
@@ -48,21 +48,23 @@ export class PostgresCommandCloseSettlement {
   get consumerAbandonReason(): ArkDbError | null { return this.abandonError; }
   get isConsumerAbandonClaimed(): boolean { return this.abandonClaimed; }
   get isDeadlineAbandoned(): boolean { return this.deadlineAbandoned; }
+  get hasDeadlineCheck(): boolean { return this.deadlineCheck !== null; } get deadlineDrainCutoffMs(): number { return this.deadlineCutoffMs; }
   get isSettled(): boolean { return this.settledNow; }
   markConsumerAbandonClaimed(): void { this.abandonClaimed = true; }
+  recordBackendError(err: PostgresError): PostgresError { if (err.kind === ArkDbErrorKind.Server && err.sqlState === '57014' && err.severity !== 'FATAL' && err.severity !== 'PANIC' && err.localizedSeverity !== 'FATAL' && err.localizedSeverity !== 'PANIC') this.backendInterrupts.add(err); return err; }
+  isBackendInterruption(err: ArkDbError): boolean { return this.backendInterrupts.has(err); }
+  appendDeadlineCleanup(primary: ArkDbError, secondary: ArkDbError | null): ArkDbError { return postgresAppendDecomposedCleanup(primary, secondary, (p: ArkDbError): boolean => this.backendInterrupts.has(p) || p === this.abandonError); }
   setDeadlineCheck(fn: (() => void) | null): void { this.deadlineCheck = fn; }
   pollDeadline(): boolean { if (this.deadlineCheck !== null) this.deadlineCheck(); return this.abandonError !== null || this.closeError !== null; }
   throwIfAbandoned(): void { if (this.closeError !== null) throw this.closeError; if (this.abandonError !== null) { this.abandonClaimed = true; throw this.abandonError; } }
   onCloseRequested(fn: (error: ArkDbError) => void): void { if (this.closeError !== null) fn(this.closeError); else if (!this.settledNow) this.closeListeners.add(fn); }
   onConsumerAbandoned(fn: (error: ArkDbError) => void): void { if (this.abandonError !== null) fn(this.abandonError); else if (!this.settledNow && this.closeError === null) this.abandonListeners.add(fn); }
-  abandonConsumer(error: ArkDbError, isDeadline: boolean = false): void {
+  abandonConsumer(error: ArkDbError, isDeadline: boolean = false, drainCutoffMs: number = -1): void {
     if (this.settledNow || this.closeError !== null) return;
-    const notifyDeadline = isDeadline && !this.deadlineAbandoned;
-    if (isDeadline) this.deadlineAbandoned = true;
+    const notifyDeadline = isDeadline && !this.deadlineAbandoned; if (isDeadline) { this.deadlineAbandoned = true; if (drainCutoffMs >= 0) this.deadlineCutoffMs = drainCutoffMs; }
     if (this.abandonError !== null && !notifyDeadline) return;
     if (this.abandonError === null) this.abandonError = error;
-    const ls: Array<(error: ArkDbError) => void> = [];
-    this.abandonListeners.forEach((fn: (error: ArkDbError) => void): void => { ls.push(fn); });
+    const ls: Array<(error: ArkDbError) => void> = []; this.abandonListeners.forEach((fn: (error: ArkDbError) => void): void => { ls.push(fn); });
     for (const fn of ls) fn(error);
   }
   deferUndeliveredCleanup(cleanup: () => void): void {
@@ -136,19 +138,16 @@ const composedErrorParts = new WeakMap<ArkDbError, Set<ArkDbError>>();
 const composedErrorRoots = new WeakMap<ArkDbError, ArkDbError>();
 function registerComposedError<E extends ArkDbError>(copy: E, primary: ArkDbError, cleanup: ArkDbError): E {
   const prev = composedErrorParts.get(primary); const cParts = composedErrorParts.get(cleanup); const root = composedErrorRoots.get(primary);
-  const parts = new Set<ArkDbError>();
-  if (prev !== undefined) prev.forEach((p: ArkDbError): void => { parts.add(p); });
-  parts.add(primary);
-  if (cParts !== undefined) cParts.forEach((p: ArkDbError): void => { parts.add(p); });
-  parts.add(cleanup);
+  const parts = new Set<ArkDbError>(); if (prev !== undefined) prev.forEach((p: ArkDbError): void => { parts.add(p); }); parts.add(primary);
+  if (cParts !== undefined) cParts.forEach((p: ArkDbError): void => { parts.add(p); }); parts.add(cleanup);
   composedErrorParts.set(copy, parts); composedErrorRoots.set(copy, root !== undefined ? root : primary); return copy;
 }
 
-export function postgresAppendCleanupError(primary: ArkDbError, cleanup: ArkDbError): ArkDbError {
+export function postgresAppendCleanupError(
+  primary: ArkDbError, cleanup: ArkDbError): ArkDbError {
   const prev = composedErrorParts.get(primary);
   if (cleanup === primary || (prev !== undefined && prev.has(cleanup))) return primary;
-  const root = prev !== undefined ? composedErrorRoots.get(primary) : primary;
-  const cParts = composedErrorParts.get(cleanup);
+  const root = prev !== undefined ? composedErrorRoots.get(primary) : primary; const cParts = composedErrorParts.get(cleanup);
   if (root !== undefined && composedErrorRoots.get(cleanup) === root && (prev === undefined || (cParts !== undefined && cParts.has(primary)))) return cleanup;
   const message = primary.message + ' (cleanup failed: ' + cleanup.message + ')';
   if (primary instanceof PostgresError) {
@@ -170,10 +169,10 @@ export function postgresAppendCleanupError(primary: ArkDbError, cleanup: ArkDbEr
 }
 
 export function isPostgresComposedError(error: ArkDbError): boolean { return composedErrorParts.has(error); }
-export function postgresAppendDecomposedCleanup(primary: ArkDbError, secondary: ArkDbError | null): ArkDbError {
+export function postgresAppendDecomposedCleanup(primary: ArkDbError, secondary: ArkDbError | null, skip?: (leaf: ArkDbError) => boolean): ArkDbError {
   if (secondary === null || secondary === primary) return primary;
-  const cParts = composedErrorParts.get(secondary); if (cParts === undefined) return postgresAppendCleanupError(primary, secondary);
-  let acc = primary; cParts.forEach((p: ArkDbError): void => { if (!composedErrorParts.has(p)) acc = postgresAppendCleanupError(acc, p); }); return acc;
+  const cParts = composedErrorParts.get(secondary); if (cParts === undefined) return skip !== undefined && skip(secondary) ? primary : postgresAppendCleanupError(primary, secondary);
+  let acc = primary; cParts.forEach((p: ArkDbError): void => { if (!composedErrorParts.has(p) && (skip === undefined || !skip(p))) acc = postgresAppendCleanupError(acc, p); }); return acc;
 }
 
 export function toPostgresArkDbError(
@@ -201,7 +200,7 @@ export function resetPostgresSessionStatus(status: PostgresDatabaseSessionStatus
   setStatus(status, false, false, PostgresTransactionState.Idle);
 }
 
-export function postgresErrorFromResponse(response: PostgresErrorResponse): PostgresError {
+export function postgresErrorFromResponse(response: PostgresErrorResponse, settlement?: PostgresCommandCloseSettlement): PostgresError {
   const f = response.fields; const sqlState = f.sqlState;
   const error = new PostgresError(sqlState.startsWith('28') ? ArkDbErrorKind.Auth : ArkDbErrorKind.Server, f.message, sqlState, sqlState);
   error.severity = f.severity !== undefined && f.severity.length > 0 ? f.severity : f.localizedSeverity;
@@ -215,7 +214,7 @@ export function postgresErrorFromResponse(response: PostgresErrorResponse): Post
   const pos = parseCanonicalSafeUint(f.position); if (pos !== undefined) error.position = pos;
   const intPos = parseCanonicalSafeUint(f.internalPosition); if (intPos !== undefined) error.internalPosition = intPos;
   const line = parseCanonicalSafeUint(f.sourceLine); if (line !== undefined) error.sourceLine = line;
-  return error;
+  return settlement !== undefined ? settlement.recordBackendError(error) : error;
 }
 
 export function applyPostgresParameterStatus(info: PostgresServerInfo, status: PostgresParameterStatus): void {

@@ -404,8 +404,9 @@ export class PostgresMessageChannel {
     });
   }
 
-  writeMessage(type: number, payload: Uint8Array): Promise<void> {
-    return this.runExclusive(async (): Promise<void> => {
+  writeMessage(type: number, payload: Uint8Array): Promise<void> { return this.writeMessageIf(type, payload).then((): void => {}); }
+  writeMessageIf(type: number, payload: Uint8Array, shouldWrite?: () => boolean): Promise<boolean> {
+    return this.runExclusive(async (): Promise<boolean> => {
       if (!Number.isInteger(type) || type < 0 || type > 255) {
         throw ArkDbError.validation('PostgreSQL message type must be one byte');
       }
@@ -414,7 +415,8 @@ export class PostgresMessageChannel {
       frame[0] = type;
       new DataView(frame.buffer).setInt32(1, payload.length + POSTGRES_LENGTH_BYTES, false);
       frame.set(payload, POSTGRES_NORMAL_HEADER_BYTES);
-      await this.writeExact(frame);
+      try { if (shouldWrite !== undefined && !shouldWrite()) { frame.fill(0); return false; } } catch (err) { frame.fill(0); throw err as Error; }
+      await this.writeExact(frame); return true;
     });
   }
 

@@ -1,5 +1,4 @@
 import { ArkDbError, estimateSqlRowBytes, QueryExecutionSummary, QueryOptions, QueryResultMeta, QueryResultSink, QueryRowChunk, QueryTruncation, SqlValue } from '@arkdb/core';
-import { isPostgresInterruptionError } from '../execution/PostgresExecutionController';
 import { postgresAppendCleanupError, PostgresCommandCloseSettlement, postgresErrorFromResponse, toPostgresArkDbError } from '../execution/PostgresSettlements';
 import { PostgresColumnDef, PostgresQueryResultSummary } from '../model/PostgresModels';
 import { PostgresFrontendSerializer } from '../protocol/PostgresByteCodec';
@@ -10,9 +9,9 @@ import {
 } from '../protocol/PostgresMessageChannel';
 import { decodePostgresDataRow, toPostgresColumnDefs } from '../value/PostgresTextValueDecoder';
 import {
-  accountDrainedBytes, consumeAsyncMessage, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType,
+  accountDrainedBytes, consumeAsyncMessage, deadlineDrainMs, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType,
   parsePostgresCommandCompleteTag, PostgresCommandTagCounts, PostgresSimpleQueryHost, raceDrainDeadline, readClockMs,
-  readWakeableQueryMessage, refreshDrain, scrubBackendMessage, scrubSqlRow, snapshotQueryOptions, writeQueryFrame
+  readWakeableQueryMessage, scrubBackendMessage, scrubSqlRow, snapshotQueryOptions, writeQueryFrame
 } from './PostgresSimpleQuery';
 
 const MAX_SAFE_BIGINT: bigint = BigInt(Number.MAX_SAFE_INTEGER);
@@ -20,7 +19,7 @@ enum StreamSubState { BetweenStatements = 0, InRowResult = 1, InCopyInAbort = 2,
 class StreamErrors { sink: ArkDbError | null = null; latched: ArkDbError | null = null; readFatal: ArkDbError | null = null; }
 
 export interface PostgresQueryStreamHost extends PostgresSimpleQueryHost {
-  enterStreaming(): void; enterDraining(): void; latchConsumerError(error: ArkDbError, synchronized?: boolean): void; beginPortalBatch?(settlement: PostgresCommandCloseSettlement): Promise<void>;
+  enterStreaming(): void; enterDraining(): void; latchConsumerError(error: ArkDbError, synchronized?: boolean): void; beginPortalBatch?(settlement: PostgresCommandCloseSettlement, prepareNext?: boolean): Promise<void>;
 }
 
 export function encodePostgresSimpleQuery(sql: string): Uint8Array { return PostgresFrontendSerializer.query(sql); }
@@ -50,14 +49,14 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
   settlement.onConsumerAbandoned((abErr: ArkDbError): void => {
     if (settlement.closeReason !== null) return;
     if (errors.sink === null && errors.latched === null) { settlement.markConsumerAbandonClaimed(); errors.sink = abErr; }
-    else if (settlement.isDeadlineAbandoned) { settlement.markConsumerAbandonClaimed(); const prior = errors.sink !== null ? errors.sink : errors.latched!; errors.latched = null; errors.sink = isPostgresInterruptionError(prior) || prior === settlement.consumerAbandonReason ? abErr : postgresAppendCleanupError(abErr, prior); }
+    else if (settlement.isDeadlineAbandoned) { settlement.markConsumerAbandonClaimed(); const prior = errors.sink !== null ? errors.sink : errors.latched!; errors.latched = null; errors.sink = settlement.appendDeadlineCleanup(abErr, prior); }
     else return;
     host.latchConsumerError(errors.sink, false); discardChunkRows(chunkRows); chunkWireBytes = 0;
-    try { if (settlement.isDeadlineAbandoned) { drainedBytes = 0; drainDeadlineMs = refreshDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs); } beginDrain(false); }
+    try { if (settlement.isDeadlineAbandoned) { drainedBytes = 0; drainDeadlineMs = deadlineDrainMs(host.timers, settlement, drainDeadlineMs, opts.maxDrainTimeMs); } beginDrain(false); }
     catch (te) { const rf = postgresAppendCleanupError(errors.sink, toPostgresArkDbError(te as Object)); errors.readFatal = rf; errors.sink = rf; host.latchConsumerError(rf, false); wakeRead(); }
   });
   const recordStreamError = (err: ArkDbError): void => {
-    if (settlement.isDeadlineAbandoned && isPostgresInterruptionError(err)) return;
+    if (settlement.isDeadlineAbandoned && settlement.isBackendInterruption(err)) return;
     if (errors.sink !== null) { errors.sink = postgresAppendCleanupError(errors.sink, err); host.latchConsumerError(errors.sink, false); }
     else if (errors.latched === null) errors.latched = err;
     else if (settlement.isDeadlineAbandoned) errors.latched = postgresAppendCleanupError(errors.latched, err);
@@ -66,22 +65,23 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
     const readClose = (): ArkDbError | null => settlement.closeReason;
     settlement.pollDeadline(); if (errors.sink !== null || errors.latched !== null) return undefined;
     const preClose = readClose(); if (preClose !== null) throw preClose;
-    let caught: ArkDbError | null = null;
+    let caught: ArkDbError | null = null; let sinkExited = false;
     try {
       return await raceDrainDeadline<T>(host.timers, drainDeadlineMs, (): Promise<T> => settlement.raceConsumer<T>(async (): Promise<T> => {
-        try { return await op(); } catch (e) { const se = toPostgresArkDbError(e as Object); caught = se; throw se; }
+        try { return await op(); } catch (e) { const se = toPostgresArkDbError(e as Object); caught = se; if (sinkExited && !settlement.isSettled && (errors.sink !== null || settlement.isDeadlineAbandoned) && (!settlement.isDeadlineAbandoned || !settlement.isBackendInterruption(se))) { if (errors.sink !== null) errors.sink = postgresAppendCleanupError(errors.sink, se); host.latchConsumerError(errors.sink !== null ? errors.sink : se, false); } if (sinkExited) return undefined as T; throw se; }
       }), (): number => { settlement.pollDeadline(); throwIfAborted(); return drainDeadlineMs; });
     } catch (err) {
-      const hasCaught = caught !== null; const postClose = readClose();
+      sinkExited = true; const hasCaught = caught !== null; const postClose = readClose();
       if ((hasCaught && (err === caught || err === settlement.consumerAbandonReason || err === postClose)) || (postClose === null && settlement.consumerAbandonReason !== null && err === settlement.consumerAbandonReason)) {
         const se = hasCaught ? caught! : settlement.consumerAbandonReason!;
         if (errors.sink === null) { if (!hasCaught) settlement.markConsumerAbandonClaimed(); errors.sink = se; host.latchConsumerError(se, false); discardChunkRows(chunkRows); chunkWireBytes = 0; if (postClose === null) beginDrain(false); }
-        else if (hasCaught && settlement.isDeadlineAbandoned && !isPostgresInterruptionError(se)) { errors.sink = postgresAppendCleanupError(errors.sink, se); host.latchConsumerError(errors.sink, false); }
+        else if (hasCaught && (!settlement.isDeadlineAbandoned || !settlement.isBackendInterruption(se))) { errors.sink = postgresAppendCleanupError(errors.sink, se); host.latchConsumerError(errors.sink, false); }
         if (postClose !== null) throw postClose;
         return undefined;
       }
+      if (hasCaught && (!settlement.isDeadlineAbandoned || !settlement.isBackendInterruption(caught!))) { errors.sink = errors.sink === null ? caught! : postgresAppendCleanupError(errors.sink, caught!); host.latchConsumerError(errors.sink, false); }
       throw err as Error;
-    }
+    } finally { sinkExited = true; }
   };
   const readNextFrame = (): Promise<PostgresMessage> => readWakeableQueryMessage(channel, settlement, host.timers, (): boolean => draining, (): number => opts.maxDrainBytes - drainedBytes, setDrainWake);
   const flushChunk = async (): Promise<boolean> => {
@@ -114,7 +114,7 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
         const msg = PostgresBackendParser.parse(raw); parsed = msg;
         if (consumeAsyncMessage(host, msg)) continue;
         if (msg instanceof PostgresErrorResponse) {
-          const pgErr = postgresErrorFromResponse(msg); if (isFatalPostgresError(pgErr)) throw pgErr;
+          const pgErr = postgresErrorFromResponse(msg, settlement); if (isFatalPostgresError(pgErr)) throw pgErr;
           if (sawServerError) throw ArkDbError.protocol('Unexpected duplicate PostgreSQL ErrorResponse.');
           sawServerError = true;
           if (subState === StreamSubState.InCopyInAbort) { if (settlement.isDeadlineAbandoned) recordStreamError(pgErr); subState = StreamSubState.BetweenStatements; continue; }

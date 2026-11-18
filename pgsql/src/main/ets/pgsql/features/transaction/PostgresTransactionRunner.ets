@@ -43,7 +43,7 @@ class StepCommandHost implements PostgresSimpleQueryHost, PostgresQueryStreamHos
   applyReadyStatus(ready: PostgresReadyStatus): void { this.inner.applyReadyStatus(ready); } retire(reason: ArkDbError): Promise<void> { return this.inner.retire(reason); }
   enterStreaming(): void { this.inner.enterStreaming(); } enterDraining(): void { this.inner.enterDraining(); }
   latchConsumerError(error: ArkDbError, synchronized: boolean = false): void { if (!this.state.callbackFailed) { this.inner.latchConsumerError(error, synchronized); this.consumerLatched = true; } }
-  beginPortalBatch(settlement: PostgresCommandCloseSettlement): Promise<void> { return this.inner.beginPortalBatch !== undefined ? this.inner.beginPortalBatch(settlement) : Promise.resolve(); }
+  beginPortalBatch(settlement: PostgresCommandCloseSettlement, prepareNext: boolean = true): Promise<void> { return this.inner.beginPortalBatch !== undefined ? this.inner.beginPortalBatch(settlement, prepareNext) : Promise.resolve(); }
 }
 class ScopedSessionPreparedExecutor implements PostgresPreparedExecutor {
   constructor(session: ScopedPostgresTransactionSession, inner: PostgresPreparedExecutor) { sessionPreparedDelegates.set(this, { session: session, inner: inner }); }

@@ -5,7 +5,7 @@ import { PostgresColumnDef, PostgresQueryResult } from '../model/PostgresModels'
 import { PostgresFrontendSerializer, PostgresFrontendTarget } from '../protocol/PostgresByteCodec';
 import { PostgresBackendMessage, PostgresBackendParser, PostgresBindComplete, PostgresCommandComplete, PostgresCopyBothResponse, PostgresCopyData, PostgresCopyDone, PostgresCopyInResponse, PostgresCopyOutResponse, PostgresDataRow, PostgresEmptyQueryResponse, PostgresErrorResponse, PostgresMessageChannel, PostgresNoData, PostgresParseComplete, PostgresPortalSuspended, PostgresReadyForQuery, PostgresRowDescription } from '../protocol/PostgresMessageChannel';
 import { decodePostgresDataRow, toPostgresColumnDefs } from '../value/PostgresTextValueDecoder';
-import { accountDrainedBytes, consumeAsyncMessage, estimateRowDescBytes, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, parsePostgresCommandCompleteTag, PostgresBufferedDrain, PostgresSimpleQueryHost, readClockMs, readWakeableQueryMessage, refreshDrain, scrubBackendMessage, scrubQueryResult, scrubSqlRow, sendQueryFrame, snapshotQueryOptions, startDrain } from './PostgresSimpleQuery';
+import { accountDrainedBytes, consumeAsyncMessage, deadlineDrainMs, estimateRowDescBytes, findNonTextFormatCode, isFatalPostgresError, isSimpleQueryFrameType, parsePostgresCommandCompleteTag, PostgresBufferedDrain, PostgresSimpleQueryHost, readClockMs, readWakeableQueryMessage, scrubBackendMessage, scrubQueryResult, scrubSqlRow, sendQueryFrame, snapshotQueryOptions, startDrain } from './PostgresSimpleQuery';
 
 enum ExtendedQueryStage { ExpectParseComplete = 0, ExpectBindComplete = 1, ExpectDescribeResult = 2, ExpectRowResult = 3, ExpectNoDataResult = 4, InCopyOutData = 5, InCopyOutDone = 6, AwaitReadyAfterCommand = 7, AwaitReadyAfterError = 8 }
 export interface PostgresExtendedQueryHost extends PostgresSimpleQueryHost { enterDraining(): void; }
@@ -25,7 +25,7 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
     };
     const d = new PostgresBufferedDrain(settlement, (): number => drainDeadlineMs, (): void => {
       if (currentResult !== null) { scrubQueryResult(currentResult); currentResult = null; }
-      activeColumns = []; if (settlement.isDeadlineAbandoned) { drainedBytes = 0; drainDeadlineMs = refreshDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs); } beginDrain();
+      activeColumns = []; if (settlement.isDeadlineAbandoned) { drainedBytes = 0; drainDeadlineMs = deadlineDrainMs(host.timers, settlement, drainDeadlineMs, opts.maxDrainTimeMs); } beginDrain();
     });
     drain = d; const startedAtMs = readClockMs(host.timers);
     const send = (code: number, f: Uint8Array): Promise<boolean> => sendQueryFrame(channel, settlement, code, f, host.timers, drainDeadlineMs, d.setWake);
@@ -60,7 +60,7 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
         if (msg instanceof PostgresErrorResponse) {
           if (currentResult !== null) { scrubQueryResult(currentResult); currentResult = null; }
           activeColumns = []; activeColumnCount = 0;
-          const pgErr = postgresErrorFromResponse(msg);
+          const pgErr = postgresErrorFromResponse(msg, settlement);
           if (isFatalPostgresError(pgErr)) throw pgErr;
           if (sawServerError) throw ArkDbError.protocol('Unexpected duplicate PostgreSQL ErrorResponse.');
           sawServerError = true; d.record(pgErr);

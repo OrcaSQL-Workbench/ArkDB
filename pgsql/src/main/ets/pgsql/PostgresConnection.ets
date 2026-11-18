@@ -221,6 +221,7 @@ class TransactionRunnerLifecycleHost extends QueryStreamLifecycleHost implements
   enterExecuting(): void { this.setPhase(PostgresCommandPhase.Executing); }
   clearConsumerError(): void { this.lifecycle.clearConsumerError(this.scope); }
   isSynchronized(): boolean { return this.lifecycle.isCommandSynchronized(this.scope); }
+  readDeadlineError(error: ArkDbError): ArkDbError { return this.lifecycle.readDeadlineBase(this.scope, error); }
   waitBeforeStep(settlement: PostgresCommandCloseSettlement): Promise<void> | null { return this.lifecycle.waitForStepReady(this.scope, settlement); }
   runStepWithDeadline<R>(settlement: PostgresCommandCloseSettlement, options: QueryOptions, op: () => Promise<R>, scrub?: (value: R) => void, canLatch?: () => boolean): Promise<R> { return this.lifecycle.runStepWithDeadline<R>(this.scope, settlement, options, op, scrub, canLatch); }
 }

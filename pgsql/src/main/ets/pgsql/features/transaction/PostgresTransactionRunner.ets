@@ -15,7 +15,7 @@ import { PostgresMessageChannel, PostgresReadyStatus } from '../../protocol/Post
 import { quotePostgresIdentifier } from '../../value/PostgresSqlHelpers';
 import { buildPostgresBeginSql, PostgresTransactionOptions } from './PostgresTransactionOptions';
 
-export interface PostgresTransactionCommandHost extends PostgresSimpleQueryHost, PostgresQueryStreamHost, PostgresExtendedQueryHost { enterExecuting(): void; clearConsumerError(): void; isSynchronized(): boolean; waitBeforeStep(settlement: PostgresCommandCloseSettlement): Promise<void> | null; runStepWithDeadline<R>(settlement: PostgresCommandCloseSettlement, options: QueryOptions, op: () => Promise<R>, scrub?: (value: R) => void, canLatch?: () => boolean): Promise<R>; }
+export interface PostgresTransactionCommandHost extends PostgresSimpleQueryHost, PostgresQueryStreamHost, PostgresExtendedQueryHost { enterExecuting(): void; clearConsumerError(): void; isSynchronized(): boolean; readDeadlineError(error: ArkDbError): ArkDbError; waitBeforeStep(settlement: PostgresCommandCloseSettlement): Promise<void> | null; runStepWithDeadline<R>(settlement: PostgresCommandCloseSettlement, options: QueryOptions, op: () => Promise<R>, scrub?: (value: R) => void, canLatch?: () => boolean): Promise<R>; }
 export class PostgresTransactionFailure { readonly error: Object | null | undefined; constructor(error: Object | null | undefined) { this.error = error; } }
 export type PostgresTransactionScopeExecutor = (op: (h: PostgresTransactionCommandHost, ch: PostgresMessageChannel, ps: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>) => Promise<PostgresTransactionFailure | null>;
 interface SessionPreparedDelegate { readonly session: ScopedPostgresTransactionSession; readonly inner: PostgresPreparedExecutor; }
@@ -115,7 +115,7 @@ async function executeTransactionScope<T>(host: PostgresTransactionCommandHost, 
     try {
       const out = options !== undefined && options.statementTimeoutMs > 0 ? await host.runStepWithDeadline<R>(stepSettlement, options, executeBody, scrub, (): boolean => !state.callbackFailed) : await executeBody();
       throwIfClosed(parentSettlement); if (stepSettlement.consumerAbandonReason !== null) { stepSettlement.markConsumerAbandonClaimed(); throw stepSettlement.consumerAbandonReason; } stepSettlement.markDelivered(); delivered = true; return out;
-    } catch (stepErr) { const typedStep = toPostgresArkDbError(stepErr as Object); if (typedStep === stepSettlement.consumerAbandonReason || stepSettlement.isDeadlineAbandoned) stepSettlement.markConsumerAbandonClaimed(); if (parentSettlement.closeReason === null && !host.isSynchronized() && state.lastUnsyncErr === null) state.lastUnsyncErr = typedStep; throw typedStep; }
+    } catch (stepErr) { const rawStep = toPostgresArkDbError(stepErr as Object); const typedStep = stepSettlement.isDeadlineAbandoned && !state.callbackFailed ? stepSettlement.appendDeadlineCleanup(host.readDeadlineError(rawStep), rawStep) : rawStep; if (typedStep === stepSettlement.consumerAbandonReason || stepSettlement.isDeadlineAbandoned) stepSettlement.markConsumerAbandonClaimed(); if (parentSettlement.closeReason === null && !host.isSynchronized() && state.lastUnsyncErr === null) state.lastUnsyncErr = typedStep; throw typedStep; }
     finally {
       if (state.activeStep === stepSettlement) state.activeStep = null;
       if (!delivered) stepSettlement.discardUndelivered();

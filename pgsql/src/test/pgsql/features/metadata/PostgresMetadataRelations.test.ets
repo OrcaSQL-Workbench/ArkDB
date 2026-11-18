@@ -40,6 +40,9 @@ export default function postgresMetadataRelationsTest(): void {
         expect(sql.indexOf(specialSchema) === -1 && sql.indexOf(specialObj) === -1 &&
           sql.indexOf("c.relkind IN ('r', 'p', 'v', 'm')") >= 0 &&
           sql.indexOf('a.attnum > 0 AND NOT a.attisdropped') >= 0 &&
+          sql.indexOf('WITH RECURSIVE notnull_domains(oid) AS') >= 0 &&
+          sql.indexOf("child.typtype = 'd' AND child.typbasetype = parent.oid") >= 0 &&
+          sql.indexOf('NOT (a.attnotnull OR nd.oid IS NOT NULL)') >= 0 &&
           sql.indexOf('pg_catalog.format_type(a.atttypid, a.atttypmod)::text') >= 0 &&
           sql.indexOf("pg_catalog.has_schema_privilege(n.oid, 'USAGE')") >= 0 &&
           sql.indexOf("pg_catalog.has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')") >= 0 &&
@@ -93,11 +96,13 @@ export default function postgresMetadataRelationsTest(): void {
       const sql = extractParseSql(tp.writes[0]);
       assertBytes(tp.writes[0], PostgresFrontendSerializer.parse('', sql, [25, 25]));
       assertBytes(tp.writes[1], PostgresFrontendSerializer.bind('', '', [0, 0], [utf8Bytes('app_schema'), utf8Bytes('users_part')], [0]));
-      expect(sql.indexOf("c.relkind IN ('r', 'p', 'm')") >= 0 &&
+      expect(sql.indexOf('WITH idx_rows AS MATERIALIZED') >= 0 &&
+        sql.indexOf("c.relkind IN ('r', 'p', 'm')") >= 0 &&
         sql.indexOf('ix.indislive') >= 0 && sql.indexOf("ic.relkind IN ('i', 'I')") >= 0 &&
         sql.indexOf('pg_catalog.unnest(ix.indkey) WITH ORDINALITY') >= 0 && sql.indexOf('k.ord <= ix.indnkeyatts') >= 0 &&
         sql.indexOf('pg_catalog.pg_get_indexdef(ix.indexrelid, key_col.ord, true)::text') >= 0 &&
-        sql.indexOf('ORDER BY ic.relname COLLATE "C", ic.oid, key_col.ord NULLS FIRST') >= 0 &&
+        sql.indexOf('bad.ord IS NOT NULL AND bad.key_name IS NULL') >= 0 &&
+        sql.indexOf('ORDER BY r.index_name COLLATE "C", r.index_oid, r.ord NULLS FIRST') >= 0 &&
         sql.indexOf('MAINTAIN') === -1).assertTrue();
       expect(idxs.length === 5 &&
         idxs[0].name === 'idx_bloom_zero' && !idxs[0].unique && !idxs[0].primary && idxs[0].columns.length === 0 &&

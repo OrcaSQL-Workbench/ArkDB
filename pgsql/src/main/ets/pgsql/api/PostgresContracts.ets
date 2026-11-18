@@ -16,6 +16,7 @@ export class PostgresDriverCapabilities extends DriverCapabilities {
   supportsMultipleResults: boolean = true;
   supportsStreamingResults: boolean = true;
   supportsGracefulCancel: boolean = true;
+  supportsMetadata: boolean = true;
 }
 
 export interface PostgresSession extends PostgresFeatureConnection {

@@ -9,7 +9,7 @@ export default function postgresCancellationTest(): void {
   describe('PostgresCancellation', () => {
     it('cancelsActiveSimpleExtendedStreamingTruncationAndTransactionQueriesAcrossSeparateSocket', 0, async () => {
       expect(new PostgresDriverFactory().capabilities.supportsGracefulCancel).assertTrue(); const sub = new CustomCancelConnection(plainConfig(), 'pw');
-      expect(sub.features.cancellation !== undefined && JSON.stringify(sub.features) === '{"streaming":{},"health":{},"context":{},"transactions":{},"cancellation":{}}' && (await sub.features.cancellation!.cancel()).outcome === CancellationOutcome.Requested && sub.cancelCalls === 1 && sub.features.cancellation!.isInterruptionError(serverErr('57014', 'ERROR')) && sub.interruptCalls === 1).assertTrue();
+      expect(sub.features.cancellation !== undefined && JSON.stringify(sub.features) === '{"streaming":{},"health":{},"context":{},"transactions":{},"cancellation":{},"metadata":{}}' && (await sub.features.cancellation!.cancel()).outcome === CancellationOutcome.Requested && sub.cancelCalls === 1 && sub.features.cancellation!.isInterruptionError(serverErr('57014', 'ERROR')) && sub.interruptCalls === 1).assertTrue();
       const primary = new ScriptedTransport([bootFrames(-2147483640, [0x89, 0xab, 0xcd, 0xef], 0x49)]); const cancels: ScriptedTransport[] = []; let finishCancelWrite: (() => void) | null = null; let inFlightRef: Uint8Array | null = null;
       const conn = new PostgresConnection(plainConfig(), 'pw', new ManualTimerPort(), (): PostgresLifecycleTransport => {
         if (cancels.length === 0 && !primary.connectedOnce) return primary; const c = new ScriptedTransport([]);

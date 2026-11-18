@@ -26,6 +26,7 @@ import {
   PostgresCommandGate, PostgresCommandKind, PostgresCommandPhase, PostgresCommandScope
 } from './execution/PostgresCommandGate';
 import { PostgresCommandCloseSettlement } from './execution/PostgresSettlements';
+import { PostgresMetadataProvider } from './features/metadata/PostgresMetadataProvider';
 import { PostgresPreparedFrames } from './features/prepared/PostgresParameterEncoder';
 import { PostgresConnectionPreparedExecutor } from './features/prepared/PostgresPreparedExecutor';
 import { PostgresConnectionTransactionRunner, PostgresTransactionCommandHost, PostgresTransactionFailure } from './features/transaction/PostgresTransactionRunner';
@@ -53,6 +54,12 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
     commandGate?: PostgresCommandGate) {
     this.lifecycle = new PostgresConnectionLifecycle(
       config, password, timers, transportFactory, startupRunner, commandGate);
+    const prepared = new PostgresConnectionPreparedExecutor(
+      (frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> =>
+        this.executeExtendedQuery(frames, options),
+      (frames: PostgresPreparedFrames, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
+        this.streamPreparedQuery(frames, options, sink),
+      (): void => this.lifecycle.assertCommandDispatchable());
     this.features.streaming = new PostgresConnectionStreaming(this,
       (sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
         this.queryStream(sql, options, sink));
@@ -62,12 +69,10 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
       (context: DatabaseContext): Promise<void> => this.changeContext(context));
     this.features.transactions = new PostgresConnectionTransactions(this);
     this.features.cancellation = new PostgresConnectionCancellation(this);
-    this.postgresFeatures.prepared = new PostgresConnectionPreparedExecutor(
-      (frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> =>
-        this.executeExtendedQuery(frames, options),
-      (frames: PostgresPreparedFrames, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
-        this.streamPreparedQuery(frames, options, sink),
+    this.features.metadata = new PostgresMetadataProvider(prepared,
+      (): string => resolvePostgresDatabaseName(this.lifecycle.config),
       (): void => this.lifecycle.assertCommandDispatchable());
+    this.postgresFeatures.prepared = prepared;
     this.postgresFeatures.transactions = new PostgresConnectionTransactionRunner(
       (op: (h: PostgresTransactionCommandHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>): Promise<PostgresTransactionFailure | null> => this.runTransactionScope(op));
   }

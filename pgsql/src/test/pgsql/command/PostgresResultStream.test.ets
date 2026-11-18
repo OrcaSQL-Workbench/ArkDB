@@ -13,20 +13,20 @@ export default function postgresResultStreamTest(): void {
         sub.features.streaming!.state === ConnectionState.Idle && sub.features.streaming!.features === sub.features && sub.features.streaming!.serverInfo === sub.serverInfo).assertTrue();
       await sub.features.streaming!.queryStream('SELECT 1', new QueryOptions(), new RecSink()); expect(sub.customCalls).assertEqual(1);
       await sub.features.streaming!.close(); expect(sub.state === ConnectionState.Closed && JSON.stringify(sub).indexOf('secret-pw-123') === -1).assertTrue();
-      const tp = new QueueTransport([bootFrames(0x49), concatFrames([msgRowDesc([colSpec('v', 0, 0, 23, 4, -1, 0)]), msgDataRow(['1']), msgDataRow(['2']), msgCmd('SELECT 2'), msgReady(0x49)]), concatFrames([msgCmd('SELECT 1'), msgReady(0x49)])]);
+      const tp = new QueueTransport([bootFrames(0x49), concatFrames([msgRowDesc([colSpec('v', 0, 0, 23, 4, -1, 0)]), msgDataRow(['1']), msgDataRow(['2']), msgCmd('SELECT 2'), msgReady(0x49)]), concatFrames([msgCmd('SELECT 1'), msgReady(0x49)]), concatFrames([msgCmd('SELECT 0'), msgReady(0x49)])]);
       const conn = openReady(tp); await conn.features.streaming!.connect(); tp.writes.length = 0;
       expect(conn.state === ConnectionState.Ready && JSON.stringify(conn).length > 0).assertTrue();
-      for (const mut of [(o: QueryOptions): void => { o.maxRows = -1; }, (o: QueryOptions): void => { o.maxChunkRows = 0; }, (o: QueryOptions): void => { o.maxDrainBytes = 0; }, (o: QueryOptions): void => { o.maxDrainTimeMs = 0; }]) {
+      for (const mut of [(o: QueryOptions): void => { o.maxRows = -1; }, (o: QueryOptions): void => { o.maxChunkRows = 0; }, (o: QueryOptions): void => { o.maxDrainBytes = 0; }, (o: QueryOptions): void => { o.maxDrainTimeMs = 0; }, (o: QueryOptions): void => { o.statementTimeoutMs = -1; }]) {
         const bad = new QueryOptions(); mut(bad); expect((await asyncFail((): Promise<Object> => conn.queryStream('SELECT 1', bad, new RecSink()))).kind).assertEqual(ArkDbErrorKind.Validation);
       }
-      const timeoutOpts = new QueryOptions(); timeoutOpts.statementTimeoutMs = 250;
-      expect((await asyncFail((): Promise<Object> => conn.queryStream('SELECT 1', timeoutOpts, new RecSink()))).kind).assertEqual(ArkDbErrorKind.Unsupported);
       expect((await asyncFail((): Promise<Object> => conn.queryStream('SELECT \u0000', new QueryOptions(), new RecSink()))).kind).assertEqual(ArkDbErrorKind.Validation);
       expect(tp.writes.length === 0 && conn.state === ConnectionState.Ready).assertTrue();
       const snapOpts = new QueryOptions(); snapOpts.maxChunkRows = 1; snapOpts.maxRows = 1;
       const sink = new RecSink(); const runTask = conn.features.streaming!.queryStream('SELECT 1', snapOpts, sink); snapOpts.maxRows = -1; snapOpts.statementTimeoutMs = 999;
       const exec = await runTask; expect(exec.loadedRowCount === 1 && sink.chunks[0].rows[0][0] === 1 && tp.writes.length === 1).assertTrue();
       assertBytes(tp.writes[0], expectedQueryFrame('SELECT 1')); expect((await conn.features.streaming!.query('SELECT 1')).affectedRows).assertEqual(0);
+      const timeoutOpts = new QueryOptions(); timeoutOpts.statementTimeoutMs = 250;
+      expect((await conn.queryStream('SELECT 0', timeoutOpts, new RecSink())).loadedRowCount).assertEqual(0);
     });
     it('streamsMultiStatementsSafeIntegerCountsAndAsyncMessages', 0, async () => {
       const logSink = new StreamLogSink(); const prevLevel = Logger.level; Logger.setLevel(LogLevel.DEBUG); Logger.addSink(logSink);

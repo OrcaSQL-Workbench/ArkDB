@@ -16,11 +16,10 @@ export default function postgresPortalStreamTest(): void {
       const uninit = new PostgresConnectionPreparedExecutor((_f: PostgresPreparedFrames, _o: QueryOptions): Promise<PostgresQueryResult> => Promise.resolve(new PostgresQueryResult()));
       expect((await asyncFail((): Promise<Object> => uninit.queryStream('SELECT 1', [], new QueryOptions(), new RecSink()))).kind).assertEqual(ArkDbErrorKind.Protocol);
       expect((await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.queryStream('SELECT 1', [], asQueryOpts(null), new RecSink()))).message).assertEqual('QueryOptions is required.');
-      for (const mut of [(o: QueryOptions): void => { o.maxRows = -1; }, (o: QueryOptions): void => { o.maxChunkRows = 0; }, (o: QueryOptions): void => { o.maxDrainBytes = 0; }, (o: QueryOptions): void => { o.maxDrainTimeMs = 0; }]) {
+      for (const mut of [(o: QueryOptions): void => { o.maxRows = -1; }, (o: QueryOptions): void => { o.maxChunkRows = 0; }, (o: QueryOptions): void => { o.maxDrainBytes = 0; }, (o: QueryOptions): void => { o.maxDrainTimeMs = 0; }, (o: QueryOptions): void => { o.statementTimeoutMs = -1; }]) {
         const bad = new QueryOptions(); mut(bad); expect((await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.queryStream('SELECT 1', [], bad, new RecSink()))).kind).assertEqual(ArkDbErrorKind.Validation);
       }
-      const dlOpts = new QueryOptions(); dlOpts.statementTimeoutMs = 25;
-      expect((await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.queryStream('SELECT 1', [], dlOpts, new RecSink()))).kind).assertEqual(ArkDbErrorKind.Unsupported);
+      const dlOpts = new QueryOptions(); dlOpts.statementTimeoutMs = 100;
       const untouchedParam = new ForgedInt4Parameter();
       for (const badSink of [asSink(null), asSink(undefined), asSink('not-sink')]) {
         const se = await asyncFail((): Promise<Object> => conn.postgresFeatures.prepared!.queryStream('SELECT $1', [untouchedParam], new QueryOptions(), badSink));
@@ -43,6 +42,8 @@ export default function postgresPortalStreamTest(): void {
       const summary = await run; expect(summary.loadedRowCount === 1 && sink.chunks[0].rows[0][0] === 7 && tp.writes.length === 6).assertTrue();
       assertBytes(tp.writes[2], expectedDescribePortal()); assertBytes(tp.writes[3], expectedExecute(2)); assertBytes(tp.writes[4], expectedFlush()); assertBytes(tp.writes[5], expectedSync());
       for (const raw of tp.rawWrites) assertZeroed(raw);
+      tp.enqueue([concatFrames([msgParseComplete(), msgBindComplete(), msgNoData(), msgCmd('SELECT 0'), msgReady(0x49)])]);
+      expect((await conn.postgresFeatures.prepared!.queryStream('SELECT 1', [], dlOpts, new RecSink())).loadedRowCount).assertEqual(0);
       await conn.close(); expect(JSON.stringify(conn).indexOf('secret-p19-pw')).assertEqual(-1);
     });
     it('streamsMultiBatchPortalSuspendedCappingExecuteWireBytesAndBackpressure', 0, async () => {

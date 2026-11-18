@@ -15,15 +15,18 @@ export class PostgresBufferedDrain {
   constructor(settlement: PostgresCommandCloseSettlement, getDeadline: () => number, onAbandon: () => void) {
     this.settlement = settlement; this.getDeadline = getDeadline;
     this.setWake = (w: (() => void) | null, check: boolean): number => { this.onWake = w; if (check) this.throwIfAborted(); return this.getDeadline(); };
+    settlement.pollDeadline();
     if (settlement.consumerAbandonReason !== null) { settlement.markConsumerAbandonClaimed(); throw settlement.consumerAbandonReason; }
     settlement.onConsumerAbandoned((abErr: ArkDbError): void => {
-      if (this.abandon !== null || this.latched !== null || this.fatal !== null || settlement.closeReason !== null) return;
-      settlement.markConsumerAbandonClaimed(); this.abandon = abErr;
-      try { onAbandon(); this.wake(); } catch (te) { const rf = postgresAppendCleanupError(abErr, toPostgresArkDbError(te as Object)); this.fatal = rf; this.abandon = rf; this.wake(); }
+      if (this.fatal !== null || settlement.closeReason !== null) return;
+      if (this.abandon === null && this.latched === null) { settlement.markConsumerAbandonClaimed(); this.abandon = abErr; }
+      else if (settlement.isDeadlineAbandoned) { settlement.markConsumerAbandonClaimed(); const prior = this.abandon !== null ? this.abandon : this.latched!; this.latched = null; this.abandon = settlement.appendDeadlineCleanup(abErr, prior); }
+      else return;
+      try { onAbandon(); this.wake(); } catch (te) { const rf = postgresAppendCleanupError(this.abandon, toPostgresArkDbError(te as Object)); this.fatal = rf; this.abandon = rf; this.wake(); }
     });
   }
   wake(): void { if (this.onWake !== null) { const w = this.onWake; this.onWake = null; w(); } }
-  record(e: ArkDbError): void { if (this.abandon !== null) this.abandon = postgresAppendCleanupError(this.abandon, e); else if (this.latched === null) this.latched = e; }
+  record(e: ArkDbError): void { if (this.settlement.isDeadlineAbandoned && this.settlement.isBackendInterruption(e)) return; if (this.abandon !== null) this.abandon = postgresAppendCleanupError(this.abandon, e); else if (this.latched === null) this.latched = e; else if (this.settlement.isDeadlineAbandoned) this.latched = postgresAppendCleanupError(this.latched, e); }
   throwIfAborted(): void { if (this.fatal !== null) throw this.fatal; if (this.settlement.closeReason !== null) throw this.settlement.closeReason; }
   throwIfFailed(): void { if (this.abandon !== null) { const out = this.abandon; this.abandon = null; throw out; } if (this.latched !== null) throw this.latched; this.throwIfAborted(); }
   toError(err: Object): ArkDbError { const typed = toPostgresArkDbError(err); return this.abandon !== null && typed !== this.abandon ? postgresAppendCleanupError(this.abandon, typed) : typed; }
@@ -55,10 +58,11 @@ export async function runPostgresSimpleQuery(host: PostgresSimpleQueryHost, chan
   let activeColumns: PostgresColumnDef[] = []; let activeColumnCount = 0; let currentResult: PostgresQueryResult | null = null; let totalResultBytes = 0;
   let draining = false; let sawServerError = false; let drainedBytes = 0; let drainDeadlineMs = -1;
   const drain = new PostgresBufferedDrain(settlement, (): number => drainDeadlineMs, (): void => {
-    discardResults(results, currentResult); currentResult = null; activeColumns = []; drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs); draining = true;
+    discardResults(results, currentResult); currentResult = null; activeColumns = []; if (settlement.isDeadlineAbandoned) { drainedBytes = 0; drainDeadlineMs = deadlineDrainMs(host.timers, settlement, drainDeadlineMs, opts.maxDrainTimeMs); } else drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs); draining = true;
   });
   const startedAtMs = readClockMs(host.timers);
   try {
+    if (settlement.pollDeadline()) drain.throwIfFailed();
     await writeQueryFrame(channel, settlement, 0x51, PostgresFrontendSerializer.query(sql), host.timers, drainDeadlineMs, drain.setWake);
     while (true) {
       const wasDrainingBefore = draining;
@@ -72,7 +76,7 @@ export async function runPostgresSimpleQuery(host: PostgresSimpleQueryHost, chan
         const msg = PostgresBackendParser.parse(raw); parsed = msg;
         if (consumeAsyncMessage(host, msg)) continue;
         if (msg instanceof PostgresErrorResponse) {
-          const pgErr = postgresErrorFromResponse(msg); if (isFatalPostgresError(pgErr)) throw pgErr;
+          const pgErr = postgresErrorFromResponse(msg, settlement); if (isFatalPostgresError(pgErr)) throw pgErr;
           if (sawServerError) throw ArkDbError.protocol('Unexpected duplicate PostgreSQL ErrorResponse.');
           sawServerError = true; drainDeadlineMs = startDrain(host.timers, drainDeadlineMs, opts.maxDrainTimeMs);
           if (subState === SimpleQuerySubState.InCopyInAbort) { subState = SimpleQuerySubState.BetweenStatements; continue; }
@@ -118,7 +122,7 @@ export async function runPostgresSimpleQuery(host: PostgresSimpleQueryHost, chan
           if (msg instanceof PostgresCopyBothResponse) { const unsupported = ArkDbError.unsupported('PostgreSQL COPY BOTH is not supported.'); await host.retire(unsupported); throw unsupported; }
           if (msg instanceof PostgresReadyForQuery) {
             const finishedAtMs = readClockMs(host.timers);
-            if (drainDeadlineMs >= 0 && finishedAtMs >= drainDeadlineMs) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
+            if (drainDeadlineMs >= 0 && finishedAtMs >= drainDeadlineMs && !(settlement.pollDeadline() && finishedAtMs < drainDeadlineMs)) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
             host.applyReadyStatus(msg.status); drain.throwIfFailed();
             const primary = finalizeQueryResults(results, host.sessionStatus, Math.max(0, finishedAtMs - startedAtMs));
             settlement.deferUndeliveredCleanup((): void => scrubQueryResult(primary)); return primary;
@@ -244,71 +248,99 @@ export function readClockMs(timers: ConnectionTimerPort): number {
   const now = timers.nowMs(); if (!Number.isSafeInteger(now) || now < 0) throw ArkDbError.protocol('Connection clock is unavailable.'); return now;
 }
 export function startDrain(timers: ConnectionTimerPort, deadlineMs: number, maxDrainTimeMs: number): number { return deadlineMs >= 0 ? deadlineMs : Math.min(Number.MAX_SAFE_INTEGER, readClockMs(timers) + maxDrainTimeMs); }
+export function refreshDrain(timers: ConnectionTimerPort, deadlineMs: number, maxDrainTimeMs: number): number { return Math.max(deadlineMs, Math.min(Number.MAX_SAFE_INTEGER, readClockMs(timers) + maxDrainTimeMs)); }
+export function deadlineDrainMs(timers: ConnectionTimerPort, settlement: PostgresCommandCloseSettlement, deadlineMs: number, maxDrainTimeMs: number): number { return settlement.deadlineDrainCutoffMs >= 0 ? settlement.deadlineDrainCutoffMs : refreshDrain(timers, deadlineMs, maxDrainTimeMs); }
 function cancelDrainTimer(timers: ConnectionTimerPort, tid: number, primary: Object | null): ArkDbError | null {
   try { timers.cancel(tid); return primary === null ? null : toPostgresArkDbError(primary); }
   catch (ce) { const c = toPostgresArkDbError(ce as Object); return primary === null ? c : postgresAppendCleanupError(toPostgresArkDbError(primary), c); }
 }
-export function raceDrainDeadline<T>(timers: ConnectionTimerPort, deadlineMs: number, op: () => Promise<T>): Promise<T> {
+export function raceDrainDeadline<T>(timers: ConnectionTimerPort, deadlineMs: number, op: () => Promise<T>, getDeadline?: () => number): Promise<T> {
   if (deadlineMs < 0) return op();
-  let now = 0; try { now = readClockMs(timers); } catch (e) { return Promise.reject<T>(toPostgresArkDbError(e as Object)); }
-  const rem = deadlineMs - now; if (rem <= 0) return Promise.reject<T>(ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.'));
+  let now = 0; let target = deadlineMs; try { now = readClockMs(timers); if (getDeadline !== undefined) target = Math.max(target, getDeadline()); } catch (e) { return Promise.reject<T>(toPostgresArkDbError(e as Object)); }
+  if (target - now <= 0) return Promise.reject<T>(ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.'));
   return new Promise<T>((resolve: (v: T | PromiseLike<T>) => void, reject: (e?: Object) => void): void => {
     let done = false; let tid = 0; let scheduled = false;
+    const arm = (remMs: number): void => {
+      scheduled = false;
+      tid = timers.schedule((): void => {
+        tid = 0; if (done) return;
+        try {
+          const curNow = readClockMs(timers); target = getDeadline !== undefined ? Math.max(target, getDeadline()) : target;
+          if (curNow < target) { arm(target - curNow); return; }
+        } catch (te) { done = true; reject(toPostgresArkDbError(te as Object)); return; }
+        done = true; reject(ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.'));
+      }, remMs);
+      scheduled = true;
+    };
     try {
-      tid = timers.schedule((): void => { if (!done) { done = true; reject(ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.')); } }, rem);
-      scheduled = true; if (done) return;
+      arm(target - now); if (done) return;
       op().then((v: T): void => {
         if (done) return;
-        done = true; const ce = cancelDrainTimer(timers, tid, null); if (ce !== null) { reject(ce); return; }
-        try { if (readClockMs(timers) >= deadlineMs) reject(ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.')); else resolve(v); }
+        done = true; const ce = tid !== 0 ? cancelDrainTimer(timers, tid, null) : null; tid = 0; if (ce !== null) { reject(ce); return; }
+        try { const endNow = readClockMs(timers); if (getDeadline !== undefined) target = Math.max(target, getDeadline()); if (endNow >= target) reject(ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.')); else resolve(v); }
         catch (te) { reject(toPostgresArkDbError(te as Object)); }
-      }, (e: Object): void => { if (!done) { done = true; reject(cancelDrainTimer(timers, tid, e)!); } });
-    } catch (e) { if (!done) { done = true; reject(scheduled ? cancelDrainTimer(timers, tid, e as Object)! : toPostgresArkDbError(e as Object)); } }
+      }, (e: Object): void => { if (!done) { done = true; const errOut = tid !== 0 ? cancelDrainTimer(timers, tid, e)! : toPostgresArkDbError(e); tid = 0; reject(errOut); } });
+    } catch (e) { if (!done) { done = true; const errOut = scheduled && tid !== 0 ? cancelDrainTimer(timers, tid, e as Object)! : toPostgresArkDbError(e as Object); tid = 0; reject(errOut); } }
   });
 }
-export async function writeQueryFrame(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, type: number, frame: Uint8Array, timers: ConnectionTimerPort, drainDeadlineMs: number, setDrainWake?: (w: (() => void) | null, check: boolean) => number): Promise<void> {
+export function writeQueryFrame(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, type: number, frame: Uint8Array, timers: ConnectionTimerPort, drainDeadlineMs: number, setDrainWake?: (w: (() => void) | null, check: boolean) => number): Promise<void> {
+  return sendQueryFrame(channel, settlement, type, frame, timers, drainDeadlineMs, setDrainWake, false).then((): void => {});
+}
+export async function sendQueryFrame(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, type: number, frame: Uint8Array, timers: ConnectionTimerPort, drainDeadlineMs: number, setDrainWake?: (w: (() => void) | null, check: boolean) => number, canSkip: boolean = true): Promise<boolean> {
   try {
     if (settlement.closeReason !== null) throw settlement.closeReason;
-    const dl0 = setDrainWake !== undefined ? setDrainWake(null, true) : drainDeadlineMs;
-    if (dl0 >= 0 || setDrainWake === undefined) { await raceDrainDeadline<void>(timers, dl0, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => { const t = channel.writeMessage(type, frame.subarray(5)); t.then((): void => {}, (): void => {}); return t; })); return; }
-    const task = channel.writeMessage(type, frame.subarray(5)); task.then((): void => {}, (): void => {});
-    let woke = false; const wake = new Promise<void>((res: () => void): void => { setDrainWake((): void => { woke = true; res(); }, false); });
+    const isSync = type === 0x53 || type === 0x48 || type === 0x43 || type === 0x66;
+    const liveDl = setDrainWake !== undefined ? (): number => { settlement.pollDeadline(); return setDrainWake(null, true); } : undefined;
+    let dl0 = setDrainWake !== undefined ? setDrainWake(null, true) : drainDeadlineMs; if (settlement.pollDeadline() && setDrainWake !== undefined) dl0 = setDrainWake(null, true);
+    if (!isSync && setDrainWake !== undefined && (dl0 >= 0 || settlement.consumerAbandonReason !== null)) { if (type === 0x51 || type === 0x50) settlement.throwIfAbandoned(); if (canSkip) return false; }
+    if (dl0 >= 0) { const now = readClockMs(timers); if (now >= dl0 && !(settlement.pollDeadline() && setDrainWake !== undefined && now < (dl0 = setDrainWake(null, true)))) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.'); }
+    const payload = frame.subarray(5);
+    if (dl0 >= 0 || setDrainWake === undefined) { await raceDrainDeadline<void>(timers, dl0, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => { const t = channel.writeMessage(type, payload); t.then((): void => {}, (): void => {}); return t; }), liveDl); return true; }
+    let attemptedWrite = true;
+    const task = !isSync && settlement.hasDeadlineCheck ? channel.writeMessageIf(type, payload, (): boolean => { const b = settlement.pollDeadline(); const ok = !b && setDrainWake(null, true) < 0 && settlement.closeReason === null && settlement.consumerAbandonReason === null; attemptedWrite = ok; return ok; }) : channel.writeMessage(type, payload).then((): boolean => true);
+    task.then((): void => {}, (): void => {});
+    let woke = false; const wake = new Promise<boolean>((res: (v: boolean) => void): void => { setDrainWake((): void => { woke = true; res(true); }, false); });
+    let sent = true;
     try {
-      await settlement.raceClose<void>((): Promise<void> => Promise.race<void>([task, wake])); const dl = setDrainWake(null, true);
-      if (woke) await raceDrainDeadline<void>(timers, dl, (): Promise<void> => settlement.raceClose<void>((): Promise<void> => task));
+      sent = await settlement.raceClose<boolean>((): Promise<boolean> => Promise.race<boolean>([task, wake])); const dl = setDrainWake(null, true);
+      if (woke) sent = attemptedWrite ? await raceDrainDeadline<boolean>(timers, dl, (): Promise<boolean> => settlement.raceClose<boolean>((): Promise<boolean> => task), liveDl) : await settlement.raceClose<boolean>((): Promise<boolean> => task);
     } finally { setDrainWake(null, false); }
+    if (!sent) { const readCr = (): ArkDbError | null => settlement.closeReason; const cr = readCr(); if (cr !== null) throw cr; if (type === 0x51 || type === 0x50 || !canSkip) settlement.throwIfAbandoned(); return false; }
+    settlement.pollDeadline(); return true;
   } finally { frame.fill(0); }
 }
-export async function readQueryMessage(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, timers: ConnectionTimerPort, drainDeadlineMs: number, maxFrameBytes: number): Promise<PostgresMessage> {
+export async function readQueryMessage(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, timers: ConnectionTimerPort, drainDeadlineMs: number, maxFrameBytes: number | ((fb: number) => number), getDeadline?: () => number): Promise<PostgresMessage> {
   if (settlement.closeReason !== null) throw settlement.closeReason;
   let abandoned = false; let hasResolved = false; let resolvedPayload = new Uint8Array(0);
   const task = channel.readMessage(maxFrameBytes);
   task.then((msg: PostgresMessage): void => { if (abandoned) msg.payload.fill(0); else { hasResolved = true; resolvedPayload = msg.payload; } }, (): void => {});
   try {
-    return await raceDrainDeadline<PostgresMessage>(timers, drainDeadlineMs, (): Promise<PostgresMessage> => settlement.raceClose<PostgresMessage>((): Promise<PostgresMessage> => task));
+    return await raceDrainDeadline<PostgresMessage>(timers, drainDeadlineMs, (): Promise<PostgresMessage> => settlement.raceClose<PostgresMessage>((): Promise<PostgresMessage> => task), getDeadline);
   } catch (err) {
     abandoned = true; if (hasResolved) { resolvedPayload.fill(0); resolvedPayload = new Uint8Array(0); } throw err as Error;
   }
 }
 export async function readWakeableQueryMessage(channel: PostgresMessageChannel, settlement: PostgresCommandCloseSettlement, timers: ConnectionTimerPort,
   isDraining: () => boolean, getDrainRem: () => number, setDrainWake: (w: (() => void) | null, check: boolean) => number): Promise<PostgresMessage> {
-  const dl0 = setDrainWake(null, true);
+  const liveDl = (): number => { settlement.pollDeadline(); return setDrainWake(null, true); };
+  let dl0 = setDrainWake(null, true); if (settlement.pollDeadline()) dl0 = setDrainWake(null, true);
   if (isDraining()) {
-    const rem = getDrainRem(); if (rem < POSTGRES_NORMAL_HEADER_BYTES) throw ArkDbError.protocol('PostgreSQL post-error drain exceeded maxDrainBytes.');
-    return readQueryMessage(channel, settlement, timers, dl0, rem);
+    if (getDrainRem() < POSTGRES_NORMAL_HEADER_BYTES) throw ArkDbError.protocol('PostgreSQL post-error drain exceeded maxDrainBytes.');
+    return readQueryMessage(channel, settlement, timers, dl0, (_fb: number): number => { settlement.pollDeadline(); return getDrainRem(); }, liveDl);
   }
   let abandoned = false; let hasRes = false; let resBuf = new Uint8Array(0); let inFlight = 0;
-  const task = channel.readMessage((fb: number): number => { inFlight = fb; return isDraining() ? getDrainRem() : MAX_POSTGRES_MESSAGE_BYTES + 1; });
+  const task = channel.readMessage((fb: number): number => { inFlight = fb; settlement.pollDeadline(); return isDraining() ? getDrainRem() : MAX_POSTGRES_MESSAGE_BYTES + 1; });
   task.then((m: PostgresMessage): void => { if (abandoned) m.payload.fill(0); else { hasRes = true; resBuf = m.payload; } }, (): void => {});
   const wake = new Promise<PostgresMessage | null>((res: (v: PostgresMessage | null) => void): void => { setDrainWake((): void => res(null), false); });
   try {
     const first = await settlement.raceClose<PostgresMessage | null>((): Promise<PostgresMessage | null> => Promise.race<PostgresMessage | null>([task, wake]));
-    const dl = setDrainWake(null, true); if (first !== null) return first;
+    let dl = setDrainWake(null, true); if (settlement.pollDeadline()) dl = setDrainWake(null, true); if (first !== null) return first;
     if (isDraining() && Math.max(POSTGRES_NORMAL_HEADER_BYTES, inFlight) > getDrainRem()) throw ArkDbError.protocol('PostgreSQL post-error drain exceeded maxDrainBytes.');
-    return await raceDrainDeadline<PostgresMessage>(timers, dl, (): Promise<PostgresMessage> => settlement.raceClose<PostgresMessage>((): Promise<PostgresMessage> => task));
+    return await raceDrainDeadline<PostgresMessage>(timers, dl, (): Promise<PostgresMessage> => settlement.raceClose<PostgresMessage>((): Promise<PostgresMessage> => task), liveDl);
   } catch (e) { setDrainWake(null, false); abandoned = true; if (hasRes) { resBuf.fill(0); resBuf = new Uint8Array(0); } throw e as Error; }
 }
 export function snapshotQueryOptions(options: QueryOptions): QueryOptions {
+  if (!(options instanceof QueryOptions)) throw ArkDbError.validation('QueryOptions is required.');
   if (options === DEFAULT_QUERY_OPTIONS) return DEFAULT_QUERY_OPTIONS;
   const cloned = options.clone(); validateQueryOptions(cloned); return cloned;
 }

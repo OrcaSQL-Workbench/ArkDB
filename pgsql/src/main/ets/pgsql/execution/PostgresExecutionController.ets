@@ -12,12 +12,13 @@ export interface PostgresCancelTransport extends PostgresStartupTransport {
   read(maximumBytes: number, timeoutMs?: number): Promise<Uint8Array | null>; write(data: Uint8Array, timeoutMs?: number): Promise<number>; close(): Promise<void>; abort(error: ArkDbError): Promise<void>;
 }
 export class PostgresCancelHandle {
-  private abortFn: ((reason: ArkDbError) => void) | null = null; private readonly stateFn: (() => void) | null; private pendingAbort: ArkDbError | null = null; private dispatchActive: boolean = false;
+  private abortFn: ((reason: ArkDbError) => void) | null = null; private readonly stateFn: (() => void) | null; private pendingAbort: ArkDbError | null = null; private dispatchActive: boolean = false; private confirmedFlag: boolean = false;
   private rejectAbort: (reason: ArkDbError) => void = (_r: ArkDbError): void => {}; private resolveCleanup: (err: ArkDbError | null) => void = (_err: ArkDbError | null): void => {};
   readonly aborted: Promise<never>; readonly cleanupSettled: Promise<ArkDbError | null>;
   constructor(onStateChange?: () => void) { this.stateFn = onStateChange === undefined ? null : onStateChange; this.aborted = new Promise<never>((_res: (v: never) => void, rej: (r: ArkDbError) => void): void => { this.rejectAbort = rej; }); this.aborted.then((): void => {}, (): void => {}); this.cleanupSettled = new Promise<ArkDbError | null>((r: (err: ArkDbError | null) => void): void => { this.resolveCleanup = r; }); }
-  get abortReason(): ArkDbError | null { return this.pendingAbort; } get blocksPrimary(): boolean { return this.dispatchActive; }
+  get abortReason(): ArkDbError | null { return this.pendingAbort; } get blocksPrimary(): boolean { return this.dispatchActive; } get confirmed(): boolean { return this.confirmedFlag; }
   setDispatchActive(active: boolean): void { if (this.dispatchActive !== active) { this.dispatchActive = active; if (this.stateFn !== null) this.stateFn(); } }
+  markConfirmed(): void { this.confirmedFlag = true; this.setDispatchActive(false); }
   bindAbort(fn: (reason: ArkDbError) => void): void { this.abortFn = fn; if (this.pendingAbort !== null) fn(this.pendingAbort); }
   abort(reason: ArkDbError): Promise<ArkDbError | null> { if (this.pendingAbort === null) { this.pendingAbort = reason; this.rejectAbort(reason); if (this.abortFn !== null) this.abortFn(reason); } return this.cleanupSettled; }
   finishCleanup(error: ArkDbError | null): void { this.abortFn = null; this.dispatchActive = false; if (this.stateFn !== null) this.stateFn(); this.resolveCleanup(error); }
@@ -53,7 +54,7 @@ export async function dispatchPostgresCancelRequest(options: PostgresCancelReque
           const pendingPrimary = options.awaitTargetDispatched(); if (pendingPrimary !== null) await waitBudget<void>(budget, options.handle, (): Promise<void> => pendingPrimary); await Promise.resolve();
           if (options.isStillRunning() && options.handle.abortReason === null) {
             cancelFrame = PostgresFrontendSerializer.cancelRequest(options.processId, options.secretKeyInt32);
-            if (await writeCancelFrame(options, cancelFrame, budget, setUnconfirmed, checkPeer, (): void => { fullWriteSettled = true; })) { await awaitCancelPeerClose(peerRead, (): boolean => unexpectedPeerReply, budget, options.handle); peerCloseConfirmed = true; outcome = CancellationOutcome.Requested; }
+            if (await writeCancelFrame(options, cancelFrame, budget, setUnconfirmed, checkPeer, (): void => { fullWriteSettled = true; })) { await awaitCancelPeerClose(peerRead, (): boolean => unexpectedPeerReply, budget, options.handle); peerCloseConfirmed = true; options.handle.markConfirmed(); outcome = CancellationOutcome.Requested; }
           }
         }
       }
@@ -123,13 +124,14 @@ function waitBudget<T>(budget: ConnectionDeadline, handle: PostgresCancelHandle,
   if (handle.abortReason !== null) return Promise.reject<T>(handle.abortReason);
   return new Promise<T>((res: (v: T) => void, rej: (e: Object) => void): void => { budget.wait<T>(op).then(res, rej); handle.aborted.then(res, rej); });
 }
-function awaitBoundedCleanup(op: () => Promise<ArkDbError | null>, timers: ConnectionTimerPort): Promise<ArkDbError | null> {
+export function awaitBoundedCleanup(op: () => Promise<ArkDbError | null>, timers: ConnectionTimerPort,
+  timeoutMessage: string = 'PostgreSQL cancel transport cleanup timed out.'): Promise<ArkDbError | null> {
   return new Promise<ArkDbError | null>((resolve: (err: ArkDbError | null) => void): void => {
     let settled = false; let timerId = 0; let task: Promise<ArkDbError | null>;
     const finish = (err: ArkDbError | null): void => { if (settled) return; settled = true; let out = err; if (timerId !== 0) { const id = timerId; timerId = 0; try { timers.cancel(id); } catch (e) { out = composeCleanup(out, toPostgresArkDbError(e as Object, ArkDbErrorKind.Protocol)); } } resolve(out); };
     try { task = op(); } catch (e) { finish(toPostgresArkDbError(e as Object, ArkDbErrorKind.Network)); return; }
     task.then((err: ArkDbError | null): void => finish(err), (e: Object): void => finish(toPostgresArkDbError(e, ArkDbErrorKind.Network)));
-    if (!settled) { try { const id = timers.schedule((): void => { timerId = 0; finish(new ArkDbError(ArkDbErrorKind.Network, 'PostgreSQL cancel transport cleanup timed out.', CONNECTION_EXCEPTION)); }, CANCEL_CLEANUP_TIMEOUT_MS); if (!settled) timerId = id; } catch (e) { finish(toPostgresArkDbError(e as Object, ArkDbErrorKind.Protocol)); } }
+    if (!settled) { try { const id = timers.schedule((): void => { timerId = 0; finish(new ArkDbError(ArkDbErrorKind.Network, timeoutMessage, CONNECTION_EXCEPTION)); }, CANCEL_CLEANUP_TIMEOUT_MS); if (!settled) timerId = id; } catch (e) { finish(toPostgresArkDbError(e as Object, ArkDbErrorKind.Protocol)); } }
   });
 }
 function isServerPeerClose(error: Object): boolean { return error instanceof ArkDbError && ((error.kind === ArkDbErrorKind.Network && error.message === 'PostgreSQL socket closed by server') || (error.kind === ArkDbErrorKind.Tls && error.message === 'PostgreSQL TLS socket closed by server')); }

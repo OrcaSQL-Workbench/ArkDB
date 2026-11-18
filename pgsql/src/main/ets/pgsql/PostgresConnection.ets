@@ -10,8 +10,8 @@ import {
 } from './api/PostgresContracts';
 import { PostgresExtendedQueryHost, runPostgresExtendedQuery } from './command/PostgresExtendedQuery';
 import { runPostgresPortalStream } from './command/PostgresPortalStream';
-import { PostgresQueryStreamHost, runPostgresQueryStream } from './command/PostgresResultStream';
-import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery } from './command/PostgresSimpleQuery';
+import { encodePostgresSimpleQuery, PostgresQueryStreamHost, runPostgresQueryStream } from './command/PostgresResultStream';
+import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery, scrubQueryResult, snapshotQueryOptions } from './command/PostgresSimpleQuery';
 import {
   runPostgresBegin, runPostgresCommit, runPostgresRollback
 } from './command/PostgresTransactionCommand';
@@ -66,7 +66,8 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
       (frames: PostgresPreparedFrames, options: QueryOptions): Promise<PostgresQueryResult> =>
         this.executeExtendedQuery(frames, options),
       (frames: PostgresPreparedFrames, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> =>
-        this.streamPreparedQuery(frames, options, sink));
+        this.streamPreparedQuery(frames, options, sink),
+      (): void => this.lifecycle.assertCommandDispatchable());
     this.postgresFeatures.transactions = new PostgresConnectionTransactionRunner(
       (op: (h: PostgresTransactionCommandHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>): Promise<PostgresTransactionFailure | null> => this.runTransactionScope(op));
   }
@@ -99,9 +100,12 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
 
   queryStream(sql: string, options: QueryOptions,
     sink: QueryResultSink): Promise<QueryExecutionSummary> {
-    return this.lifecycle.runCommand<QueryExecutionSummary>(PostgresCommandKind.QueryStream,
-      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> =>
-        runPostgresQueryStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, sql, options, sink));
+    let qFrame: Uint8Array | undefined = undefined;
+    return this.lifecycle.runDeadlineCommand<QueryExecutionSummary>(PostgresCommandKind.QueryStream, (): QueryOptions => {
+      const snap = snapshotQueryOptions(options); if (sink === null || sink === undefined || typeof sink !== 'object') throw ArkDbError.validation('QueryResultSink is required.');
+      qFrame = encodePostgresSimpleQuery(sql); return snap;
+    }, (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement, opts: QueryOptions): Promise<QueryExecutionSummary> =>
+      runPostgresQueryStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, sql, opts, sink, qFrame)).finally((): void => { if (qFrame !== undefined) qFrame.fill(0); });
   }
 
   ping(): Promise<void> {
@@ -173,16 +177,16 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
 
   private executeExtendedQuery(frames: PostgresPreparedFrames,
     options: QueryOptions): Promise<PostgresQueryResult> {
-    return this.lifecycle.runCommand<PostgresQueryResult>(PostgresCommandKind.ExtendedQuery,
-      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> =>
-        runPostgresExtendedQuery(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, options));
+    return this.lifecycle.runDeadlineCommand<PostgresQueryResult>(PostgresCommandKind.ExtendedQuery, (): QueryOptions => options,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement, opts: QueryOptions): Promise<PostgresQueryResult> =>
+        runPostgresExtendedQuery(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, opts), scrubQueryResult);
   }
 
   private streamPreparedQuery(frames: PostgresPreparedFrames, options: QueryOptions,
     sink: QueryResultSink): Promise<QueryExecutionSummary> {
-    return this.lifecycle.runCommand<QueryExecutionSummary>(PostgresCommandKind.Prepared,
-      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> =>
-        runPostgresPortalStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, options, sink));
+    return this.lifecycle.runDeadlineCommand<QueryExecutionSummary>(PostgresCommandKind.Prepared, (): QueryOptions => options,
+      (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement, opts: QueryOptions): Promise<QueryExecutionSummary> =>
+        runPostgresPortalStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, frames, opts, sink));
   }
 
   private runTransactionScope(op: (h: PostgresTransactionCommandHost, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>): Promise<PostgresTransactionFailure | null> {
@@ -210,11 +214,14 @@ class QueryStreamLifecycleHost extends SimpleQueryLifecycleHost
   enterStreaming(): void { this.setPhase(PostgresCommandPhase.Streaming); }
   enterDraining(): void { this.setPhase(PostgresCommandPhase.Draining); }
   latchConsumerError(error: ArkDbError, synchronized: boolean = false): void { this.lifecycle.latchConsumerError(this.scope, error, synchronized); }
+  beginPortalBatch(settlement: PostgresCommandCloseSettlement, prepareNext: boolean = true): Promise<void> { return this.lifecycle.beginPortalBatch(this.scope, settlement, prepareNext); }
 }
 
 class TransactionRunnerLifecycleHost extends QueryStreamLifecycleHost implements PostgresTransactionCommandHost {
   enterExecuting(): void { this.setPhase(PostgresCommandPhase.Executing); }
   clearConsumerError(): void { this.lifecycle.clearConsumerError(this.scope); }
   isSynchronized(): boolean { return this.lifecycle.isCommandSynchronized(this.scope); }
+  readDeadlineError(error: ArkDbError): ArkDbError { return this.lifecycle.readDeadlineBase(this.scope, error); }
   waitBeforeStep(settlement: PostgresCommandCloseSettlement): Promise<void> | null { return this.lifecycle.waitForStepReady(this.scope, settlement); }
+  runStepWithDeadline<R>(settlement: PostgresCommandCloseSettlement, options: QueryOptions, op: () => Promise<R>, scrub?: (value: R) => void, canLatch?: () => boolean): Promise<R> { return this.lifecycle.runStepWithDeadline<R>(this.scope, settlement, options, op, scrub, canLatch); }
 }

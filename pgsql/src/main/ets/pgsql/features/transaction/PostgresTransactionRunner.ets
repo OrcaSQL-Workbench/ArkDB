@@ -3,8 +3,8 @@ import { PostgresConnectionFeatures, PostgresSession, PostgresTransactionRunner 
 import { PostgresPreparedExecutor } from '../../api/PostgresPreparedContracts';
 import { PostgresExtendedQueryHost, runPostgresExtendedQuery } from '../../command/PostgresExtendedQuery';
 import { runPostgresPortalStream } from '../../command/PostgresPortalStream';
-import { PostgresQueryStreamHost, runPostgresQueryStream } from '../../command/PostgresResultStream';
-import { PostgresSimpleQueryHost, runPostgresSimpleQuery, snapshotQueryOptions } from '../../command/PostgresSimpleQuery';
+import { encodePostgresSimpleQuery, PostgresQueryStreamHost, runPostgresQueryStream } from '../../command/PostgresResultStream';
+import { PostgresSimpleQueryHost, runPostgresSimpleQuery, scrubQueryResult, snapshotQueryOptions } from '../../command/PostgresSimpleQuery';
 import { runPostgresBegin, runPostgresCommit, runPostgresRollback } from '../../command/PostgresTransactionCommand';
 import { PostgresCommandCloseSettlement, postgresAppendCleanupError, toPostgresArkDbError } from '../../execution/PostgresSettlements';
 import { PostgresParameter } from '../prepared/PostgresParameter';
@@ -15,11 +15,11 @@ import { PostgresMessageChannel, PostgresReadyStatus } from '../../protocol/Post
 import { quotePostgresIdentifier } from '../../value/PostgresSqlHelpers';
 import { buildPostgresBeginSql, PostgresTransactionOptions } from './PostgresTransactionOptions';
 
-export interface PostgresTransactionCommandHost extends PostgresSimpleQueryHost, PostgresQueryStreamHost, PostgresExtendedQueryHost { enterExecuting(): void; clearConsumerError(): void; isSynchronized(): boolean; waitBeforeStep(settlement: PostgresCommandCloseSettlement): Promise<void> | null; }
+export interface PostgresTransactionCommandHost extends PostgresSimpleQueryHost, PostgresQueryStreamHost, PostgresExtendedQueryHost { enterExecuting(): void; clearConsumerError(): void; isSynchronized(): boolean; readDeadlineError(error: ArkDbError): ArkDbError; waitBeforeStep(settlement: PostgresCommandCloseSettlement): Promise<void> | null; runStepWithDeadline<R>(settlement: PostgresCommandCloseSettlement, options: QueryOptions, op: () => Promise<R>, scrub?: (value: R) => void, canLatch?: () => boolean): Promise<R>; }
 export class PostgresTransactionFailure { readonly error: Object | null | undefined; constructor(error: Object | null | undefined) { this.error = error; } }
 export type PostgresTransactionScopeExecutor = (op: (h: PostgresTransactionCommandHost, ch: PostgresMessageChannel, ps: PostgresCommandCloseSettlement) => Promise<PostgresTransactionFailure | null>) => Promise<PostgresTransactionFailure | null>;
 interface SessionPreparedDelegate { readonly session: ScopedPostgresTransactionSession; readonly inner: PostgresPreparedExecutor; }
-type StepExecutor = <R>(fn: (sh: StepCommandHost, ss: PostgresCommandCloseSettlement) => Promise<R>) => Promise<R>;
+type StepExecutor = <R>(fn: (sh: StepCommandHost, ss: PostgresCommandCloseSettlement) => Promise<R>, options?: QueryOptions, scrub?: (value: R) => void) => Promise<R>;
 class ScopeState { activeStep: PostgresCommandCloseSettlement | null = null; lastUnsyncErr: ArkDbError | null = null; callbackFailed: boolean = false; }
 const transactionScopeExecutors = new WeakMap<PostgresConnectionTransactionRunner, PostgresTransactionScopeExecutor>();
 const sessionPreparedDelegates = new WeakMap<ScopedSessionPreparedExecutor, SessionPreparedDelegate>();
@@ -43,6 +43,7 @@ class StepCommandHost implements PostgresSimpleQueryHost, PostgresQueryStreamHos
   applyReadyStatus(ready: PostgresReadyStatus): void { this.inner.applyReadyStatus(ready); } retire(reason: ArkDbError): Promise<void> { return this.inner.retire(reason); }
   enterStreaming(): void { this.inner.enterStreaming(); } enterDraining(): void { this.inner.enterDraining(); }
   latchConsumerError(error: ArkDbError, synchronized: boolean = false): void { if (!this.state.callbackFailed) { this.inner.latchConsumerError(error, synchronized); this.consumerLatched = true; } }
+  beginPortalBatch(settlement: PostgresCommandCloseSettlement, prepareNext: boolean = true): Promise<void> { return this.inner.beginPortalBatch !== undefined ? this.inner.beginPortalBatch(settlement, prepareNext) : Promise.resolve(); }
 }
 class ScopedSessionPreparedExecutor implements PostgresPreparedExecutor {
   constructor(session: ScopedPostgresTransactionSession, inner: PostgresPreparedExecutor) { sessionPreparedDelegates.set(this, { session: session, inner: inner }); }
@@ -51,26 +52,28 @@ class ScopedSessionPreparedExecutor implements PostgresPreparedExecutor {
   private delegate(): SessionPreparedDelegate { const d = sessionPreparedDelegates.get(this); if (d === undefined) throw ArkDbError.protocol('PostgreSQL transaction prepared executor is uninitialized.'); return d; }
 }
 class ScopedPostgresTransactionSession implements PostgresSession {
-  private readonly host: PostgresTransactionCommandHost; private readonly channel: PostgresMessageChannel; private readonly executeStep: StepExecutor;
+  private readonly host: PostgresTransactionCommandHost; private readonly channel: PostgresMessageChannel; private readonly executeStep: StepExecutor; private readonly precheckStep: () => void;
   private readonly featuresView: PostgresConnectionFeatures = new PostgresConnectionFeatures(); private expired: boolean = false; private activeSettlementTask: Promise<ArkDbError | null> | null = null;
-  constructor(host: PostgresTransactionCommandHost, channel: PostgresMessageChannel, executeStep: StepExecutor) {
-    this.host = host; this.channel = channel; this.executeStep = executeStep;
+  constructor(host: PostgresTransactionCommandHost, channel: PostgresMessageChannel, executeStep: StepExecutor, precheckStep: () => void) {
+    this.host = host; this.channel = channel; this.executeStep = executeStep; this.precheckStep = precheckStep;
     this.featuresView.prepared = new ScopedSessionPreparedExecutor(this, new PostgresConnectionPreparedExecutor(
-      (f: PostgresPreparedFrames, o: QueryOptions): Promise<PostgresQueryResult> => this.runActiveStep<PostgresQueryResult>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> => runPostgresExtendedQuery(sh, this.channel, ss, f, o)),
-      (f: PostgresPreparedFrames, o: QueryOptions, sk: QueryResultSink): Promise<QueryExecutionSummary> => this.runActiveStep<QueryExecutionSummary>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> => runPostgresPortalStream(sh, this.channel, ss, f, o, sk))));
+      (f: PostgresPreparedFrames, o: QueryOptions): Promise<PostgresQueryResult> => this.runActiveStep<PostgresQueryResult>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> => runPostgresExtendedQuery(sh, this.channel, ss, f, o), o, scrubQueryResult),
+      (f: PostgresPreparedFrames, o: QueryOptions, sk: QueryResultSink): Promise<QueryExecutionSummary> => this.runActiveStep<QueryExecutionSummary>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> => runPostgresPortalStream(sh, this.channel, ss, f, o, sk), o),
+      (): void => { this.assertActive(); if (this.activeSettlementTask !== null) throw ArkDbError.protocol('Another PostgreSQL transaction session command is already active.'); this.precheckStep(); }));
   }
   get postgresFeatures(): PostgresConnectionFeatures { this.assertActive(); return this.featuresView; } get serverInfo(): PostgresServerInfo { this.assertActive(); return this.host.serverInfo; }
   get sessionStatus(): PostgresDatabaseSessionStatus { this.assertActive(); return this.host.sessionStatus.clone(); } get hasActiveCommand(): boolean { return this.activeSettlementTask !== null; }
   assertActive(): void { if (this.expired) throw ArkDbError.validation(SESSION_EXPIRED_MSG); } expire(): void { this.expired = true; }
   waitForActiveCommand(): Promise<ArkDbError | null> { return this.activeSettlementTask !== null ? this.activeSettlementTask : Promise.resolve<ArkDbError | null>(null); }
-  private runActiveStep<R>(op: (sh: StepCommandHost, ss: PostgresCommandCloseSettlement) => Promise<R>): Promise<R> { return this.runSerialized<R>((): Promise<R> => this.executeStep<R>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<R> => { const fail = checkActiveTransaction<R>(sh, ss, false); return fail !== null ? fail : op(sh, ss); })); }
+  private runActiveStep<R>(op: (sh: StepCommandHost, ss: PostgresCommandCloseSettlement) => Promise<R>, options?: QueryOptions, scrub?: (value: R) => void): Promise<R> { return this.runSerialized<R>((): Promise<R> => this.executeStep<R>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<R> => { const fail = checkActiveTransaction<R>(sh, ss, false); return fail !== null ? fail : op(sh, ss); }, options, scrub)); }
   query(sql: string): Promise<PostgresQueryResult> { return this.runActiveStep<PostgresQueryResult>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<PostgresQueryResult> => runPostgresSimpleQuery(sh, this.channel, ss, sql)); }
   queryStream(sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> {
     return this.runSerialized<QueryExecutionSummary>((): Promise<QueryExecutionSummary> => {
+      this.precheckStep();
       if (!(options instanceof QueryOptions)) throw ArkDbError.validation('QueryOptions is required.');
       if (sink === null || sink === undefined || typeof sink !== 'object') throw ArkDbError.validation('QueryResultSink is required.');
-      const snap = snapshotQueryOptions(options);
-      return this.executeStep<QueryExecutionSummary>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> => { const fail = checkActiveTransaction<QueryExecutionSummary>(sh, ss, false); return fail !== null ? fail : runPostgresQueryStream(sh, this.channel, ss, sql, snap, sink); });
+      const snap = snapshotQueryOptions(options); const qFrame = encodePostgresSimpleQuery(sql);
+      return this.executeStep<QueryExecutionSummary>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> => { const fail = checkActiveTransaction<QueryExecutionSummary>(sh, ss, false); return fail !== null ? fail : runPostgresQueryStream(sh, this.channel, ss, sql, snap, sink, qFrame); }, snap).finally((): void => { qFrame.fill(0); });
     });
   }
   savepoint(name: string): Promise<void> { return this.runSavepoint(name, 'SAVEPOINT ', 'SAVEPOINT'); } rollbackTo(name: string): Promise<void> { return this.runSavepoint(name, 'ROLLBACK TO SAVEPOINT ', 'ROLLBACK'); } releaseSavepoint(name: string): Promise<void> { return this.runSavepoint(name, 'RELEASE SAVEPOINT ', 'RELEASE'); }
@@ -98,22 +101,28 @@ async function executeTransactionScope<T>(host: PostgresTransactionCommandHost, 
   beginSql: string, body: (session: PostgresSession) => Promise<T>, onSuccess: (val: T) => void): Promise<PostgresTransactionFailure | null> {
   const state = new ScopeState();
   const propagateAbort = (target: PostgresCommandCloseSettlement, err: ArkDbError): void => { if (parentSettlement.isCloseRequested) target.signalClose(err); else target.signalFatal(err); };
-  const runStep: StepExecutor = async <R>(fn: (stepHost: StepCommandHost, stepSettlement: PostgresCommandCloseSettlement) => Promise<R>): Promise<R> => {
-    throwIfClosed(parentSettlement); if (!host.isSynchronized()) throw state.lastUnsyncErr !== null ? state.lastUnsyncErr : ArkDbError.protocol('PostgreSQL transaction lost synchronization.');
+  const assertStepOpen = (): void => { throwIfClosed(parentSettlement); if (!host.isSynchronized()) throw state.lastUnsyncErr !== null ? state.lastUnsyncErr : ArkDbError.protocol('PostgreSQL transaction lost synchronization.'); };
+  const runStep: StepExecutor = async <R>(fn: (stepHost: StepCommandHost, stepSettlement: PostgresCommandCloseSettlement) => Promise<R>, options?: QueryOptions, scrub?: (value: R) => void): Promise<R> => {
+    assertStepOpen();
     const stepSettlement = new PostgresCommandCloseSettlement(parentSettlement.scope); const stepHost = new StepCommandHost(host, state);
     state.activeStep = stepSettlement; if (parentSettlement.closeReason !== null) propagateAbort(stepSettlement, parentSettlement.closeReason);
     let delivered = false;
+    const executeBody = async (): Promise<R> => {
+      host.enterExecuting();
+      const gate = host.waitBeforeStep(stepSettlement); if (gate !== null) { await gate; assertStepOpen(); host.enterExecuting(); }
+      return fn(stepHost, stepSettlement);
+    };
     try {
-      const gate = host.waitBeforeStep(stepSettlement); if (gate !== null) { await gate; throwIfClosed(parentSettlement); if (!host.isSynchronized()) throw state.lastUnsyncErr !== null ? state.lastUnsyncErr : ArkDbError.protocol('PostgreSQL transaction lost synchronization.'); }
-      host.enterExecuting(); const out = await fn(stepHost, stepSettlement); throwIfClosed(parentSettlement); if (stepSettlement.consumerAbandonReason !== null) { stepSettlement.markConsumerAbandonClaimed(); throw stepSettlement.consumerAbandonReason; } stepSettlement.markDelivered(); delivered = true; return out;
-    } catch (stepErr) { const typedStep = toPostgresArkDbError(stepErr as Object); if (typedStep === stepSettlement.consumerAbandonReason) stepSettlement.markConsumerAbandonClaimed(); if (parentSettlement.closeReason === null && !host.isSynchronized() && state.lastUnsyncErr === null) state.lastUnsyncErr = typedStep; throw typedStep; }
+      const out = options !== undefined && options.statementTimeoutMs > 0 ? await host.runStepWithDeadline<R>(stepSettlement, options, executeBody, scrub, (): boolean => !state.callbackFailed) : await executeBody();
+      throwIfClosed(parentSettlement); if (stepSettlement.consumerAbandonReason !== null) { stepSettlement.markConsumerAbandonClaimed(); throw stepSettlement.consumerAbandonReason; } stepSettlement.markDelivered(); delivered = true; return out;
+    } catch (stepErr) { const rawStep = toPostgresArkDbError(stepErr as Object); const typedStep = stepSettlement.isDeadlineAbandoned && !state.callbackFailed ? stepSettlement.appendDeadlineCleanup(host.readDeadlineError(rawStep), rawStep) : rawStep; if (typedStep === stepSettlement.consumerAbandonReason || stepSettlement.isDeadlineAbandoned) stepSettlement.markConsumerAbandonClaimed(); if (parentSettlement.closeReason === null && !host.isSynchronized() && state.lastUnsyncErr === null) state.lastUnsyncErr = typedStep; throw typedStep; }
     finally {
       if (state.activeStep === stepSettlement) state.activeStep = null;
       if (!delivered) stepSettlement.discardUndelivered();
-      stepSettlement.markSettled(); if (stepHost.consumerLatched && !state.callbackFailed && parentSettlement.closeReason === null) host.clearConsumerError();
+      stepSettlement.markSettled(); if ((stepHost.consumerLatched || stepSettlement.isDeadlineAbandoned || host.isSynchronized()) && !state.callbackFailed && parentSettlement.closeReason === null) host.clearConsumerError();
     }
   };
-  const session = new ScopedPostgresTransactionSession(host, channel, runStep);
+  const session = new ScopedPostgresTransactionSession(host, channel, runStep, assertStepOpen);
   parentSettlement.onCloseRequested((err: ArkDbError): void => { session.expire(); if (state.activeStep !== null) propagateAbort(state.activeStep, err); });
   parentSettlement.settled.then((): void => { session.expire(); if (state.activeStep !== null) state.activeStep.markSettled(); });
   await runStep<PostgresDatabaseSessionStatus>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<PostgresDatabaseSessionStatus> => runPostgresBegin(sh, channel, ss, beginSql));
@@ -122,8 +131,10 @@ async function executeTransactionScope<T>(host: PostgresTransactionCommandHost, 
   catch (err) { hasCallbackFailure = true; callbackFailure = err as Object | null | undefined; } finally { session.expire(); }
   const abandonedStep = state.activeStep;
   if (hasCallbackFailure) { state.callbackFailed = true; host.latchConsumerError(composeCallbackFailure(callbackFailure, null), false); }
-  if (session.hasActiveCommand && abandonedStep !== null) abandonedStep.abandonConsumer(earlyAbandon ? (callbackFailure as ArkDbError) : ArkDbError.protocol(ABANDON_MSG));
-  const abandonedErr = await session.waitForActiveCommand(); const claimedAbandon = abandonedStep !== null && abandonedStep.isConsumerAbandonClaimed;
+  const abandonTrigger = earlyAbandon ? (callbackFailure as ArkDbError) : ArkDbError.protocol(ABANDON_MSG);
+  if (session.hasActiveCommand && abandonedStep !== null) abandonedStep.abandonConsumer(abandonTrigger);
+  const rawAbandoned = await session.waitForActiveCommand(); const claimedAbandon = abandonedStep !== null && abandonedStep.isConsumerAbandonClaimed && !abandonedStep.isDeadlineAbandoned;
+  const abandonedErr = !earlyAbandon && abandonedStep !== null && abandonedStep.isDeadlineAbandoned && rawAbandoned !== null ? postgresAppendCleanupError(abandonTrigger, rawAbandoned) : rawAbandoned;
   const baseFailure = hasCallbackFailure ? (earlyAbandon && claimedAbandon && abandonedErr !== null ? abandonedErr : composeCallbackFailure(callbackFailure, abandonedErr)) : null;
   if (baseFailure !== null) host.latchConsumerError(baseFailure, false);
   throwIfClosed(parentSettlement);

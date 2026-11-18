@@ -13,11 +13,15 @@ export const LIST_POSTGRES_SCHEMAS_SQL: string =
   "AND n.nspname NOT LIKE E'pg\\\\_temp\\\\_%' ESCAPE E'\\\\' AND n.nspname NOT LIKE E'pg\\\\_toast\\\\_temp\\\\_%' ESCAPE E'\\\\' " +
   "AND pg_catalog.has_schema_privilege(n.oid, 'USAGE, CREATE') ORDER BY n.nspname COLLATE \"C\"";
 
+function relationVisible(nsAlias: string, relAlias: string): string {
+  return 'pg_catalog.has_schema_privilege(' + nsAlias + ".oid, 'USAGE') AND (pg_catalog.pg_has_role(" +
+    relAlias + ".relowner, 'USAGE') OR pg_catalog.has_table_privilege(" + relAlias +
+    ".oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') OR pg_catalog.has_any_column_privilege(" +
+    relAlias + ".oid, 'SELECT, INSERT, UPDATE, REFERENCES'))";
+}
+
 const RELATION_VISIBILITY_PREDICATE: string =
-  "AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND (pg_catalog.pg_has_role(c.relowner, 'USAGE') " +
-  "OR pg_catalog.has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') " +
-  "OR pg_catalog.has_any_column_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')) " +
-  'ORDER BY c.relname COLLATE "C", c.oid';
+  'AND ' + relationVisible('n', 'c') + ' ORDER BY c.relname COLLATE "C", c.oid';
 
 export const LIST_POSTGRES_TABLES_SQL: string =
   "SELECT c.relname::text, CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'PARTITIONED TABLE' ELSE '' END::text " +
@@ -28,6 +32,44 @@ export const LIST_POSTGRES_VIEWS_SQL: string =
   "SELECT c.relname::text, CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE '' END::text " +
   "FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace " +
   "WHERE n.nspname = $1 AND c.relkind IN ('v', 'm') " + RELATION_VISIBILITY_PREDICATE;
+
+export const LIST_POSTGRES_COLUMNS_SQL: string =
+  'SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod)::text, a.attnum::int4, (NOT a.attnotnull) ' +
+  'FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace ' +
+  'JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped ' +
+  "WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p', 'v', 'm') " +
+  "AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND (pg_catalog.pg_has_role(c.relowner, 'USAGE') " +
+  "OR pg_catalog.has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES') " +
+  "OR pg_catalog.has_column_privilege(c.oid, a.attnum, 'SELECT, INSERT, UPDATE, REFERENCES')) " +
+  'ORDER BY a.attnum';
+
+export const LIST_POSTGRES_INDEXES_SQL: string =
+  'SELECT ic.relname::text, ix.indisunique, ix.indisprimary, key_col.ord, ' +
+  'CASE WHEN key_col.ord IS NULL THEN NULL::text WHEN key_col.attnum > 0 THEN a.attname::text ' +
+  'WHEN key_col.attnum = 0 THEN pg_catalog.pg_get_indexdef(ix.indexrelid, key_col.ord, true)::text ELSE NULL::text END ' +
+  'FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace ' +
+  'JOIN pg_catalog.pg_index AS ix ON ix.indrelid = c.oid AND ix.indislive ' +
+  "JOIN pg_catalog.pg_class AS ic ON ic.oid = ix.indexrelid AND ic.relkind IN ('i', 'I') " +
+  'LEFT JOIN LATERAL (SELECT k.attnum, k.ord::int4 AS ord FROM pg_catalog.unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ' +
+  'WHERE k.ord <= ix.indnkeyatts) AS key_col ON TRUE ' +
+  'LEFT JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid AND a.attnum = key_col.attnum ' +
+  'AND key_col.attnum > 0 AND NOT a.attisdropped ' +
+  "WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p', 'm') AND " + relationVisible('n', 'c') +
+  ' ORDER BY ic.relname COLLATE "C", ic.oid, key_col.ord NULLS FIRST';
+
+export const LIST_POSTGRES_FOREIGN_KEYS_SQL: string =
+  'SELECT con.conname::text, fk_col.ord::int4, la.attname::text, rn.nspname::text, rc.relname::text, ra.attname::text ' +
+  'FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace ' +
+  "JOIN pg_catalog.pg_constraint AS con ON con.conrelid = c.oid AND con.contype = 'f' " +
+  'JOIN pg_catalog.pg_class AS rc ON rc.oid = con.confrelid ' +
+  'JOIN pg_catalog.pg_namespace AS rn ON rn.oid = rc.relnamespace ' +
+  'CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS fk_col(local_attnum, ref_attnum, ord) ' +
+  'JOIN pg_catalog.pg_attribute AS la ON la.attrelid = c.oid AND la.attnum = fk_col.local_attnum AND NOT la.attisdropped ' +
+  'JOIN pg_catalog.pg_attribute AS ra ON ra.attrelid = rc.oid AND ra.attnum = fk_col.ref_attnum AND NOT ra.attisdropped ' +
+  "WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') " +
+  'AND (con.conparentid = 0 OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint AS pcon WHERE pcon.oid = con.conparentid AND pcon.conrelid = con.conrelid)) AND ' +
+  relationVisible('n', 'c') + ' AND ' + relationVisible('rn', 'rc') +
+  ' ORDER BY con.conname COLLATE "C", con.oid, fk_col.ord';
 
 export const LIST_POSTGRES_ROUTINES_SQL: string =
   "SELECT p.proname::text, CASE p.prokind WHEN 'f' THEN 'FUNCTION' WHEN 'p' THEN 'PROCEDURE' ELSE '' END::text " +

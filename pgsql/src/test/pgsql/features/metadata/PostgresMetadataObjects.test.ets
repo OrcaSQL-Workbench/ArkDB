@@ -196,9 +196,9 @@ export default function postgresMetadataObjectsTest(): void {
     it('integratesWithPostgresConnectionLifecycleErrorsAndPreservesNoHiddenColumnEnrichment', 0, async () => {
       const gate = new PostgresCommandGate(); const cfg = makeCfg('alice', 'app_db');
       const idleTp = new QueueTransport([]); const idleConn = openConn('alice', 'app_db', idleTp, gate);
-      expect(idleConn.features.metadata === undefined &&
-        JSON.stringify(idleConn.features) === '{"streaming":{},"health":{},"context":{},"transactions":{},"cancellation":{}}' &&
-        !new PostgresDriverCapabilities().supportsMetadata && !new PostgresDriverFactory().capabilities.supportsMetadata).assertTrue();
+      expect(idleConn.features.metadata !== undefined &&
+        JSON.stringify(idleConn.features) === '{"streaming":{},"health":{},"context":{},"transactions":{},"cancellation":{},"metadata":{}}' &&
+        new PostgresDriverCapabilities().supportsMetadata && new PostgresDriverFactory().capabilities.supportsMetadata).assertTrue();
       const idleProvider = makeConnProvider(idleConn, cfg, gate);
       for (const idleOp of [
         (): Promise<Object> => idleProvider.listCatalogs(), (): Promise<Object> => idleProvider.listSchemas(''),
@@ -255,7 +255,7 @@ export default function postgresMetadataObjectsTest(): void {
       expect(closedErr.kind === ArkDbErrorKind.Protocol && closedErr.message === 'PostgreSQL connection is closed.').assertTrue();
     });
 
-    it('validatesAndRejectsUnimplementedColumnIndexAndForeignKeyMethodsInP24', 0, async () => {
+    it('validatesRelationMetadataTargetBoundariesBeforeExecutingQueries', 0, async () => {
       const rec = new RecordingPreparedExecutor();
       const provider = new PostgresMetadataProvider(rec, (): string => 'app_db');
       for (const invoke of [
@@ -273,11 +273,6 @@ export default function postgresMetadataObjectsTest(): void {
           expect((await asyncFail((): Promise<Object> => invoke(makeCtx('', 'public'), badObj))).kind).assertEqual(ArkDbErrorKind.Validation);
         }
         expect((await asyncFail((): Promise<Object> => invoke(makeCtx('', 'public'), asStr(undefined)))).kind).assertEqual(ArkDbErrorKind.Validation);
-        const mutable = makeCtx('app_db', 'public'); const pending = invoke(mutable, 'users'); mutable.catalog = 'other_db';
-        const notImpl = await asyncFail((): Promise<Object> => pending);
-        expect(notImpl.kind === ArkDbErrorKind.Unsupported && notImpl.message === 'PostgreSQL column/index/foreign-key metadata is not implemented.').assertTrue();
-        const emptyCatErr = await asyncFail((): Promise<Object> => invoke(makeCtx('', 'public'), 'users'));
-        expect(emptyCatErr.kind === ArkDbErrorKind.Unsupported && emptyCatErr.message === 'PostgreSQL column/index/foreign-key metadata is not implemented.').assertTrue();
       }
       expect(rec.calls).assertEqual(0);
     });

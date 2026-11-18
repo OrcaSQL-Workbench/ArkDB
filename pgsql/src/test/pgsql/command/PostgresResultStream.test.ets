@@ -9,7 +9,7 @@ export default function postgresResultStreamTest(): void {
     it('validatesFacadeCycleFreeJsonAndPreDispatchGuards', 0, async () => {
       expect(new PostgresDriverFactory().capabilities.supportsStreamingResults).assertTrue();
       const sub = new CustomStreamConnection(baseConfig(), 'secret-pw-123');
-      expect(sub.features.streaming !== undefined && JSON.stringify(sub.features) === '{"streaming":{},"health":{},"context":{},"transactions":{},"cancellation":{}}' && JSON.stringify(sub).indexOf('secret-pw-123') === -1 &&
+      expect(sub.features.streaming !== undefined && JSON.stringify(sub.features) === '{"streaming":{},"health":{},"context":{},"transactions":{},"cancellation":{},"metadata":{}}' && JSON.stringify(sub).indexOf('secret-pw-123') === -1 &&
         sub.features.streaming!.state === ConnectionState.Idle && sub.features.streaming!.features === sub.features && sub.features.streaming!.serverInfo === sub.serverInfo).assertTrue();
       await sub.features.streaming!.queryStream('SELECT 1', new QueryOptions(), new RecSink()); expect(sub.customCalls).assertEqual(1);
       await sub.features.streaming!.close(); expect(sub.state === ConnectionState.Closed && JSON.stringify(sub).indexOf('secret-pw-123') === -1).assertTrue();

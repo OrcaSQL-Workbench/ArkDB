@@ -16,11 +16,13 @@ context switching (`changeContext()`), explicit and scoped transactions
 and protocol `CancelRequest` cancellation and `QueryOptions.statementTimeoutMs`
 statement deadlines with bounded cancellation-grace convergence and
 unknown-outcome retirement (`cancel()`, `isInterruptionError()`,
-`features.cancellation`, with `supportsSsl`, `supportsCatalogs`,
-`supportsSchemas`, `supportsTransactions`, `supportsMultipleResults`,
-`supportsStreamingResults`, `supportsPreparedStatements`, and
-`supportsGracefulCancel` enabled). Metadata and server metrics remain
-unimplemented (`ArkDbErrorKind.Unsupported`).
+`features.cancellation`), and parameterized `pg_catalog` metadata inspection
+(`features.metadata` across catalogs, schemas, tables, views, routines,
+triggers, columns, indexes, and foreign keys, with `supportsSsl`,
+`supportsCatalogs`, `supportsSchemas`, `supportsTransactions`,
+`supportsMultipleResults`, `supportsStreamingResults`,
+`supportsPreparedStatements`, `supportsGracefulCancel`, and `supportsMetadata`
+enabled). Server metrics remain unimplemented (`ArkDbErrorKind.Unsupported`).
 
 The package depends on `@arkdb/core` 1.1.0 in the source workspace. Driver
 delivery will compile the selected source dependency closure into one
@@ -34,10 +36,10 @@ passed separately through transient `PostgresConnectionOptions`.
 ## Compile-only skeleton usage
 
 The factory constructs an idle connection that can be closed offline; calling
-querying, streaming, prepared execution, or health checks before `connect()`
-rejects with `ArkDbErrorKind.Protocol`, calling `cancel()` while idle resolves
-`CancellationOutcome.NotRunning`, and unimplemented metadata or server metrics
-reject with `ArkDbErrorKind.Unsupported`.
+querying, streaming, prepared execution, metadata inspection, or health checks
+before `connect()` rejects with `ArkDbErrorKind.Protocol`, calling `cancel()`
+while idle resolves `CancellationOutcome.NotRunning`, and unimplemented server
+metrics remain `undefined` (`supportsServerMetrics === false`).
 
 <!-- arkts-example: skeleton -->
 ```typescript

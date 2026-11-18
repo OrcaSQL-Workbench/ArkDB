@@ -12,6 +12,7 @@ import postgresCancellationTest from './pgsql/execution/PostgresCancellation.tes
 import postgresDeadlineTest from './pgsql/execution/PostgresDeadline.test';
 import postgresExtendedQueryTest from './pgsql/features/prepared/PostgresExtendedQuery.test';
 import postgresMetadataObjectsTest from './pgsql/features/metadata/PostgresMetadataObjects.test';
+import postgresMetadataRelationsTest from './pgsql/features/metadata/PostgresMetadataRelations.test';
 import postgresParameterEncoderTest from './pgsql/features/prepared/PostgresParameterEncoder.test';
 import postgresTransactionControlTest from './pgsql/features/transaction/PostgresTransactionControl.test';
 import postgresTransactionRunnerTest from './pgsql/features/transaction/PostgresTransactionRunner.test';
@@ -48,6 +49,7 @@ export default function testsuite(): void {
   postgresParameterEncoderTest();
   postgresExtendedQueryTest();
   postgresMetadataObjectsTest();
+  postgresMetadataRelationsTest();
   postgresTransactionControlTest();
   postgresTransactionRunnerTest();
 }

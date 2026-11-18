@@ -74,7 +74,8 @@ export async function runPostgresExtendedQuery(host: PostgresExtendedQueryHost, 
         const canFinishEarly = (!sentBind && stage === ExtendedQueryStage.ExpectBindComplete) ||
           (sentBind && !sentDesc && stage === ExtendedQueryStage.ExpectDescribeResult) ||
           (sentDesc && !sentExec && (stage === ExtendedQueryStage.ExpectRowResult || stage === ExtendedQueryStage.ExpectNoDataResult));
-        if (canFinishEarly && msg instanceof PostgresReadyForQuery) {
+        if (canFinishEarly) {
+          if (!(msg instanceof PostgresReadyForQuery)) throw ArkDbError.protocol('Unexpected PostgreSQL backend message for skipped extended query step.');
           const endAt = readClockMs(host.timers); if (drainDeadlineMs >= 0 && endAt >= drainDeadlineMs && !(settlement.pollDeadline() && endAt < drainDeadlineMs)) throw ArkDbError.protocol('PostgreSQL drain exceeded maxDrainTimeMs.');
           host.applyReadyStatus(msg.status); d.throwIfFailed();
         }

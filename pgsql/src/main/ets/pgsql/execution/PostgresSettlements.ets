@@ -136,9 +136,11 @@ const composedErrorParts = new WeakMap<ArkDbError, Set<ArkDbError>>();
 const composedErrorRoots = new WeakMap<ArkDbError, ArkDbError>();
 function registerComposedError<E extends ArkDbError>(copy: E, primary: ArkDbError, cleanup: ArkDbError): E {
   const prev = composedErrorParts.get(primary); const cParts = composedErrorParts.get(cleanup); const root = composedErrorRoots.get(primary);
-  const parts = new Set<ArkDbError>(); parts.add(primary); parts.add(cleanup);
+  const parts = new Set<ArkDbError>();
   if (prev !== undefined) prev.forEach((p: ArkDbError): void => { parts.add(p); });
+  parts.add(primary);
   if (cParts !== undefined) cParts.forEach((p: ArkDbError): void => { parts.add(p); });
+  parts.add(cleanup);
   composedErrorParts.set(copy, parts); composedErrorRoots.set(copy, root !== undefined ? root : primary); return copy;
 }
 
@@ -168,6 +170,11 @@ export function postgresAppendCleanupError(primary: ArkDbError, cleanup: ArkDbEr
 }
 
 export function isPostgresComposedError(error: ArkDbError): boolean { return composedErrorParts.has(error); }
+export function postgresAppendDecomposedCleanup(primary: ArkDbError, secondary: ArkDbError | null): ArkDbError {
+  if (secondary === null || secondary === primary) return primary;
+  const cParts = composedErrorParts.get(secondary); if (cParts === undefined) return postgresAppendCleanupError(primary, secondary);
+  let acc = primary; cParts.forEach((p: ArkDbError): void => { if (!composedErrorParts.has(p)) acc = postgresAppendCleanupError(acc, p); }); return acc;
+}
 
 export function toPostgresArkDbError(
   error: Object, fallbackKind: ArkDbErrorKind = ArkDbErrorKind.Protocol): ArkDbError {

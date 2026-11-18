@@ -3,7 +3,7 @@ import { PostgresConnectionFeatures, PostgresSession, PostgresTransactionRunner 
 import { PostgresPreparedExecutor } from '../../api/PostgresPreparedContracts';
 import { PostgresExtendedQueryHost, runPostgresExtendedQuery } from '../../command/PostgresExtendedQuery';
 import { runPostgresPortalStream } from '../../command/PostgresPortalStream';
-import { PostgresQueryStreamHost, runPostgresQueryStream } from '../../command/PostgresResultStream';
+import { encodePostgresSimpleQuery, PostgresQueryStreamHost, runPostgresQueryStream } from '../../command/PostgresResultStream';
 import { PostgresSimpleQueryHost, runPostgresSimpleQuery, scrubQueryResult, snapshotQueryOptions } from '../../command/PostgresSimpleQuery';
 import { runPostgresBegin, runPostgresCommit, runPostgresRollback } from '../../command/PostgresTransactionCommand';
 import { PostgresCommandCloseSettlement, postgresAppendCleanupError, toPostgresArkDbError } from '../../execution/PostgresSettlements';
@@ -72,8 +72,8 @@ class ScopedPostgresTransactionSession implements PostgresSession {
       this.precheckStep();
       if (!(options instanceof QueryOptions)) throw ArkDbError.validation('QueryOptions is required.');
       if (sink === null || sink === undefined || typeof sink !== 'object') throw ArkDbError.validation('QueryResultSink is required.');
-      const snap = snapshotQueryOptions(options);
-      return this.executeStep<QueryExecutionSummary>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> => { const fail = checkActiveTransaction<QueryExecutionSummary>(sh, ss, false); return fail !== null ? fail : runPostgresQueryStream(sh, this.channel, ss, sql, snap, sink); }, snap);
+      const snap = snapshotQueryOptions(options); const qFrame = encodePostgresSimpleQuery(sql);
+      return this.executeStep<QueryExecutionSummary>((sh: StepCommandHost, ss: PostgresCommandCloseSettlement): Promise<QueryExecutionSummary> => { const fail = checkActiveTransaction<QueryExecutionSummary>(sh, ss, false); return fail !== null ? fail : runPostgresQueryStream(sh, this.channel, ss, sql, snap, sink, qFrame); }, snap).finally((): void => { qFrame.fill(0); });
     });
   }
   savepoint(name: string): Promise<void> { return this.runSavepoint(name, 'SAVEPOINT ', 'SAVEPOINT'); } rollbackTo(name: string): Promise<void> { return this.runSavepoint(name, 'ROLLBACK TO SAVEPOINT ', 'ROLLBACK'); } releaseSavepoint(name: string): Promise<void> { return this.runSavepoint(name, 'RELEASE SAVEPOINT ', 'RELEASE'); }
@@ -119,7 +119,7 @@ async function executeTransactionScope<T>(host: PostgresTransactionCommandHost, 
     finally {
       if (state.activeStep === stepSettlement) state.activeStep = null;
       if (!delivered) stepSettlement.discardUndelivered();
-      stepSettlement.markSettled(); if ((stepHost.consumerLatched || stepSettlement.isDeadlineAbandoned) && !state.callbackFailed && parentSettlement.closeReason === null) host.clearConsumerError();
+      stepSettlement.markSettled(); if ((stepHost.consumerLatched || stepSettlement.isDeadlineAbandoned || host.isSynchronized()) && !state.callbackFailed && parentSettlement.closeReason === null) host.clearConsumerError();
     }
   };
   const session = new ScopedPostgresTransactionSession(host, channel, runStep, assertStepOpen);

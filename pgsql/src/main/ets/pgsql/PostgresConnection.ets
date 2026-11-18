@@ -10,7 +10,7 @@ import {
 } from './api/PostgresContracts';
 import { PostgresExtendedQueryHost, runPostgresExtendedQuery } from './command/PostgresExtendedQuery';
 import { runPostgresPortalStream } from './command/PostgresPortalStream';
-import { PostgresQueryStreamHost, runPostgresQueryStream } from './command/PostgresResultStream';
+import { encodePostgresSimpleQuery, PostgresQueryStreamHost, runPostgresQueryStream } from './command/PostgresResultStream';
 import { PostgresSimpleQueryHost, runPostgresPing, runPostgresSimpleQuery, scrubQueryResult, snapshotQueryOptions } from './command/PostgresSimpleQuery';
 import {
   runPostgresBegin, runPostgresCommit, runPostgresRollback
@@ -100,10 +100,12 @@ export class PostgresConnection implements DbConnection, DbStreamingConnection,
 
   queryStream(sql: string, options: QueryOptions,
     sink: QueryResultSink): Promise<QueryExecutionSummary> {
+    let qFrame: Uint8Array | undefined = undefined;
     return this.lifecycle.runDeadlineCommand<QueryExecutionSummary>(PostgresCommandKind.QueryStream, (): QueryOptions => {
-      const snap = snapshotQueryOptions(options); if (sink === null || sink === undefined || typeof sink !== 'object') throw ArkDbError.validation('QueryResultSink is required.'); return snap;
+      const snap = snapshotQueryOptions(options); if (sink === null || sink === undefined || typeof sink !== 'object') throw ArkDbError.validation('QueryResultSink is required.');
+      qFrame = encodePostgresSimpleQuery(sql); return snap;
     }, (s: PostgresCommandScope, ch: PostgresMessageChannel, st: PostgresCommandCloseSettlement, opts: QueryOptions): Promise<QueryExecutionSummary> =>
-      runPostgresQueryStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, sql, opts, sink));
+      runPostgresQueryStream(new QueryStreamLifecycleHost(this.lifecycle, s), ch, st, sql, opts, sink, qFrame)).finally((): void => { if (qFrame !== undefined) qFrame.fill(0); });
   }
 
   ping(): Promise<void> {

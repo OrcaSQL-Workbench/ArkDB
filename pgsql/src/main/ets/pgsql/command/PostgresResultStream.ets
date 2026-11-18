@@ -23,8 +23,10 @@ export interface PostgresQueryStreamHost extends PostgresSimpleQueryHost {
   enterStreaming(): void; enterDraining(): void; latchConsumerError(error: ArkDbError, synchronized?: boolean): void; beginPortalBatch?(settlement: PostgresCommandCloseSettlement): Promise<void>;
 }
 
+export function encodePostgresSimpleQuery(sql: string): Uint8Array { return PostgresFrontendSerializer.query(sql); }
+
 export async function runPostgresQueryStream(host: PostgresQueryStreamHost, channel: PostgresMessageChannel,
-  settlement: PostgresCommandCloseSettlement, sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary> {
+  settlement: PostgresCommandCloseSettlement, sql: string, options: QueryOptions, sink: QueryResultSink, preencodedQuery?: Uint8Array): Promise<QueryExecutionSummary> {
   const opts = snapshotQueryOptions(options); settlement.pollDeadline();
   if (settlement.consumerAbandonReason !== null) { settlement.markConsumerAbandonClaimed(); throw settlement.consumerAbandonReason; }
   const startedAtMs = readClockMs(host.timers);
@@ -100,7 +102,7 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
   };
   try {
     if (settlement.pollDeadline()) { throwIfAborted(); settlement.throwIfAbandoned(); }
-    await writeQueryFrame(channel, settlement, 0x51, PostgresFrontendSerializer.query(sql), host.timers, drainDeadlineMs, setDrainWake);
+    await writeQueryFrame(channel, settlement, 0x51, preencodedQuery !== undefined ? preencodedQuery : PostgresFrontendSerializer.query(sql), host.timers, drainDeadlineMs, setDrainWake);
     if (!draining) host.enterStreaming();
     while (true) {
       const wasDrainingBefore = draining; const raw = await readNextFrame(); const wasDraining = wasDrainingBefore || draining;
@@ -115,7 +117,7 @@ export async function runPostgresQueryStream(host: PostgresQueryStreamHost, chan
           const pgErr = postgresErrorFromResponse(msg); if (isFatalPostgresError(pgErr)) throw pgErr;
           if (sawServerError) throw ArkDbError.protocol('Unexpected duplicate PostgreSQL ErrorResponse.');
           sawServerError = true;
-          if (subState === StreamSubState.InCopyInAbort) { subState = StreamSubState.BetweenStatements; continue; }
+          if (subState === StreamSubState.InCopyInAbort) { if (settlement.isDeadlineAbandoned) recordStreamError(pgErr); subState = StreamSubState.BetweenStatements; continue; }
           discardChunkRows(chunkRows); chunkWireBytes = 0;
           if (cancellationRequested && pgErr.sqlState === '57014' && errors.sink === null && errors.latched === null) {
             beginDrain(false); allRowCountsKnown = false;

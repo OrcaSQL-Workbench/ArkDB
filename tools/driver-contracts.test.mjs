@@ -34,7 +34,7 @@ test('core is a real independent shared HAR, not an extra database driver', () =
   assert.deepEqual(postgresVerification.nativeModules, ['core', 'pgsql']);
   assert.equal(postgresVerification.consumer, 'examples/postgres-client');
   assert.equal(postgresVerification.deviceConsumer, undefined);
-  assert.equal(postgresVerification.requiresInternet, false);
+  assert.equal(postgresVerification.requiresInternet, true);
   assert.equal(postgresVerification.consumerDirectory,
     join(ROOT, 'examples', 'postgres-client'));
 });

@@ -1,11 +1,5 @@
-# ArkDB PostgreSQL skeleton consumer
+# ArkDB PostgreSQL consumer
 
-This independent HarmonyOS application compiles the registered
-`@arkdb/postgres` package skeleton. Its local Hypium test verifies that
-`connect()` rejects with the shared `ArkDbError` identity and
-`ArkDbErrorKind.Unsupported`, while every advertised driver capability remains
-false.
+Independent HarmonyOS exact-HAR consumer of `@arkdb/postgres` (`dependency\pgsql.har`), with no core dependency or repository-source imports. A host-owned `ThreadWorker` runs one fixed read-only streaming query using `VERIFY_FULL` TLS.
 
-The entry build removes the skeleton HAR's inherited INTERNET permission. The
-sample does not open a socket, implement PostgreSQL protocol behavior, or
-establish release or interoperability evidence.
+Offline local Hypium `PublicInterface.test.ets` and `SampleRunner.test.ets` cover consumer contracts and sample behavior. Consumer verification proves self-contained HAR compilation, packaging, and contracts without claiming live physical-hardware certification.

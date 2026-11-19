@@ -63,6 +63,8 @@ test('preserves exact core, consumer and acceptance suite registrations', () => 
   const acceptance = checkArkTsTests(
     ROOT, 'examples/mysql-device-acceptance/entry/src/test',
     'mysql-device-acceptance');
+  const postgresConsumer = checkArkTsTests(ROOT,
+    'examples/postgres-client/entry/src/test', 'postgres-client');
 
   assert.deepEqual(
     [core.testSuites, core.testCases, core.testOwners],
@@ -76,6 +78,16 @@ test('preserves exact core, consumer and acceptance suite registrations', () => 
     [acceptance.testSuites, acceptance.testCases, acceptance.testOwners],
     [3, 14, ['acceptance', 'evidence']]
   );
+  assert.deepEqual([postgresConsumer.testSuites, postgresConsumer.testCases, postgresConsumer.testOwners],
+    [2, 8, ['consumer', 'sample']]);
+});
+
+test('preserves stopped-read status and port until the read settles', () => {
+  const source = readFileSync(join(ROOT, 'examples', 'postgres-client', 'entry', 'src', 'main', 'ets', 'workers', 'postgres.worker.ets'), 'utf8');
+  const stopHandler = source.match(/if \(payload\.operation === 'stop'\) \{([\s\S]*?)\n\s*\}\n\s*let operationPending/);
+  const page = readFileSync(join(ROOT, 'examples', 'postgres-client', 'entry', 'src', 'main', 'ets', 'pages', 'Index.ets'), 'utf8');
+  assert.ok(stopHandler); assert.doesNotMatch(stopHandler[1], /closePortSafely|port\.close/);
+  assert.ok(/this\.stopping && data\.errorKind === 'cancelled'[\s\S]*Sample stopped/.test(page) && /if \(!terminate && this\.stoppingWorker === target && this\.stopTimer !== -1\)[\s\S]*?clearTimeout\(this\.stopTimer\)/.test(page) && /const timeoutStatus = this\.status\.startsWith\('Stopping sample\.\.\.'\)[\s\S]*?: this\.status;/.test(page));
 });
 
 test('rejects unowned core fixture directories', async (t) => {

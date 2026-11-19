@@ -3,6 +3,6 @@
   "verification": {
     "consumer": "examples/postgres-client",
     "nativeModules": ["core", "pgsql"],
-    "requiresInternet": false
+    "requiresInternet": true
   }
 }

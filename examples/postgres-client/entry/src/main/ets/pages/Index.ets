@@ -73,9 +73,10 @@ struct Index {
     sampleWorker.onmessage = (event: MessageEvents): void => {
       const data = event.data as Object;
       const terminate = !(data instanceof SampleResponse) || data.requiresTermination;
-      const msg = data instanceof SampleResponse
-        ? (data.ok ? 'Success:\n' : 'Error (' + data.errorKind + '):\n') + data.text
-        : 'Worker returned an unexpected response.';
+      const msg = data instanceof SampleResponse && this.stopping && data.errorKind === 'cancelled'
+        ? 'Sample stopped. Outcome is unknown; SQL was not replayed.\n' + data.text
+        : data instanceof SampleResponse ? (data.ok ? 'Success:\n' : 'Error (' + data.errorKind + '):\n') + data.text
+          : 'Worker returned an unexpected response.';
       responseStatus = msg;
       this.finishWorker(sampleWorker, msg, terminate, request, true);
     };
@@ -102,6 +103,11 @@ struct Index {
     target: worker.ThreadWorker, status: string, terminate: boolean,
     request: SampleRequest | null, scrub: boolean = false
   ): void {
+    if (!terminate && this.stoppingWorker === target && this.stopTimer !== -1) {
+      clearTimeout(this.stopTimer);
+      this.stopTimer = -1;
+      this.stoppingWorker = null;
+    }
     if (this.activeWorker === target) this.status = status;
     if (terminate) {
       if (request !== null) this.scrubRequest(request);
@@ -133,10 +139,10 @@ struct Index {
       const request = activeRequest;
       this.stopTimer = setTimeout((): void => {
         if (this.activeWorker !== runningWorker) return;
-        this.finishWorker(
-          runningWorker, 'Sample stopped before Worker finished. Outcome is unknown; SQL was not replayed.',
-          true, request
-        );
+        const timeoutStatus = this.status.startsWith('Stopping sample...')
+          ? 'Sample stopped before Worker finished. Outcome is unknown; SQL was not replayed.'
+          : this.status;
+        this.finishWorker(runningWorker, timeoutStatus, true, request);
       }, 2000);
     } catch {
       if (this.activeWorker === runningWorker && !leavingPage) {
@@ -147,11 +153,6 @@ struct Index {
     }
   }
   private clearWorker(target: worker.ThreadWorker): void {
-    if (this.stoppingWorker === target && this.stopTimer !== -1) {
-      clearTimeout(this.stopTimer);
-      this.stopTimer = -1;
-      this.stoppingWorker = null;
-    }
     if (this.activeWorker === target) {
       this.activeWorker = null;
       this.running = false;

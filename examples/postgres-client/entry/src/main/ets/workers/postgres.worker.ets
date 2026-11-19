@@ -14,10 +14,7 @@ port.onmessage = async (event: MessageEvents): Promise<void> => {
   if (!(payload instanceof SampleRequest)) { closePortSafely(); return; }
   if (payload.operation === 'stop') {
     payload.password = '';
-    try {
-      await runner.stop();
-      closePortSafely();
-    } catch { console.error('ArkDB PostgreSQL worker stop cleanup failed.'); }
+    try { await runner.stop(); } catch { console.error('ArkDB PostgreSQL worker stop cleanup failed.'); }
     return;
   }
   let operationPending: boolean = false;

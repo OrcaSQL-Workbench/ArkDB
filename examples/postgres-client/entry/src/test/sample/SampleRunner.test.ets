@@ -99,14 +99,17 @@ export default function sampleRunnerTest(): void {
       expect(dualResponse.text.indexOf('PRIVATE_')).assertEqual(-1);
       const heldCloseFactory = new FakeFactory();
       heldCloseFactory.connection.holdClose = true;
-      const heldClose = await Promise.race<SampleResponse | null>([
-        new SampleRunner(heldCloseFactory, 20).run(validRequest()),
-        new Promise<null>((resolve): void => { setTimeout((): void => { resolve(null); }, 250); })
-      ]);
-      expect(heldClose !== null).assertTrue();
-      expect((heldClose as SampleResponse).ok).assertFalse();
-      expect((heldClose as SampleResponse).errorKind).assertEqual('cleanup');
-      expect((heldClose as SampleResponse).text.indexOf('cleanup also failed') >= 0).assertTrue();
+      const heldCloseRunner = new SampleRunner(heldCloseFactory, 20);
+      const heldClose = await heldCloseRunner.run(validRequest());
+      expect(heldClose.ok).assertFalse(); expect(heldClose.errorKind).assertEqual('cleanup');
+      expect(heldClose.requiresTermination).assertTrue();
+      const blockedAfterCleanup = await heldCloseRunner.run(validRequest());
+      expect(blockedAfterCleanup.errorKind).assertEqual(ArkDbErrorKind.Validation);
+      expect(heldCloseFactory.created).assertEqual(1);
+      let heldStopTimedOut: boolean = false;
+      try { await heldCloseRunner.stop(); } catch { heldStopTimedOut = true; }
+      expect(heldStopTimedOut).assertTrue();
+      expect(heldCloseFactory.connection.events.join(',')).assertEqual('connect,changeContext,queryStream,close');
     });
     it('rejectsOverlappingRequestsAndStopsHeldConnection', 0, async () => {
       const factory = new FakeFactory();

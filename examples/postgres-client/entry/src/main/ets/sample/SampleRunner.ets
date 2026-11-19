@@ -45,6 +45,7 @@ export class SampleRunner {
     let operationSettled: boolean = true;
     let finalized: boolean = false;
     const release = (): void => {
+      if (response.requiresTermination) return;
       if (connection === null || this.active === connection) {
         this.active = null;
         this.closing = null;
@@ -125,8 +126,8 @@ export class SampleRunner {
         }
       }
       finalized = true;
-      if (connection === null || operationSettled) release();
       response.requiresTermination = response.requiresTermination || !operationSettled;
+      if (connection === null || operationSettled) release();
     }
     return response;
   }
@@ -139,14 +140,10 @@ export class SampleRunner {
     if (connection !== null) await this.closeActive(connection);
   }
   private closeActive(connection: DbConnection): Promise<void> {
-    if (this.closing === null) {
-      const budgetMs = Number.isSafeInteger(this.executionTimeoutMs) && this.executionTimeoutMs >= 1
-        ? Math.min(this.executionTimeoutMs, 1500) : 1500;
-      const closing = closeWithTimeout(connection, budgetMs);
-      this.closing = closing;
-      closing.catch((): void => { if (this.closing === closing) this.closing = null; });
-    }
-    return this.closing;
+    if (this.closing === null) this.closing = connection.close();
+    const budgetMs = Number.isSafeInteger(this.executionTimeoutMs) && this.executionTimeoutMs >= 1
+      ? Math.min(this.executionTimeoutMs, 1500) : 1500;
+    return closeWithTimeout(this.closing, budgetMs);
   }
   private async raceDeadline(
     work: () => Promise<QueryExecutionSummary>, onAbort: () => void, onSettled: () => void
@@ -173,11 +170,11 @@ export class SampleRunner {
     }
   }
 }
-async function closeWithTimeout(connection: DbConnection, timeoutMs: number): Promise<void> {
+async function closeWithTimeout(operation: Promise<void>, timeoutMs: number): Promise<void> {
   let timer: number = -1;
   try {
     await Promise.race<void>([
-      connection.close(),
+      operation,
       new Promise<void>((_res, reject): void => {
         timer = setTimeout((): void => { reject(ArkDbError.timeout('Connection cleanup timed out.')); }, timeoutMs);
       })

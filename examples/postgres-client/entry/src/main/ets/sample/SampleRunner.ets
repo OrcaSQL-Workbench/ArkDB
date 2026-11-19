@@ -9,12 +9,10 @@ import { SampleRequest, SampleResponse } from './Messages';
 const DEMO_SQL: string = 'SELECT version() AS version, ' +
   '9007199254740993::bigint AS exact_bigint, ' +
   '12.34::numeric(10,2) AS exact_decimal, NULL::text AS sql_null';
-
 export interface SampleConnection extends DbConnection {
   changeContext(context: DatabaseContext): Promise<void>;
   queryStream(sql: string, options: QueryOptions, sink: QueryResultSink): Promise<QueryExecutionSummary>;
 }
-
 export interface SampleConnectionFactory {
   create(options: PostgresConnectionOptions): SampleConnection;
 }
@@ -32,7 +30,6 @@ export class SampleRunner {
     this.factory = factory;
     this.executionTimeoutMs = executionTimeoutMs;
   }
-
   async run(request: SampleRequest): Promise<SampleResponse> {
     const response = new SampleResponse();
     if (this.busy || this.stopping) {
@@ -45,6 +42,15 @@ export class SampleRunner {
     const password: string = request.password;
     request.password = '';
     let connection: SampleConnection | null = null;
+    let operationSettled: boolean = true;
+    let finalized: boolean = false;
+    const release = (): void => {
+      if (connection === null || this.active === connection) {
+        this.active = null;
+        this.closing = null;
+        this.busy = false;
+      }
+    };
     try {
       if (request.operation !== 'read') throw ArkDbError.validation('Unsupported sample operation.');
       if (!Number.isSafeInteger(this.executionTimeoutMs) || this.executionTimeoutMs < 1 ||
@@ -71,6 +77,7 @@ export class SampleRunner {
       connection = this.factory.create(new PostgresConnectionOptions(config, password));
       this.active = connection;
       const activeConn = connection;
+      operationSettled = false;
       let aborted: boolean = false;
       const sink = new DisplaySink((): boolean => aborted || this.stopping);
       const summary = await this.raceDeadline(async (): Promise<QueryExecutionSummary> => {
@@ -92,7 +99,10 @@ export class SampleRunner {
         const execSummary = await activeConn.queryStream(DEMO_SQL, options, sink);
         if (aborted || this.stopping) throw ArkDbError.cancelled('Sample is stopping.');
         return execSummary;
-      }, (): void => { aborted = true; });
+      }, (): void => { aborted = true; }, (): void => {
+        operationSettled = true;
+        if (finalized) release();
+      });
       response.ok = true;
       response.text = sink.text + '\nLoaded ' + summary.loadedRowCount +
         ' row(s). TLS active: ' + String(connection.serverInfo.tlsActive) +
@@ -108,18 +118,18 @@ export class SampleRunner {
           await this.closeActive(connection);
         } catch (cleanup) {
           response.ok = false;
+          response.requiresTermination = true;
           response.errorKind = response.errorKind.length > 0 ? response.errorKind : 'cleanup';
           const detail = 'Connection cleanup also failed: ' + describeSampleError(cleanup as Object);
           response.text = response.text.length > 0 ? response.text + '\n' + detail : detail;
         }
       }
-      this.closing = null;
-      this.active = null;
-      this.busy = false;
+      finalized = true;
+      if (connection === null || operationSettled) release();
+      response.requiresTermination = response.requiresTermination || !operationSettled;
     }
     return response;
   }
-
   async stop(): Promise<void> {
     this.stopping = true;
     const cancel = this.rejectStop;
@@ -128,23 +138,30 @@ export class SampleRunner {
     const connection = this.active;
     if (connection !== null) await this.closeActive(connection);
   }
-
   private closeActive(connection: DbConnection): Promise<void> {
     if (this.closing === null) {
       const budgetMs = Number.isSafeInteger(this.executionTimeoutMs) && this.executionTimeoutMs >= 1
-        ? Math.min(this.executionTimeoutMs, 2000) : 2000;
-      this.closing = closeWithTimeout(connection, budgetMs);
+        ? Math.min(this.executionTimeoutMs, 1500) : 1500;
+      const closing = closeWithTimeout(connection, budgetMs);
+      this.closing = closing;
+      closing.catch((): void => { if (this.closing === closing) this.closing = null; });
     }
     return this.closing;
   }
-
   private async raceDeadline(
-    work: () => Promise<QueryExecutionSummary>, onAbort: () => void
+    work: () => Promise<QueryExecutionSummary>, onAbort: () => void, onSettled: () => void
   ): Promise<QueryExecutionSummary> {
     let timer: number = -1;
     try {
+      const operation = work().then((summary: QueryExecutionSummary): QueryExecutionSummary => {
+        onSettled();
+        return summary;
+      }, (error: Error): never => {
+        onSettled();
+        throw error;
+      });
       return await Promise.race<QueryExecutionSummary>([
-        work(),
+        operation,
         new Promise<QueryExecutionSummary>((_res, reject): void => {
           this.rejectStop = (err: Error): void => { onAbort(); reject(err); };
           timer = setTimeout((): void => { onAbort(); reject(ArkDbError.timeout('Sample execution timed out.')); }, this.executionTimeoutMs);
@@ -156,7 +173,6 @@ export class SampleRunner {
     }
   }
 }
-
 async function closeWithTimeout(connection: DbConnection, timeoutMs: number): Promise<void> {
   let timer: number = -1;
   try {
@@ -170,24 +186,25 @@ async function closeWithTimeout(connection: DbConnection, timeoutMs: number): Pr
     if (timer !== -1) clearTimeout(timer);
   }
 }
-
 class DisplaySink implements QueryResultSink {
   private readonly isStopped: () => boolean;
   private lines: string[] = [];
   private chars: number = 0;
   private capped: boolean = false;
+  private cellTruncated: boolean = false;
   constructor(isStopped: () => boolean) { this.isStopped = isStopped; }
-  get displayTruncated(): boolean { return this.capped; }
+  get displayTruncated(): boolean { return this.capped || this.cellTruncated; }
   get text(): string { return this.lines.join('\n'); }
 
   async onResultStart(meta: QueryResultMeta): Promise<void> {
     this.pushLine('Columns: ' + meta.columns.map((column): string => column.name).join(' | '));
   }
-
   async onRows(chunk: QueryRowChunk): Promise<void> {
-    for (let i = 0; i < chunk.rows.length; i += 1) this.pushLine('Row: ' + chunk.rows[i].map(formatCell).join(' | '));
+    for (let i = 0; i < chunk.rows.length; i += 1) {
+      this.pushLine('Row: ' + chunk.rows[i].map((cell): string =>
+        formatCell(cell, (): void => { this.cellTruncated = true; })).join(' | '));
+    }
   }
-
   async onResultEnd(_summary: QueryResultSummary): Promise<void> {}
 
   private pushLine(line: string): void {
@@ -202,11 +219,13 @@ class DisplaySink implements QueryResultSink {
   }
 }
 
-function formatCell(value: SqlValue): string {
+function formatCell(value: SqlValue, onClip: () => void): string {
   if (value === null) return 'NULL';
   if (value instanceof Uint8Array) return '[binary ' + value.byteLength + ' bytes]';
   const text = String(value);
-  return text.length > 256 ? text.slice(0, 256) + '...' : text;
+  if (text.length <= 256) return text;
+  onClip();
+  return text.slice(0, 256) + '...';
 }
 
 export function describeSampleError(error: Object): string {

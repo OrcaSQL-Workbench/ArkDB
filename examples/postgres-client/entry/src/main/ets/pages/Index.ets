@@ -15,11 +15,10 @@ struct Index {
   @State running: boolean = false;
   @State stopping: boolean = false;
   private activeWorker: worker.ThreadWorker | null = null;
+  private activeRequest: SampleRequest | null = null;
   private stoppingWorker: worker.ThreadWorker | null = null;
   private stopTimer: number = -1;
-
   aboutToDisappear(): void { this.stopCurrentRun(true); }
-
   build() {
     Column({ space: 8 }) {
       Text('ArkDB PostgreSQL Example').fontSize(20).fontWeight(FontWeight.Bold)
@@ -59,6 +58,7 @@ struct Index {
     this.running = true;
     this.stopping = false;
     this.status = 'Connecting on Worker with VERIFY_FULL TLS...';
+    let responseStatus: string = '';
     let sampleWorker: worker.ThreadWorker;
     try {
       sampleWorker = new worker.ThreadWorker('entry/ets/workers/postgres.worker.ets');
@@ -69,37 +69,51 @@ struct Index {
       return;
     }
     this.activeWorker = sampleWorker;
+    this.activeRequest = request;
     sampleWorker.onmessage = (event: MessageEvents): void => {
       const data = event.data as Object;
+      const terminate = !(data instanceof SampleResponse) || data.requiresTermination;
       const msg = data instanceof SampleResponse
         ? (data.ok ? 'Success:\n' : 'Error (' + data.errorKind + '):\n') + data.text
         : 'Worker returned an unexpected response.';
-      this.finishWorker(sampleWorker, msg, false);
+      responseStatus = msg;
+      this.finishWorker(sampleWorker, msg, terminate, request, true);
     };
     sampleWorker.onerror = (_e: ErrorEvent): void => {
-      this.finishWorker(sampleWorker, 'Worker failed with unknown query outcome. SQL was not replayed.', true);
+      this.finishWorker(sampleWorker, responseStatus.length > 0 ? responseStatus : 'Worker failed with unknown query outcome. SQL was not replayed.', true, request, true);
     };
     sampleWorker.onmessageerror = (_e: MessageEvents): void => {
-      this.finishWorker(sampleWorker, 'Worker message serialization failed. SQL was not replayed.', true);
+      this.finishWorker(sampleWorker, responseStatus.length > 0 ? responseStatus : 'Worker message serialization failed. SQL was not replayed.', true, request, true);
     };
     sampleWorker.onexit = (_code: number): void => {
-      this.finishWorker(
-        sampleWorker, 'Worker exited before returning a response. Outcome is unknown; SQL was not replayed.', false
-      );
+      const exitStatus = this.status.startsWith('Connecting on Worker')
+        ? 'Worker exited before returning a response. Outcome is unknown; SQL was not replayed.'
+        : this.status;
+      this.finishWorker(sampleWorker, exitStatus, false, request, true);
     };
     try {
       sampleWorker.postMessageWithSharedSendable(request);
     } catch {
-      request.password = '';
-      this.finishWorker(sampleWorker, 'Failed to dispatch request to Worker. SQL was not replayed.', true);
+      this.scrubRequest(request);
+      this.finishWorker(sampleWorker, 'Failed to dispatch request to Worker. SQL was not replayed.', true, request);
     }
   }
-
-  private finishWorker(target: worker.ThreadWorker, status: string, terminate: boolean): void {
+  private finishWorker(
+    target: worker.ThreadWorker, status: string, terminate: boolean,
+    request: SampleRequest | null, scrub: boolean = false
+  ): void {
     if (this.activeWorker === target) this.status = status;
-    this.clearWorker(target, terminate);
+    if (terminate) {
+      if (request !== null) this.scrubRequest(request);
+      try { target.terminate(); } catch {
+        this.stopping = false;
+        this.status += '\nWorker termination could not be confirmed; waiting for Worker exit.';
+      }
+      return;
+    }
+    if (scrub && request !== null) this.scrubRequest(request);
+    this.clearWorker(target);
   }
-
   private stopCurrentRun(leavingPage: boolean): void {
     this.password = '';
     const runningWorker = this.activeWorker;
@@ -111,25 +125,28 @@ struct Index {
     }
     const stopRequest = new SampleRequest();
     stopRequest.operation = 'stop';
+    const activeRequest = this.activeRequest;
     try {
       runningWorker.postMessageWithSharedSendable(stopRequest);
       if (this.stopTimer !== -1) clearTimeout(this.stopTimer);
       this.stoppingWorker = runningWorker;
+      const request = activeRequest;
       this.stopTimer = setTimeout((): void => {
-        if (this.activeWorker === runningWorker) {
-          this.status = 'Sample stopped before Worker finished. Outcome is unknown; SQL was not replayed.';
-        }
-        this.clearWorker(runningWorker, true);
+        if (this.activeWorker !== runningWorker) return;
+        this.finishWorker(
+          runningWorker, 'Sample stopped before Worker finished. Outcome is unknown; SQL was not replayed.',
+          true, request
+        );
       }, 2000);
     } catch {
       if (this.activeWorker === runningWorker && !leavingPage) {
         this.status = 'Sample stopped. Outcome is unknown; SQL was not replayed.';
       }
-      this.clearWorker(runningWorker, true);
+      this.finishWorker(runningWorker, 'Sample stopped. Outcome is unknown; SQL was not replayed.',
+        true, activeRequest);
     }
   }
-
-  private clearWorker(target: worker.ThreadWorker, terminate: boolean): void {
+  private clearWorker(target: worker.ThreadWorker): void {
     if (this.stoppingWorker === target && this.stopTimer !== -1) {
       clearTimeout(this.stopTimer);
       this.stopTimer = -1;
@@ -140,8 +157,10 @@ struct Index {
       this.running = false;
       this.stopping = false;
     }
-    if (terminate) {
-      try { target.terminate(); } catch {}
-    }
+  }
+
+  private scrubRequest(request: SampleRequest): void {
+    request.password = '';
+    if (this.activeRequest === request) this.activeRequest = null;
   }
 }

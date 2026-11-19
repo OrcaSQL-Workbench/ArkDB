@@ -17,4 +17,5 @@ export class SampleResponse {
   ok: boolean = false;
   text: string = '';
   errorKind: string = '';
+  requiresTermination: boolean = false;
 }

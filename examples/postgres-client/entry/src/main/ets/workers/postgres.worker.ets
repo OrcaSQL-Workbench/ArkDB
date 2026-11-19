@@ -14,15 +14,21 @@ port.onmessage = async (event: MessageEvents): Promise<void> => {
   if (!(payload instanceof SampleRequest)) { closePortSafely(); return; }
   if (payload.operation === 'stop') {
     payload.password = '';
-    try { await runner.stop(); } catch { console.error('ArkDB PostgreSQL worker stop cleanup failed.'); }
+    try {
+      await runner.stop();
+      closePortSafely();
+    } catch { console.error('ArkDB PostgreSQL worker stop cleanup failed.'); }
     return;
   }
+  let operationPending: boolean = false;
   try {
-    port.postMessageWithSharedSendable(await runner.run(payload));
+    const response = await runner.run(payload);
+    port.postMessageWithSharedSendable(response);
+    operationPending = response.requiresTermination;
   } catch {
     console.error('ArkDB PostgreSQL worker response dispatch failed.');
   } finally {
-    closePortSafely();
+    if (!operationPending) closePortSafely();
   }
 };
 

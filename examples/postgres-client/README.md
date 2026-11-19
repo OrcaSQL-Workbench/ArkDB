@@ -1,23 +1,9 @@
 # ArkDB PostgreSQL Example Application
+Independent HarmonyOS 6.1.1 / API 24 Stage-model app using only self-contained `@arkdb/postgres` (`dependency\pgsql.har`), without `@arkdb/core` or repository source imports.
 
-Independent HarmonyOS 6.1.1 / API 24 Stage-model application consuming `@arkdb/postgres` solely via `dependency\pgsql.har`, with no `@arkdb/core` dependency/override and no repository source imports.
+## Prepare
+From the repo root run `npm ci --ignore-scripts`, `npm run restore`, `node tools/package-har.mjs --driver pgsql`, then `node tools/test-consumer.mjs --driver pgsql --prepare`; open in DevEco Studio for an API 24 tablet/2in1 target.
 
-## Prepare And Build From Repository Root
-
-```powershell
-npm ci --ignore-scripts
-npm run restore
-node tools/package-har.mjs --driver pgsql
-node tools/test-consumer.mjs --driver pgsql --prepare
-node tools/test-consumer.mjs --driver pgsql --example
-```
-
-`--prepare` copies the built HAR to `examples\postgres-client\dependency\pgsql.har` and runs `ohpm install` in `examples\postgres-client`, ready to open in DevEco Studio for an API 24 tablet/2in1 target.
-
-## Runtime Behavior And Verification Boundary
-
-- Host-owned `ThreadWorker` (`entry\src\main\ets\workers\postgres.worker.ets`) and `SampleRunner` (`entry\src\main\ets\sample\SampleRunner.ets`) paired with shared `@Sendable` DTOs (`Messages.ets`) and Stage UI (`pages\Index.ets`).
-- Clears the UI password field on submit and scrubs `SampleRequest.password` before awaiting network I/O and on every Worker termination path.
-- Enforces `PostgresSslMode.VERIFY_FULL` TLS (with optional sandbox CA PEM), applies optional `changeContext` schema, and streams one fixed read-only query (`SELECT version(), 9007199254740993::bigint, 12.34::numeric(10,2), NULL::text`) with bounded `QueryOptions` (`statementTimeoutMs = 15000`, `maxRows = 20`, `maxResultBytes = 16384`).
-- Always closes the connection in `finally`, never replays SQL automatically, and bounds Worker stop/termination (`2000ms` grace timer on `Stop` or `aboutToDisappear`).
-- `node tools/test-consumer.mjs --driver pgsql` runs offline Hypium `PublicInterface.test.ets` + `SampleRunner.test.ets` and verifies self-contained HAR compilation, `ohos.permission.INTERNET` HAP/Worker packaging, and contracts; it does not claim public OHPM acquisition or live physical-hardware certification.
+## Worker Sample And Verification
+The Stage UI dispatches to a host-owned `ThreadWorker` via shared `@Sendable` DTOs. `SampleRunner` scrubs passwords before awaits, uses `PostgresSslMode.VERIFY_FULL` (optional sandbox CA PEM), optionally applies schema via `changeContext`, and streams one fixed read-only query (`SELECT version(), 9007199254740993::bigint, 12.34::numeric(10,2), NULL::text`) with bounded `QueryOptions`; execution/stop/close attempts are bounded, unresolved operations stay latched, and SQL is never replayed automatically.
+`node tools/test-consumer.mjs --driver pgsql` compiles the HAR, Worker/HAP and README example and runs offline Hypium `PublicInterface.test.ets` + `SampleRunner.test.ets`. This verifies self-contained HAR packaging/contracts, not public OHPM acquisition or live physical-hardware certification.

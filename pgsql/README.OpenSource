@@ -3,6 +3,6 @@ Copyright 2026 OrcaSQL Workbench
 
 Licensed under the Apache License, Version 2.0; see LICENSE.
 
-This package currently contains ArkDB-owned public contracts and runtime
-skeleton code. It includes no copied PostgreSQL client implementation or
-third-party protocol fixtures.
+This package contains ArkDB-owned PostgreSQL contracts and implementation.
+It includes no copied PostgreSQL client implementation or third-party protocol
+fixtures. The self-contained HAR also includes the shared core notice.

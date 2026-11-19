@@ -2,17 +2,17 @@
 
 Native ArkTS database drivers for HarmonyOS, distributed as headless Harmony Archives (HARs).
 
-**MySQL is the only database implementation.** MySQL 1.1.0 engineering-preview source uses core 1.1.0 internally, but its delivery is **one self-contained `@arkdb/mysql` HAR**. Users do not install core separately. PostgreSQL 1.0.0 is registered only as a compile-verified package skeleton; every runtime operation remains unsupported. ArkDB does not require OrcaSQL Workbench, Node.js, a WebView, or a native MySQL client at runtime.
+MySQL and PostgreSQL have native driver implementations. Each selected driver is delivered as **one self-contained HAR** with core 1.1.0 embedded; users do not install core separately. PostgreSQL 1.0.0 is unreleased and its live compatibility and device validation are not established. ArkDB does not require OrcaSQL Workbench, Node.js, a WebView, or a native database client at runtime.
 
 | Package | Status | Platform |
 | --- | --- | --- |
 | [`@arkdb/mysql`](mysql/README.md) | [1.1.0 engineering preview](https://github.com/OrcaSQL-Workbench/ArkDB/releases/tag/mysql-v1.1.0); one self-contained HAR, not published to OHPM | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
-| [`@arkdb/postgres`](pgsql/README.md) 1.0.0 source skeleton | Registered for package, contract and no-network consumer compilation; not a working protocol implementation or published release | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
+| [`@arkdb/postgres`](pgsql/README.md) 1.0.0 source | Unreleased PostgreSQL driver; local HAR and independent exact-HAR Worker consumer | HarmonyOS 6.1.1 / API 24, tablet and 2in1 |
 | [`@arkdb/core`](core/README.md) 1.1.0 source contract | Embedded in the selected driver HAR; not separately installed or published | HarmonyOS source module; no database implementation |
 
 The published 1.0.1 and 1.0.2 tags/HARs remain immutable. Their historical checks do not validate 1.1.0. See [shared driver contracts](docs/driver-contracts.md) for ownership, optional interfaces and compatibility changes.
 
-The current driver supports the MySQL text protocol, optional typed prepared statements and private convenience-statement caching, restricted prepared multi-row INSERT, session initialization, authentication, TCP/TLS, bounded streamed results, transactions, metadata, cancellation primitives, and server metrics. MariaDB is experimental. Pooling and an automatically managed Worker are not implemented. Read the [usage and execution contract](mysql/README.md) before integrating it.
+The MySQL driver supports the text protocol, optional typed prepared statements and private convenience-statement caching, restricted prepared multi-row INSERT, session initialization, authentication, TCP/TLS, bounded streamed results, transactions, metadata, cancellation primitives, and server metrics. MariaDB is experimental. The PostgreSQL driver implements startup, authentication, TCP/TLS, simple and prepared queries, streaming, transactions, metadata and cancellation; server metrics are unsupported. Pooling and an automatically managed Worker are not implemented. Read the [MySQL](mysql/README.md) or [PostgreSQL](pgsql/README.md) usage contract before integration.
 
 The [package guide](mysql/README.md) includes configuration defaults and examples for typed rows, errors, verified/custom-CA TLS, bounded streaming, transactions, cancellation, and providers. The [runnable example](examples/mysql-client/README.md) supplies a host-owned Worker and UI; it is not a new managed-client interface inside the driver.
 
@@ -42,7 +42,7 @@ npm run drivers
 npm run pack -- --driver mysql
 ```
 
-The selector reads registered driver declarations and their source directories; shared source modules are not database drivers. It compiles core plus the selected driver into one temporary delivery module, preserving the maintained source separation. MySQL packaging produces `build\mysql-v1.1.0\arkdb-mysql-1.1.0-local.har`, its checksum and source manifest. PostgreSQL selection uses the same model and produces a skeleton candidate under `build\pgsql-v1.0.0\`; successful compilation does not establish protocol support, release readiness or publication.
+The selector reads registered driver declarations and their source directories; shared source modules are not database drivers. It compiles core plus the selected driver into one temporary delivery module, preserving the maintained source separation. MySQL packaging produces `build\mysql-v1.1.0\arkdb-mysql-1.1.0-local.har`, its checksum and source manifest. PostgreSQL selection uses the same model and produces `build\pgsql-v1.0.0\arkdb-postgres-1.0.0-local.har`; successful compilation does not establish live compatibility, release readiness or publication.
 
 ## Generated output locations
 
@@ -76,7 +76,7 @@ npm run verify
 | `npm run test:contracts` | Node-only extension/architecture constraints; no ArkTS compilation |
 | `npm run drivers` | List implemented driver modules and their package/source identities |
 | `npm run build` | Compile the standalone driver HAR |
-| `npm run test:arkts` | Generate current HAR build profiles and run declared core/MySQL Hypium suites at registered source paths, failing on assertion output as well as process errors |
+| `npm run test:arkts -- core pgsql` | Generate current HAR build profiles and run the selected core/PostgreSQL Hypium suites at registered source paths, failing on assertion output as well as process errors |
 | `npm run pack -- --driver mysql` | Compile core plus the selected driver into one versioned self-contained HAR, checksum and source manifest |
 | `npm run test:consumer` | Build the sample HAP/Worker and README examples against the exact HAR, then run offline sample lifecycle tests |
 | `npm run example:prepare` | Install the verified HAR into the runnable Worker sample |
@@ -98,7 +98,7 @@ Read the [release procedure](docs/releasing.md) before preparing or uploading a 
 
 ## Source and distribution
 
-`core/Index.ets` owns portable contracts; `mysql/Index.ets` owns the stable MySQL interface and native adaptations. Core's `DbConnection` is minimal, optional features are explicit, and typed core factories do not require every engine to accept MySQL options or password authentication. The existing `@arkdb/mysql` `DbConnection` and non-generic `DbDriverFactory` retain their MySQL methods. MySQL configuration, wire fields, native stream defaults and InnoDB metrics stay in the adapter. A test-only independent catalog adapter exercises the shared seam without claiming PostgreSQL support. See [the architecture and migration contract](docs/driver-contracts.md).
+`core/Index.ets` owns portable contracts; each driver entry owns its native interface and adaptations. Core's `DbConnection` is minimal, optional features are explicit, and typed core factories do not require every engine to accept MySQL options or password authentication. The existing `@arkdb/mysql` `DbConnection` and non-generic `DbDriverFactory` retain their MySQL methods. MySQL configuration, wire fields, native stream defaults and InnoDB metrics stay in that adapter; PostgreSQL has its own protocol and features. See [the architecture and migration contract](docs/driver-contracts.md).
 
 The extraction origin and subsequent interface cleanup are recorded in [`docs/source-snapshot.json`](docs/source-snapshot.json); immutable upstream revisions and vectors are in [protocol test provenance](docs/protocol-test-provenance.md). Application code, signing machinery, saved credentials, operational evidence, generated dependencies, and private Git history are not part of this extraction.
 
@@ -110,9 +110,11 @@ See [release and verification requirements](docs/releasing.md) before publishing
 | --- | --- |
 | `core/` | Shared source contracts, deadlines and diagnostics; not a required user-installed HAR |
 | `mysql/` | MySQL HAR implementation, native extensions, package docs/legal files and local test sources |
+| `pgsql/` | PostgreSQL HAR implementation, native extensions, package docs/legal files and local test sources |
 | `AppScope/`, `hvigor/`, root build files | Required metadata for the current HAR-only Hvigor workspace; no application UI or runtime |
 | `docs/` | Release guidance and extraction/upstream provenance |
 | `examples/mysql-client/` | A runnable Stage-model HAP/Worker sample consuming the actual HAR, with offline lifecycle tests |
+| `examples/postgres-client/` | An independent exact-HAR Stage-model HAP with a host-owned Worker and offline tests |
 | `examples/mysql-device-acceptance/` | A dedicated release-bound device acceptance HAP/Worker harness, excluded from the ordinary consumer fingerprint |
 | `tools/` | Maintainer-only launchers, checks, and packaging; not driver runtime dependencies |
 

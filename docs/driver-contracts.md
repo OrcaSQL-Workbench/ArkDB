@@ -492,9 +492,16 @@ acquire this MySQL-specific field.
 
 `ArkDbError` has one owner inside a delivery, so its public entry and driver
 implementation use the same constructor. Separately assembled standalone driver
-HARs do not automatically share constructors; their coexistence is not established
-by a single-driver build. A source composition includes core once for all selected
-adapters. Native codes may
+HARs embed separate core copies; they do not share constructor identity. The
+dedicated dual-HAR consumer compiles the exact local MySQL and PostgreSQL HARs
+together in one app, with package-specific factories. Its required offline
+Hypium case exercises each package's factory, result/error identity and
+unconnected-query failure. This establishes only compilation and offline
+package-identity behavior for those artifacts and this local toolchain.
+Worker integration, message delivery and lifecycle isolation remain a separate
+verification unit; these checks do not establish system-wide constructor identity
+or live server/device compatibility. Source composition includes core once for
+all selected adapters. Native codes may
 be numeric or textual in `nativeCode`, and SQLSTATE is independent. The numeric
 `code` compatibility field is retained on the same error constructor. MySQL
 preserves its numeric error codes and SQLSTATE. Unsupported operations use an explicit missing
@@ -584,15 +591,23 @@ source compatibility is not a claim of binary interchangeability.
 Validation is split by evidence type. Node regressions check registration,
 dependency graphs and synthetic archive/release handling. Native suites
 compile and exercise the shared contracts and each selected driver's protocol/lifecycle behavior.
-The isolated consumer restores one exact HAR with an empty cache and unavailable
-registry, compiles packaged examples and the sample HAP, then separately restores
-test-only dependencies and checks driver-created error identity.
+The single-driver isolated consumer restores one exact HAR with an empty cache
+and unavailable registry, compiles packaged examples and the sample HAP, then
+separately restores test-only dependencies and checks driver-created error
+identity. The dual-HAR consumer stages both exact local HARs in a fresh app,
+restores without a package registry, compiles both package imports, and requires
+the named offline factory/result/error identity case to pass.
+Each successful run outputs a unique HAP path and SHA-256; failed runs return
+no artifact. These are not Worker dispatch or lifecycle-isolation evidence.
+Each HAR retains its own
+embedded core constructors; no shared `ArkDbError` identity is assumed.
 The compatibility consumer exercises the published factory/connection/provider
 signatures, native scalar/column/stream types, numeric codes, defaults and old
 data literals against the original 1.0.1 HAR and the new one-file candidate.
 Native test launching first generates each HAR's current BuildProfile and refreshes the
 registered source directory's unit cache; it does not depend on IDE leftovers.
 Neither local mock networking nor these artifact checks establishes device
-interoperability, a PostgreSQL version compatibility matrix or simultaneous
-standalone MySQL/PostgreSQL HAR use.
+interoperability, a PostgreSQL version compatibility matrix or live PostgreSQL
+compatibility. The dual-HAR check is limited to the exact local candidate
+archives and offline host tests; it does not establish runtime Worker dispatch.
 Do not reuse published 1.0.1 evidence as evidence for this architecture.

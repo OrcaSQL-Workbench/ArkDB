@@ -67,9 +67,9 @@ async function prepareDependency(workspace, source, registry, dependencies, rest
       if (sha256(await readFile(target)) !== archive.expectedSha256) {
         throw new Error('The sample received a different archive.');
       }
-      if (Object.keys(projectManifest.overrides).length === 0) delete projectManifest.overrides;
     }
   }
+  if (!registry && Object.keys(projectManifest.overrides).length === 0) delete projectManifest.overrides;
   await writeFile(packagePath, `${JSON.stringify(packageManifest, null, 2)}\n`);
   await writeFile(projectPath, `${JSON.stringify(projectManifest, null, 2)}\n`);
   const args = restoreArguments ?? ['install', '--all'];
@@ -98,8 +98,8 @@ export function assertInternetPermission(module, requiresInternet) {
 
 export function consumerMode(flags) {
   if (flags.length > 1 || flags.some((flag) =>
-    !['--prepare', '--example', '--registry', '--compile-only'].includes(flag))) {
-    throw new Error('Usage: node tools/test-consumer.mjs [--prepare | --example | --registry | --compile-only]');
+    !['--prepare', '--example', '--registry', '--compile-only', '--dual'].includes(flag))) {
+    throw new Error('Usage: node tools/test-consumer.mjs [--prepare | --example | --registry | --compile-only | --dual]');
   }
   return flags[0] ?? '--verify';
 }
@@ -364,6 +364,126 @@ export async function verifyHarConsumer({
   }
 }
 
+export function assertDualHarArtifacts(artifacts) {
+  if (!Array.isArray(artifacts) || artifacts.length !== 2) {
+    throw new Error('Dual consumer requires the exact MySQL and PostgreSQL HAR pair.');
+  }
+  const expected = [
+    { driver: 'mysql', packageName: '@arkdb/mysql' },
+    { driver: 'pgsql', packageName: '@arkdb/postgres' }
+  ];
+  const ordered = expected.map(({ driver, packageName }) =>
+    artifacts.find((entry) => entry?.driver?.id === driver &&
+      entry?.identity?.driver === driver && entry?.manifest?.name === packageName &&
+      entry?.identity?.packageName === packageName));
+  if (ordered.some((entry) => entry === undefined)) {
+    throw new Error('Dual consumer requires the exact MySQL and PostgreSQL package identity pair.');
+  }
+  for (const entry of ordered) {
+    const identity = entry.identity;
+    const runtimeDependencies = identity.dependencies ?? {};
+    if (identity.delivery !== 'self-contained') {
+      throw new Error('Dual consumer accepts only self-contained driver HARs.');
+    }
+    if (!runtimeDependencies || typeof runtimeDependencies !== 'object' ||
+      Array.isArray(runtimeDependencies) || Object.keys(runtimeDependencies).length > 0 ||
+      !Array.isArray(identity.dependencyArtifacts) || identity.dependencyArtifacts.length > 0) {
+      throw new Error('Dual consumer HARs must not have external runtime dependencies.');
+    }
+    if (entry.manifest.version !== identity.version ||
+      !SHA256.test(identity.sha256 ?? '') || !Number.isSafeInteger(identity.byteLength) ||
+      identity.byteLength <= 0) {
+      throw new Error('Dual consumer HAR package identity or digest is inconsistent.');
+    }
+  }
+  return ordered;
+}
+
+export async function verifyDualHarConsumer({ root = ROOT } = {}, dependencies = {}) {
+  const getArtifact = dependencies.verifiedArtifact ?? verifiedArtifact;
+  const artifacts = await Promise.all(['mysql', 'pgsql'].map((driver) =>
+    getArtifact(root, driver)));
+  const ordered = assertDualHarArtifacts(artifacts);
+  const build = plainPath(root, join(root, 'build'), { allowMissing: true });
+  await mkdir(build, { recursive: true });
+  plainPath(root, build);
+  const workspace = await mkdtemp(join(build, 'dual-har-consumer-'));
+  try {
+    const consumer = join(root, 'examples', 'dual-har-client');
+    const generated = new Set(['build', '.hvigor', '.test', 'oh_modules', 'node_modules',
+      'BuildProfile.ets', 'oh-package-lock.json5', '.ohpmrc', '.npmrc', 'local.properties']);
+    await cp(consumer, workspace, {
+      recursive: true, filter: (file) => !generated.has(basename(file))
+    });
+    const testDependencies = [];
+    for (const file of [join(workspace, 'oh-package.json5'), join(workspace, 'entry', 'oh-package.json5')]) {
+      const config = JSON5.parse(await readFile(file, 'utf8'));
+      if (config.devDependencies !== undefined) {
+        testDependencies.push({ file, value: config.devDependencies });
+        delete config.devDependencies;
+        await writeFile(file, `${JSON.stringify(config, null, 2)}\n`);
+      }
+    }
+    const archives = ordered.map((entry) => ({
+      ...entry,
+      artifactPath: entry.artifact,
+      expectedSha256: entry.identity.sha256,
+      manifest: entry.identity
+    }));
+    const cache = join(workspace, '.ohpm-cache');
+    await prepareDependency(workspace, { archives }, false, dependencies, [
+      'install', '--all', '--cache', cache, '--registry', 'http://127.0.0.1:9'
+    ]);
+    const hap = await buildSample(workspace, dependencies, true);
+    const hapBytes = releaseFile(dirname(hap), basename(hap), MAX_RELEASE_ASSET_BYTES);
+    if (hapBytes.length === 0) throw new Error('Dual-HAR consumer HAP is empty.');
+    if (testDependencies.length > 0) {
+      for (const saved of testDependencies) {
+        const config = JSON5.parse(await readFile(saved.file, 'utf8'));
+        config.devDependencies = saved.value;
+        await writeFile(saved.file, `${JSON.stringify(config, null, 2)}\n`);
+      }
+      const restored = (dependencies.runOhpm ?? runOhpm)([
+        'install', '--all', '--cache', cache, '--registry', REGISTRY
+      ], { cwd: workspace });
+      if (restored.status !== 0 || /ohpm ERROR/.test(restored.output)) {
+        throw new Error('The dual-HAR test-framework restore failed.');
+      }
+    }
+    requireBuild((dependencies.runHvigor ?? runHvigor)([
+      '--mode', 'module', '-p', 'module=entry@default', '-p', 'product=default', 'test', '--no-daemon'
+    ], { cwd: workspace }), 'Dual-HAR offline runtime tests');
+    const report = await readFile(join(workspace, 'entry', '.test', 'default',
+      'intermediates', 'test', 'coverage_data', 'test_result.txt'), 'utf8');
+    const verdict = parseHypiumResults(report);
+    if (verdict.total !== 1 ||
+      !/^class=Dual standalone HAR identity boundaries\r?\ntest=keepsFactoryResultAndErrorIdentityPackageLocal\r?\nresult=Success\r?$/m.test(report)) {
+      throw new Error('Required dual-HAR identity case was not the sole passing test.');
+    }
+    for (const entry of ordered) {
+      if (sha256(releaseFile(dirname(entry.artifact), basename(entry.artifact),
+        MAX_RELEASE_ASSET_BYTES)) !== entry.identity.sha256) {
+        throw new Error('A dual-HAR candidate changed during consumer verification.');
+      }
+    }
+    const applicationHap = plainPath(build, join(build, `${basename(workspace)}.hap`), { allowMissing: true });
+    await writeFile(applicationHap, hapBytes, { flag: 'wx' });
+    return {
+      schemaVersion: 1,
+      packageIdentities: ordered.map((entry) => ({
+        driver: entry.driver.id, packageName: entry.identity.packageName,
+        version: entry.identity.version, sha256: entry.identity.sha256,
+        byteLength: entry.identity.byteLength
+      })),
+      localCases: verdict.total, localTestsExecuted: true,
+      sampleHapCompiled: true, applicationHap, applicationHapSha256: sha256(hapBytes),
+      workerRuntimeVerified: false, liveNetworkingVerified: false
+    };
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
 export function suppliedReference(manifest) {
   return {
     id: manifest.driver, packageName: manifest.packageName, version: manifest.version,
@@ -381,11 +501,22 @@ export function consumerArguments(argv) {
       selected = true;
     } else flags.push(argv[index]);
   }
-  return { driver, mode: consumerMode(flags) };
+  const mode = consumerMode(flags);
+  if (mode === '--dual' && selected) {
+    throw new Error('Usage: node tools/test-consumer.mjs [--prepare | --example | --registry | --compile-only | --dual]');
+  }
+  return { driver, mode };
 }
 
 export async function runConsumerCli(argv = process.argv.slice(2)) {
   const { driver, mode } = consumerArguments(argv);
+  if (mode === '--dual') {
+    const record = await verifyDualHarConsumer();
+    console.log(`Dual-HAR HAP compiled; ${record.localCases} required offline identity cases passed.`);
+    console.log(`Runtime HAP: ${record.applicationHap}\nSHA-256: ${record.applicationHapSha256}; Workers not executed.`);
+    console.log('Both exact local HARs were consumed; server compatibility and device certification remain unverified.');
+    return;
+  }
   const sources = await verifiedArtifactSet(ROOT, driver);
   const source = sources.at(-1);
   const supplied = sources.map((entry) => ({

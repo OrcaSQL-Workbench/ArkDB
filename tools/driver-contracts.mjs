@@ -105,6 +105,8 @@ export function checkDriverContracts(root = ROOT) {
       }
     }
   }
+  projects.push(checkIsolatedArkTsProject(root,
+    join(root, 'examples', 'dual-har-client')));
   for (let sourceIndex = 0; sourceIndex < projects.length; sourceIndex += 1) {
     const source = projects[sourceIndex];
     for (let targetIndex = 0; targetIndex < projects.length; targetIndex += 1) {

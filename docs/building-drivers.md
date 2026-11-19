@@ -10,7 +10,7 @@ Root `build-profile.json5`, each module's `module.json5`, and its tooling-only `
 npm run drivers
 ```
 
-The driver list contains `mysql` / `@arkdb/mysql` and the compile-verified `pgsql` / `@arkdb/postgres` skeleton; `core` / `@arkdb/core` is a shared dependency, not a driver. PostgreSQL protocol and networking are not implemented, so a successful `pgsql` package/consumer build is not runtime or release evidence. Selecting `core` or an unknown module as a driver fails before compilation.
+The driver list contains `mysql` / `@arkdb/mysql` and `pgsql` / `@arkdb/postgres`; `core` / `@arkdb/core` is a shared dependency, not a driver. PostgreSQL implements protocol and networking operations, but a successful `pgsql` package/consumer build is not live compatibility, device or release evidence. Selecting `core` or an unknown module as a driver fails before compilation.
 
 ## Select a driver
 
@@ -114,7 +114,7 @@ The API24 pipeline deliberately uses standard compilation of one generated SDK m
 
 The delivery route prepares one selected driver with shared code inside its HAR, then separately authorizes upload of the same bytes. The next tag, `mysql-v1.1.0`, must match clean reviewed source. This source does not recreate, move or overwrite `mysql-v1.0.1` or `mysql-v1.0.2`. Pushing a tag does not compile a HAR in Actions.
 
-Package identity and directory identity need not be identical. The current module named `pgsql` lives under `pgsql` and publishes the package identity `@arkdb/postgres`; its artifact name follows that package identity. It remains a compile-verified skeleton rather than a PostgreSQL protocol implementation.
+Package identity and directory identity need not be identical. The `pgsql` module lives under `pgsql`, uses the package identity `@arkdb/postgres`, and produces `build\pgsql-v1.0.0\arkdb-postgres-1.0.0-local.har`. Its independent `examples\postgres-client` consumer builds a host-owned Worker and the packaged README examples against the selected exact HAR. PostgreSQL 1.0.0 is unreleased; separate driver HAR coexistence and live-device compatibility are not established.
 
 To add a driver, implement its HAR/public entry, package/legal/usage files and contract suites, depend on core, and add its build registration and `arkdb-package.json` declaration. Its own consumer path, native dependency modules and Internet requirement drive verification; no MySQL-specific tool branch or MySQL implementation edit is required. See [driver contracts](driver-contracts.md). Generic packaging and the MySQL sample are not proof of another driver.
 

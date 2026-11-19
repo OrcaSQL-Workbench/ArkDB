@@ -5,14 +5,14 @@
 This is the engineering-preview source architecture for `@arkdb/mysql` 1.1.0 with
 `@arkdb/core` 1.1.0. The published `mysql-v1.0.1` and `mysql-v1.0.2` previews
 remain immutable standalone HARs; their tags and bytes are not changed by this
-release. `@arkdb/postgres` 1.0.0 is registered as a compile-verified skeleton;
-its runtime capabilities remain false and its operations remain unsupported.
+release. `@arkdb/postgres` 1.0.0 implements its own protocol and optional
+features but remains unreleased; local checks are not live/device validation.
 
 | Module | Owns |
 | --- | --- |
 | `core` / `@arkdb/core` | One runtime error identity, portable results and server information, minimal connections, optional capability interfaces, deadlines and HarmonyOS diagnostics |
 | `mysql` / `@arkdb/mysql` | MySQL options/TLS posture, wire protocol, authentication, native columns/server information, SQL, context aliases, control-session cancellation, opt-in statement deadlines, bounded prepared long-data upload and vendor metrics |
-| `pgsql` / `@arkdb/postgres` | PostgreSQL public configuration/result/error/factory skeleton, all-false capabilities and canonical Unsupported runtime behavior; no protocol or networking implementation |
+| `pgsql` / `@arkdb/postgres` | PostgreSQL configuration, protocol, authentication, TLS, results, streaming, transactions, cancellation and catalog metadata; no server metrics |
 | Driver-local `arkdb-package.json` | Tooling-only shared/driver classification and driver-owned verification declaration; not an OHPM schema extension |
 | `tools` | Dependency discovery, source/import constraints and exact-archive verification/distribution |
 
@@ -576,14 +576,14 @@ textual identifiers available through `nativeCode`.
 Native streaming converts portable events at the adapter seam: MySQL callbacks
 retain required warning/insert-id defaults, while `features.streaming` leaves
 unreported identifiers absent. The `ServerMetricsProvider` alias remains
-MySQL-specific. `ServerFamily.PostgreSQL` is a reserved compatibility value,
-not a database implementation or a core engine enum. Consumer applications
+MySQL-specific. `ServerFamily.PostgreSQL` is a legacy compatibility value,
+not the PostgreSQL implementation or a core engine enum. Consumer applications
 must still restore and rebuild dependencies when replacing their HAR;
 source compatibility is not a claim of binary interchangeability.
 
 Validation is split by evidence type. Node regressions check registration,
-dependency graphs and synthetic archive/release handling. Actual native suites
-compile and exercise the shared adapter and MySQL protocol/lifecycle behavior.
+dependency graphs and synthetic archive/release handling. Native suites
+compile and exercise the shared contracts and each selected driver's protocol/lifecycle behavior.
 The isolated consumer restores one exact HAR with an empty cache and unavailable
 registry, compiles packaged examples and the sample HAP, then separately restores
 test-only dependencies and checks driver-created error identity.
@@ -593,5 +593,6 @@ data literals against the original 1.0.1 HAR and the new one-file candidate.
 Native test launching first generates each HAR's current BuildProfile and refreshes the
 registered source directory's unit cache; it does not depend on IDE leftovers.
 Neither local mock networking nor these artifact checks establishes device
-interoperability, PostgreSQL support or a three-HAR MySQL/PostgreSQL application.
+interoperability, a PostgreSQL version compatibility matrix or simultaneous
+standalone MySQL/PostgreSQL HAR use.
 Do not reuse published 1.0.1 evidence as evidence for this architecture.

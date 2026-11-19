@@ -7,6 +7,19 @@ import { createDeliveryWorkspace, deliveryPlan } from '../delivery-workspace.mjs
 import { listFiles } from '../check-package.mjs';
 import { sourceFingerprint } from '../package-har.mjs';
 import { sharedReleaseFixture } from '../test-fixtures/har-release.mjs';
+import { ROOT } from './driver-packages.mjs';
+
+test('PostgreSQL delivery embeds only core and preserves its package and notices', () => {
+  const plan = deliveryPlan(ROOT, 'pgsql');
+
+  assert.deepEqual(plan.packages.map((entry) => entry.manifest.name),
+    ['@arkdb/core', '@arkdb/postgres']);
+  assert.equal(plan.manifest.name, '@arkdb/postgres');
+  assert.equal(plan.manifest.version, '1.0.0');
+  assert.deepEqual(plan.manifest.dependencies, {});
+  assert.equal(plan.definition.name, 'pgsql');
+  assert.ok(plan.notice.includes(Buffer.from('Bundled source package: @arkdb/core@1.1.0')));
+});
 
 test('stages one SDK module without changing shared sources or retaining a core dependency', async (t) => {
   const fixture = await sharedReleaseFixture(t);

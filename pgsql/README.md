@@ -1,64 +1,171 @@
 # @arkdb/postgres
 
-A headless ArkTS PostgreSQL HAR for HarmonyOS 6.1.1 / API 24, tablet and
-2in1.
+Native ArkTS PostgreSQL driver source for HarmonyOS 6.1.1 / API 24, tablet
+and 2in1. Version 1.0.0 is unreleased; a local HAR or passing local tests do
+not establish publication, production readiness, live compatibility, or
+physical-device certification.
 
-**Source status:** The 1.0.0 package provides PostgreSQL 3.0 startup/TLS
-connection lifecycle (`connect()`, `ping()`, `close()`), simple-query execution
-and result streaming (`query()`, `queryStream()`), and parameterized
-extended-query execution and `PortalSuspended` streaming via
-`connection.postgresFeatures.prepared` (`execute()` and `queryStream()`, with
-`PostgresQueryResultSummary` reporting `commandTag`, exact counts, and
-`affectedRowsKnown` for empty queries and safe-integer DML tags — early portal
-close bounds client row delivery without rolling back server DML), plus schema
-context switching (`changeContext()`), explicit and scoped transactions
-(`begin()`, `commit()`, `rollback()`, `postgresFeatures.transactions.run()`),
-and protocol `CancelRequest` cancellation and `QueryOptions.statementTimeoutMs`
-statement deadlines with bounded cancellation-grace convergence and
-unknown-outcome retirement (`cancel()`, `isInterruptionError()`,
-`features.cancellation`), and parameterized `pg_catalog` metadata inspection
-(`features.metadata` across catalogs, schemas, tables, views, routines,
-triggers, columns, indexes, and foreign keys, with `supportsSsl`,
-`supportsCatalogs`, `supportsSchemas`, `supportsTransactions`,
-`supportsMultipleResults`, `supportsStreamingResults`,
-`supportsPreparedStatements`, `supportsGracefulCancel`, and `supportsMetadata`
-enabled). Server metrics remain unimplemented (`ArkDbErrorKind.Unsupported`).
+The source implements PostgreSQL protocol 3.0 connection startup, TCP/TLS,
+authentication, simple and parameterized queries, bounded streaming,
+transactions, schema context, cancellation and catalog metadata. Server
+metrics and pooling are not implemented. See [operational limits](#operational-limits)
+before integrating.
 
-The package depends on `@arkdb/core` 1.1.0 in the source workspace. Driver
-delivery will compile the selected source dependency closure into one
-self-contained `@arkdb/postgres` HAR. Consumers do not install a separate core
-HAR.
+## Packaging and execution
 
-`PostgresConnectionConfig` defaults to port 5432, application name `arkdb`,
-10-second connection timeout, and `PostgresSslMode.VERIFY_FULL`. Passwords are
-passed separately through transient `PostgresConnectionOptions`.
+The `pgsql` build selector produces one self-contained `@arkdb/postgres` HAR
+with core 1.1.0 embedded; consumers do not install a separate core HAR.
+Build and verify a local candidate with:
 
-## Compile-only skeleton usage
+```powershell
+npm run pack -- --driver pgsql
+npm run test:consumer -- --driver pgsql
+```
 
-The factory constructs an idle connection that can be closed offline; calling
-querying, streaming, prepared execution, metadata inspection, or health checks
-before `connect()` rejects with `ArkDbErrorKind.Protocol`, calling `cancel()`
-while idle resolves `CancellationOutcome.NotRunning`, and unimplemented server
-metrics remain `undefined` (`supportsServerMetrics === false`).
+The candidate is `build\pgsql-v1.0.0\arkdb-postgres-1.0.0-local.har`.
+Install the selected HAR in the application and import from
+`@arkdb/postgres`. The host must declare `ohos.permission.INTERNET` and own
+its Worker and lifecycle; the driver does not create or manage a Worker.
+The [independent sample](../examples/postgres-client/README.md) compiles
+against the exact HAR and uses a host-owned Worker. Separate MySQL and
+PostgreSQL HAR coexistence is not established.
 
-<!-- arkts-example: skeleton -->
+## Connect and query
+
+Use a server name matching its certificate. `VERIFY_FULL` is the default;
+set `caCertPath` to a trusted CA PEM path when needed. The options carry the
+password separately, and the connection snapshots the configuration. If
+`database` is omitted or empty, it defaults to the user name.
+
+<!-- arkts-example: connect-query -->
 ```typescript
 import {
-  PostgresConnection, PostgresConnectionConfig, PostgresConnectionOptions,
-  PostgresDriverFactory
+  PostgresConnectionConfig, PostgresConnectionOptions, PostgresDriverFactory,
+  PostgresQueryResult, PostgresSslMode
 } from '@arkdb/postgres';
 
-export function createPostgresSkeleton(host: string, user: string,
-  password: string): PostgresConnection {
+export class QueryAndCloseFailure extends Error {
+  operationFailure: Object;
+  closeFailure: Object;
+  constructor(operationFailure: Object, closeFailure: Object) {
+    super('Query and connection cleanup both failed.');
+    this.operationFailure = operationFailure;
+    this.closeFailure = closeFailure;
+  }
+}
+
+export async function readVersion(host: string, user: string, password: string,
+  database: string, caPath: string): Promise<PostgresQueryResult> {
   const config = new PostgresConnectionConfig();
   config.host = host;
   config.user = user;
-  return new PostgresDriverFactory().create(
+  config.database = database;
+  config.ssl.mode = PostgresSslMode.VERIFY_FULL;
+  if (caPath.length > 0) config.ssl.caCertPath = caPath;
+  const errors = config.validate();
+  if (errors.length > 0) throw errors[0];
+  const connection = new PostgresDriverFactory().create(
     new PostgresConnectionOptions(config, password));
+  let result: PostgresQueryResult | null = null;
+  let operationFailure: Object | null = null;
+  let closeFailure: Object | null = null;
+  try {
+    await connection.connect();
+    result = await connection.query('SELECT version()');
+  } catch (error) {
+    operationFailure = error as Object;
+  }
+  try { await connection.close(); } catch (error) { closeFailure = error as Object; }
+  if (operationFailure !== null && closeFailure !== null) {
+    throw new QueryAndCloseFailure(operationFailure, closeFailure);
+  }
+  if (operationFailure !== null) throw operationFailure as Error;
+  if (closeFailure !== null) throw closeFailure as Error;
+  if (result === null) throw new Error('Query completed without a result.');
+  return result;
 }
 ```
 
-The module is registered in the root workspace with an independent
-`examples/postgres-client` consumer. That consumer verifies package compilation,
-the shared `ArkDbError` identity and the canonical Unsupported result without
-performing network I/O.
+`query()` accepts SQL text, not parameters. Use prepared execution for
+untrusted values; placeholders are `$1`, `$2`, etc. Identifiers cannot be
+bound as values: use `quotePostgresIdentifier()` for identifier components.
+
+<!-- arkts-example: prepared-stream -->
+```typescript
+import {
+  ArkDbError, PostgresConnection, PostgresParameter, PostgresParameterType,
+  QueryExecutionSummary, QueryOptions, QueryResultSink
+} from '@arkdb/postgres';
+
+export async function streamById(connection: PostgresConnection, id: number,
+  sink: QueryResultSink): Promise<QueryExecutionSummary> {
+  const prepared = connection.postgresFeatures.prepared;
+  if (prepared === undefined) throw ArkDbError.unsupported('Prepared execution unavailable.');
+  const options = new QueryOptions();
+  options.maxRows = 100;
+  options.maxChunkRows = 20;
+  options.maxChunkBytes = 64 * 1024;
+  options.maxResultBytes = 1024 * 1024;
+  options.statementTimeoutMs = 15000;
+  return prepared.queryStream('SELECT $1::int4 AS id',
+    [new PostgresParameter(PostgresParameterType.Int4, id)], options, sink);
+}
+```
+
+The caller supplies a sink and owns connection setup and cleanup. Sink callbacks
+are awaited; avoid retaining unbounded rows. Inspect truncation and execution
+summaries rather than assuming all rows were delivered.
+
+## Transactions
+
+The scoped runner commits on success and rolls back on failure. Use the
+provided session inside the callback, and do not retain it after the callback.
+The caller remains responsible for closing the connection.
+
+<!-- arkts-example: transaction -->
+```typescript
+import {
+  ArkDbError, PostgresConnection, PostgresSession, PostgresTransactionOptions
+} from '@arkdb/postgres';
+
+export async function runReadOnly(connection: PostgresConnection): Promise<void> {
+  const transactions = connection.postgresFeatures.transactions;
+  if (transactions === undefined) throw ArkDbError.unsupported('Transactions unavailable.');
+  const options = new PostgresTransactionOptions();
+  options.readOnly = true;
+  await transactions.run<void>(options, async (session: PostgresSession): Promise<void> => {
+    await session.query('SELECT 1');
+  });
+}
+```
+
+## Operational limits
+
+- TLS defaults to `VERIFY_FULL`, verifying the certificate chain and hostname.
+  `VERIFY_CA` verifies the chain without hostname verification; `REQUIRED`
+  encrypts without authenticating the server; `DISABLED` is plaintext. There
+  is no silent TLS downgrade. Client certificate and key must be supplied
+  together. Cleartext-password authentication requires explicit opt-in and
+  active `VERIFY_FULL` TLS; use trusted credentials and avoid logging them.
+- Simple query and prepared execution return PostgreSQL-native results and
+  columns. `int8` values are `bigint`, `numeric` and temporal values remain
+  text, and `bytea` is bytes. Multiple simple-query results appear in
+  `additionalResults`. Query columns do not automatically include enriched
+  catalog metadata.
+- A connection serializes command ownership; do not overlap queries. Simple
+  streaming drains remaining server messages after truncation within configured
+  limits; prepared streaming may close its portal early. Early portal close
+  limits delivered rows, not server-side DML effects. Unknown synchronization
+  retires the connection rather than making it reusable.
+- `cancel()` dispatches a separate PostgreSQL CancelRequest; dispatch alone
+  does not prove that the server interrupted the original operation. Await the
+  original operation and inspect its error and connection state. A nonzero
+  `statementTimeoutMs` applies to streaming and prepared execution, not
+  `query()`; timeout and cancellation can leave an unknown outcome.
+- `changeContext()` changes schema search path; changing databases requires a
+  new connection. Metadata covers catalogs, schemas, tables/views, columns,
+  routines, triggers, indexes and foreign keys, subject to server privileges;
+  events and server metrics are unsupported.
+- Local mock tests and exact-HAR compilation do not establish PostgreSQL
+  version compatibility, live TLS/cancellation behavior, signed-device
+  validation, or physical hardware certification.

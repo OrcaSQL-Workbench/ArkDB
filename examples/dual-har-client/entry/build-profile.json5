@@ -1,5 +1,13 @@
 {
   "apiType": "stageMode",
+  "buildOption": {
+    "sourceOption": {
+      "workers": [
+        "./src/main/ets/workers/mysql.worker.ets",
+        "./src/main/ets/workers/postgres.worker.ets"
+      ]
+    }
+  },
   "targets": [
     { "name": "default" }
   ]

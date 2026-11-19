@@ -117,7 +117,10 @@ test('dual-HAR verification stages both exact archives and removes its temporary
         mkdirSync(dirname(module), { recursive: true });
         writeFileSync(module, '{"module":{"requestPermissions":[{"name":"ohos.permission.INTERNET"}]}}');
         const profile = JSON.parse(readFileSync(join(options.cwd, 'entry', 'build-profile.json5'), 'utf8'));
-        assert.deepEqual(profile.buildOption?.sourceOption?.workers ?? [], []);
+        assert.deepEqual(profile.buildOption?.sourceOption?.workers, [
+          './src/main/ets/workers/mysql.worker.ets',
+          './src/main/ets/workers/postgres.worker.ets'
+        ]);
       } else {
         const report = join(options.cwd, 'entry', '.test', 'default', 'intermediates',
           'test', 'coverage_data', 'test_result.txt');

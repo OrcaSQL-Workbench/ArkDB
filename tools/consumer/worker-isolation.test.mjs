@@ -1,0 +1,121 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import vm from 'node:vm';
+import ts from 'typescript';
+
+function createIsolationRuntime({
+  selfExitAfter, noShutdownAck = false, shutdownReply = 'shutdown-complete',
+  exitCode = 0, failPost = false, failTerminate = false
+} = {}) {
+  const workers = [];
+  class ThreadWorker {
+    constructor(path) {
+      this.path = path;
+      this.messages = [];
+      this.probes = 0;
+      this.terminationCalls = 0;
+      workers.push(this);
+    }
+
+    postMessage(message) {
+      if (message === 'shutdown' && failPost) throw new Error('post failed');
+      this.messages.push(message);
+      if (message === 'shutdown') {
+        if (noShutdownAck) return;
+        queueMicrotask(() => {
+          this.onmessage({ data: shutdownReply });
+          this.onexit(exitCode);
+        });
+        return;
+      }
+
+      this.probes++;
+      const driver = this.path.includes('mysql') ? 'mysql' : 'pgsql';
+      queueMicrotask(() => {
+        this.onmessage({ data: `${driver}:local-error:${this.probes}` });
+        if (selfExitAfter?.path === driver && selfExitAfter.probes === this.probes) {
+          queueMicrotask(() => this.onexit(0));
+        }
+      });
+    }
+
+    terminate() {
+      this.terminationCalls++;
+      if (failTerminate) throw new Error('terminate failed');
+      queueMicrotask(() => this.onexit(exitCode));
+    }
+  }
+  class MySqlResult {}
+  class PostgresResult {}
+  class MySqlError { static server() { return new MySqlError(); } }
+  class PostgresError { static server() { return new PostgresError(); } }
+
+  const file = new URL('../../examples/dual-har-client/entry/src/main/ets/WorkerIsolation.ets', import.meta.url);
+  const source = readFileSync(file, 'utf8')
+    .replace(/import\s*\{[^}]*\}\s*from\s*['"][^'"]+['"];?/g, '') +
+    '\nexport { verifyWorkerIsolation };';
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS }
+  }).outputText;
+  const api = {};
+  vm.runInNewContext(compiled, {
+    exports: api,
+    worker: { ThreadWorker },
+    MySqlError,
+    MySqlResult,
+    PostgresError,
+    PostgresResult,
+    Error,
+    Promise,
+    setTimeout: (callback) => setTimeout(callback, 30),
+    clearTimeout,
+    queueMicrotask
+  });
+  return { workers, verifyWorkerIsolation: api.verifyWorkerIsolation };
+}
+
+test('Workers keep package-local responses and state, and acknowledge host shutdown', async () => {
+  const runtime = createIsolationRuntime();
+  await runtime.verifyWorkerIsolation();
+
+  assert.deepEqual(runtime.workers.map((worker) => worker.path), [
+    'entry/ets/workers/mysql.worker.ets',
+    'entry/ets/workers/postgres.worker.ets',
+    'entry/ets/workers/mysql.worker.ets'
+  ]);
+  assert.deepEqual(runtime.workers.map((worker) => worker.messages), [
+    ['offline-probe', 'offline-probe', 'shutdown'],
+    ['offline-probe', 'offline-probe', 'shutdown'],
+    ['offline-probe', 'shutdown']
+  ]);
+});
+
+test('a queued zero exit after the final response cannot acknowledge shutdown', async () => {
+  const runtime = createIsolationRuntime({
+    selfExitAfter: { path: 'mysql', probes: 2 }
+  });
+
+  await assert.rejects(runtime.verifyWorkerIsolation(), /Unexpected Worker exit/);
+});
+
+test('shutdown accepts only its acknowledgement followed by a zero-code exit', async () => {
+  const abnormal = createIsolationRuntime({ exitCode: 1 });
+  await assert.rejects(abnormal.verifyWorkerIsolation(), /Unexpected Worker exit/);
+
+  const wrongReply = createIsolationRuntime({ shutdownReply: 'incorrect' });
+  await assert.rejects(wrongReply.verifyWorkerIsolation(), /Unexpected Worker exit/);
+});
+
+test('a stalled shutdown terminates the Worker and reports failure', async () => {
+  const runtime = createIsolationRuntime({ noShutdownAck: true });
+
+  await assert.rejects(runtime.verifyWorkerIsolation(), /exit/i);
+  assert.equal(runtime.workers[0].terminationCalls, 1);
+});
+
+test('failed shutdown request reports request and termination failures', async () => {
+  const runtime = createIsolationRuntime({ failPost: true, failTerminate: true });
+
+  await assert.rejects(runtime.verifyWorkerIsolation(), /post failed.*termination failed.*terminate failed/i);
+});

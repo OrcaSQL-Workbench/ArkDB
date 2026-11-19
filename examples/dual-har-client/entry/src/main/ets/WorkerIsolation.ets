@@ -2,12 +2,19 @@ import { worker } from '@kit.ArkTS';
 import { ArkDbError as MySqlError, QueryResult as MySqlResult } from '@arkdb/mysql';
 import { ArkDbError as PostgresError, QueryResult as PostgresResult } from '@arkdb/postgres';
 
+let workerIsolationRetryBlocked: boolean = false;
+
+export function isWorkerIsolationRetryBlocked(): boolean {
+  return workerIsolationRetryBlocked;
+}
+
 class Probe {
   readonly instance: worker.ThreadWorker;
   readonly exit: Promise<void>;
   shutdownAcknowledged: boolean = false;
   finished: boolean = false;
   failure: string = '';
+  stopPromise: Promise<void> | null = null;
 
   constructor(path: string) {
     this.instance = new worker.ThreadWorker(path);
@@ -34,7 +41,12 @@ function exchange(probe: Probe, expected: string): Promise<void> {
     instance.onmessage = (event): void => {
       clearTimeout(timer);
       if (event.data === expected) resolve();
-      else reject(new Error('Unexpected Worker response: ' + String(event.data)));
+      else {
+        if (probe.failure.length === 0) {
+          probe.failure = 'Unexpected Worker response: ' + String(event.data);
+        }
+        reject(new Error(probe.failure));
+      }
     };
     instance.onerror = (): void => {
       probe.failure = 'Worker execution failed: ' + expected;
@@ -54,15 +66,30 @@ function exchange(probe: Probe, expected: string): Promise<void> {
 }
 
 function stop(probe: Probe): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+  if (probe.stopPromise !== null) return probe.stopPromise;
+  probe.stopPromise = new Promise<void>((resolve, reject) => {
     const abort = (reason: Error): void => {
-      try {
-        if (!probe.finished) probe.instance.terminate();
-      } catch (error) {
-        reject(new Error(reason.message + '; Worker termination failed: ' + String(error)));
+      if (probe.failure.length === 0) probe.failure = reason.message;
+      if (probe.finished) {
+        reject(new Error(probe.failure));
         return;
       }
-      reject(reason);
+      try {
+        probe.instance.terminate();
+      } catch (error) {
+        workerIsolationRetryBlocked = true;
+        reject(new Error(probe.failure + '; Worker termination failed: ' + String(error) +
+          '; Worker exit remains unconfirmed.'));
+        return;
+      }
+      const terminationTimer = setTimeout((): void => {
+        workerIsolationRetryBlocked = true;
+        reject(new Error(probe.failure + '; Worker exit was not confirmed after termination.'));
+      }, 5000);
+      probe.exit.then((): void => {
+        clearTimeout(terminationTimer);
+        reject(new Error(probe.failure));
+      });
     };
     const timer = setTimeout((): void => abort(new Error('Worker exit was not confirmed.')), 5000);
     probe.exit.then((): void => {
@@ -86,9 +113,13 @@ function stop(probe: Probe): Promise<void> {
       }
     }
   });
+  return probe.stopPromise;
 }
 
 export async function verifyWorkerIsolation(): Promise<void> {
+  if (workerIsolationRetryBlocked) {
+    throw new Error('A previous Worker exit is unconfirmed. Restart the app before retrying.');
+  }
   if (new MySqlResult() instanceof PostgresResult || new PostgresResult() instanceof MySqlResult ||
     MySqlError.server('identity probe') instanceof PostgresError ||
     PostgresError.server('identity probe') instanceof MySqlError) {

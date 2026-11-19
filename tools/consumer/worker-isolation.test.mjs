@@ -7,16 +7,25 @@ import ts from 'typescript';
 function createIsolationRuntime({
   selfExitAfter, noShutdownAck = false, shutdownReply = 'shutdown-complete',
   exitCode = 0, failPost = false, failTerminate = false, shutdownMessageError = false,
-  shutdownReplies, failPostFor, failTerminateFor, noShutdownAckFor
+  shutdownReplies, failPostFor, failTerminateFor, noShutdownAckFor, lateProbeReplyAfterValid = false,
+  terminateDelayMs = 0
 } = {}) {
   const workers = [];
+  let resolveTermination;
+  const terminationRequested = new Promise((resolve) => { resolveTermination = resolve; });
   class ThreadWorker {
     constructor(path) {
       this.path = path;
       this.messages = [];
       this.probes = 0;
       this.terminationCalls = 0;
+      this.exited = false;
       workers.push(this);
+    }
+
+    emitExit(code) {
+      this.exited = true;
+      this.onexit(code);
     }
 
     postMessage(message) {
@@ -28,7 +37,7 @@ function createIsolationRuntime({
         queueMicrotask(() => {
           if (shutdownMessageError) this.onmessageerror({});
           for (const reply of shutdownReplies ?? [shutdownReply]) this.onmessage({ data: reply });
-          this.onexit(exitCode);
+          this.emitExit(exitCode);
         });
         return;
       }
@@ -37,18 +46,21 @@ function createIsolationRuntime({
       const driver = this.path.includes('mysql') ? 'mysql' : 'pgsql';
       queueMicrotask(() => {
         this.onmessage({ data: `${driver}:local-error:${this.probes}` });
+        if (lateProbeReplyAfterValid) this.onmessage({ data: 'unexpected-late-reply' });
         if (selfExitAfter?.path === driver && selfExitAfter.probes === this.probes) {
-          queueMicrotask(() => this.onexit(0));
+          queueMicrotask(() => this.emitExit(0));
         }
       });
     }
 
     terminate() {
       this.terminationCalls++;
+      resolveTermination();
       if (failTerminate || (failTerminateFor && this.path.includes(failTerminateFor))) {
         throw new Error('terminate failed');
       }
-      queueMicrotask(() => this.onexit(exitCode));
+      if (terminateDelayMs > 0) setTimeout(() => this.emitExit(exitCode), terminateDelayMs);
+      else queueMicrotask(() => this.emitExit(exitCode));
     }
   }
   class MySqlResult {}
@@ -59,7 +71,7 @@ function createIsolationRuntime({
   const file = new URL('../../examples/dual-har-client/entry/src/main/ets/WorkerIsolation.ets', import.meta.url);
   const source = readFileSync(file, 'utf8')
     .replace(/import\s*\{[^}]*\}\s*from\s*['"][^'"]+['"];?/g, '') +
-    '\nexport { verifyWorkerIsolation };';
+    '\nexport { isWorkerIsolationRetryBlocked, verifyWorkerIsolation };';
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS }
   }).outputText;
@@ -77,7 +89,12 @@ function createIsolationRuntime({
     clearTimeout,
     queueMicrotask
   });
-  return { workers, verifyWorkerIsolation: api.verifyWorkerIsolation };
+  return {
+    workers,
+    isWorkerIsolationRetryBlocked: api.isWorkerIsolationRetryBlocked,
+    terminationRequested,
+    verifyWorkerIsolation: api.verifyWorkerIsolation
+  };
 }
 
 test('Workers keep package-local responses and state, and acknowledge host shutdown', async () => {
@@ -126,11 +143,34 @@ test('an unexpected shutdown reply cannot be cleared by a later acknowledgement'
   await assert.rejects(runtime.verifyWorkerIsolation(), /Unexpected Worker shutdown response/i);
 });
 
+test('a late invalid probe reply after a valid response remains fatal', async () => {
+  const runtime = createIsolationRuntime({ lateProbeReplyAfterValid: true });
+
+  await assert.rejects(runtime.verifyWorkerIsolation(), /Unexpected Worker response/i);
+});
+
 test('a stalled shutdown terminates the Worker and reports failure', async () => {
-  const runtime = createIsolationRuntime({ noShutdownAck: true });
+  const runtime = createIsolationRuntime({ noShutdownAck: true, terminateDelayMs: 10 });
 
   await assert.rejects(runtime.verifyWorkerIsolation(), /exit/i);
   assert.equal(runtime.workers[0].terminationCalls, 1);
+  assert.ok(runtime.workers.every((worker) => worker.exited));
+});
+
+test('an unconfirmed forced exit blocks another Worker verification', async () => {
+  const runtime = createIsolationRuntime({ noShutdownAck: true, terminateDelayMs: 100 });
+  const verification = runtime.verifyWorkerIsolation();
+  let settled = false;
+  verification.catch(() => { settled = true; });
+
+  await runtime.terminationRequested;
+  assert.equal(settled, false);
+  await assert.rejects(verification, /exit was not confirmed after termination/i);
+  assert.equal(runtime.isWorkerIsolationRetryBlocked(), true);
+
+  const workerCount = runtime.workers.length;
+  await assert.rejects(runtime.verifyWorkerIsolation(), /restart the app before retrying/i);
+  assert.equal(runtime.workers.length, workerCount);
 });
 
 test('failed shutdown request reports request and termination failures', async () => {

@@ -30,7 +30,11 @@ state, host-to-Worker and Worker-to-host messages, replacement of a stopped
 Worker while the other continues, and host-requested shutdown acknowledged by
 the Worker before a zero-code exit. `P27_WORKERS_PASS` is emitted only after
 these checks; a queued unsolicited exit without the shutdown acknowledgement is
-a failure. The dual-consumer Node suite also tests that no-delay exit regression.
+a failure. Late invalid replies also fail the probe. Shutdown waits for exit
+confirmation after forced termination; if exit remains unconfirmed, the app
+blocks retries until restart to avoid overlapping Worker generations. The
+dual-consumer Node suite also tests these failure paths and the no-delay exit
+regression.
 
 For device evidence, use only a successful `Runtime HAP` path and verify its
 SHA-256 before installation. Require `install bundle successfully`, start

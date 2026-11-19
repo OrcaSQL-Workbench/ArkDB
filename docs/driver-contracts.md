@@ -500,7 +500,9 @@ unconnected-query failure. This establishes only compilation and offline
 package-identity behavior for those artifacts and this local toolchain.
 P27B's fresh API-24 emulator run is intended to verify Worker message delivery
 and package-local errors, state isolation, replacement, and acknowledged
-shutdown. Until that run is captured from the exact digest-bound HAP,
+shutdown. Unexpected and late messages remain fatal, and shutdown cleanup waits
+for every Worker exit; if forced exit cannot be confirmed, the example blocks
+retries until restart. Until that run is captured from the exact digest-bound HAP,
 compilation and offline package-identity checks do not establish runtime Worker
 behavior. No check establishes system-wide constructor identity or live
 server/device compatibility. Source composition includes core once for all

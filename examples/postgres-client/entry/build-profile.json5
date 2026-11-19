@@ -1,9 +1,9 @@
 {
   "apiType": "stageMode",
   "buildOption": {
-    "removePermissions": [
-      { "name": "ohos.permission.INTERNET" }
-    ]
+    "sourceOption": {
+      "workers": ["./src/main/ets/workers/postgres.worker.ets"]
+    }
   },
   "targets": [
     { "name": "default" }

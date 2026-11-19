@@ -63,6 +63,8 @@ test('preserves exact core, consumer and acceptance suite registrations', () => 
   const acceptance = checkArkTsTests(
     ROOT, 'examples/mysql-device-acceptance/entry/src/test',
     'mysql-device-acceptance');
+  const postgresConsumer = checkArkTsTests(
+    ROOT, 'examples/postgres-client/entry/src/test', 'postgres-client');
 
   assert.deepEqual(
     [core.testSuites, core.testCases, core.testOwners],
@@ -75,6 +77,10 @@ test('preserves exact core, consumer and acceptance suite registrations', () => 
   assert.deepEqual(
     [acceptance.testSuites, acceptance.testCases, acceptance.testOwners],
     [3, 14, ['acceptance', 'evidence']]
+  );
+  assert.deepEqual(
+    [postgresConsumer.testSuites, postgresConsumer.testCases, postgresConsumer.testOwners],
+    [2, 8, ['consumer', 'sample']]
   );
 });
 

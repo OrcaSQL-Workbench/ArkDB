@@ -816,7 +816,8 @@ test('R12 tests use explicit production, fixture, consumer and acceptance owners
     'examples/mysql-device-acceptance/entry/src/test/acceptance/DeviceAcceptanceRunner.test.ets',
     'examples/mysql-device-acceptance/entry/src/test/evidence/DeviceReceiptClipboard.test.ets',
     'examples/mysql-device-acceptance/entry/src/test/evidence/DeviceReceiptSigner.test.ets',
-    'examples/postgres-client/entry/src/test/consumer/PublicInterface.test.ets'
+    'examples/postgres-client/entry/src/test/consumer/PublicInterface.test.ets',
+    'examples/postgres-client/entry/src/test/sample/SampleRunner.test.ets'
   ];
   const forbidden = [
     'core/src/test/ReferenceAdapter.ets',

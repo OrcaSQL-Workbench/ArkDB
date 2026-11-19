@@ -9,15 +9,15 @@ import {
 } from '@arkdb/postgres';
 
 export default function publicInterfaceTest(): void {
-  describe('Published PostgreSQL skeleton consumer interface', () => {
-    it('usesCanonicalUnsupportedIdentityWithoutNetworking', 0, async () => {
+  describe('Published PostgreSQL consumer interface', () => {
+    it('preservesCanonicalContractsAndCapabilitiesOffline', 0, async () => {
       const config = new PostgresConnectionConfig();
       config.host = 'offline.invalid';
       config.user = 'consumer';
       const factory = new PostgresDriverFactory();
       const connection = factory.create(new PostgresConnectionOptions(config, 'secret'));
       expect(factory.driverId).assertEqual('pgsql');
-      expectAllCapabilitiesFalse(factory.capabilities);
+      expectImplementedCapabilities(factory.capabilities);
       expect(connection.features.streaming !== undefined).assertTrue();
       expect(connection.features.context !== undefined).assertTrue();
       const policy = connection.contextPolicy;
@@ -81,7 +81,7 @@ async function expectUnconnectedProtocol(op: () => Promise<void>): Promise<void>
     failure.message === 'PostgreSQL connection is not connected.').assertTrue();
 }
 
-function expectAllCapabilitiesFalse(capabilities: PostgresDriverCapabilities): void {
+function expectImplementedCapabilities(capabilities: PostgresDriverCapabilities): void {
   expect(capabilities.supportsSsl).assertTrue();
   expect(capabilities.supportsCatalogs).assertTrue();
   expect(capabilities.supportsSchemas).assertTrue();

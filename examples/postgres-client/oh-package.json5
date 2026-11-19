@@ -1,6 +1,6 @@
 {
   "modelVersion": "6.1.1",
-  "description": "Compile-only ArkDB PostgreSQL skeleton consumer",
+  "description": "Independent ArkDB PostgreSQL HAR consumer",
   "dependencies": {},
   "devDependencies": {
     "@ohos/hypium": "1.0.25"

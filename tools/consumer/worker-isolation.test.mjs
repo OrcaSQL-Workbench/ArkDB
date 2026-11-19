@@ -6,7 +6,8 @@ import ts from 'typescript';
 
 function createIsolationRuntime({
   selfExitAfter, noShutdownAck = false, shutdownReply = 'shutdown-complete',
-  exitCode = 0, failPost = false, failTerminate = false, shutdownMessageError = false
+  exitCode = 0, failPost = false, failTerminate = false, shutdownMessageError = false,
+  shutdownReplies, failPostFor, failTerminateFor, noShutdownAckFor
 } = {}) {
   const workers = [];
   class ThreadWorker {
@@ -19,13 +20,14 @@ function createIsolationRuntime({
     }
 
     postMessage(message) {
-      if (message === 'shutdown' && failPost) throw new Error('post failed');
+      if (message === 'shutdown' &&
+        (failPost || (failPostFor && this.path.includes(failPostFor)))) throw new Error('post failed');
       this.messages.push(message);
       if (message === 'shutdown') {
-        if (noShutdownAck) return;
+        if (noShutdownAck || (noShutdownAckFor && this.path.includes(noShutdownAckFor))) return;
         queueMicrotask(() => {
           if (shutdownMessageError) this.onmessageerror({});
-          this.onmessage({ data: shutdownReply });
+          for (const reply of shutdownReplies ?? [shutdownReply]) this.onmessage({ data: reply });
           this.onexit(exitCode);
         });
         return;
@@ -43,7 +45,9 @@ function createIsolationRuntime({
 
     terminate() {
       this.terminationCalls++;
-      if (failTerminate) throw new Error('terminate failed');
+      if (failTerminate || (failTerminateFor && this.path.includes(failTerminateFor))) {
+        throw new Error('terminate failed');
+      }
       queueMicrotask(() => this.onexit(exitCode));
     }
   }
@@ -105,13 +109,21 @@ test('shutdown accepts only its acknowledgement followed by a zero-code exit', a
   await assert.rejects(abnormal.verifyWorkerIsolation(), /Unexpected Worker exit/);
 
   const wrongReply = createIsolationRuntime({ shutdownReply: 'incorrect' });
-  await assert.rejects(wrongReply.verifyWorkerIsolation(), /Unexpected Worker exit/);
+  await assert.rejects(wrongReply.verifyWorkerIsolation(), /Unexpected Worker shutdown response/);
 });
 
 test('shutdown decoding errors cannot be cleared by a later acknowledgement', async () => {
   const runtime = createIsolationRuntime({ shutdownMessageError: true });
 
   await assert.rejects(runtime.verifyWorkerIsolation(), /message decoding failed/i);
+});
+
+test('an unexpected shutdown reply cannot be cleared by a later acknowledgement', async () => {
+  const runtime = createIsolationRuntime({
+    shutdownReplies: ['incorrect', 'shutdown-complete']
+  });
+
+  await assert.rejects(runtime.verifyWorkerIsolation(), /Unexpected Worker shutdown response/i);
 });
 
 test('a stalled shutdown terminates the Worker and reports failure', async () => {
@@ -125,4 +137,20 @@ test('failed shutdown request reports request and termination failures', async (
   const runtime = createIsolationRuntime({ failPost: true, failTerminate: true });
 
   await assert.rejects(runtime.verifyWorkerIsolation(), /post failed.*termination failed.*terminate failed/i);
+});
+
+test('cleanup waits for every Worker stop attempt before reporting failures', async () => {
+  const runtime = createIsolationRuntime({
+    failPostFor: 'mysql',
+    failTerminateFor: 'mysql',
+    noShutdownAckFor: 'postgres'
+  });
+  const verification = runtime.verifyWorkerIsolation();
+  let settled = false;
+  verification.catch(() => { settled = true; });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  await assert.rejects(verification, /post failed.*termination failed.*terminate failed/i);
+  assert.equal(runtime.workers[1].terminationCalls, 1);
 });

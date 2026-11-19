@@ -15,7 +15,9 @@ class Probe {
     this.exit = new Promise<void>((resolve) => {
       this.instance.onexit = (code: number): void => {
         this.finished = true;
-        if (!this.shutdownAcknowledged || code !== 0) this.failure = 'Unexpected Worker exit: ' + code;
+        if ((!this.shutdownAcknowledged || code !== 0) && this.failure.length === 0) {
+          this.failure = 'Unexpected Worker exit: ' + code;
+        }
         resolve();
       };
     });
@@ -71,6 +73,9 @@ function stop(probe: Probe): Promise<void> {
     if (!probe.finished) {
       probe.instance.onmessage = (event): void => {
         if (event.data === 'shutdown-complete' && !probe.finished) probe.shutdownAcknowledged = true;
+        else if (probe.failure.length === 0) {
+          probe.failure = 'Unexpected Worker shutdown response: ' + String(event.data);
+        }
       };
       probe.instance.onmessageerror = (): void => {
         if (probe.failure.length === 0) probe.failure = 'Worker shutdown message decoding failed.';
@@ -109,6 +114,10 @@ export async function verifyWorkerIsolation(): Promise<void> {
       exchange(postgres, 'pgsql:local-error:2')
     ]);
   } finally {
-    await Promise.all(active.map((probe: Probe): Promise<void> => stop(probe)));
+    const cleanupFailures: string[] = [];
+    await Promise.all(active.map(async (probe: Probe): Promise<void> => {
+      try { await stop(probe); } catch (error) { cleanupFailures.push(String(error)); }
+    }));
+    if (cleanupFailures.length > 0) throw new Error(cleanupFailures.join('; '));
   }
 }

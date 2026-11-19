@@ -6,7 +6,7 @@ import ts from 'typescript';
 
 function createIsolationRuntime({
   selfExitAfter, noShutdownAck = false, shutdownReply = 'shutdown-complete',
-  exitCode = 0, failPost = false, failTerminate = false
+  exitCode = 0, failPost = false, failTerminate = false, shutdownMessageError = false
 } = {}) {
   const workers = [];
   class ThreadWorker {
@@ -24,6 +24,7 @@ function createIsolationRuntime({
       if (message === 'shutdown') {
         if (noShutdownAck) return;
         queueMicrotask(() => {
+          if (shutdownMessageError) this.onmessageerror({});
           this.onmessage({ data: shutdownReply });
           this.onexit(exitCode);
         });
@@ -105,6 +106,12 @@ test('shutdown accepts only its acknowledgement followed by a zero-code exit', a
 
   const wrongReply = createIsolationRuntime({ shutdownReply: 'incorrect' });
   await assert.rejects(wrongReply.verifyWorkerIsolation(), /Unexpected Worker exit/);
+});
+
+test('shutdown decoding errors cannot be cleared by a later acknowledgement', async () => {
+  const runtime = createIsolationRuntime({ shutdownMessageError: true });
+
+  await assert.rejects(runtime.verifyWorkerIsolation(), /message decoding failed/i);
 });
 
 test('a stalled shutdown terminates the Worker and reports failure', async () => {

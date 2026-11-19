@@ -40,8 +40,9 @@ function exchange(probe: Probe, expected: string): Promise<void> {
       reject(new Error(probe.failure));
     };
     instance.onmessageerror = (): void => {
+      probe.failure = 'Worker message decoding failed: ' + expected;
       clearTimeout(timer);
-      reject(new Error('Worker message decoding failed: ' + expected));
+      reject(new Error(probe.failure));
     };
     try { instance.postMessage('offline-probe'); } catch (error) {
       clearTimeout(timer);
@@ -70,6 +71,9 @@ function stop(probe: Probe): Promise<void> {
     if (!probe.finished) {
       probe.instance.onmessage = (event): void => {
         if (event.data === 'shutdown-complete' && !probe.finished) probe.shutdownAcknowledged = true;
+      };
+      probe.instance.onmessageerror = (): void => {
+        if (probe.failure.length === 0) probe.failure = 'Worker shutdown message decoding failed.';
       };
       try { probe.instance.postMessage('shutdown'); } catch (error) {
         clearTimeout(timer);

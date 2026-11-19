@@ -1,0 +1,7 @@
+{
+  "modelVersion": "6.1.1",
+  "name": "arkdb-dual-har-entry",
+  "version": "1.0.0",
+  "description": "Consumer for separate standalone MySQL and PostgreSQL HARs",
+  "dependencies": {}
+}

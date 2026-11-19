@@ -27,8 +27,13 @@ Install the selected HAR in the application and import from
 `@arkdb/postgres`. The host must declare `ohos.permission.INTERNET` and own
 its Worker and lifecycle; the driver does not create or manage a Worker.
 The [independent sample](../examples/postgres-client/README.md) compiles
-against the exact HAR and uses a host-owned Worker. Separate MySQL and
-PostgreSQL HAR coexistence is not established.
+against the exact HAR and uses a host-owned Worker. The dedicated
+[dual-HAR consumer](../examples/dual-har-client/README.md) verifies that the
+exact local MySQL and PostgreSQL HARs compile and run deterministic offline
+package-identity tests. Worker integration, dispatch and lifecycle-isolation
+verification are deferred to the next unit; this check is not Worker runtime proof.
+Each HAR embeds its own core constructors, so constructor identity is
+package-local; this does not establish live server or device compatibility.
 
 ## Connect and query
 

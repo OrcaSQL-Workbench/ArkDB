@@ -1,0 +1,7 @@
+{
+  "modelVersion": "6.1.1",
+  "description": "ArkDB consumer for separate standalone MySQL and PostgreSQL HARs",
+  "devDependencies": {
+    "@ohos/hypium": "1.0.25"
+  }
+}

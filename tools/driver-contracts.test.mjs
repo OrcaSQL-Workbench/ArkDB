@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import JSON5 from 'json5';
 import ts from 'typescript';
-import { ROOT } from './check-package.mjs';
+import { checkArkTsTests, checkIsolatedArkTsProject, ROOT } from './check-package.mjs';
 import { checkDriverContracts } from './driver-contracts.mjs';
 import { affectedDrivers, dependencyClosure, discoverDrivers, discoverPackages,
   driverVerification, resolveDriver } from './driver-packages.mjs';
@@ -37,6 +37,28 @@ test('core is a real independent shared HAR, not an extra database driver', () =
   assert.equal(postgresVerification.requiresInternet, true);
   assert.equal(postgresVerification.consumerDirectory,
     join(ROOT, 'examples', 'postgres-client'));
+});
+
+test('dual-HAR consumer is isolated and imports both package identities', async () => {
+  const projectRoot = join(ROOT, 'examples', 'dual-har-client');
+  const project = checkIsolatedArkTsProject(ROOT, projectRoot);
+  const profile = JSON5.parse(await readFile(join(projectRoot, 'entry', 'build-profile.json5'), 'utf8'));
+  const entryPackage = JSON5.parse(await readFile(join(projectRoot, 'entry', 'oh-package.json5'), 'utf8'));
+  const hvigorConfig = JSON5.parse(await readFile(join(projectRoot, 'hvigor', 'hvigor-config.json5'), 'utf8'));
+  const suite = await readFile(join(projectRoot, 'entry', 'src', 'test', 'consumer',
+    'DualHarIdentity.test.ets'), 'utf8');
+
+  assert.equal(typeof entryPackage.name, 'string');
+  assert.equal(typeof entryPackage.version, 'string');
+  assert.deepEqual(hvigorConfig.dependencies, {});
+  assert.deepEqual(profile.buildOption?.sourceOption?.workers ?? [], []);
+  assert.deepEqual([...new Set(project.externalImports.map((entry) => entry.specifier)
+    .filter((specifier) => specifier.startsWith('@arkdb/')))].sort(),
+  ['@arkdb/mysql', '@arkdb/postgres']);
+  assert.match(suite, /instanceof MySqlArkDbError/);
+  assert.match(suite, /instanceof PostgresArkDbError/);
+  const tests = checkArkTsTests(ROOT, 'examples/dual-har-client/entry/src/test', 'dual-har-client');
+  assert.deepEqual([tests.testSuites, tests.testCases, tests.testOwners], [1, 1, ['consumer']]);
 });
 
 test('compatibility-only MySQL surface stays exported and explicitly deprecated', async () => {

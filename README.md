@@ -79,6 +79,7 @@ npm run verify
 | `npm run test:arkts -- core pgsql` | Generate current HAR build profiles and run the selected core/PostgreSQL Hypium suites at registered source paths, failing on assertion output as well as process errors |
 | `npm run pack -- --driver mysql` | Compile core plus the selected driver into one versioned self-contained HAR, checksum and source manifest |
 | `npm run test:consumer` | Build the sample HAP/Worker and README examples against the exact HAR, then run offline sample lifecycle tests |
+| `npm run test:dual-consumer` | Consume both exact local HARs, compile a dual-package HAP, run required offline identity tests, and output a unique HAP path and digest; no Worker runtime proof |
 | `npm run example:prepare` | Install the verified HAR into the runnable Worker sample |
 | `npm run example:build` | Compile its unsigned HAP for opening/running with owner-supplied debug signing |
 | `npm run device:prepare -- --driver mysql --bundle dist\mysql-v1.1.0` | From exact clean sealed source, build one unsigned HAR-bound HAP with an embedded one-time Ed25519 key and publish the pending challenge last |

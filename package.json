@@ -17,6 +17,7 @@
     "test:arkts": "node tools/run-ohos-tests.mjs",
     "pack": "node tools/package-har.mjs",
     "test:consumer": "node tools/test-consumer.mjs",
+    "test:dual-consumer": "node tools/test-consumer.mjs --dual",
     "example:prepare": "node tools/test-consumer.mjs --prepare",
     "example:build": "node tools/test-consumer.mjs --example",
     "device:prepare": "node tools/verify-device-evidence.mjs prepare",

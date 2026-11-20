@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { verify } from 'node:crypto';
+import { createPrivateKey, sign, verify } from 'node:crypto';
 import test from 'node:test';
-import { ArkDbError, Kind, deviceRuntime, deviceSampleLoader, signingKeys } from './postgres-device-runner-fixtures.mjs';
+import {
+  ArkDbError, Kind, deviceRuntime, deviceSampleLoader, deviceRunnerFixture, signingKeys
+} from './postgres-device-runner-fixtures.mjs';
 
 const samples = new URL('../../examples/postgres-device-acceptance/entry/src/main/ets/sample/', import.meta.url);
 
@@ -71,4 +73,17 @@ test('fixture preserves built-in errors across sample modules', async () => {
   );
   await assert.rejects(operation.result, (error) => error === observed && error instanceof TypeError);
   assert.equal(await operation.settlement, observed);
+});
+
+test('runner fixture creates a valid bound identity and matching signing keys', () => {
+  const now = Date.UTC(2026, 10, 20);
+  const fixture = deviceRunnerFixture(now, Date, () => 1,
+    ['./DeviceEvidenceIdentity', './DeviceAcceptanceValidation']);
+  assert.equal(fixture.validBinding(fixture.binding), true);
+  assert.equal(fixture.binding.suiteId, fixture.manifest.suiteId);
+  assert.equal(Date.parse(fixture.binding.expiresAt) - Date.parse(fixture.binding.createdAt), 86_400_000);
+  const signature = sign(null, Buffer.from('receipt'), createPrivateKey({
+    key: Buffer.from(fixture.pkcs8, 'base64'), type: 'pkcs8', format: 'der'
+  }));
+  assert.equal(verify(null, Buffer.from('receipt'), fixture.publicKey, signature), true);
 });

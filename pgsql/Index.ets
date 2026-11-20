@@ -41,7 +41,7 @@ export {
   PostgresConnectionOptions
 } from './src/main/ets/pgsql/model/PostgresConnectionConfig';
 export {
-  PostgresTransactionState, PostgresColumnDef, PostgresQueryResult,
+  PostgresAuthMethod, PostgresTransactionState, PostgresColumnDef, PostgresQueryResult,
   PostgresQueryResultSummary, PostgresServerInfo, PostgresDatabaseSessionStatus,
   PostgresError
 } from './src/main/ets/pgsql/model/PostgresModels';

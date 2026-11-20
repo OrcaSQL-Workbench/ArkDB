@@ -8,6 +8,13 @@ export enum PostgresTransactionState {
   FailedTransaction = 'failed_transaction'
 }
 
+export enum PostgresAuthMethod {
+  NotReported = '',
+  ScramSha256 = 'scram-sha-256',
+  Md5 = 'md5',
+  CleartextPassword = 'cleartext-password'
+}
+
 export class PostgresColumnDef extends ColumnDef {
   tableOid: number = 0;
   columnAttributeNumber: number = 0;
@@ -37,6 +44,7 @@ export class PostgresServerInfo extends ServerInfo {
   integerDatetimes: boolean = true;
   dateStyle: string = '';
   timeZone: string = '';
+  authPlugin: PostgresAuthMethod = PostgresAuthMethod.NotReported;
 }
 
 export class PostgresDatabaseSessionStatus extends DatabaseSessionStatus {

@@ -3,6 +3,7 @@ import { HarmonyPostgresAuthPlatform, PostgresAuthPlatform, PostgresScramClient,
 import { DefaultPostgresScramPort } from '../auth/PostgresSaslPrep';
 import { PostgresStartupSession, applyPostgresParameterStatus, postgresErrorFromResponse } from '../execution/PostgresSettlements';
 import { PostgresSslMode, resolvePostgresDatabaseName } from '../model/PostgresConnectionConfig';
+import { PostgresAuthMethod } from '../model/PostgresModels';
 import { PostgresFrontendSerializer, PostgresStartupParameter } from '../protocol/PostgresByteCodec';
 import { PostgresAuthenticationCleartextPassword, PostgresAuthenticationMd5Password, PostgresAuthenticationOk, PostgresAuthenticationRequest, PostgresAuthenticationSasl, PostgresAuthenticationSaslContinue, PostgresAuthenticationSaslFinal, PostgresBackendKeyData, PostgresBackendMessage, PostgresBackendParser, PostgresErrorResponse, PostgresMessage, PostgresNegotiateProtocolVersion, PostgresNoticeResponse, PostgresNotificationResponse, PostgresParameterStatus, PostgresReadyForQuery } from '../protocol/PostgresMessageChannel';
 import { MAX_POSTGRES_MESSAGE_BYTES, POSTGRES_LENGTH_BYTES, POSTGRES_NORMAL_HEADER_BYTES } from '../protocol/PostgresProtocolConstants';
@@ -48,6 +49,7 @@ export async function runPostgresStartup(context: PostgresStartupSession,
             if (authExchangeStarted) throw duplicateAuthChallenge();
             authExchangeStarted = true;
             if (!offersMechanism(msg.mechanisms, SCRAM_SHA_256)) throw ArkDbError.unsupported('PostgreSQL server does not offer SCRAM-SHA-256.');
+            context.serverInfo.authPlugin = PostgresAuthMethod.ScramSha256;
             const pw = context.readPassword();
             if (pw.length === 0) throw ArkDbError.validation('Password is required for PostgreSQL SCRAM authentication.');
             const activeScram = new PostgresScramClient(context.config.user, pw, scramPortFactory(authPlatform));
@@ -67,14 +69,16 @@ export async function runPostgresStartup(context: PostgresStartupSession,
           }
           if (msg instanceof PostgresAuthenticationMd5Password) {
             if (authExchangeStarted) throw duplicateAuthChallenge();
-            authExchangeStarted = true; const pw = context.readPassword();
+            authExchangeStarted = true; context.serverInfo.authPlugin = PostgresAuthMethod.Md5; const pw = context.readPassword();
             if (pw.length === 0) throw ArkDbError.validation('Password is required for PostgreSQL MD5 authentication.');
             const payload = await runSensitiveBytesStep(context, (): Promise<Uint8Array> => buildPostgresMd5PasswordResponse(pw, context.config.user, msg.salt, authPlatform));
             await writeSensitivePasswordPayload(context, payload); continue;
           }
           if (msg instanceof PostgresAuthenticationCleartextPassword) {
             if (authExchangeStarted) throw duplicateAuthChallenge();
-            authExchangeStarted = true; const pw = context.readPassword();
+            authExchangeStarted = true;
+            context.serverInfo.authPlugin = PostgresAuthMethod.CleartextPassword;
+            const pw = context.readPassword();
             if (context.config.allowCleartextPassword && context.serverInfo.tlsActive && context.config.ssl.mode === PostgresSslMode.VERIFY_FULL && pw.length === 0) {
               throw ArkDbError.validation('Password is required for PostgreSQL cleartext password authentication.');
             }

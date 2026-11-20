@@ -61,6 +61,21 @@ test('reports signing failure without including private key or runtime details',
   });
 });
 
+test('rejects a short signature rather than emitting an invalid envelope', async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const spki = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+  const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64');
+  const crypto = modules.get('@kit.CryptoArchitectureKit').cryptoFramework;
+  const createSign = crypto.createSign;
+  crypto.createSign = () => ({ initSync() {}, signSync: () => ({ data: new Uint8Array(0) }) });
+  try {
+    const signer = new exports.Ed25519DeviceReceiptSigner(spki, pkcs8);
+    await assert.rejects(signer.sign('{}'), /HarmonyOS Ed25519 signing is unavailable/);
+  } finally {
+    crypto.createSign = createSign;
+  }
+});
+
 test('source binding is disabled and the generated binding preserves challenge identity', () => {
   const samples = new URL(
     '../../examples/postgres-device-acceptance/entry/src/main/ets/sample/', import.meta.url);

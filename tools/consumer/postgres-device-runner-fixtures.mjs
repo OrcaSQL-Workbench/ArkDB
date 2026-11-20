@@ -27,6 +27,25 @@ export function signingKeys() {
   };
 }
 
+export function validDeviceRunnerRequest(Request, sha, password) {
+  return Object.assign(new Request(), {
+    host: 'db.test', mismatchHost: 'wrong.test', schema: 'authorized', user: 'operator',
+    password, signedHapSha256: sha, operatorEvidenceId: 'operator-1'
+  });
+}
+
+export function deviceRunnerPreparedFeatures(sha) {
+  return { prepared: { execute: async (_, parameters) => ({
+    rows: [parameters.length === 1 ? [sha] : [9007199254740993n, '12.34', new Uint8Array([0, 127, 255])]]
+  }) } };
+}
+
+export function stallRunnerClose(connection, register) {
+  return new Promise((resolve) => {
+    register(() => { connection.state = State.Closed; resolve(); });
+  });
+}
+
 export function deviceSampleLoader(samples, clock = Date, uptime = () => 1) {
   const core = new Map([['@arkdb/core', { ArkDbError }]]);
   const models = new URL('../../pgsql/src/main/ets/pgsql/model/', import.meta.url);

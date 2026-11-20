@@ -3,9 +3,71 @@ import { join } from 'node:path';
 import { listFiles, ROOT } from '../workspace/check-package.mjs';
 import { driverVerification } from '../workspace/driver-packages.mjs';
 import { createSha256, sha256 } from '../lib/hash.mjs';
-import { releaseFile } from '../lib/safe-files.mjs';
+import { jsonBytes, releaseFile } from '../lib/safe-files.mjs';
 
 const DEVICE_POLICY_MANIFEST = 'device-evidence-policy.json';
+
+export function exactKeys(value, names, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...names].sort())) {
+    throw new Error(`${label} has an invalid property set.`);
+  }
+}
+
+function safePolicyLabel(value) {
+  return typeof value === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9 ._()+/-]{0,127}$/.test(value);
+}
+
+function policyStringList(value, label) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32 ||
+    value.some((entry) => !safePolicyLabel(entry)) || new Set(value).size !== value.length) {
+    throw new Error(`${label} must contain unique bounded labels.`);
+  }
+}
+
+export function parseDeviceEvidencePolicy(bytes, expectedDriver) {
+  const policy = jsonBytes(bytes);
+  exactKeys(policy, [
+    'schemaVersion', 'driver', 'caseManifestFile', 'suiteId', 'serverFamilies',
+    'features', 'authPlugins', 'tlsModes', 'profiles'
+  ], 'Device evidence policy');
+  if (policy.schemaVersion !== 1 || policy.driver !== expectedDriver ||
+    policy.caseManifestFile !== 'device-acceptance-cases.json' ||
+    !/^[a-z][a-z0-9_-]*$/.test(expectedDriver) ||
+    !safePolicyLabel(policy.suiteId)) {
+    throw new Error('Device evidence policy differs from the registered driver.');
+  }
+  policyStringList(policy.serverFamilies, 'Device policy server families');
+  if (!Array.isArray(policy.features) || policy.features.length > 64 ||
+    policy.features.some((feature) => typeof feature !== 'string' ||
+      !/^[a-z][a-z0-9-]{0,63}$/.test(feature)) ||
+    new Set(policy.features).size !== policy.features.length) {
+    throw new Error('Device policy features are invalid.');
+  }
+  policyStringList(policy.authPlugins, 'Device policy authentication plugins');
+  policyStringList(policy.tlsModes, 'Device policy TLS modes');
+  if (!Array.isArray(policy.profiles) || policy.profiles.length === 0 ||
+    policy.profiles.length > 16 || new Set(policy.profiles.map((profile) => profile?.id)).size !==
+      policy.profiles.length) {
+    throw new Error('Device policy profiles are invalid.');
+  }
+  for (const profile of policy.profiles) {
+    exactKeys(profile, ['id', 'features', 'authPlugins'], 'Device policy profile');
+    if (typeof profile.id !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(profile.id) ||
+      !Array.isArray(profile.features) ||
+      profile.features.some((feature) => !policy.features.includes(feature)) ||
+      new Set(profile.features).size !== profile.features.length ||
+      JSON.stringify([...profile.features].sort()) !== JSON.stringify(profile.features) ||
+      !Array.isArray(profile.authPlugins) || profile.authPlugins.length === 0 ||
+      profile.authPlugins.some((plugin) => !policy.authPlugins.includes(plugin)) ||
+      new Set(profile.authPlugins).size !== profile.authPlugins.length) {
+      throw new Error('Device policy profile selection is invalid.');
+    }
+  }
+  return policy;
+}
 
 export function deviceEvidencePolicyBytes(root = ROOT, driver = 'mysql') {
   const directory = driverVerification(root, driver).deviceConsumerDirectory;
@@ -17,7 +79,9 @@ export function deviceEvidencePolicyBytes(root = ROOT, driver = 'mysql') {
 
 export function deviceEvidencePolicySha256(root = ROOT, driver = 'mysql') {
   try {
-    return sha256(deviceEvidencePolicyBytes(root, driver));
+    const bytes = deviceEvidencePolicyBytes(root, driver);
+    parseDeviceEvidencePolicy(bytes, driver);
+    return sha256(bytes);
   } catch (error) {
     if (driver === 'mysql' && error?.code === 'ENOENT') return undefined;
     throw error;

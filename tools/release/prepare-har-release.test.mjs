@@ -30,6 +30,24 @@ test('prepares only exact verified assets and binds them to the clean annotated 
   assert.equal(loaded.assets.get(`${STEM}.har`).length, fixture.identity.byteLength);
 });
 
+test('rejects malformed device policies before release verification', async (t) => {
+  const fixture = await releaseFixture(t);
+  const policyPath = join(fixture.root, 'examples', 'mysql-device-acceptance',
+    'device-evidence-policy.json');
+  const policy = JSON.parse(await readFile(policyPath, 'utf8'));
+  policy.features = [null];
+  await writeFile(policyPath, `${JSON.stringify(policy, null, 2)}\n`);
+  let verificationStarted = false;
+  await assert.rejects(prepareHarRelease(fixture.options, {
+    ...fixture.dependencies,
+    verify: async () => {
+      verificationStarted = true;
+      return { driverTestsPassed: 183 };
+    }
+  }), /device policy features are invalid/i);
+  assert.equal(verificationStarted, false);
+});
+
 test('unimplemented drivers and tag/version mistakes fail before any build', async (t) => {
   const fixture = await releaseFixture(t);
   const dependencies = { ...fixture.dependencies, verify: () => assert.fail('No verification may run') };

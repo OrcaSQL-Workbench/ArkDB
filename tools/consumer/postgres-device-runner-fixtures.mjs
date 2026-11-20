@@ -1,4 +1,5 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { createSampleLoader } from './postgres-device-test-loader.mjs';
 
@@ -68,4 +69,32 @@ export function deviceSampleLoader(samples, clock = Date, uptime = () => 1) {
 export function deviceRuntime(samples, moduleNames, clock = Date, uptime = () => 1) {
   const load = deviceSampleLoader(samples, clock, uptime);
   return Object.assign({}, ...moduleNames.map((name) => load(name)));
+}
+
+const acceptanceRoot = new URL('../../examples/postgres-device-acceptance/', import.meta.url);
+const runnerSamples = new URL('entry/src/main/ets/sample/', acceptanceRoot);
+const runnerModules = [
+  './DeviceAcceptanceValidation', './DeviceEvidenceIdentity', './DeviceReceiptSigner', './Messages'
+];
+
+export function deviceRunnerRuntime(clock = Date, uptime = () => 1, moduleNames = runnerModules) {
+  return deviceRuntime(runnerSamples, moduleNames, clock, uptime);
+}
+
+export function deviceRunnerFixture(now, clock = Date, uptime = () => 1, moduleNames = runnerModules) {
+  const runtime = deviceRunnerRuntime(clock, uptime, moduleNames);
+  const { publicKey, spki, pkcs8 } = signingKeys();
+  const sha = 'a'.repeat(64);
+  const manifest = JSON.parse(readFileSync(new URL('device-acceptance-cases.json', acceptanceRoot), 'utf8'));
+  const binding = Object.assign(new runtime.DeviceEvidenceIdentity(), {
+    enabled: true, challengeId: 'b'.repeat(32), receiptNonce: sha, schemaChallenge: sha,
+    createdAt: new Date(now).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(),
+    suiteId: manifest.suiteId, caseManifestSha256: sha, releaseSetSha256: sha,
+    repository: 'OrcaSQL-Workbench/ArkDB', driver: 'pgsql', packageName: '@arkdb/postgres', version: '1.0.0',
+    sourceCommit: 'c'.repeat(40), artifactSha256: sha, artifactByteLength: 1, consumerFingerprint: sha,
+    acceptanceFingerprint: sha, publicKeySpkiBase64: spki, publicKeySpkiSha256: sha,
+    privateKeyPkcs8Base64: pkcs8, format: 'bytecode-har', compatibleSdkVersion: 24,
+    compatibleSdkType: 'HarmonyOS', useNormalizedOHMUrl: true, buildMode: 'release'
+  });
+  return { ...runtime, publicKey, spki, pkcs8, sha, manifest, binding };
 }

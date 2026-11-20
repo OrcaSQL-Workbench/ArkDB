@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "arkdb.postgresql.device-acceptance",
+  "caseIds": [
+    "tls_identity",
+    "tls_hostname_mismatch",
+    "server_error",
+    "prepared_values",
+    "authorized_schema",
+    "cancellation",
+    "cleanup"
+  ],
+  "runtime": {
+    "minimumSdkApiVersion": 24,
+    "deviceTypes": ["tablet", "2in1"],
+    "serverFamilies": ["PostgreSQL"]
+  }
+}

@@ -96,6 +96,25 @@ test('waits for a registered close added during case query settlement', async ()
   assert.equal(await pending, failure);
 });
 
+test('waits for a close registered at the final drain boundary', async () => {
+  let release;
+  const close = closeDeviceConnections([]);
+  const pending = cleanupDeviceRun(close, Promise.resolve(null));
+  const observed = observeSettlement(pending);
+  let chain = Promise.resolve();
+  for (let i = 0; i < 4; i++) chain = chain.then(() => {});
+  await chain.then(() => {
+    const connection = { state: 'ready', close: () => new Promise((resolve) => {
+      release = () => { connection.state = 'closed'; resolve(); };
+    }) };
+    close.register(connection);
+  });
+  await new Promise(setImmediate);
+  assert.equal(observed.settled, false);
+  release();
+  assert.equal(await pending, null);
+});
+
 test('closes connections registered asynchronously by an in-flight operation', async () => {
   let release;
   const close = closeDeviceConnections([]);
@@ -243,4 +262,110 @@ test('concurrent cleanup calls share one deadline and can retry after settlement
   assert.equal(first, second);
   assert.equal(await first, null);
   assert.notEqual(cleanupDeviceRun(close, operation), first);
+});
+
+test('a retry cannot replace an operation still pending after timeout', async () => {
+  let finish;
+  const close = closeDeviceConnections([]);
+  const operation = new Promise((resolve) => { finish = resolve; });
+  let subscriptions = 0;
+  const then = operation.then;
+  operation.then = function (...args) {
+    subscriptions++;
+    return then.apply(this, args);
+  };
+  const first = cleanupDeviceRun(close, operation);
+  const timeout = await first;
+  assert.match(timeout.message, /timed out/);
+  assert.throws(() => cleanupDeviceRun(close, Promise.resolve(null)), /cannot change the active operation/);
+  const beforeRetries = subscriptions;
+  for (let i = 0; i < 20; i++) assert.equal(cleanupDeviceRun(close, operation), first);
+  assert.equal(subscriptions, beforeRetries);
+  assert.throws(() => cleanupDeviceRun(close, Promise.resolve(null)), /cannot change the active operation/);
+  const failure = new Error('late operation failed');
+  finish(failure);
+  assert.equal(await timeout.operationSettlement, failure);
+  await new Promise(setImmediate);
+  assert.equal(await cleanupDeviceRun(close, operation), failure);
+});
+
+test('a case timeout keeps its operation until query and cleanup settle', async () => {
+  let finishQuery;
+  let finishCleanup;
+  const query = new Promise((resolve) => { finishQuery = resolve; });
+  const cleanup = new Promise((resolve) => { finishCleanup = resolve; });
+  const failure = new DeviceCaseCleanupError(new Error('cancel failed'), new DeviceCaseCleanupTimeoutError(),
+    query, cleanup);
+  const close = closeDeviceConnections([]);
+  const operation = Promise.resolve(failure);
+  const result = await cleanupDeviceRun(close, operation);
+  assert.match(result.message, /timed out/);
+  await new Promise(setImmediate);
+  assert.throws(() => cleanupDeviceRun(close, Promise.resolve(null)), /cannot change the active operation/);
+  finishQuery(null);
+  await new Promise(setImmediate);
+  assert.throws(() => cleanupDeviceRun(close, Promise.resolve(null)), /cannot change the active operation/);
+  finishCleanup(null);
+  await new Promise(setImmediate);
+  assert.equal(await cleanupDeviceRun(close, Promise.resolve(null)), null);
+});
+
+test('case timeout keeps its operation until a later registered close settles', async () => {
+  let finishQuery;
+  let finishClose;
+  const query = new Promise((resolve) => { finishQuery = resolve; });
+  const failure = new DeviceCaseCleanupError(new Error('cancel failed'), new DeviceCaseCleanupTimeoutError(),
+    query, Promise.resolve(null));
+  const close = closeDeviceConnections([]);
+  await cleanupDeviceRun(close, Promise.resolve(failure));
+  await new Promise(setImmediate);
+  const connection = { state: 'ready', close: () => new Promise((resolve) => {
+    finishClose = () => { connection.state = 'closed'; resolve(); };
+  }) };
+  close.register(connection);
+  finishQuery(null);
+  await new Promise(setImmediate);
+  assert.throws(() => cleanupDeviceRun(close, Promise.resolve(null)), /cannot change the active operation/);
+  finishClose();
+  await new Promise(setImmediate);
+  assert.equal(await cleanupDeviceRun(close, Promise.resolve(null)), null);
+});
+
+test('a late registration reestablishes ownership after a timeout settles', async () => {
+  let finishOperation;
+  let finishClose;
+  const operation = new Promise((resolve) => { finishOperation = resolve; });
+  const close = closeDeviceConnections([]);
+  await cleanupDeviceRun(close, operation);
+  finishOperation(null);
+  await new Promise(setImmediate);
+  const closeError = new Error('late close failed');
+  close.register({ state: 'ready', close: () => new Promise((_, reject) => {
+    finishClose = () => reject(closeError);
+  }) });
+  const different = Promise.resolve(null);
+  assert.throws(() => cleanupDeviceRun(close, different), /cannot change the active operation/);
+  finishClose();
+  await new Promise(setImmediate);
+  assert.equal(await cleanupDeviceRun(close, different), closeError);
+});
+
+test('retries share one retention of a timed-out case', async () => {
+  let finishQuery;
+  const query = new Promise((resolve) => { finishQuery = resolve; });
+  let subscriptions = 0;
+  const then = query.then;
+  query.then = function (...args) {
+    subscriptions++;
+    return then.apply(this, args);
+  };
+  const failure = new DeviceCaseCleanupError(new Error('cancel failed'), new DeviceCaseCleanupTimeoutError(),
+    query, Promise.resolve(null));
+  const close = closeDeviceConnections([]);
+  const operation = Promise.resolve(failure);
+  for (let i = 0; i < 20; i++) {
+    assert.match((await cleanupDeviceRun(close, operation)).message, /timed out/);
+  }
+  assert.equal(subscriptions, 1);
+  finishQuery(null);
 });

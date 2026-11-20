@@ -38,6 +38,15 @@ function loadCases() {
   return exports.DeviceAcceptanceCases;
 }
 
+function withTimeoutSetup(connection) {
+  return {
+    ...connection,
+    query: (sql) => sql === 'SET statement_timeout = 0'
+      ? Promise.resolve({ rows: [] })
+      : connection.query(sql)
+  };
+}
+
 test('fixed acceptance cases check errors, exact prepared values, and the bound schema challenge', async () => {
   const Cases = loadCases();
   const calls = [];
@@ -108,7 +117,7 @@ test('cancellation verifies interruption and stops before further work when the 
     ping: async () => { calls.push('ping'); },
     close: async () => { calls.push('close'); rejectQuery(new ArkDbError('57014')); }
   };
-  assert.equal(await cases.verifyCancellation(connection), true);
+  assert.equal(await cases.verifyCancellation(withTimeoutSetup(connection)), true);
   assert.deepEqual(calls, ['query', 'wait', 'cancel', 'ping']);
 
   calls.length = 0;
@@ -116,7 +125,7 @@ test('cancellation verifies interruption and stops before further work when the 
     calls.push('wait');
     allowed = false;
   } }, () => { if (!allowed) throw new Error('inactive'); });
-  await assert.rejects(() => stopped.verifyCancellation(connection),
+  await assert.rejects(() => stopped.verifyCancellation(withTimeoutSetup(connection)),
     (error) => error.operationError?.message === 'inactive');
   assert.deepEqual(calls, ['query', 'wait', 'close']);
 });
@@ -152,7 +161,7 @@ test('failed cancellation closes and settles the outstanding query', async () =>
     close: async () => { calls.push('close'); rejectQuery(new Error('closed')); },
     ping: async () => { calls.push('ping'); }
   };
-  await assert.rejects(() => cases.verifyCancellation(connection), (error) =>
+  await assert.rejects(() => cases.verifyCancellation(withTimeoutSetup(connection)), (error) =>
     error.operationError?.message === 'cancel failed' && error.queryError?.message === 'closed');
   assert.deepEqual(calls, ['close']);
 });
@@ -167,7 +176,7 @@ test('a cancellation that was not requested closes the query and fails the case'
     cancel: async () => ({ outcome: 'not-requested' }),
     close: async () => { closed = true; resolveQuery({ rows: [] }); }
   };
-  assert.equal(await cases.verifyCancellation(connection), false);
+  assert.equal(await cases.verifyCancellation(withTimeoutSetup(connection)), false);
   assert.equal(closed, true);
 });
 
@@ -187,7 +196,7 @@ test('cancellation does not pass when the guard closes during ping', async () =>
     ping: async () => { active = false; },
     close: async () => { closed = true; }
   };
-  await assert.rejects(() => cases.verifyCancellation(connection),
+  await assert.rejects(() => cases.verifyCancellation(withTimeoutSetup(connection)),
     (error) => error.operationError?.message === 'inactive');
   assert.equal(closed, true);
 });
@@ -205,7 +214,7 @@ test('cancellation closes a pending query if the guard closes during cancel', as
     cancel: async () => { active = false; return { outcome: 'requested' }; },
     close: async () => { closed = true; rejectQuery(new Error('closed')); }
   };
-  const operation = cases.verifyCancellation(connection).then(
+  const operation = cases.verifyCancellation(withTimeoutSetup(connection)).then(
     () => null, (error) => error
   );
   let timeout;
@@ -230,7 +239,7 @@ test('cleanup failure preserves both cancellation and cleanup errors', async () 
     cancel: async () => { throw new Error('cancel failed'); },
     close: async () => { throw new Error('close failed'); }
   };
-  const error = await cases.verifyCancellation(connection).catch((failure) => failure);
+  const error = await cases.verifyCancellation(withTimeoutSetup(connection)).catch((failure) => failure);
   assert.equal(error.operationError.message, 'cancel failed');
   assert.equal(error.cleanupError.message, 'close failed');
   assert.equal(typeof error.querySettlement?.then, 'function');
@@ -250,7 +259,7 @@ test('unexpected query failures survive cancellation cleanup', async () => {
     isInterruptionError: () => false,
     close: async () => { closed = true; }
   };
-  await assert.rejects(() => cases.verifyCancellation(connection), (error) => error === queryError);
+  await assert.rejects(() => cases.verifyCancellation(withTimeoutSetup(connection)), (error) => error === queryError);
   assert.equal(closed, true);
 });
 
@@ -263,7 +272,7 @@ test('not-requested cancellation keeps the query handle if cleanup fails', async
     cancel: async () => ({ outcome: 'not-requested' }),
     close: async () => { throw new Error('close failed'); }
   };
-  const error = await cases.verifyCancellation(connection).catch((failure) => failure);
+  const error = await cases.verifyCancellation(withTimeoutSetup(connection)).catch((failure) => failure);
   assert.match(error.operationError.message, /not requested/);
   assert.equal(error.cleanupError.message, 'close failed');
   rejectQuery(new Error('query failed'));
@@ -282,7 +291,7 @@ test('guard closure during not-requested cancellation cleanup prevents a verdict
     cancel: async () => ({ outcome: 'not-requested' }),
     close: async () => { active = false; resolveQuery({ rows: [] }); }
   };
-  await assert.rejects(() => cases.verifyCancellation(connection), /inactive/);
+  await assert.rejects(() => cases.verifyCancellation(withTimeoutSetup(connection)), /inactive/);
 });
 
 test('a query failure during cleanup is never discarded', async () => {
@@ -298,11 +307,62 @@ test('a query failure during cleanup is never discarded', async () => {
       },
       close: async () => { rejectQuery(new Error('query cleanup failed')); }
     };
-    await assert.rejects(() => cases.verifyCancellation(connection), (error) => {
+    await assert.rejects(() => cases.verifyCancellation(withTimeoutSetup(connection)), (error) => {
       assert.equal(cancelFails ? error.operationError?.message : undefined,
         cancelFails ? 'cancel failed' : undefined);
       assert.equal(cancelFails ? error.queryError?.message : error.message, 'query cleanup failed');
       return true;
     });
+  }
+});
+
+test('cancellation disables server statement timeouts before starting the sleep query', async () => {
+  const Cases = loadCases();
+  const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
+  const calls = [];
+  let timeoutEnabled = true;
+  let rejectQuery;
+  const connection = {
+    state: State.Ready,
+    query: async (sql) => {
+      calls.push(sql);
+      if (sql === 'SET statement_timeout = 0') {
+        timeoutEnabled = false;
+        return { rows: [] };
+      }
+      assert.equal(sql, 'SELECT pg_sleep(10), 1');
+      if (timeoutEnabled) throw new ArkDbError('57014');
+      return new Promise((_, reject) => { rejectQuery = reject; });
+    },
+    cancel: async () => {
+      if (rejectQuery) rejectQuery(new ArkDbError('57014'));
+      return { outcome: 'requested' };
+    },
+    isInterruptionError: () => true,
+    ping: async () => {},
+    close: async () => {}
+  };
+  assert.equal(await cases.verifyCancellation(connection), true);
+  assert.deepEqual(calls, ['SET statement_timeout = 0', 'SELECT pg_sleep(10), 1']);
+});
+
+test('cancellation does not start a query if disabling timeouts fails or the guard closes', async () => {
+  const Cases = loadCases();
+  for (const failSetup of [true, false]) {
+    let active = true;
+    const calls = [];
+    const cases = new Cases('id', 'value', { wait: async () => {} }, () => {
+      if (!active) throw new Error('inactive');
+    });
+    const connection = {
+      query: async (sql) => {
+        calls.push(sql);
+        if (failSetup) throw new Error('setup failed');
+        active = false;
+        return { rows: [] };
+      }
+    };
+    await assert.rejects(() => cases.verifyCancellation(connection), failSetup ? /setup failed/ : /inactive/);
+    assert.deepEqual(calls, ['SET statement_timeout = 0']);
   }
 });

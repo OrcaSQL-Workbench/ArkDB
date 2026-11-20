@@ -112,6 +112,9 @@ export class DeviceAcceptanceCases {
 
   async verifyCancellation(connection: DeviceAcceptanceConnection): Promise<boolean> {
     this.requireActive();
+    // This disposable session must not be reset or cancelled by other actors during the probe.
+    await connection.query('SET statement_timeout = 0');
+    this.requireActive();
     const query = connection.query(CANCELLATION_SQL).then(
       (): Error | null => null,
       (error: Object): Error | null => error instanceof Error ? error :

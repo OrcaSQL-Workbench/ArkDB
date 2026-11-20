@@ -77,8 +77,7 @@ test('fixture preserves built-in errors across sample modules', async () => {
 
 test('runner fixture creates a valid bound identity and matching signing keys', () => {
   const now = Date.UTC(2026, 10, 20);
-  const fixture = deviceRunnerFixture(now, Date, () => 1,
-    ['./DeviceEvidenceIdentity', './DeviceAcceptanceValidation']);
+  const fixture = deviceRunnerFixture(now);
   assert.equal(fixture.validBinding(fixture.binding), true);
   assert.equal(fixture.binding.suiteId, fixture.manifest.suiteId);
   assert.equal(Date.parse(fixture.binding.expiresAt) - Date.parse(fixture.binding.createdAt), 86_400_000);

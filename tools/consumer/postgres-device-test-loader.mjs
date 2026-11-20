@@ -10,7 +10,8 @@ export function createSampleLoader(samples, modules, ts, globals = {}) {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
       }).outputText;
       const exports = {};
-      vm.runInNewContext(compiled, { exports, require: load, Error, setTimeout, clearTimeout, ...globals });
+      const execute = vm.compileFunction(compiled, ['exports', 'require', ...Object.keys(globals)]);
+      execute(exports, load, ...Object.values(globals));
       modules.set(name, exports);
     }
     return modules.get(name);

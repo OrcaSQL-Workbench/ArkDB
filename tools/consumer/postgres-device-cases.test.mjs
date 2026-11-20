@@ -29,7 +29,7 @@ function loadCases() {
     PostgresParameterType: { Int8: 1, Numeric: 2, Bytea: 3, Text: 4 }
   };
   vm.runInNewContext(compiled, {
-    exports, Error, Uint8Array,
+    exports, Error, Uint8Array, setTimeout, clearTimeout,
     require(name) {
       assert.equal(name, '@arkdb/postgres');
       return postgres;
@@ -242,9 +242,47 @@ test('cleanup failure preserves both cancellation and cleanup errors', async () 
   const error = await cases.verifyCancellation(withTimeoutSetup(connection)).catch((failure) => failure);
   assert.equal(error.operationError.message, 'cancel failed');
   assert.equal(error.cleanupError.message, 'close failed');
+  assert.equal((await error.cleanupSettlement).message, 'close failed');
   assert.equal(typeof error.querySettlement?.then, 'function');
   rejectQuery(new Error('query cleanup failed'));
   assert.equal((await error.querySettlement).message, 'query cleanup failed');
+});
+
+test('cancellation cleanup times out without losing the outstanding query', async (t) => {
+  const Cases = loadCases();
+  for (const stalled of ['close', 'query']) {
+    await t.test(stalled, async () => {
+      let rejectQuery;
+      let rejectClose;
+      const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
+      const connection = {
+        query: () => new Promise((_, reject) => { rejectQuery = reject; }),
+        cancel: async () => { throw new Error('cancel failed'); },
+        close: () => stalled === 'close'
+          ? new Promise((_, reject) => { rejectClose = reject; })
+          : Promise.resolve()
+      };
+      const pending = cases.verifyCancellation(withTimeoutSetup(connection)).catch((error) => error);
+      let timer;
+      const failure = await Promise.race([
+        pending, new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2300); })
+      ]);
+      clearTimeout(timer);
+      if (failure === null) {
+        if (rejectClose) rejectClose(new Error('late close failure'));
+        rejectQuery(new Error('query failed'));
+        await pending;
+      }
+      assert.notEqual(failure, null, `${stalled} cleanup must not hang`);
+      assert.equal(failure.operationError.message, 'cancel failed');
+      assert.match(failure.cleanupError.message, /timed out/);
+      if (rejectClose) rejectClose(new Error('late close failure'));
+      rejectQuery(new Error('query failed'));
+      assert.equal((await failure.querySettlement).message, 'query failed');
+      const lateCleanup = await failure.cleanupSettlement;
+      assert.equal(lateCleanup?.message ?? null, stalled === 'close' ? 'late close failure' : null);
+    });
+  }
 });
 
 test('unexpected query failures survive cancellation cleanup', async () => {

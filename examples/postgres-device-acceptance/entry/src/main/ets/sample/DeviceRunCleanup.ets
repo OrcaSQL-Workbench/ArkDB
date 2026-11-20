@@ -26,6 +26,15 @@ export class DeviceConnectionCleanupError extends Error {
   }
 }
 
+export class DeviceOperationsCleanupError extends Error {
+  errors: Error[];
+
+  constructor(errors: Error[]) {
+    super('Multiple device operations failed during cleanup.');
+    this.errors = errors;
+  }
+}
+
 export class DeviceConnectionCleanup {
   errors: Error[] = [];
   settlements: Promise<Error | null>[] = [];
@@ -33,21 +42,64 @@ export class DeviceConnectionCleanup {
   cleanupTask: Promise<Error | null> | null = null;
   cleanupOperation: Promise<Error | null> | null = null;
   lastOperation: Promise<Error | null> | null = null;
+  readonly quiescence: Promise<Error | null>;
+  readonly registrationDone: Promise<void>;
   drainedCount: number = 0;
   private connections: DeviceAcceptanceConnection[];
   private scanned: number = 0;
   private pendingCloses: number = 0;
+  private registrationSealed: boolean = false;
+  private finishRegistration: (() => void) | null = null;
+  private operations: Promise<Error | null>[] = [];
+  private operationSettlements: Promise<Error | null>[] = [];
 
   constructor(connections: DeviceAcceptanceConnection[]) {
     // Take ownership of a snapshot; later additions must use register().
     this.connections = connections.slice();
+    this.registrationDone = new Promise<void>((resolve): void => {
+      this.finishRegistration = (): void => resolve();
+    });
     this.settlement = Promise.resolve().then((): Promise<Error | null> => this.drain());
+    this.quiescence = this.registrationDone.then(async (): Promise<Error | null> => {
+      const results = await Promise.all(this.operationSettlements);
+      const errors: Error[] = [];
+      for (const result of results) {
+        if (result !== null) errors.push(result);
+      }
+      const operationError = combineOperationErrors(errors);
+      const closeError = await this.drain();
+      if (operationError !== null && closeError !== null) {
+        return new DeviceOperationCleanupError(operationError, closeError);
+      }
+      return operationError ?? closeError;
+    });
   }
 
-  // All connections created after cleanup starts must be registered here.
+  // All connections created after cleanup starts must be registered before the seal.
   register(connection: DeviceAcceptanceConnection): void {
     this.connections.push(connection);
     this.startClosing();
+    if (this.registrationSealed) throw new Error('Connection registration is sealed.');
+  }
+
+  sealRegistration(): void {
+    if (this.registrationSealed) return;
+    this.registrationSealed = true;
+    if (this.finishRegistration !== null) this.finishRegistration();
+  }
+
+  isRegistrationSealed(): boolean {
+    return this.registrationSealed;
+  }
+
+  hasTrackedOperation(operation: Promise<Error | null>): boolean {
+    return this.operations.includes(operation);
+  }
+
+  trackOperation(operation: Promise<Error | null>, settlement: Promise<Error | null>): void {
+    if (this.hasTrackedOperation(operation)) return;
+    this.operations.push(operation);
+    this.operationSettlements.push(settlement);
   }
 
   hasPendingCloses(): boolean {
@@ -88,6 +140,12 @@ export class DeviceConnectionCleanup {
   }
 }
 
+function combineOperationErrors(errors: Error[]): Error | null {
+  if (errors.length === 0) return null;
+  if (errors.length === 1) return errors[0];
+  return new DeviceOperationsCleanupError(errors);
+}
+
 export class DeviceRunCleanupTimeoutError extends DeviceCleanupTimeoutError {
   cleanupErrors: Error[];
   closeSettlements: Promise<Error | null>[];
@@ -116,8 +174,19 @@ export async function settleDeviceCase(error: Error | null): Promise<Error | nul
   return new DeviceQueryCleanupError(failure, queryError);
 }
 
+async function settleRetainedCase(error: Error | null): Promise<Error | null> {
+  if (!(error instanceof DeviceCaseCleanupError)) return error;
+  const failure: DeviceCaseCleanupError = error;
+  const results = await Promise.all([failure.querySettlement, failure.cleanupSettlement]);
+  if (results[0] === null) return failure;
+  return new DeviceQueryCleanupError(failure, results[0]);
+}
+
 export function cleanupDeviceRun(close: DeviceConnectionCleanup,
   operation: Promise<Error | null>): Promise<Error | null> {
+  if (close.isRegistrationSealed() && !close.hasTrackedOperation(operation)) {
+    throw new Error('Cleanup operation registration is sealed.');
+  }
   if ((close.cleanupOperation !== null && close.cleanupOperation !== operation) ||
     (close.hasPendingCloses() && close.lastOperation !== null && close.lastOperation !== operation)) {
     throw new Error('Concurrent cleanup cannot change the active operation.');
@@ -133,23 +202,22 @@ export function cleanupDeviceRun(close: DeviceConnectionCleanup,
       close.cleanupOperation = null;
     }
   };
-  task.then((result: Error | null): void => {
-    if (result instanceof DeviceRunCleanupTimeoutError) {
-      const retainedCase = operation.then(async (error: Error | null): Promise<void> => {
-        if (error instanceof DeviceCaseCleanupError) {
-          await Promise.all([error.querySettlement, error.cleanupSettlement]);
-        }
-      });
-      retainedCase.then(async (): Promise<void> => {
-        do {
-          await close.drain();
-        } while (close.drainedCount !== close.settlements.length);
-        clearOperation();
-      });
-    } else {
+  const settled = task.then(async (result: Error | null): Promise<Error | null> => {
+    if (!(result instanceof DeviceRunCleanupTimeoutError)) {
       clearOperation();
+      return settleRetainedCase(await operation);
     }
-  }, (): void => { clearOperation(); });
+    const settledOperation = await settleRetainedCase(await operation);
+    do {
+      await close.drain();
+    } while (close.drainedCount !== close.settlements.length);
+    clearOperation();
+    return settledOperation;
+  }, (error: Object): Error => {
+    clearOperation();
+    return error instanceof Error ? error : new Error('Device cleanup failed with a non-error value.');
+  });
+  close.trackOperation(operation, settled);
   return task;
 }
 

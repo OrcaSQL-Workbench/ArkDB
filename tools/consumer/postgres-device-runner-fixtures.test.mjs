@@ -60,3 +60,15 @@ test('fixture preserves real prepared parameter types', async () => {
   } } } };
   assert.equal(await cases.verifyPreparedValues(connection), true);
 });
+
+test('fixture preserves built-in errors across sample modules', async () => {
+  const { DeviceAcceptanceRequestSnapshot, DeviceRunOperation } = deviceRuntime(samples,
+    ['./DeviceAcceptanceRequestSnapshot', './DeviceRunOperation']);
+  let observed;
+  const operation = new DeviceRunOperation(
+    async () => new DeviceAcceptanceRequestSnapshot({ host: null }),
+    new Promise(() => {}), () => {}, (error) => { observed = error; }
+  );
+  await assert.rejects(operation.result, (error) => error === observed && error instanceof TypeError);
+  assert.equal(await operation.settlement, observed);
+});

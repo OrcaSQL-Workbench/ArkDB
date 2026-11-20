@@ -90,24 +90,37 @@ function readDeviceConsumerFile(directory, name) {
   return releaseFile(directory, name, 128 * 1024);
 }
 
-export async function readDeviceEvidenceContract(root, driver) {
+async function deviceEvidenceContract(root, driver, allowLegacyMysqlPolicy) {
   const verification = driverVerification(root, driver);
   if (verification.deviceConsumerDirectory === undefined) {
     throw new Error(`Driver ${driver} has no device acceptance consumer or policy.`);
   }
-  const policyBytes = deviceEvidencePolicyBytes(root, driver);
-  const policy = parseDeviceEvidencePolicy(policyBytes, driver);
+  let policyBytes;
+  let policy;
+  try {
+    policyBytes = deviceEvidencePolicyBytes(root, driver);
+    policy = parseDeviceEvidencePolicy(policyBytes, driver);
+  } catch (error) {
+    if (!allowLegacyMysqlPolicy || driver !== 'mysql' || error?.code !== 'ENOENT') throw error;
+    policy = LEGACY_MYSQL_POLICY;
+  }
   const caseBytes = readDeviceConsumerFile(verification.deviceConsumerDirectory,
     policy.caseManifestFile);
   const cases = readCaseManifest(caseBytes, policy);
   return {
-    policy, policyBytes, policySha256: sha256(policyBytes), caseBytes, cases,
+    policy, policyBytes, policySha256: policyBytes === undefined ? undefined : sha256(policyBytes),
+    caseBytes, cases,
     deviceConsumerDirectory: verification.deviceConsumerDirectory
   };
 }
 
+export async function readDeviceEvidenceContract(root, driver) {
+  return deviceEvidenceContract(root, driver, false);
+}
+
 export async function loadSealedDeviceEvidenceContract(root, driver, expectedPolicySha256) {
-  const contract = await readDeviceEvidenceContract(root, driver);
+  const contract = await deviceEvidenceContract(root, driver,
+    expectedPolicySha256 === undefined && driver === 'mysql');
   if (expectedPolicySha256 !== undefined) {
     if (!/^[0-9a-f]{64}$/.test(expectedPolicySha256) ||
       contract.policySha256 !== expectedPolicySha256) {

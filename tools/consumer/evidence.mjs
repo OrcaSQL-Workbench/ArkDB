@@ -16,7 +16,12 @@ export function deviceEvidencePolicyBytes(root = ROOT, driver = 'mysql') {
 }
 
 export function deviceEvidencePolicySha256(root = ROOT, driver = 'mysql') {
-  return sha256(deviceEvidencePolicyBytes(root, driver));
+  try {
+    return sha256(deviceEvidencePolicyBytes(root, driver));
+  } catch (error) {
+    if (driver === 'mysql' && error?.code === 'ENOENT') return undefined;
+    throw error;
+  }
 }
 
 function exampleFingerprint(sample, extraRootFiles = []) {

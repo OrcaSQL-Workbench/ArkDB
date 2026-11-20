@@ -21,6 +21,10 @@ const LEGACY_CASE_MANIFEST_SHA256 =
 
 async function deviceFixture(t, overrides = {}) {
   const fixture = await releaseFixture(t);
+  if (overrides.legacyWithoutPolicy) {
+    await rm(join(fixture.root, 'examples', 'mysql-device-acceptance',
+      'device-evidence-policy.json'));
+  }
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
   const keyPair = generateKeyPairSync('ed25519');
   const publicKeySpki = Buffer.from(keyPair.publicKey.export({ format: 'der', type: 'spki' }));
@@ -66,7 +70,7 @@ async function prepareAdditionalDeviceChallenge(f, challengeFill) {
     Buffer.alloc(32, challengeFill + 1),
     Buffer.alloc(32, challengeFill + 2)
   ];
-  return await prepareDeviceEvidence({
+  const prepared = await prepareDeviceEvidence({
     root: f.fixture.root,
     driver: 'mysql',
     bundleDirectory: f.bundle.bundleDirectory
@@ -86,6 +90,7 @@ async function prepareAdditionalDeviceChallenge(f, challengeFill) {
       await writeFile(hapPath, f.hapBytes, { flag: 'wx' });
     }
   });
+  return { ...prepared, keyPair };
 }
 
 function artifactDependencies(overrides = {}) {
@@ -156,6 +161,46 @@ test('resolves policy from registered driver consumers and rejects cross-driver 
     deviceContracts.readDeviceEvidenceContract(process.cwd(), 'pgsql'),
     /no device acceptance consumer/i
   );
+  await assert.rejects(
+    deviceContracts.loadSealedDeviceEvidenceContract(process.cwd(), 'pgsql', undefined),
+    /no device acceptance consumer/i
+  );
+});
+
+test('prepares digest-less legacy MySQL evidence when its policy file is absent', async (t) => {
+  const f = await deviceFixture(t, { legacyWithoutPolicy: true });
+  assert.equal(f.bundle.releaseSet.verification.deviceEvidencePolicySha256, undefined);
+  assert.equal(existsSync(join(f.fixture.root, 'examples', 'mysql-device-acceptance',
+    'device-evidence-policy.json')), false);
+  const contract = await deviceContracts.loadSealedDeviceEvidenceContract(
+    f.fixture.root, 'mysql', undefined);
+  assert.equal(contract.policySha256, undefined);
+  assert.deepEqual(contract.policy.serverFamilies, ['MySQL']);
+  await assert.rejects(
+    deviceContracts.loadSealedDeviceEvidenceContract(f.fixture.root, 'mysql', 'a'.repeat(64)),
+    { code: 'ENOENT' }
+  );
+  assert.equal(f.prepared.challenge.state, 'issued');
+  const verificationTime = { now: () => new Date('2026-11-01T01:00:00.000Z') };
+  const verify = async (prepared, challenge, keyPair, name) => {
+    await writeFile(prepared.challengePath, `${JSON.stringify(challenge, null, 2)}\n`);
+    const receiptPath = join(f.fixture.root, `${name}-receipt.json`);
+    await writeFile(receiptPath,
+      `${JSON.stringify(passingEnvelope(challenge, keyPair.privateKey))}\n`);
+    return await verifyDeviceEvidence({
+      root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+      receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+    }, verificationTime);
+  };
+  const acceptedSchema2 = await verify(f.prepared, f.prepared.challenge,
+    f.keyPair, 'legacy-no-policy-schema-2');
+  assert.equal(acceptedSchema2.record.schemaVersion, 2);
+
+  const sibling = await prepareAdditionalDeviceChallenge(f, 0x54);
+  const legacySchema1 = schema1Challenge(sibling.challenge);
+  const acceptedSchema1 = await verify(sibling, legacySchema1, sibling.keyPair,
+    'legacy-no-policy-schema-1');
+  assert.equal(acceptedSchema1.record.schemaVersion, 1);
 });
 
 test('sealed release binds the driver-owned policy without changing legacy case-manifest bytes', async (t) => {

@@ -119,7 +119,7 @@ test('receipt assertion checks signature, case verdicts, metadata and secrecy', 
   const key = createPrivateKey({ key: Buffer.from(pkcs8, 'base64'), type: 'pkcs8', format: 'der' });
   const sha = 'a'.repeat(64);
   const manifest = { caseIds: ['tls_hostname_mismatch', 'cleanup'] };
-  const expected = { publicKey, spki, sha, manifest, mismatchFailed: false, failCleanup: false };
+  const expected = { publicKey, spki, sha, manifest, mismatchFailed: false };
   const payload = {
     cases: manifest.caseIds.map((id) => ({ id, status: 'pass' })),
     authPlugin: 'scram-sha-256', profile: 'P17', hapSha256: sha, operatorEvidenceId: 'operator-1'
@@ -138,9 +138,6 @@ test('receipt assertion checks signature, case verdicts, metadata and secrecy', 
     cases: [{ id: 'tls_hostname_mismatch', status: 'fail' }, payload.cases[1]] });
   failedMismatch.ok = false;
   assert.doesNotThrow(() => assertDeviceRunnerReceipt(failedMismatch, { ...expected, mismatchFailed: true }));
-  const failedCleanup = resultFor({ ...payload,
-    cases: [payload.cases[0], { id: 'cleanup', status: 'fail' }] });
-  assert.doesNotThrow(() => assertDeviceRunnerReceipt(failedCleanup, { ...expected, failCleanup: true }));
   assert.throws(() => assertDeviceRunnerReceipt({ ...valid, ok: false }, expected));
   const badSignature = JSON.parse(valid.receiptJson);
   badSignature.payload += ' ';

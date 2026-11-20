@@ -48,7 +48,7 @@ export function stallRunnerClose(connection, register) {
 }
 
 export function assertDeviceRunnerReceipt(result, { publicKey, spki, sha, manifest,
-  mismatchFailed, failCleanup }) {
+  mismatchFailed }) {
   assert.equal(result.ok, !mismatchFailed);
   const envelope = JSON.parse(result.receiptJson);
   assert.equal(envelope.kind, 'arkdb-device-acceptance-envelope');
@@ -58,7 +58,7 @@ export function assertDeviceRunnerReceipt(result, { publicKey, spki, sha, manife
   assert.deepEqual(payload.cases.map(({ id }) => id), manifest.caseIds);
   assert.equal(payload.cases.find(({ id }) => id === 'tls_hostname_mismatch').status,
     mismatchFailed ? 'fail' : 'pass');
-  assert.equal(payload.cases.find(({ id }) => id === 'cleanup').status, failCleanup ? 'fail' : 'pass');
+  assert.equal(payload.cases.find(({ id }) => id === 'cleanup').status, 'pass');
   assert.equal(payload.authPlugin, 'scram-sha-256');
   assert.equal(payload.profile, 'P17');
   assert.equal(payload.hapSha256, sha);

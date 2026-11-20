@@ -4,7 +4,7 @@ import test from 'node:test';
 import { observeSettlement } from './postgres-device-test-loader.mjs';
 import {
   ArkDbError, Kind, State, deviceRuntime, deviceSampleLoader, deviceRunnerFixture, signingKeys,
-  deviceRunnerPreparedFeatures, validDeviceRunnerRequest, stallRunnerClose
+  deviceRunnerPreparedFeatures, validDeviceRunnerRequest, stallRunnerClose, assertDeviceRunnerReceipt
 } from './postgres-device-runner-fixtures.mjs';
 
 const samples = new URL('../../examples/postgres-device-acceptance/entry/src/main/ets/sample/', import.meta.url);
@@ -112,4 +112,56 @@ test('runner fixture lets a pending close settle explicitly', async () => {
   release();
   await close;
   assert.equal(connection.state, State.Closed);
+});
+
+test('receipt assertion checks signature, case verdicts, metadata and secrecy', () => {
+  const { publicKey, spki, pkcs8 } = signingKeys();
+  const key = createPrivateKey({ key: Buffer.from(pkcs8, 'base64'), type: 'pkcs8', format: 'der' });
+  const sha = 'a'.repeat(64);
+  const manifest = { caseIds: ['tls_hostname_mismatch', 'cleanup'] };
+  const expected = { publicKey, spki, sha, manifest, mismatchFailed: false, failCleanup: false };
+  const payload = {
+    cases: manifest.caseIds.map((id) => ({ id, status: 'pass' })),
+    authPlugin: 'scram-sha-256', profile: 'P17', hapSha256: sha, operatorEvidenceId: 'operator-1'
+  };
+  const resultFor = (value) => {
+    const text = JSON.stringify(value);
+    return { ok: true, receiptJson: JSON.stringify({
+      kind: 'arkdb-device-acceptance-envelope', payload: text,
+      signature: { publicKeySpkiBase64: spki,
+        valueBase64: sign(null, Buffer.from(text), key).toString('base64') }
+    }) };
+  };
+  const valid = resultFor(payload);
+  assert.doesNotThrow(() => assertDeviceRunnerReceipt(valid, expected));
+  const failedMismatch = resultFor({ ...payload,
+    cases: [{ id: 'tls_hostname_mismatch', status: 'fail' }, payload.cases[1]] });
+  failedMismatch.ok = false;
+  assert.doesNotThrow(() => assertDeviceRunnerReceipt(failedMismatch, { ...expected, mismatchFailed: true }));
+  const failedCleanup = resultFor({ ...payload,
+    cases: [payload.cases[0], { id: 'cleanup', status: 'fail' }] });
+  assert.doesNotThrow(() => assertDeviceRunnerReceipt(failedCleanup, { ...expected, failCleanup: true }));
+  assert.throws(() => assertDeviceRunnerReceipt({ ...valid, ok: false }, expected));
+  const badSignature = JSON.parse(valid.receiptJson);
+  badSignature.payload += ' ';
+  assert.throws(() => assertDeviceRunnerReceipt({ ...valid, receiptJson: JSON.stringify(badSignature) }, expected));
+  const badKey = JSON.parse(valid.receiptJson);
+  badKey.signature.publicKeySpkiBase64 = 'wrong-key';
+  assert.throws(() => assertDeviceRunnerReceipt({ ...valid, receiptJson: JSON.stringify(badKey) }, expected));
+  const badKind = JSON.parse(valid.receiptJson);
+  badKind.kind = 'other-envelope';
+  assert.throws(() => assertDeviceRunnerReceipt({ ...valid, receiptJson: JSON.stringify(badKind) }, expected));
+  for (const invalid of [
+    { ...payload, profile: 'P18' },
+    { ...payload, authPlugin: 'md5' },
+    { ...payload, hapSha256: 'b'.repeat(64) },
+    { ...payload, operatorEvidenceId: 'other' },
+    { ...payload, cases: payload.cases.slice().reverse() },
+    { ...payload, cases: [{ id: 'tls_hostname_mismatch', status: 'fail' }, payload.cases[1]] },
+    { ...payload, cases: [payload.cases[0], { id: 'cleanup', status: 'fail' }] },
+    { ...payload, extra: 'not-for-a-receipt' },
+    { ...payload, extra: 'Sensitive' }
+  ]) {
+    assert.throws(() => assertDeviceRunnerReceipt(resultFor(invalid), expected));
+  }
 });

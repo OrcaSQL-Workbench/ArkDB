@@ -1,4 +1,5 @@
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { createSampleLoader } from './postgres-device-test-loader.mjs';
@@ -44,6 +45,25 @@ export function stallRunnerClose(connection, register) {
   return new Promise((resolve) => {
     register(() => { connection.state = State.Closed; resolve(); });
   });
+}
+
+export function assertDeviceRunnerReceipt(result, { publicKey, spki, sha, manifest,
+  mismatchFailed, failCleanup }) {
+  assert.equal(result.ok, !mismatchFailed);
+  const envelope = JSON.parse(result.receiptJson);
+  assert.equal(envelope.kind, 'arkdb-device-acceptance-envelope');
+  assert.equal(envelope.signature.publicKeySpkiBase64, spki);
+  assert.ok(verify(null, Buffer.from(envelope.payload), publicKey, Buffer.from(envelope.signature.valueBase64, 'base64')));
+  const payload = JSON.parse(envelope.payload);
+  assert.deepEqual(payload.cases.map(({ id }) => id), manifest.caseIds);
+  assert.equal(payload.cases.find(({ id }) => id === 'tls_hostname_mismatch').status,
+    mismatchFailed ? 'fail' : 'pass');
+  assert.equal(payload.cases.find(({ id }) => id === 'cleanup').status, failCleanup ? 'fail' : 'pass');
+  assert.equal(payload.authPlugin, 'scram-sha-256');
+  assert.equal(payload.profile, 'P17');
+  assert.equal(payload.hapSha256, sha);
+  assert.equal(payload.operatorEvidenceId, 'operator-1');
+  assert.doesNotMatch(result.receiptJson, /Sensitive|not-for-a-receipt/);
 }
 
 export function deviceSampleLoader(samples, clock = Date, uptime = () => 1) {

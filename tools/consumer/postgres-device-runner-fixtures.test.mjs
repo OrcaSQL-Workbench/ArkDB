@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { createPrivateKey, sign, verify } from 'node:crypto';
 import test from 'node:test';
+import { observeSettlement } from './postgres-device-test-loader.mjs';
 import {
-  ArkDbError, Kind, deviceRuntime, deviceSampleLoader, deviceRunnerFixture, signingKeys
+  ArkDbError, Kind, State, deviceRuntime, deviceSampleLoader, deviceRunnerFixture, signingKeys,
+  deviceRunnerPreparedFeatures, validDeviceRunnerRequest, stallRunnerClose
 } from './postgres-device-runner-fixtures.mjs';
 
 const samples = new URL('../../examples/postgres-device-acceptance/entry/src/main/ets/sample/', import.meta.url);
@@ -85,4 +87,29 @@ test('runner fixture creates a valid bound identity and matching signing keys', 
     key: Buffer.from(fixture.pkcs8, 'base64'), type: 'pkcs8', format: 'der'
   }));
   assert.equal(verify(null, Buffer.from('receipt'), fixture.publicKey, signature), true);
+});
+
+test('runner fixture builds a valid request and prepared results', async () => {
+  const { DeviceAcceptanceRequest, sha } = deviceRunnerFixture(Date.UTC(2026, 10, 20));
+  const { DeviceAcceptanceRequestSnapshot } = deviceSampleLoader(samples)('./DeviceAcceptanceRequestSnapshot');
+  const request = validDeviceRunnerRequest(DeviceAcceptanceRequest, sha, 'secret');
+  assert.equal(new DeviceAcceptanceRequestSnapshot(request).valid(), true);
+  assert.equal(request.password, 'secret');
+  const prepared = deviceRunnerPreparedFeatures(sha).prepared;
+  assert.deepEqual((await prepared.execute('', [{}])).rows, [[sha]]);
+  assert.deepEqual((await prepared.execute('', [{}, {}, {}])).rows,
+    [[9007199254740993n, '12.34', new Uint8Array([0, 127, 255])]]);
+});
+
+test('runner fixture lets a pending close settle explicitly', async () => {
+  const connection = { state: State.Ready };
+  let release;
+  const close = stallRunnerClose(connection, (callback) => { release = callback; });
+  const observation = observeSettlement(close);
+  await new Promise(setImmediate);
+  assert.equal(observation.settled, false);
+  assert.equal(connection.state, State.Ready);
+  release();
+  await close;
+  assert.equal(connection.state, State.Closed);
 });

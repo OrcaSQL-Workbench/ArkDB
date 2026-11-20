@@ -35,13 +35,6 @@ const LEGACY_MYSQL_POLICY = {
 
 export { exactKeys, parseDeviceEvidencePolicy };
 
-function stringList(value, label) {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 32 ||
-    value.some((entry) => !safePublicLabel(entry)) || new Set(value).size !== value.length) {
-    throw new Error(`${label} must contain unique bounded labels.`);
-  }
-}
-
 function readDeviceConsumerFile(directory, name) {
   return releaseFile(directory, name, 128 * 1024);
 }

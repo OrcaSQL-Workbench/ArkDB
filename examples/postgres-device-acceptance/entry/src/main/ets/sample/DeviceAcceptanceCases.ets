@@ -11,6 +11,7 @@ const PREPARED_VALUES_SQL: string =
 const AUTHORIZED_SCHEMA_SQL: string =
   'SELECT challenge_value FROM arkdb_device_acceptance WHERE challenge_id = $1';
 const CANCELLATION_SQL: string = 'SELECT pg_sleep(10), 1';
+const CANCELLATION_CLEANUP_TIMEOUT_MS: number = 2000;
 
 export interface DeviceAcceptanceConnection extends DbConnection {
   readonly serverInfo: PostgresServerInfo;
@@ -31,12 +32,15 @@ export class DeviceCaseCleanupError extends Error {
   cleanupError: Error;
   // The connection must not be reused; this tracks its outstanding query.
   querySettlement: Promise<Error | null>;
+  cleanupSettlement: Promise<Error | null>;
 
-  constructor(operationError: Error, cleanupError: Error, querySettlement: Promise<Error | null>) {
+  constructor(operationError: Error, cleanupError: Error, querySettlement: Promise<Error | null>,
+    cleanupSettlement: Promise<Error | null>) {
     super('Cancellation and connection cleanup both failed.');
     this.operationError = operationError;
     this.cleanupError = cleanupError;
     this.querySettlement = querySettlement;
+    this.cleanupSettlement = cleanupSettlement;
   }
 }
 
@@ -140,13 +144,27 @@ export class DeviceAcceptanceCases {
       operationError = error instanceof Error ? error :
         new Error('Cancellation failed with a non-error value.');
     }
-    try {
-      await connection.close();
-    } catch (cleanupError) {
+    const closeSettlement = Promise.resolve().then((): Promise<void> => connection.close()).then(
+      (): Error | null => null,
+      (error: Object): Error | null => error instanceof Error ? error :
+        new Error('Connection cleanup failed with a non-error value.')
+    );
+    const cleanupSettlement = closeSettlement.then(async (error: Error | null): Promise<Error | null> => {
+      if (error !== null) return error;
+      await query;
+      return null;
+    });
+    let timer: number = 0;
+    const timeout = new Promise<Error>((resolve): void => {
+      timer = setTimeout((): void => resolve(new Error('Cancellation cleanup timed out.')),
+        CANCELLATION_CLEANUP_TIMEOUT_MS);
+    });
+    const cleanupError = await Promise.race<Error | null>([cleanupSettlement, timeout]);
+    clearTimeout(timer);
+    if (cleanupError !== null) {
       throw new DeviceCaseCleanupError(
         operationError ?? new Error('Cancellation was not requested.'),
-        cleanupError instanceof Error ? cleanupError :
-          new Error('Connection cleanup failed with a non-error value.'), query);
+        cleanupError, query, cleanupSettlement);
     }
     const queryError = await query;
     if (operationError === null) {

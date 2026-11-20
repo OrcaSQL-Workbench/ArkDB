@@ -7,7 +7,9 @@ import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { sourceFingerprint } from '../artifact/source-identity.mjs';
 import { ROOT } from '../workspace/check-package.mjs';
-import { deviceSampleFingerprint, sampleFingerprint } from '../consumer/evidence.mjs';
+import {
+  deviceEvidencePolicySha256, deviceSampleFingerprint, sampleFingerprint
+} from '../consumer/evidence.mjs';
 import { driverVerification, packageStem, tagOutputPaths } from '../workspace/driver-packages.mjs';
 import { hapSigningContentFingerprint } from '../artifact/hap-content.mjs';
 import { sha256 } from '../lib/hash.mjs';
@@ -20,8 +22,7 @@ import {
   releaseProcessLock, syncDirectory, syncPreparedFile
 } from './atomic-store.mjs';
 import {
-  CASE_MANIFEST, CHALLENGE_LIFETIME_MS, exactKeys, randomHex, readCaseManifest,
-  recordBytes
+  CHALLENGE_LIFETIME_MS, exactKeys, loadSealedDeviceEvidenceContract, randomHex, recordBytes
 } from './contracts.mjs';
 import { secureSecretDirectory } from './hap-signature.mjs';
 import { buildDeviceHarness, renderDeviceEvidenceBinding } from './harness.mjs';
@@ -84,12 +85,13 @@ function signingKeyPair(dependencies) {
   };
 }
 
-function assertCleanReleaseSource(root, driver, set, acceptanceFingerprint, git) {
+function assertCleanReleaseSource(root, driver, set, acceptanceFingerprint, policySha256, git) {
   if (git(['status', '--porcelain', '--untracked-files=all']).trim() !== '' ||
     git(['rev-parse', '--verify', 'HEAD']).trim() !== set.sourceCommit ||
     sourceFingerprint(root, driver) !== set.sourceFingerprint ||
     sampleFingerprint(root, driver) !== set.verification.sampleFingerprint ||
-    deviceSampleFingerprint(root, driver) !== acceptanceFingerprint) {
+    deviceSampleFingerprint(root, driver) !== acceptanceFingerprint ||
+    deviceEvidencePolicySha256(root, driver) !== policySha256) {
     throw new Error(
       'Device harness preparation requires the exact clean sealed-release source and consumers.');
   }
@@ -101,9 +103,12 @@ export async function prepareDeviceEvidence({
   const bundle = await readReleaseBundle(bundleDirectory);
   const set = bundle.releaseSet;
   if (set.driver !== driver) throw new Error('The sealed release is not for the selected driver.');
+  const deviceContract = await loadSealedDeviceEvidenceContract(root, driver,
+    set.verification.deviceEvidencePolicySha256);
   const git = dependencies.git ?? gitReader(root);
   const acceptanceFingerprint = deviceSampleFingerprint(root, driver);
-  assertCleanReleaseSource(root, driver, set, acceptanceFingerprint, git);
+  assertCleanReleaseSource(root, driver, set, acceptanceFingerprint,
+    deviceContract.policySha256, git);
   const stem = packageStem({ name: set.packageName, version: set.version });
   const artifact = set.assets.find((entry) => entry.name === `${stem}.har`);
   const artifactBytes = bundle.assets.get(`${stem}.har`);
@@ -119,8 +124,7 @@ export async function prepareDeviceEvidence({
     join(paths.workspaces, 'device-acceptance'), { allowMissing: true });
   await mkdir(workParent, { recursive: true });
   plainPath(root, workParent);
-  const caseBytes = await readFile(join(root, CASE_MANIFEST));
-  const cases = readCaseManifest(caseBytes);
+  const { caseBytes, cases } = deviceContract;
   const now = dependencies.now ? dependencies.now() : new Date();
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
     throw new Error('Invalid device challenge time.');
@@ -196,6 +200,7 @@ export async function prepareDeviceEvidence({
       const buildHarness = dependencies.buildHarness ?? buildDeviceHarness;
       await buildHarness({
         root, driver, sampleDirectory, artifactBytes,
+        artifactFileName: `${set.packageName.slice('@arkdb/'.length)}.har`,
         bindingSource: renderDeviceEvidenceBinding(binding), hapPath
       }, {
         ...dependencies,
@@ -259,7 +264,8 @@ export async function prepareDeviceEvidence({
         preparedUnsignedHapContentSha256
       };
       challengeBytes = recordBytes(challenge);
-      assertCleanReleaseSource(root, driver, set, acceptanceFingerprint, git);
+      assertCleanReleaseSource(root, driver, set, acceptanceFingerprint,
+        deviceContract.policySha256, git);
       const currentBundle = await readReleaseBundle(bundleDirectory);
       if (sha256(currentBundle.releaseSetBytes) !== challenge.releaseSetSha256) {
         throw new Error('The sealed release changed while the device harness was built.');

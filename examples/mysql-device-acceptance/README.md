@@ -17,6 +17,9 @@ the ordinary consumer fingerprint from the release set, independently captures
 this acceptance harness fingerprint, generates a one-time Ed25519 key pair,
 injects both fingerprints and the challenge identity into an isolated copy,
 installs the exact sealed HAR, and compiles `entry-default-unsigned.hap`.
+The driver-owned `device-evidence-policy.json` is selected from the registered
+device-consumer directory, and its digest is sealed into the release set. The
+ordered case manifest remains unchanged.
 
 The private key exists only in the generated source and the HAP compiled from
 that source. Preparation records the exact HAP SHA-256/size, removes the
@@ -109,6 +112,7 @@ be replayed.
 | `entry/src/main/ets/sample/DeviceReceiptSigner.ets` | Sign the canonical payload with the one-time Ed25519 key |
 | `entry/src/main/ets/sample/DeviceReceiptClipboard.ets` | Copy the exact signed envelope without reformatting |
 | `device-acceptance-cases.json` | Canonical ordered cases and runtime profile included in the acceptance fingerprint |
+| `device-evidence-policy.json` | Driver-specific suite, server, profile, feature, authentication, and TLS policy |
 | `entry/src/test/acceptance/DeviceAcceptanceRunner.test.ets` | Synthetic fixed-case, failure, unbound, and privacy behavior |
 | `entry/src/test/evidence/DeviceReceiptSigner.test.ets` | Exact UTF-8 view and Ed25519 vector behavior |
 | `entry/src/test/evidence/DeviceReceiptClipboard.test.ets` | Exact transfer and bounded-input rejection |

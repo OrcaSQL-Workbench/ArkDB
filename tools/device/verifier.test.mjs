@@ -10,6 +10,7 @@ import { releaseFixture } from '../test-fixtures/har-release.mjs';
 import { sha256 } from '../package-har.mjs';
 import { deviceSampleFingerprint, sampleFingerprint } from '../test-consumer.mjs';
 import { hapSigningContentFingerprint } from '../hap-content.mjs';
+import * as deviceContracts from './contracts.mjs';
 import {
   deviceEvidenceArguments, prepareDeviceEvidence, verifyDeviceEvidence, verifyDeviceReceiptEnvelope
 } from '../verify-device-evidence.mjs';
@@ -20,6 +21,10 @@ const LEGACY_CASE_MANIFEST_SHA256 =
 
 async function deviceFixture(t, overrides = {}) {
   const fixture = await releaseFixture(t);
+  if (overrides.legacyWithoutPolicy) {
+    await rm(join(fixture.root, 'examples', 'mysql-device-acceptance',
+      'device-evidence-policy.json'));
+  }
   const bundle = await prepareHarRelease(fixture.options, fixture.dependencies);
   const keyPair = generateKeyPairSync('ed25519');
   const publicKeySpki = Buffer.from(keyPair.publicKey.export({ format: 'der', type: 'spki' }));
@@ -43,6 +48,7 @@ async function deviceFixture(t, overrides = {}) {
     async buildHarness(options) {
       assert.equal(sha256(options.artifactBytes), fixture.identity.sha256);
       assert.equal(options.artifactBytes.length, fixture.identity.byteLength);
+      assert.equal(options.artifactFileName, 'mysql.har');
       assert.equal(options.bindingSource.includes(privateKeyPkcs8.toString('base64')), true);
       assert.match(options.bindingSource, /privateKeyPkcs8Base64/);
       assert.match(options.bindingSource, /consumerFingerprint/);
@@ -64,7 +70,7 @@ async function prepareAdditionalDeviceChallenge(f, challengeFill) {
     Buffer.alloc(32, challengeFill + 1),
     Buffer.alloc(32, challengeFill + 2)
   ];
-  return await prepareDeviceEvidence({
+  const prepared = await prepareDeviceEvidence({
     root: f.fixture.root,
     driver: 'mysql',
     bundleDirectory: f.bundle.bundleDirectory
@@ -84,6 +90,7 @@ async function prepareAdditionalDeviceChallenge(f, challengeFill) {
       await writeFile(hapPath, f.hapBytes, { flag: 'wx' });
     }
   });
+  return { ...prepared, keyPair };
 }
 
 function artifactDependencies(overrides = {}) {
@@ -141,6 +148,100 @@ test('preserves the historical schema-1 case manifest bytes after moving the har
   assert.equal(sha256(bytes), LEGACY_CASE_MANIFEST_SHA256);
 });
 
+test('resolves policy from registered driver consumers and rejects cross-driver reuse', async () => {
+  const mysql = await deviceContracts.readDeviceEvidenceContract(process.cwd(), 'mysql');
+  assert.equal(mysql.policy.driver, 'mysql');
+  assert.equal(mysql.policy.caseManifestFile, 'device-acceptance-cases.json');
+  assert.throws(() => deviceContracts.parseDeviceEvidencePolicy(mysql.policyBytes, 'pgsql'),
+    /registered driver/i);
+  const legacy = await deviceContracts.loadSealedDeviceEvidenceContract(
+    process.cwd(), 'mysql', undefined);
+  assert.deepEqual(legacy.policy, mysql.policy);
+  await assert.rejects(
+    deviceContracts.readDeviceEvidenceContract(process.cwd(), 'pgsql'),
+    /no device acceptance consumer/i
+  );
+  await assert.rejects(
+    deviceContracts.loadSealedDeviceEvidenceContract(process.cwd(), 'pgsql', undefined),
+    /no device acceptance consumer/i
+  );
+});
+
+test('rejects non-string policy features and profile IDs', async () => {
+  const { policyBytes } = await deviceContracts.readDeviceEvidenceContract(
+    process.cwd(), 'mysql');
+  const nonStringFeature = JSON.parse(policyBytes.toString('utf8'));
+  nonStringFeature.features[0] = null;
+  assert.throws(
+    () => deviceContracts.parseDeviceEvidencePolicy(
+      Buffer.from(JSON.stringify(nonStringFeature)), 'mysql'),
+    /Device policy features are invalid/
+  );
+
+  const nonStringProfileId = JSON.parse(policyBytes.toString('utf8'));
+  nonStringProfileId.profiles[0].id = 1;
+  assert.throws(
+    () => deviceContracts.parseDeviceEvidencePolicy(
+      Buffer.from(JSON.stringify(nonStringProfileId)), 'mysql'),
+    /Device policy profile selection is invalid/
+  );
+});
+
+test('prepares digest-less legacy MySQL evidence when its policy file is absent', async (t) => {
+  const f = await deviceFixture(t, { legacyWithoutPolicy: true });
+  assert.equal(f.bundle.releaseSet.verification.deviceEvidencePolicySha256, undefined);
+  assert.equal(existsSync(join(f.fixture.root, 'examples', 'mysql-device-acceptance',
+    'device-evidence-policy.json')), false);
+  const contract = await deviceContracts.loadSealedDeviceEvidenceContract(
+    f.fixture.root, 'mysql', undefined);
+  assert.equal(contract.policySha256, undefined);
+  assert.deepEqual(contract.policy.serverFamilies, ['MySQL']);
+  await assert.rejects(
+    deviceContracts.loadSealedDeviceEvidenceContract(f.fixture.root, 'mysql', 'a'.repeat(64)),
+    { code: 'ENOENT' }
+  );
+  assert.equal(f.prepared.challenge.state, 'issued');
+  const verificationTime = { now: () => new Date('2026-11-01T01:00:00.000Z') };
+  const verify = async (prepared, challenge, keyPair, name) => {
+    await writeFile(prepared.challengePath, `${JSON.stringify(challenge, null, 2)}\n`);
+    const receiptPath = join(f.fixture.root, `${name}-receipt.json`);
+    await writeFile(receiptPath,
+      `${JSON.stringify(passingEnvelope(challenge, keyPair.privateKey))}\n`);
+    return await verifyDeviceEvidence({
+      root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+      receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+    }, verificationTime);
+  };
+  const acceptedSchema2 = await verify(f.prepared, f.prepared.challenge,
+    f.keyPair, 'legacy-no-policy-schema-2');
+  assert.equal(acceptedSchema2.record.schemaVersion, 2);
+
+  const sibling = await prepareAdditionalDeviceChallenge(f, 0x54);
+  const legacySchema1 = schema1Challenge(sibling.challenge);
+  const acceptedSchema1 = await verify(sibling, legacySchema1, sibling.keyPair,
+    'legacy-no-policy-schema-1');
+  assert.equal(acceptedSchema1.record.schemaVersion, 1);
+});
+
+test('sealed release binds the driver-owned policy without changing legacy case-manifest bytes', async (t) => {
+  const f = await deviceFixture(t);
+  const policyPath = join(f.fixture.root, 'examples', 'mysql-device-acceptance',
+    'device-evidence-policy.json');
+  const policyBytes = await readFile(policyPath);
+  assert.equal(f.bundle.releaseSet.verification.deviceEvidencePolicySha256, sha256(policyBytes));
+  const policy = JSON.parse(policyBytes.toString('utf8'));
+  policy.tlsModes = ['disable'];
+  await writeFile(policyPath, `${JSON.stringify(policy, null, 2)}\n`);
+  const receiptPath = join(f.fixture.root, 'tampered-policy-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(passingEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey
+  ))}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }), /policy differs from the sealed release/i);
+});
+
 test('keeps device selection contracts while removing duplicate helper surface', async () => {
   const manifestSource = await readFile(join(process.cwd(), 'examples',
     'mysql-device-acceptance', 'entry', 'src', 'main', 'ets', 'sample',
@@ -151,7 +252,8 @@ test('keeps device selection contracts while removing duplicate helper surface',
   assert.doesNotMatch(manifestSource, /\bDEVICE_ACCEPTANCE_SERVER_FAMILIES\b/);
   assert.doesNotMatch(cli, /\bdeviceEvidenceCaseManifestPath\b/);
   assert.doesNotMatch(cli, /\bCASE_MANIFEST\b/);
-  assert.match(contracts, /export const DEVICE_PROFILES = \['M1', 'M2', 'M3', 'M4'\]/);
+  assert.doesNotMatch(contracts, /export const DEVICE_(?:PROFILES|FEATURES)\s*=/);
+  assert.match(contracts, /parseDeviceEvidencePolicy/);
   assert.match(contracts, /\bserverFamilies\b/);
   assert.match(contracts, /\['MySQL'\]/);
 });
@@ -1437,14 +1539,19 @@ test('parses only explicit preparation and artifact-validation commands', () => 
     features: ['procedures', 'sha256'],
     outPath: 'device-verified.json'
   });
+  assert.deepEqual(deviceEvidenceArguments([
+    '--receipt', 'device-receipt.json', '--manifest', 'postgres.manifest.json',
+    '--consumer', 'postgres.consumer.json', '--hap', 'signed-entry.hap',
+    '--profile', 'PG_BASE', '--features', 'jsonb', '--out', 'device-verified.json'
+  ]).profile, 'PG_BASE');
   for (const argv of [
     [],
     ['prepare', '--driver', 'mysql'],
     ['--receipt', 'receipt.json', '--manifest', 'manifest.json'],
     ['--receipt', 'receipt.json', '--manifest', 'manifest.json', '--consumer', 'consumer.json',
-      '--hap', 'signed.hap', '--profile', 'M1', '--features', 'procedures', '--out', 'out.json'],
+      '--hap', 'signed.hap', '--profile', 'invalid profile', '--out', 'out.json'],
     ['--receipt', 'receipt.json', '--manifest', 'manifest.json', '--consumer', 'consumer.json',
-      '--hap', 'signed.hap', '--profile', 'M4', '--features', 'unknown', '--out', 'out.json'],
+      '--hap', 'signed.hap', '--profile', 'M1', '--features', 'unknown_feature!', '--out', 'out.json'],
     ['prepare', '--bundle', 'dist', '--bundle', 'other']
   ]) assert.throws(() => deviceEvidenceArguments(argv),
     /Usage|explicit|repeated|driver|profile|feature/i);
@@ -1547,8 +1654,10 @@ test('runs the official HAP signature verifier and binds its certificate evidenc
       const snapshotPath = args[4];
       assert.notEqual(snapshotPath, hapPath);
       assert.deepEqual(readFileSync(snapshotPath), f.hapBytes);
+      assert.equal(basename(args[args.indexOf('-outCertChain') + 1]),
+        'certificate-chain.cer');
       assert.deepEqual(args.slice(-2), ['-inForm', 'zip']);
-      writeFileSync(args[args.indexOf('-outCertchain') + 1], certificate);
+      writeFileSync(args[args.indexOf('-outCertChain') + 1], certificate);
       writeFileSync(args[args.indexOf('-outProfile') + 1], profile);
       return { status: 0, stdout: '', stderr: '' };
     }

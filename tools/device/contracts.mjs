@@ -1,44 +1,101 @@
 import { createPublicKey, verify as verifySignature } from 'node:crypto';
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
-import { deviceSampleFingerprint } from '../consumer/evidence.mjs';
-import { packageStem } from '../workspace/driver-packages.mjs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  deviceEvidencePolicyBytes, deviceSampleFingerprint, exactKeys, parseDeviceEvidencePolicy
+} from '../consumer/evidence.mjs';
+import { driverVerification, packageStem } from '../workspace/driver-packages.mjs';
 import { sha256 } from '../lib/hash.mjs';
-import { jsonBytes } from '../lib/safe-files.mjs';
+import { jsonBytes, releaseFile } from '../lib/safe-files.mjs';
 
-export const CASE_MANIFEST =
-  'examples/mysql-device-acceptance/device-acceptance-cases.json';
+const CASE_MANIFEST = 'device-acceptance-cases.json';
 export const CHALLENGE_LIFETIME_MS = 24 * 60 * 60 * 1000;
-export const DEVICE_PROFILES = ['M1', 'M2', 'M3', 'M4'];
-export const DEVICE_FEATURES = [
-  'multi-statements', 'procedures', 'text-parameters', 'sha256', 'compression',
-  'local-infile', 'failover', 'worker', 'session-observations', 'routing'
-];
-const DEVICE_AUTH_PLUGINS = ['mysql_native_password', 'caching_sha2_password'];
 const CANONICAL_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const BASE64 =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-export function exactKeys(value, names, label) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-    JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...names].sort())) {
-    throw new Error(`${label} has an invalid property set.`);
-  }
+const LEGACY_MYSQL_POLICY = {
+  schemaVersion: 1,
+  driver: 'mysql',
+  caseManifestFile: CASE_MANIFEST,
+  suiteId: 'arkdb.mysql.device-acceptance',
+  serverFamilies: ['MySQL'],
+  features: [
+    'multi-statements', 'procedures', 'text-parameters', 'sha256', 'compression',
+    'local-infile', 'failover', 'worker', 'session-observations', 'routing'
+  ],
+  authPlugins: ['mysql_native_password', 'caching_sha2_password'],
+  tlsModes: ['verify_identity'],
+  profiles: [
+    { id: 'M1', features: [], authPlugins: ['mysql_native_password', 'caching_sha2_password'] },
+    { id: 'M2', features: [], authPlugins: ['mysql_native_password', 'caching_sha2_password'] },
+    { id: 'M3', features: [], authPlugins: ['mysql_native_password', 'caching_sha2_password'] },
+    { id: 'M4', features: ['sha256'], authPlugins: ['caching_sha2_password'] }
+  ]
+};
+
+export { exactKeys, parseDeviceEvidencePolicy };
+
+function readDeviceConsumerFile(directory, name) {
+  return releaseFile(directory, name, 128 * 1024);
 }
 
-export function readCaseManifest(bytes) {
+async function deviceEvidenceContract(root, driver, allowLegacyMysqlPolicy) {
+  const verification = driverVerification(root, driver);
+  if (verification.deviceConsumerDirectory === undefined) {
+    throw new Error(`Driver ${driver} has no device acceptance consumer or policy.`);
+  }
+  let policyBytes;
+  let policy;
+  try {
+    policyBytes = deviceEvidencePolicyBytes(root, driver);
+    policy = parseDeviceEvidencePolicy(policyBytes, driver);
+  } catch (error) {
+    if (!allowLegacyMysqlPolicy || driver !== 'mysql' || error?.code !== 'ENOENT') throw error;
+    policy = LEGACY_MYSQL_POLICY;
+  }
+  const caseBytes = readDeviceConsumerFile(verification.deviceConsumerDirectory,
+    policy.caseManifestFile);
+  const cases = readCaseManifest(caseBytes, policy);
+  return {
+    policy, policyBytes, policySha256: policyBytes === undefined ? undefined : sha256(policyBytes),
+    caseBytes, cases,
+    deviceConsumerDirectory: verification.deviceConsumerDirectory
+  };
+}
+
+export async function readDeviceEvidenceContract(root, driver) {
+  return deviceEvidenceContract(root, driver, false);
+}
+
+export async function loadSealedDeviceEvidenceContract(root, driver, expectedPolicySha256) {
+  const contract = await deviceEvidenceContract(root, driver,
+    expectedPolicySha256 === undefined && driver === 'mysql');
+  if (expectedPolicySha256 !== undefined) {
+    if (!/^[0-9a-f]{64}$/.test(expectedPolicySha256) ||
+      contract.policySha256 !== expectedPolicySha256) {
+      throw new Error('Device evidence policy differs from the sealed release.');
+    }
+  } else if (driver !== 'mysql' ||
+    JSON.stringify(contract.policy) !== JSON.stringify(LEGACY_MYSQL_POLICY)) {
+    throw new Error(`Sealed release for ${driver} has no compatible device evidence policy.`);
+  }
+  return contract;
+}
+
+export function readCaseManifest(bytes, policy) {
   const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   exactKeys(value, ['schemaVersion', 'suiteId', 'caseIds', 'runtime'],
     'Device acceptance case manifest');
   exactKeys(value.runtime, ['minimumSdkApiVersion', 'deviceTypes', 'serverFamilies'],
     'Device acceptance runtime manifest');
-  if (value.schemaVersion !== 1 || value.suiteId !== 'arkdb.mysql.device-acceptance' ||
+  if (value.schemaVersion !== 1 || value.suiteId !== policy.suiteId ||
     !Array.isArray(value.caseIds) || value.caseIds.length === 0 || value.caseIds.length > 32 ||
     new Set(value.caseIds).size !== value.caseIds.length ||
     value.caseIds.some((id) => !/^[a-z][a-z0-9_]{1,63}$/.test(id)) ||
     !Number.isSafeInteger(value.runtime.minimumSdkApiVersion) ||
     value.runtime.minimumSdkApiVersion < 1 ||
     JSON.stringify(value.runtime.deviceTypes) !== JSON.stringify(['tablet', '2in1']) ||
-    JSON.stringify(value.runtime.serverFamilies) !== JSON.stringify(['MySQL'])) {
+    JSON.stringify(value.runtime.serverFamilies) !== JSON.stringify(policy.serverFamilies)) {
     throw new Error('Invalid device acceptance case manifest.');
   }
   return value;
@@ -93,13 +150,14 @@ function safePublicLabel(value) {
     /^[A-Za-z0-9][A-Za-z0-9 ._()+/-]{0,127}$/.test(value);
 }
 
-export function supportedDeviceSelection(profile, features, authPlugin) {
-  if (['M1', 'M2', 'M3'].includes(profile)) return features.length === 0;
-  return profile === 'M4' && features.length === 1 && features[0] === 'sha256' &&
-    (authPlugin === undefined || authPlugin === 'caching_sha2_password');
+export function supportedDeviceSelection(profile, features, authPlugin, policy) {
+  const selection = policy.profiles.find((entry) => entry.id === profile &&
+    JSON.stringify(entry.features) === JSON.stringify(features));
+  return selection !== undefined &&
+    (authPlugin === undefined || selection.authPlugins.includes(authPlugin));
 }
 
-export function validateChallenge(challenge, set, bundle, cases, caseBytes, root) {
+export function validateChallenge(challenge, set, bundle, cases, caseBytes, root, policy) {
   const stem = packageStem({ name: set.packageName, version: set.version });
   const artifact = set.assets.find((entry) => entry.name === `${stem}.har`);
   const fingerprintKeys = challenge.schemaVersion === 1
@@ -125,7 +183,8 @@ export function validateChallenge(challenge, set, bundle, cases, caseBytes, root
   if (![1, 2].includes(challenge.schemaVersion) ||
     challenge.kind !== 'arkdb-device-evidence-challenge' ||
     challenge.state !== 'issued' || challenge.repository !== set.repository ||
-    challenge.driver !== set.driver || challenge.packageName !== set.packageName ||
+    challenge.driver !== set.driver || policy.driver !== set.driver ||
+    challenge.packageName !== set.packageName ||
     challenge.version !== set.version || challenge.tag !== set.tag ||
     challenge.sourceCommit !== set.sourceCommit || challenge.artifactSha256 !== artifact?.sha256 ||
     challenge.artifactByteLength !== artifact?.byteLength ||
@@ -201,7 +260,7 @@ export function verifyDeviceReceiptEnvelope(bytes, expectedPublicKeySpkiBase64) 
   return verifyEnvelopeSignature(parseReceiptEnvelope(bytes), expectedPublicKeySpkiBase64);
 }
 
-export function validateReceipt(envelope, receipt, challenge, cases, now) {
+export function validateReceipt(envelope, receipt, challenge, cases, now, policy) {
   const parsed = verifyEnvelopeSignature({ envelope, payload: receipt },
     challenge.publicKeySpkiBase64);
   const publicKeyBytes = Buffer.from(parsed.envelope.signature.publicKeySpkiBase64, 'base64');
@@ -226,12 +285,11 @@ export function validateReceipt(envelope, receipt, challenge, cases, now) {
       receipt.consumerFingerprint === challenge.consumerFingerprint &&
       receipt.acceptanceFingerprint === challenge.acceptanceFingerprint;
   if (![1, 2].includes(receipt.schemaVersion) || !fingerprintsMatch ||
-    !DEVICE_PROFILES.includes(receipt.profile) ||
     !Array.isArray(receipt.features) ||
-    receipt.features.some((feature) => !DEVICE_FEATURES.includes(feature)) ||
+    receipt.features.some((feature) => !policy.features.includes(feature)) ||
     new Set(receipt.features).size !== receipt.features.length ||
     JSON.stringify([...receipt.features].sort()) !== JSON.stringify(receipt.features) ||
-    !supportedDeviceSelection(receipt.profile, receipt.features, receipt.authPlugin) ||
+    !supportedDeviceSelection(receipt.profile, receipt.features, receipt.authPlugin, policy) ||
     receipt.runId !== challenge.challengeId ||
     receipt.sourceCommit !== challenge.sourceCommit || receipt.sourceClean !== true ||
     receipt.harSha256 !== challenge.artifactSha256 ||
@@ -239,8 +297,8 @@ export function validateReceipt(envelope, receipt, challenge, cases, now) {
     !Number.isSafeInteger(receipt.apiVersion) ||
     receipt.apiVersion < cases.runtime.minimumSdkApiVersion ||
     !cases.runtime.deviceTypes.includes(receipt.deviceClass) ||
-    !safePublicLabel(receipt.serverVersion) || receipt.tlsMode !== 'verify_identity' ||
-    !DEVICE_AUTH_PLUGINS.includes(receipt.authPlugin) ||
+    !safePublicLabel(receipt.serverVersion) || !policy.tlsModes.includes(receipt.tlsMode) ||
+    !policy.authPlugins.includes(receipt.authPlugin) ||
     receipt.challengeIssuedAt !== challenge.createdAt ||
     receipt.challengeExpiresAt !== challenge.expiresAt ||
     !canonicalTime(receipt.startedAt) || !canonicalTime(receipt.completedAt) ||

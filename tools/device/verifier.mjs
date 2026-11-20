@@ -15,9 +15,8 @@ import {
   releaseProcessLock, replaceStaleLock, syncDirectory
 } from './atomic-store.mjs';
 import {
-  acceptedRecord, CASE_MANIFEST, claimRecord,
-  DEVICE_FEATURES, DEVICE_PROFILES, exactKeys, parseReceiptEnvelope, pathWithin,
-  pathWithinDeviceVerifierStorage, readCaseManifest, recordBytes,
+  acceptedRecord, claimRecord, exactKeys, loadSealedDeviceEvidenceContract,
+  parseReceiptEnvelope, pathWithin, pathWithinDeviceVerifierStorage, recordBytes,
   rejectedRecord, supportedDeviceSelection, validateChallenge, validateClaim,
   validateReceipt, verifyEnvelopeSignature
 } from './contracts.mjs';
@@ -229,6 +228,8 @@ async function verifyBoundDeviceEvidence({
   const bundle = await readReleaseBundle(resolvedBundleDirectory);
   const set = bundle.releaseSet;
   if (set.driver !== driver) throw new Error('The sealed release is not for the selected driver.');
+  const deviceContract = await loadSealedDeviceEvidenceContract(root, driver,
+    set.verification.deviceEvidencePolicySha256);
   if (receiptSnapshot !== null &&
     (!Buffer.isBuffer(receiptSnapshot) || receiptSnapshot.length === 0 ||
       receiptSnapshot.length > 2 * 1024 * 1024)) {
@@ -243,10 +244,9 @@ async function verifyBoundDeviceEvidence({
   }
   const paths = tagOutputPaths(root, driver, set.tag);
   const states = statePaths(root, paths, parsed.payload.runId);
-  const caseBytes = await readFile(join(root, CASE_MANIFEST));
-  const cases = readCaseManifest(caseBytes);
+  const { policy, caseBytes, cases } = deviceContract;
   const observedChallenge = await readChallengeWithoutRecovery(states, parsed.payload.runId);
-  validateChallenge(observedChallenge, set, bundle, cases, caseBytes, root);
+  validateChallenge(observedChallenge, set, bundle, cases, caseBytes, root, policy);
   verifyEnvelopeSignature(parsed, observedChallenge.publicKeySpkiBase64);
   const buildRoot = join(root, 'build');
   const canonicalBuildRoot = await realpath(buildRoot);
@@ -327,16 +327,16 @@ async function verifyBoundDeviceEvidence({
     } else if (lockExists) {
       claim = null;
       pendingRawWithLock = true;
-      validateChallenge(pending, set, bundle, cases, caseBytes, root);
+      validateChallenge(pending, set, bundle, cases, caseBytes, root, policy);
     } else {
-      validateChallenge(pending, set, bundle, cases, caseBytes, root);
+      validateChallenge(pending, set, bundle, cases, caseBytes, root, policy);
       const now = dependencies.now ? dependencies.now() : new Date();
       if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
         throw new Error('Invalid device verification time.');
       }
       try {
         if (now.getTime() > Date.parse(pending.expiresAt)) throw new Error('Device challenge has expired.');
-        validateReceipt(parsed.envelope, parsed.payload, pending, cases, now);
+        validateReceipt(parsed.envelope, parsed.payload, pending, cases, now, policy);
       } catch (error) {
         validationFailure = error;
       }
@@ -393,7 +393,7 @@ async function verifyBoundDeviceEvidence({
     await releaseClaimLock(states.lock, claim);
     throw new Error('Device challenge state changed before claim-lock acquisition.');
   }
-  validateChallenge(claim.challenge, set, bundle, cases, caseBytes, root);
+  validateChallenge(claim.challenge, set, bundle, cases, caseBytes, root, policy);
   const decision = claim.decision;
   const recordPath = decision === 'accepted' ? states.acceptedRecord : states.rejectedRecord;
   claim = validateClaim(claim, receiptBytes, parsed, decision, recordPath,
@@ -466,11 +466,12 @@ export async function verifyDeviceEvidenceArtifacts({
   features = [],
   outPath
 }, dependencies = {}) {
-  if (!DEVICE_PROFILES.includes(profile) || !Array.isArray(features) ||
+  if (typeof profile !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(profile) ||
+    !Array.isArray(features) ||
     new Set(features).size !== features.length ||
     JSON.stringify([...features].sort()) !== JSON.stringify(features) ||
-    features.some((feature) => !DEVICE_FEATURES.includes(feature)) ||
-    (profile !== 'M4' && features.length !== 0)) {
+    features.some((feature) => typeof feature !== 'string' ||
+      !/^[a-z][a-z0-9-]{0,63}$/.test(feature))) {
     throw new Error('Device evidence profile or product features are invalid.');
   }
   const manifestDirectory = dirname(resolve(manifestPath));
@@ -487,6 +488,8 @@ export async function verifyDeviceEvidenceArtifacts({
   }
   const bundle = await readReleaseBundle(manifestDirectory);
   const set = bundle.releaseSet;
+  const deviceContract = await loadSealedDeviceEvidenceContract(root, set.driver,
+    set.verification.deviceEvidencePolicySha256);
   const stem = packageStem({ name: set.packageName, version: set.version });
   if (basename(manifestPath) !== `${stem}.manifest.json` ||
     basename(consumerPath) !== `${stem}.consumer.json`) {
@@ -519,7 +522,7 @@ export async function verifyDeviceEvidenceArtifacts({
     consumer.sampleFingerprint !== receiptConsumerFingerprint ||
     parsed.payload.profile !== profile ||
     JSON.stringify(parsed.payload.features) !== JSON.stringify(features) ||
-    !supportedDeviceSelection(profile, features, parsed.payload.authPlugin) ||
+    !supportedDeviceSelection(profile, features, parsed.payload.authPlugin, deviceContract.policy) ||
     parsed.payload.hapSha256 !== actualHapSha256 ||
     challenge.preparedUnsignedHapContentSha256 !== actualHapContentSha256) {
     throw new Error('Receipt, sealed release, consumer evidence, or actual signed HAP identity differs.');

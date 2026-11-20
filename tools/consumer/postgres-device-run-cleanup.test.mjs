@@ -29,7 +29,7 @@ test('includes connections registered synchronously after reentrant stop', async
   const closed = [];
   const connections = [{ state: 'closed', async close() { closed.push('first'); } }];
   const cleanup = closeDeviceConnections(connections);
-  connections.push({ state: 'closed', async close() { closed.push('second'); } });
+  cleanup.register({ state: 'closed', async close() { closed.push('second'); } });
   assert.equal(await cleanup.settlement, null);
   assert.deepEqual(closed, ['first', 'second']);
 });
@@ -75,16 +75,37 @@ test('waits for a registered close added while another close is pending', async 
   assert.equal(await pending, null);
 });
 
+test('waits for a registered close added during case query settlement', async () => {
+  let finishQuery;
+  let finishClose;
+  const query = new Promise((resolve) => { finishQuery = resolve; });
+  const failure = new DeviceCaseCleanupError(new Error('cancel failed'), new Error('close failed'),
+    query, Promise.resolve(null));
+  const close = closeDeviceConnections([]);
+  const pending = cleanupDeviceRun(close, Promise.resolve(failure));
+  const observed = observeSettlement(pending);
+  await new Promise(setImmediate);
+  const connection = { state: 'ready', close: () => new Promise((resolve) => {
+    finishClose = () => { connection.state = 'closed'; resolve(); };
+  }) };
+  close.register(connection);
+  finishQuery(null);
+  await new Promise(setImmediate);
+  assert.equal(observed.settled, false);
+  finishClose();
+  assert.equal(await pending, failure);
+});
+
 test('closes connections registered asynchronously by an in-flight operation', async () => {
   let release;
-  const connections = [];
+  const close = closeDeviceConnections([]);
   const connection = { state: 'ready', async close() { this.state = 'closed'; } };
   const operation = (async () => {
     await new Promise((resolve) => { release = resolve; });
-    connections.push(connection);
+    close.register(connection);
     return null;
   })();
-  const cleanup = cleanupDeviceRun(closeDeviceConnections(connections), operation);
+  const cleanup = cleanupDeviceRun(close, operation);
   await new Promise(setImmediate);
   release();
   assert.equal(await cleanup, null);
@@ -93,14 +114,14 @@ test('closes connections registered asynchronously by an in-flight operation', a
 
 test('retains a late connection close error after the initial scan', async () => {
   let release;
-  const connections = [];
+  const close = closeDeviceConnections([]);
   const closeError = new Error('late close failed');
   const operation = (async () => {
     await new Promise((resolve) => { release = resolve; });
-    connections.push({ state: 'ready', async close() { throw closeError; } });
+    close.register({ state: 'ready', async close() { throw closeError; } });
     return null;
   })();
-  const cleanup = cleanupDeviceRun(closeDeviceConnections(connections), operation);
+  const cleanup = cleanupDeviceRun(close, operation);
   await new Promise(setImmediate);
   release();
   assert.equal(await cleanup, closeError);
@@ -108,14 +129,14 @@ test('retains a late connection close error after the initial scan', async () =>
 
 test('drains a connection registered after cleanup has timed out', async () => {
   let release;
-  const connections = [];
+  const close = closeDeviceConnections([]);
   const connection = { state: 'ready', async close() { this.state = 'closed'; } };
   const operation = (async () => {
     await new Promise((resolve) => { release = resolve; });
-    connections.push(connection);
+    close.register(connection);
     return null;
   })();
-  const timeout = await cleanupDeviceRun(closeDeviceConnections(connections), operation);
+  const timeout = await cleanupDeviceRun(close, operation);
   assert.match(timeout.message, /timed out/);
   release();
   await timeout.operationSettlement;

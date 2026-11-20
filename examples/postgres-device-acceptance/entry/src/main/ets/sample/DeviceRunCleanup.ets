@@ -36,11 +36,12 @@ export class DeviceConnectionCleanup {
   private scanned: number = 0;
 
   constructor(connections: DeviceAcceptanceConnection[]) {
-    this.connections = connections;
-    // Include a connection returned synchronously after a reentrant stop.
+    // Take ownership of a snapshot; later additions must use register().
+    this.connections = connections.slice();
     this.settlement = Promise.resolve().then((): Promise<Error | null> => this.drain());
   }
 
+  // All connections created after cleanup starts must be registered here.
   register(connection: DeviceAcceptanceConnection): void {
     this.connections.push(connection);
     this.startClosing();
@@ -134,7 +135,7 @@ async function waitForDeviceRunCleanup(close: DeviceConnectionCleanup,
     });
   });
   const settlement = operation.then(settleDeviceCase);
-  const finalClose = operation.then((): Promise<Error | null> => close.drain());
+  const finalClose = settlement.then((): Promise<Error | null> => close.drain());
   const cleanup = Promise.all([close.settlement, finalClose, settlement]).then((errors): Error | null => {
     if (errors[1] !== null && errors[2] !== null) {
       return new DeviceOperationCleanupError(errors[2], errors[1]);

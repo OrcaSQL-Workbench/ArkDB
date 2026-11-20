@@ -34,6 +34,96 @@ test('includes connections registered synchronously after reentrant stop', async
   assert.deepEqual(closed, ['first', 'second']);
 });
 
+test('closes connections registered during and after a stalled operation timeout', async () => {
+  let finishOperation;
+  const operation = new Promise((resolve) => { finishOperation = resolve; });
+  const close = closeDeviceConnections([]);
+  const pending = cleanupDeviceRun(close, operation);
+  await new Promise(setImmediate);
+  const first = { state: 'ready', async close() { this.state = 'closed'; } };
+  close.register(first);
+  await close.settlements[0];
+  assert.equal(first.state, 'closed');
+  const timeout = await pending;
+  assert.match(timeout.message, /timed out/);
+  const second = { state: 'ready', async close() { this.state = 'closed'; } };
+  close.register(second);
+  await timeout.closeSettlements[1];
+  assert.equal(second.state, 'closed');
+  finishOperation(null);
+  await timeout.operationSettlement;
+});
+
+test('waits for a registered close added while another close is pending', async () => {
+  let releaseFirst;
+  let releaseSecond;
+  const first = { state: 'ready', close: () => new Promise((resolve) => {
+    releaseFirst = () => { first.state = 'closed'; resolve(); };
+  }) };
+  const second = { state: 'ready', close: () => new Promise((resolve) => {
+    releaseSecond = () => { second.state = 'closed'; resolve(); };
+  }) };
+  const close = closeDeviceConnections([first]);
+  const pending = cleanupDeviceRun(close, Promise.resolve(null));
+  const observed = observeSettlement(pending);
+  await new Promise(setImmediate);
+  close.register(second);
+  releaseFirst();
+  await new Promise(setImmediate);
+  assert.equal(observed.settled, false);
+  releaseSecond();
+  assert.equal(await pending, null);
+});
+
+test('closes connections registered asynchronously by an in-flight operation', async () => {
+  let release;
+  const connections = [];
+  const connection = { state: 'ready', async close() { this.state = 'closed'; } };
+  const operation = (async () => {
+    await new Promise((resolve) => { release = resolve; });
+    connections.push(connection);
+    return null;
+  })();
+  const cleanup = cleanupDeviceRun(closeDeviceConnections(connections), operation);
+  await new Promise(setImmediate);
+  release();
+  assert.equal(await cleanup, null);
+  assert.equal(connection.state, 'closed');
+});
+
+test('retains a late connection close error after the initial scan', async () => {
+  let release;
+  const connections = [];
+  const closeError = new Error('late close failed');
+  const operation = (async () => {
+    await new Promise((resolve) => { release = resolve; });
+    connections.push({ state: 'ready', async close() { throw closeError; } });
+    return null;
+  })();
+  const cleanup = cleanupDeviceRun(closeDeviceConnections(connections), operation);
+  await new Promise(setImmediate);
+  release();
+  assert.equal(await cleanup, closeError);
+});
+
+test('drains a connection registered after cleanup has timed out', async () => {
+  let release;
+  const connections = [];
+  const connection = { state: 'ready', async close() { this.state = 'closed'; } };
+  const operation = (async () => {
+    await new Promise((resolve) => { release = resolve; });
+    connections.push(connection);
+    return null;
+  })();
+  const timeout = await cleanupDeviceRun(closeDeviceConnections(connections), operation);
+  assert.match(timeout.message, /timed out/);
+  release();
+  await timeout.operationSettlement;
+  await new Promise(setImmediate);
+  assert.equal(connection.state, 'closed');
+  assert.equal(timeout.closeSettlements.length, 1);
+});
+
 test('settling a failed case waits for the query and retains both errors', async () => {
   const operationError = new Error('cancel failed');
   const cleanupError = new Error('close failed');
@@ -115,4 +205,21 @@ test('case timeout does not wait a second time for a stalled connection', async 
   assert.notEqual(result, null);
   assert.equal(result.operationError, failure);
   assert.equal(typeof result.closeSettlements[0].then, 'function');
+});
+
+test('concurrent cleanup calls share one deadline and can retry after settlement', async () => {
+  let release;
+  const connection = { state: 'ready', close: () => new Promise((resolve) => {
+    release = () => { connection.state = 'closed'; resolve(); };
+  }) };
+  const close = closeDeviceConnections([connection]);
+  const operation = Promise.resolve(null);
+  const first = cleanupDeviceRun(close, operation);
+  await new Promise(setImmediate);
+  const second = cleanupDeviceRun(close, operation);
+  assert.throws(() => cleanupDeviceRun(close, Promise.resolve(null)), /cannot change the active operation/);
+  release();
+  assert.equal(first, second);
+  assert.equal(await first, null);
+  assert.notEqual(cleanupDeviceRun(close, operation), first);
 });

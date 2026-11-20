@@ -30,29 +30,50 @@ export class DeviceConnectionCleanup {
   errors: Error[] = [];
   settlements: Promise<Error | null>[] = [];
   settlement: Promise<Error | null>;
+  cleanupTask: Promise<Error | null> | null = null;
+  cleanupOperation: Promise<Error | null> | null = null;
+  private connections: DeviceAcceptanceConnection[];
+  private scanned: number = 0;
 
   constructor(connections: DeviceAcceptanceConnection[]) {
+    this.connections = connections;
     // Include a connection returned synchronously after a reentrant stop.
-    this.settlement = Promise.resolve().then(async (): Promise<Error | null> => {
-      for (const connection of connections) {
-        const settlement = (async (): Promise<Error | null> => {
-          try {
-            await connection.close();
-            return connection.state === ConnectionState.Closed ? null : new Error('Connection did not close.');
-          } catch (error) {
-            return error instanceof Error ? error : new Error('Connection cleanup failed with a non-error value.');
-          }
-        })().then((error): Error | null => {
-          if (error !== null) this.errors.push(error);
-          return error;
-        });
-        this.settlements.push(settlement);
-      }
+    this.settlement = Promise.resolve().then((): Promise<Error | null> => this.drain());
+  }
+
+  register(connection: DeviceAcceptanceConnection): void {
+    this.connections.push(connection);
+    this.startClosing();
+  }
+
+  private startClosing(): void {
+    while (this.scanned < this.connections.length) {
+      const connection = this.connections[this.scanned++];
+      const settlement = (async (): Promise<Error | null> => {
+        try {
+          await connection.close();
+          return connection.state === ConnectionState.Closed ? null : new Error('Connection did not close.');
+        } catch (error) {
+          return error instanceof Error ? error : new Error('Connection cleanup failed with a non-error value.');
+        }
+      })().then((error): Error | null => {
+        if (error !== null) this.errors.push(error);
+        return error;
+      });
+      this.settlements.push(settlement);
+    }
+  }
+
+  async drain(): Promise<Error | null> {
+    let awaited: number = 0;
+    do {
+      this.startClosing();
+      awaited = this.settlements.length;
       await Promise.all(this.settlements);
-      if (this.errors.length === 0) return null;
-      if (this.errors.length === 1) return this.errors[0];
-      return new DeviceConnectionCleanupError(this.errors.slice());
-    });
+    } while (this.scanned < this.connections.length || awaited !== this.settlements.length);
+    if (this.errors.length === 0) return null;
+    if (this.errors.length === 1) return this.errors[0];
+    return new DeviceConnectionCleanupError(this.errors.slice());
   }
 }
 
@@ -84,7 +105,24 @@ export async function settleDeviceCase(error: Error | null): Promise<Error | nul
   return new DeviceQueryCleanupError(failure, queryError);
 }
 
-export async function cleanupDeviceRun(close: DeviceConnectionCleanup,
+export function cleanupDeviceRun(close: DeviceConnectionCleanup,
+  operation: Promise<Error | null>): Promise<Error | null> {
+  if (close.cleanupTask !== null) {
+    if (close.cleanupOperation !== operation) throw new Error('Concurrent cleanup cannot change the active operation.');
+    return close.cleanupTask;
+  }
+  const task = waitForDeviceRunCleanup(close, operation);
+  close.cleanupTask = task;
+  close.cleanupOperation = operation;
+  const clearTask = (): void => {
+    close.cleanupTask = null;
+    close.cleanupOperation = null;
+  };
+  task.then(clearTask, clearTask);
+  return task;
+}
+
+async function waitForDeviceRunCleanup(close: DeviceConnectionCleanup,
   operation: Promise<Error | null>): Promise<Error | null> {
   let observedOperationError: Error | null = null;
   const expiredCase = new Promise<Error>((resolve): void => {
@@ -96,11 +134,12 @@ export async function cleanupDeviceRun(close: DeviceConnectionCleanup,
     });
   });
   const settlement = operation.then(settleDeviceCase);
-  const cleanup = Promise.all([close.settlement, settlement]).then((errors): Error | null => {
-    if (errors[0] !== null && errors[1] !== null) {
-      return new DeviceOperationCleanupError(errors[1], errors[0]);
+  const finalClose = operation.then((): Promise<Error | null> => close.drain());
+  const cleanup = Promise.all([close.settlement, finalClose, settlement]).then((errors): Error | null => {
+    if (errors[1] !== null && errors[2] !== null) {
+      return new DeviceOperationCleanupError(errors[2], errors[1]);
     }
-    return errors[1] ?? errors[0];
+    return errors[2] ?? errors[1];
   });
   let timer: number = 0;
   const timeout = new Promise<Error>((resolve): void => {

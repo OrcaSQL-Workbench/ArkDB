@@ -1,21 +1,12 @@
 import assert from 'node:assert/strict';
 import { verify } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { observeSettlement } from './postgres-device-test-loader.mjs';
-import { ArkDbError, Kind, State, deviceRuntime, signingKeys } from './postgres-device-runner-fixtures.mjs';
-
-const root = new URL('../../examples/postgres-device-acceptance/', import.meta.url);
-const samples = new URL('entry/src/main/ets/sample/', root);
-const { publicKey, spki, pkcs8 } = signingKeys();
-const runtimeModules = [
-  './DeviceAcceptanceRunner', './DeviceEvidenceIdentity', './DeviceReceiptSigner', './Messages'
-];
-
-const runtime = (clock = Date, uptime = () => 1) => deviceRuntime(samples, runtimeModules, clock, uptime);
+import { ArkDbError, Kind, State, deviceRunnerFixture, deviceRunnerRuntime,
+  deviceRunnerPreparedFeatures, validDeviceRunnerRequest, stallRunnerClose } from './postgres-device-runner-fixtures.mjs';
 
 test('unbound source refuses a connection and erases the supplied password', async () => {
-  const { DeviceAcceptanceRunner, DeviceAcceptanceRequest, DeviceEvidenceIdentity } = runtime();
+  const { DeviceAcceptanceRunner, DeviceAcceptanceRequest, DeviceEvidenceIdentity } = deviceRunnerRuntime();
   const runner = new DeviceAcceptanceRunner({
     createConnection() { assert.fail('unbound runner must not create a connection'); }
   }, new DeviceEvidenceIdentity());
@@ -27,30 +18,21 @@ test('unbound source refuses a connection and erases the supplied password', asy
 });
 
 test('signs fixed acceptance results only within the active run', async (t) => {
-  const sha = 'a'.repeat(64);
-  const manifest = JSON.parse(readFileSync(new URL('device-acceptance-cases.json', root), 'utf8'));
   const now = Date.UTC(2026, 10, 20);
   let time = now;
   let uptime = 0;
-  const { DeviceAcceptanceRunner, DeviceAcceptanceRequest, DeviceEvidenceIdentity,
-    Ed25519DeviceReceiptSigner } = runtime(
+  const { DeviceAcceptanceRunner, DeviceAcceptanceRequest, Ed25519DeviceReceiptSigner,
+    publicKey, spki, pkcs8, sha, manifest, binding } = deviceRunnerFixture(now,
     class extends Date { constructor(value = time) { super(value); } }, () => uptime
   );
-  const binding = Object.assign(new DeviceEvidenceIdentity(), {
-    enabled: true, challengeId: 'b'.repeat(32), receiptNonce: sha, schemaChallenge: sha,
-    createdAt: new Date(now).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(),
-    suiteId: manifest.suiteId, caseManifestSha256: sha, releaseSetSha256: sha,
-    repository: 'OrcaSQL-Workbench/ArkDB', driver: 'pgsql', packageName: '@arkdb/postgres', version: '1.0.0',
-    sourceCommit: 'c'.repeat(40), artifactSha256: sha, artifactByteLength: 1, consumerFingerprint: sha,
-    acceptanceFingerprint: sha, publicKeySpkiBase64: spki, publicKeySpkiSha256: sha,
-    privateKeyPkcs8Base64: pkcs8, format: 'bytecode-har', compatibleSdkVersion: 24,
-    compatibleSdkType: 'HarmonyOS', useNormalizedOHMUrl: true, buildMode: 'release'
-  });
   for (const scenario of [
-    'success', 'cleanup failure', 'expired', 'not issued', 'expires during run',
+    'success', 'normalized probe password', 'cleanup failure', 'expired', 'not issued', 'expires during run',
     'expires during platform read', 'expires between connections', 'request changes during run',
     'schema changes before use', 'expires during signing', 'clock reverses during signing',
-    'expires during mismatch', 'signing overlap and stop', 'stalled context at expiry',
+    'expires during mismatch', 'valid mismatch host', 'mismatch authentication failure',
+    'signing overlap and stop', 'late signing failure after stop',
+    'signing expires while pending',
+    'stalled context at expiry',
     'stalled context after clock jump', 'late query cleanup failure after stop', 'stalled cleanup',
     'second factory fails', 'stalled context after rollback', 'stalled cancellation cleanup',
     'late settlement failure after stop', 'unsettled cancellation after stop', 'reentrant stop during dispatch',
@@ -74,10 +56,8 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     const signingWaiters = [];
     let notifySigning;
     const signingStarted = new Promise((resolve) => { notifySigning = resolve; });
-    const request = Object.assign(new DeviceAcceptanceRequest(), {
-      host: 'db.test', mismatchHost: 'wrong.test', schema: 'authorized', user: 'operator',
-      password: 'not-for-a-receipt', signedHapSha256: sha, operatorEvidenceId: 'operator-1'
-    });
+    const request = validDeviceRunnerRequest(DeviceAcceptanceRequest, sha,
+      scenario === 'normalized probe password' ? 'arkdb\u00ad-tls-probe' : 'not-for-a-receipt');
     let rejectQuery;
     let rejectContext;
     let resolveClose;
@@ -110,9 +90,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       return {
         state: State.Closed, serverInfo: { productName: 'PostgreSQL', version: '17.6',
           tlsActive: true, authPlugin: 'scram-sha-256' },
-        postgresFeatures: { prepared: { execute: async (_, parameters) => ({
-          rows: [parameters.length === 1 ? [sha] : [9007199254740993n, '12.34', new Uint8Array([0, 127, 255])]]
-        }) } },
+        postgresFeatures: deviceRunnerPreparedFeatures(sha),
         async connect() {
           connected.push(config.host);
           if (scenario === 'reentrant stop during dispatch' && config.host === 'db.test') {
@@ -122,6 +100,8 @@ test('signs fixed acceptance results only within the active run', async (t) => {
           }
           if (config.host === 'wrong.test') {
             if (scenario === 'expires during mismatch') time = expiry + 1;
+            if (scenario === 'valid mismatch host') { this.state = State.Ready; return; }
+            if (scenario === 'mismatch authentication failure') throw new ArkDbError('auth', '28P01');
             throw new ArkDbError(Kind.Tls, 'TLS_HOSTNAME_MISMATCH');
           }
           this.state = State.Ready;
@@ -132,15 +112,9 @@ test('signs fixed acceptance results only within the active run', async (t) => {
           closed.push(config.host);
           if (rejectContext) { rejectContext(new Error('closed')); rejectContext = undefined; }
           if (scenario === 'expires during run') time = expiry + 1;
-          if (scenario === 'stalled cleanup' && config.host === 'db.test') {
-            return new Promise((resolve) => {
-              resolveClose = () => { this.state = State.Closed; resolve(); };
-            });
-          }
-          if (scenario === 'stalled cancellation cleanup' && config.host === 'db.test' && !resolveClose) {
-            return new Promise((resolve) => {
-              resolveClose = () => { this.state = State.Closed; resolve(); };
-            });
+          if (config.host === 'db.test' && (scenario === 'stalled cleanup' ||
+            (scenario === 'stalled cancellation cleanup' && !resolveClose))) {
+            return stallRunnerClose(this, (resolve) => { resolveClose = resolve; });
           }
           if ((scenario === 'late query cleanup failure after stop' ||
             scenario === 'failed cancellation close with pending query') && config.host === 'db.test') {
@@ -202,9 +176,13 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     { wait: async () => {} }, {
       async sign(payload) {
         const envelope = await signer.sign(payload);
-        if (scenario === 'signing overlap and stop') {
+        if (scenario === 'signing overlap and stop' || scenario === 'late signing failure after stop' ||
+          scenario === 'signing expires while pending') {
           notifySigning();
-          await new Promise((resolve) => { signingWaiters.push(resolve); });
+          await new Promise((resolve, reject) => {
+            signingWaiters.push(scenario === 'late signing failure after stop' ?
+              () => reject(new Error('late signing failure')) : resolve);
+          });
         }
         if (scenario === 'expires during signing') time = expiry + 1;
         if (scenario === 'clock reverses during signing') time = now + 999;
@@ -228,7 +206,8 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.equal(reentrant.errorKind, 'validation');
       assert.equal(reentrantRequest.password, '');
       assert.deepEqual(created, ['db.test', 'wrong.test']);
-      assert.deepEqual(passwords, ['not-for-a-receipt', 'not-for-a-receipt']);
+      assert.equal(passwords[0], 'not-for-a-receipt');
+      assert.notEqual(passwords[1], passwords[0]);
       return;
     }
     if (scenario === 'reentrant stop during first factory' || scenario === 'reentrant stop during second factory') {
@@ -372,16 +351,55 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       const another = Object.assign(new DeviceAcceptanceRequest(), request, { password: 'another-password' });
       const overlapping = runner.run(another);
       await new Promise(setImmediate);
-      await runner.stop();
+      const stopping = observeSettlement(runner.stop());
+      await new Promise(setImmediate);
+      const prematurelyStopped = stopping.settled;
       for (const resolve of signingWaiters) resolve();
+      await stopping.result;
       const [first, second] = await Promise.all([running, overlapping]);
+      assert.equal(prematurelyStopped, false, 'stop must retain the pending signing operation');
       assert.equal(created.length, 2, 'a second run must not create connections during signing');
       assert.equal(second.errorKind, 'validation');
       assert.equal(another.password, '');
       assert.equal(first.receiptJson, '', 'stop must suppress a still-pending receipt');
       return;
     }
+    if (scenario === 'late signing failure after stop') {
+      await signingStarted;
+      const stopping = runner.stop().catch((error) => error);
+      const result = await running;
+      assert.equal(result.receiptJson, '');
+      assert.match((await stopping).message, /timed out/);
+      const cleanup = runner.closeTask;
+      assert.ok(cleanup, 'the timed-out signing operation must retain its cleanup owner');
+      cleanup.sealRegistration();
+      const quiescence = observeSettlement(cleanup.quiescence);
+      await new Promise(setImmediate);
+      assert.equal(quiescence.settled, false);
+      for (const resolve of signingWaiters) resolve();
+      assert.equal((await quiescence.result).message, 'late signing failure');
+      return;
+    }
+    if (scenario === 'signing expires while pending') {
+      await signingStarted;
+      time = expiry + 1;
+      const result = await running;
+      assert.equal(result.receiptJson, '');
+      const cleanup = runner.closeTask;
+      assert.ok(cleanup);
+      cleanup.sealRegistration();
+      const quiescence = observeSettlement(cleanup.quiescence);
+      await new Promise(setImmediate);
+      const premature = quiescence.settled;
+      for (const resolve of signingWaiters) resolve();
+      assert.equal(premature, false, 'expiry must track the pending signer');
+      assert.equal(await quiescence.result, null);
+      return;
+    }
     const result = await running;
+    if (scenario === 'success' || scenario === 'normalized probe password') {
+      assert.equal(passwords[1], '', 'negative TLS probe must use the empty probe password');
+    }
     if (scenario === 'expires during mismatch') {
       assert.equal(contextChanges, 0, 'expired challenge must not start more database operations');
     }
@@ -398,13 +416,16 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.equal(result.receiptJson, '', scenario);
       return;
     }
-    assert.equal(result.ok, !failCleanup);
+    const mismatchFailed = scenario === 'valid mismatch host' || scenario === 'mismatch authentication failure';
+    assert.equal(result.ok, !mismatchFailed);
     const envelope = JSON.parse(result.receiptJson);
     assert.equal(envelope.kind, 'arkdb-device-acceptance-envelope');
     assert.equal(envelope.signature.publicKeySpkiBase64, spki);
     assert.ok(verify(null, Buffer.from(envelope.payload), publicKey, Buffer.from(envelope.signature.valueBase64, 'base64')));
     const payload = JSON.parse(envelope.payload);
     assert.deepEqual(payload.cases.map(({ id }) => id), manifest.caseIds);
+    assert.equal(payload.cases.find(({ id }) => id === 'tls_hostname_mismatch').status,
+      mismatchFailed ? 'fail' : 'pass');
     assert.equal(payload.cases.find(({ id }) => id === 'cleanup').status, failCleanup ? 'fail' : 'pass');
     assert.equal(payload.authPlugin, 'scram-sha-256');
     assert.equal(payload.profile, 'P17');

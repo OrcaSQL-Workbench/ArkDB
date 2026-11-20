@@ -1,7 +1,6 @@
-import { deviceInfo, systemDateTime } from '@kit.BasicServicesKit';
+import { systemDateTime } from '@kit.BasicServicesKit';
 import {
-  ArkDbError, ArkDbErrorKind, ConnectionState, DatabaseContext, PostgresConnectionConfig,
-  PostgresConnectionOptions, PostgresDriverFactory, PostgresAuthMethod
+  ArkDbError, ArkDbErrorKind, ConnectionState, DatabaseContext, PostgresAuthMethod
 } from '@arkdb/postgres';
 import { DEVICE_ACCEPTANCE_CASE_IDS } from './DeviceAcceptanceManifest';
 import { currentDeviceEvidenceBinding, DeviceEvidenceIdentity } from './DeviceEvidenceBinding';
@@ -18,40 +17,12 @@ import { DeviceConnectionCleanup, closeDeviceConnections, cleanupDeviceRun } fro
 import {
   DeviceAcceptanceCases, DeviceAcceptanceConnection, DeviceCaseCleanupError, DeviceDelay
 } from './DeviceAcceptanceCases';
+import {
+  DeviceAcceptanceFactory, DefaultDeviceAcceptanceFactory, DevicePlatformReader,
+  SystemDevicePlatformReader, SystemDeviceDelay
+} from './DeviceAcceptanceRuntime';
 
 const NO_OPERATION_SETTLEMENT: Promise<Error | null> = Promise.resolve(null);
-
-export interface DeviceAcceptanceFactory {
-  createConnection(config: PostgresConnectionConfig, password: string): DeviceAcceptanceConnection;
-}
-
-class DefaultDeviceAcceptanceFactory implements DeviceAcceptanceFactory {
-  private readonly factory: PostgresDriverFactory = new PostgresDriverFactory();
-
-  createConnection(config: PostgresConnectionConfig, password: string): DeviceAcceptanceConnection {
-    return this.factory.create(new PostgresConnectionOptions(config, password));
-  }
-}
-
-export interface DevicePlatformReader {
-  read(): DevicePlatformInfo;
-}
-
-class SystemDevicePlatformReader implements DevicePlatformReader {
-  read(): DevicePlatformInfo {
-    const info = new DevicePlatformInfo();
-    info.deviceType = deviceInfo.deviceType;
-    info.sdkApiVersion = deviceInfo.sdkApiVersion;
-    info.osFullName = deviceInfo.osFullName;
-    return info;
-  }
-}
-
-class SystemDeviceDelay implements DeviceDelay {
-  async wait(milliseconds: number): Promise<void> {
-    await new Promise<void>((resolve): void => { setTimeout(resolve, milliseconds); });
-  }
-}
 
 export class DeviceAcceptanceRunner {
   private factory: DeviceAcceptanceFactory;
@@ -156,7 +127,7 @@ export class DeviceAcceptanceRunner {
       connection = this.factory.createConnection(config, password);
       this.registerConnection(connection);
       this.requireActive();
-      mismatch = this.factory.createConnection(mismatchConfig, password);
+      mismatch = this.factory.createConnection(mismatchConfig, '');
       this.registerConnection(mismatch);
       this.requireActive();
       await this.executeCase(cases, 'tls_identity', async (): Promise<boolean> => {
@@ -266,7 +237,7 @@ export class DeviceAcceptanceRunner {
       else response.errors++;
     }
     try {
-      const signed = await this.waitActive((): Promise<string> => this.signer.sign(JSON.stringify(payload)), false);
+      const signed = await this.waitActive((): Promise<string> => this.signer.sign(JSON.stringify(payload)));
       const signedAt = new Date().getTime();
       if (signedAt < completedAt.getTime() || signedAt > Date.parse(this.binding.expiresAt)) {
         response.errorKind = ArkDbErrorKind.Validation;
@@ -275,6 +246,11 @@ export class DeviceAcceptanceRunner {
       }
       response.receiptJson = signed;
     } catch (error) {
+      if (this.stopping && await this.waitForCleanup() !== null) {
+        response.errorKind = 'device-cleanup';
+        response.text = 'Connection cleanup failed or timed out; no receipt was issued.';
+        return response;
+      }
       response.errorKind = 'device-evidence-signature';
       response.text = 'The device suite finished but its one-time receipt could not be signed.';
       return response;
@@ -291,7 +267,7 @@ export class DeviceAcceptanceRunner {
       this.busy = false;
       this.interrupted = null;
       this.interruptRun = null;
-      if (this.active.length === 0) this.closeTask = null;
+      if (!this.stopping && this.active.length === 0) this.closeTask = null;
     }
   }
 
@@ -311,7 +287,7 @@ export class DeviceAcceptanceRunner {
     return challengeIsActive(this.binding) && monotonicNowMs() <= this.monotonicDeadline;
   }
 
-  private async waitActive<T>(operation: () => Promise<T>, trackSettlement: boolean = true): Promise<T> {
+  private async waitActive<T>(operation: () => Promise<T>): Promise<T> {
     this.requireActive();
     const interrupted = this.interrupted;
     if (interrupted === null) throw new Error('The device run is not initialized.');
@@ -324,7 +300,7 @@ export class DeviceAcceptanceRunner {
       }
     });
     const settlement = tracked.settlement;
-    if (trackSettlement) this.activeOperation = settlement;
+    this.activeOperation = settlement;
     try {
       return await tracked.result;
     } finally {

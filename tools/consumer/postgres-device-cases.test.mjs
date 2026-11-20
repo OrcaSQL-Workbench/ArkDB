@@ -276,6 +276,7 @@ test('cancellation cleanup times out without losing the outstanding query', asyn
       assert.notEqual(failure, null, `${stalled} cleanup must not hang`);
       assert.equal(failure.operationError.message, 'cancel failed');
       assert.match(failure.cleanupError.message, /timed out/);
+      assert.equal(failure.cleanupError.constructor.name, 'DeviceCaseCleanupTimeoutError');
       if (rejectClose) rejectClose(new Error('late close failure'));
       rejectQuery(new Error('query failed'));
       assert.equal((await failure.querySettlement).message, 'query failed');

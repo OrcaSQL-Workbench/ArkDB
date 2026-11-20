@@ -11,6 +11,7 @@ const PREPARED_VALUES_SQL: string =
 const AUTHORIZED_SCHEMA_SQL: string =
   'SELECT challenge_value FROM arkdb_device_acceptance WHERE challenge_id = $1';
 const CANCELLATION_SQL: string = 'SELECT pg_sleep(10), 1';
+const CANCELLATION_QUERY_TIMEOUT_MS: number = 2000;
 const CANCELLATION_CLEANUP_TIMEOUT_MS: number = 2000;
 
 export interface DeviceAcceptanceConnection extends DbConnection {
@@ -137,7 +138,13 @@ export class DeviceAcceptanceCases {
       const result = await connection.cancel();
       this.requireActive();
       if (result.outcome === CancellationOutcome.Requested) {
-        const queryError = await query;
+        let queryTimer: number = 0;
+        const queryTimeout = new Promise<Error>((resolve): void => {
+          queryTimer = setTimeout((): void => resolve(new Error('Cancellation query settlement timed out.')),
+            CANCELLATION_QUERY_TIMEOUT_MS);
+        });
+        const queryError = await Promise.race<Error | null>([query, queryTimeout]);
+        clearTimeout(queryTimer);
         this.requireActive();
         if (queryError === null) return false;
         if (!(queryError instanceof ArkDbError) ||

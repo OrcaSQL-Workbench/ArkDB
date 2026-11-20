@@ -105,12 +105,12 @@ export async function verifyHapPackageSignature(hapBytes, dependencies) {
     await secureSecretDirectory(temporaryDirectory);
     const snapshotPath = join(temporaryDirectory, 'signed.hap');
     await writePrivateSnapshot(snapshotPath, snapshot);
-    const certificatePath = join(temporaryDirectory, 'certificate-chain.pem');
+    const certificatePath = join(temporaryDirectory, 'certificate-chain.cer');
     const profilePath = join(temporaryDirectory, 'provisioning-profile.p7b');
     const result = (dependencies.hapSignatureSpawnSync ?? nodeSpawnSync)(javaPath, [
       '-jar', signToolPath, 'verify-app',
       '-inFile', snapshotPath,
-      '-outCertchain', certificatePath,
+      '-outCertChain', certificatePath,
       '-outProfile', profilePath,
       '-inForm', 'zip'
     ], {

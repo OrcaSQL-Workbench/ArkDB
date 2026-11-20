@@ -1654,8 +1654,10 @@ test('runs the official HAP signature verifier and binds its certificate evidenc
       const snapshotPath = args[4];
       assert.notEqual(snapshotPath, hapPath);
       assert.deepEqual(readFileSync(snapshotPath), f.hapBytes);
+      assert.equal(basename(args[args.indexOf('-outCertChain') + 1]),
+        'certificate-chain.cer');
       assert.deepEqual(args.slice(-2), ['-inForm', 'zip']);
-      writeFileSync(args[args.indexOf('-outCertchain') + 1], certificate);
+      writeFileSync(args[args.indexOf('-outCertChain') + 1], certificate);
       writeFileSync(args[args.indexOf('-outProfile') + 1], profile);
       return { status: 0, stdout: '', stderr: '' };
     }

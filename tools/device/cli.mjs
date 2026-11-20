@@ -1,7 +1,6 @@
 import { resolve } from 'node:path';
 import { ROOT } from '../workspace/check-package.mjs';
 import { prepareDeviceEvidence } from './challenge.mjs';
-import { DEVICE_FEATURES, DEVICE_PROFILES } from './contracts.mjs';
 import { verifyDeviceEvidenceArtifacts } from './verifier.mjs';
 
 export function deviceEvidenceArguments(argv) {
@@ -50,15 +49,14 @@ export function deviceEvidenceArguments(argv) {
       }
     } else {
       throw new Error('Usage: --receipt FILE --manifest FILE --consumer FILE --hap FILE ' +
-        '--profile M1|M2|M3|M4 [--features KEYS] --out FILE');
+        '--profile KEY [--features KEYS] --out FILE');
     }
   }
   if (['receiptPath', 'manifestPath', 'consumerPath', 'hapPath', 'profile', 'outPath']
     .some((name) => typeof options[name] !== 'string') ||
-    !DEVICE_PROFILES.includes(options.profile) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(options.profile) ||
     new Set(options.features).size !== options.features.length ||
-    options.features.some((feature) => !DEVICE_FEATURES.includes(feature)) ||
-    (options.profile !== 'M4' && options.features.length !== 0)) {
+    options.features.some((feature) => !/^[a-z][a-z0-9-]{0,63}$/.test(feature))) {
     throw new Error('Artifact validation requires explicit files, a valid profile, and product feature keys.');
   }
   return options;

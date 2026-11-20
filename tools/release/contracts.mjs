@@ -157,6 +157,10 @@ export function validateReleaseSet(value) {
   if (![1, 3].includes(verificationSchema)) {
     throw new Error('Unsupported release verification evidence schema.');
   }
+  if (verification.deviceEvidencePolicySha256 !== undefined &&
+    (verificationSchema !== 3 || !SHA256.test(verification.deviceEvidencePolicySha256))) {
+    throw new Error('Release device evidence policy identity is invalid.');
+  }
   for (const name of ['driverTestsPassed', 'documentedExamples', 'localSampleCases']) {
     if (!Number.isSafeInteger(verification?.[name]) || verification[name] <= 0) {
       throw new Error('Release verification must contain successful local tests/examples.');

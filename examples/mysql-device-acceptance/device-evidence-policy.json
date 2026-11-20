@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "driver": "mysql",
+  "caseManifestFile": "device-acceptance-cases.json",
+  "suiteId": "arkdb.mysql.device-acceptance",
+  "serverFamilies": ["MySQL"],
+  "features": [
+    "multi-statements",
+    "procedures",
+    "text-parameters",
+    "sha256",
+    "compression",
+    "local-infile",
+    "failover",
+    "worker",
+    "session-observations",
+    "routing"
+  ],
+  "authPlugins": ["mysql_native_password", "caching_sha2_password"],
+  "tlsModes": ["verify_identity"],
+  "profiles": [
+    {
+      "id": "M1",
+      "features": [],
+      "authPlugins": ["mysql_native_password", "caching_sha2_password"]
+    },
+    {
+      "id": "M2",
+      "features": [],
+      "authPlugins": ["mysql_native_password", "caching_sha2_password"]
+    },
+    {
+      "id": "M3",
+      "features": [],
+      "authPlugins": ["mysql_native_password", "caching_sha2_password"]
+    },
+    {
+      "id": "M4",
+      "features": ["sha256"],
+      "authPlugins": ["caching_sha2_password"]
+    }
+  ]
+}

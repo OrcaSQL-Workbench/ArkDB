@@ -10,6 +10,7 @@ import { releaseFixture } from '../test-fixtures/har-release.mjs';
 import { sha256 } from '../package-har.mjs';
 import { deviceSampleFingerprint, sampleFingerprint } from '../test-consumer.mjs';
 import { hapSigningContentFingerprint } from '../hap-content.mjs';
+import * as deviceContracts from './contracts.mjs';
 import {
   deviceEvidenceArguments, prepareDeviceEvidence, verifyDeviceEvidence, verifyDeviceReceiptEnvelope
 } from '../verify-device-evidence.mjs';
@@ -43,6 +44,7 @@ async function deviceFixture(t, overrides = {}) {
     async buildHarness(options) {
       assert.equal(sha256(options.artifactBytes), fixture.identity.sha256);
       assert.equal(options.artifactBytes.length, fixture.identity.byteLength);
+      assert.equal(options.artifactFileName, 'mysql.har');
       assert.equal(options.bindingSource.includes(privateKeyPkcs8.toString('base64')), true);
       assert.match(options.bindingSource, /privateKeyPkcs8Base64/);
       assert.match(options.bindingSource, /consumerFingerprint/);
@@ -141,6 +143,40 @@ test('preserves the historical schema-1 case manifest bytes after moving the har
   assert.equal(sha256(bytes), LEGACY_CASE_MANIFEST_SHA256);
 });
 
+test('resolves policy from registered driver consumers and rejects cross-driver reuse', async () => {
+  const mysql = await deviceContracts.readDeviceEvidenceContract(process.cwd(), 'mysql');
+  assert.equal(mysql.policy.driver, 'mysql');
+  assert.equal(mysql.policy.caseManifestFile, 'device-acceptance-cases.json');
+  assert.throws(() => deviceContracts.parseDeviceEvidencePolicy(mysql.policyBytes, 'pgsql'),
+    /registered driver/i);
+  const legacy = await deviceContracts.loadSealedDeviceEvidenceContract(
+    process.cwd(), 'mysql', undefined);
+  assert.deepEqual(legacy.policy, mysql.policy);
+  await assert.rejects(
+    deviceContracts.readDeviceEvidenceContract(process.cwd(), 'pgsql'),
+    /no device acceptance consumer/i
+  );
+});
+
+test('sealed release binds the driver-owned policy without changing legacy case-manifest bytes', async (t) => {
+  const f = await deviceFixture(t);
+  const policyPath = join(f.fixture.root, 'examples', 'mysql-device-acceptance',
+    'device-evidence-policy.json');
+  const policyBytes = await readFile(policyPath);
+  assert.equal(f.bundle.releaseSet.verification.deviceEvidencePolicySha256, sha256(policyBytes));
+  const policy = JSON.parse(policyBytes.toString('utf8'));
+  policy.tlsModes = ['disable'];
+  await writeFile(policyPath, `${JSON.stringify(policy, null, 2)}\n`);
+  const receiptPath = join(f.fixture.root, 'tampered-policy-receipt.json');
+  await writeFile(receiptPath, `${JSON.stringify(passingEnvelope(
+    f.prepared.challenge, f.keyPair.privateKey
+  ))}\n`);
+  await assert.rejects(verifyDeviceEvidence({
+    root: f.fixture.root, driver: 'mysql', bundleDirectory: f.bundle.bundleDirectory,
+    receiptPath, confirmPhysicalDevice: true, confirmAuthorizedSchema: true
+  }), /policy differs from the sealed release/i);
+});
+
 test('keeps device selection contracts while removing duplicate helper surface', async () => {
   const manifestSource = await readFile(join(process.cwd(), 'examples',
     'mysql-device-acceptance', 'entry', 'src', 'main', 'ets', 'sample',
@@ -151,7 +187,8 @@ test('keeps device selection contracts while removing duplicate helper surface',
   assert.doesNotMatch(manifestSource, /\bDEVICE_ACCEPTANCE_SERVER_FAMILIES\b/);
   assert.doesNotMatch(cli, /\bdeviceEvidenceCaseManifestPath\b/);
   assert.doesNotMatch(cli, /\bCASE_MANIFEST\b/);
-  assert.match(contracts, /export const DEVICE_PROFILES = \['M1', 'M2', 'M3', 'M4'\]/);
+  assert.doesNotMatch(contracts, /export const DEVICE_(?:PROFILES|FEATURES)\s*=/);
+  assert.match(contracts, /parseDeviceEvidencePolicy/);
   assert.match(contracts, /\bserverFamilies\b/);
   assert.match(contracts, /\['MySQL'\]/);
 });
@@ -1437,14 +1474,19 @@ test('parses only explicit preparation and artifact-validation commands', () => 
     features: ['procedures', 'sha256'],
     outPath: 'device-verified.json'
   });
+  assert.deepEqual(deviceEvidenceArguments([
+    '--receipt', 'device-receipt.json', '--manifest', 'postgres.manifest.json',
+    '--consumer', 'postgres.consumer.json', '--hap', 'signed-entry.hap',
+    '--profile', 'PG_BASE', '--features', 'jsonb', '--out', 'device-verified.json'
+  ]).profile, 'PG_BASE');
   for (const argv of [
     [],
     ['prepare', '--driver', 'mysql'],
     ['--receipt', 'receipt.json', '--manifest', 'manifest.json'],
     ['--receipt', 'receipt.json', '--manifest', 'manifest.json', '--consumer', 'consumer.json',
-      '--hap', 'signed.hap', '--profile', 'M1', '--features', 'procedures', '--out', 'out.json'],
+      '--hap', 'signed.hap', '--profile', 'invalid profile', '--out', 'out.json'],
     ['--receipt', 'receipt.json', '--manifest', 'manifest.json', '--consumer', 'consumer.json',
-      '--hap', 'signed.hap', '--profile', 'M4', '--features', 'unknown', '--out', 'out.json'],
+      '--hap', 'signed.hap', '--profile', 'M1', '--features', 'unknown_feature!', '--out', 'out.json'],
     ['prepare', '--bundle', 'dist', '--bundle', 'other']
   ]) assert.throws(() => deviceEvidenceArguments(argv),
     /Usage|explicit|repeated|driver|profile|feature/i);

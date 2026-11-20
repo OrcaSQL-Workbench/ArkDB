@@ -6,7 +6,8 @@ import { inspectHar } from '../artifact/har-inspection.mjs';
 import { verifiedArtifactSet } from '../artifact/local-artifact.mjs';
 import { sourceFingerprint } from '../artifact/source-identity.mjs';
 import { checkPackage, ROOT } from '../workspace/check-package.mjs';
-import { sampleFingerprint } from '../consumer/evidence.mjs';
+import { deviceEvidencePolicySha256 as getDeviceEvidencePolicySha256, sampleFingerprint }
+  from '../consumer/evidence.mjs';
 import { extractExamples } from '../lib/doc-examples.mjs';
 import { driverVerification, packageStem, tagOutputPaths } from '../workspace/driver-packages.mjs';
 import { sha256 } from '../lib/hash.mjs';
@@ -81,7 +82,11 @@ function readyAssetBytes(source, suffix, bytes) {
 
 export async function prepareHarRelease({ root = ROOT, driver: id = 'mysql', tag, destination }, dependencies = {}) {
   const source = checkPackage(root, id);
-  driverVerification(root, id);
+  const registeredVerification = driverVerification(root, id);
+  const readDevicePolicySha256 = () => registeredVerification.deviceConsumerDirectory === undefined
+    ? undefined
+    : getDeviceEvidencePolicySha256(root, id);
+  const devicePolicySha256 = readDevicePolicySha256();
   const git = dependencies.git ?? gitReader(root);
   const before = releaseIdentity(source.driver, source.manifest, tag, git);
   if (resolve(git(['rev-parse', '--show-toplevel']).trim()) !== resolve(root)) {
@@ -97,8 +102,11 @@ export async function prepareHarRelease({ root = ROOT, driver: id = 'mysql', tag
   const sample = sampleFingerprint(root, id);
   const verification = await (dependencies.verify ?? verifyLocally)(root, id);
   const after = releaseIdentity(source.driver, source.manifest, tag, git);
+  const currentDevicePolicySha256 = readDevicePolicySha256();
   if (JSON.stringify(before) !== JSON.stringify(after) || fingerprint !== sourceFingerprint(root, id) ||
-    sample !== sampleFingerprint(root, id)) throw new Error('Release source or tag changed while verification ran.');
+    sample !== sampleFingerprint(root, id) || devicePolicySha256 !== currentDevicePolicySha256) {
+    throw new Error('Release source, device policy, or tag changed while verification ran.');
+  }
   if (!Number.isSafeInteger(verification?.driverTestsPassed) || verification.driverTestsPassed <= 0) {
     throw new Error('Release verification did not establish successful driver tests.');
   }
@@ -164,6 +172,7 @@ export async function prepareHarRelease({ root = ROOT, driver: id = 'mysql', tag
       sampleHapSha256: consumer.sampleHapSha256, sampleHapByteLength: consumer.sampleHapByteLength,
       sampleHapContentSha256: consumer.sampleHapContentSha256,
       ohpmPrepublishPassed: true, realDeviceVerified: false,
+      ...(devicePolicySha256 === undefined ? {} : { deviceEvidencePolicySha256: devicePolicySha256 }),
       ...(selected.identity.delivery === 'self-contained' ? {
         selfContainedRuntimeVerified: consumer.selfContainedRuntimeVerified
       } : {})
@@ -188,7 +197,8 @@ export async function prepareHarRelease({ root = ROOT, driver: id = 'mysql', tag
   }
   if (identity.sha256 !== sha256(assets.get(`${stem}.har`)) ||
     sourceFingerprint(root, id) !== fingerprint || JSON.stringify(before) !==
-      JSON.stringify(releaseIdentity(source.driver, source.manifest, tag, git))) {
+      JSON.stringify(releaseIdentity(source.driver, source.manifest, tag, git)) ||
+    devicePolicySha256 !== readDevicePolicySha256()) {
     throw new Error('Release artifact or source changed before sealing the bundle.');
   }
   const parent = join(root, 'dist');

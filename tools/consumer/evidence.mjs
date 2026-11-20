@@ -2,7 +2,22 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { listFiles, ROOT } from '../workspace/check-package.mjs';
 import { driverVerification } from '../workspace/driver-packages.mjs';
-import { createSha256 } from '../lib/hash.mjs';
+import { createSha256, sha256 } from '../lib/hash.mjs';
+import { releaseFile } from '../lib/safe-files.mjs';
+
+const DEVICE_POLICY_MANIFEST = 'device-evidence-policy.json';
+
+export function deviceEvidencePolicyBytes(root = ROOT, driver = 'mysql') {
+  const directory = driverVerification(root, driver).deviceConsumerDirectory;
+  if (directory === undefined) {
+    throw new Error(`Driver ${driver} has no device acceptance consumer or policy.`);
+  }
+  return releaseFile(directory, DEVICE_POLICY_MANIFEST, 128 * 1024);
+}
+
+export function deviceEvidencePolicySha256(root = ROOT, driver = 'mysql') {
+  return sha256(deviceEvidencePolicyBytes(root, driver));
+}
 
 function exampleFingerprint(sample, extraRootFiles = []) {
   const files = [

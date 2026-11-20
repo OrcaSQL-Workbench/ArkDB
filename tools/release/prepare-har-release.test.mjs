@@ -20,6 +20,7 @@ test('prepares only exact verified assets and binds them to the clean annotated 
   assert.equal(prepared.releaseSet.verification.sampleHapByteLength, fixture.consumer.sampleHapByteLength);
   assert.equal(prepared.releaseSet.verification.sampleHapContentSha256,
     fixture.consumer.sampleHapContentSha256);
+  assert.match(prepared.releaseSet.verification.deviceEvidencePolicySha256, /^[0-9a-f]{64}$/);
   assert.deepEqual((await readdir(prepared.bundleDirectory)).sort(), [
     `${STEM}.consumer.json`, `${STEM}.har`, `${STEM}.har.sha256`,
     `${STEM}.manifest.json`, `${STEM}.readiness.json`, 'release-set.json'
@@ -65,6 +66,18 @@ test('rejects source or tag changes that happen while verification runs', async 
     ...second.dependencies,
     verify: async () => { second.state.tagObject = 'd'.repeat(40); return { driverTestsPassed: 183 }; }
   }), /changed/i);
+  const third = await releaseFixture(t);
+  await assert.rejects(prepareHarRelease(third.options, {
+    ...third.dependencies,
+    verify: async () => {
+      const policyPath = join(third.root, 'examples', 'mysql-device-acceptance',
+        'device-evidence-policy.json');
+      const policy = JSON.parse(await readFile(policyPath, 'utf8'));
+      policy.tlsModes = ['disable'];
+      await writeFile(policyPath, `${JSON.stringify(policy, null, 2)}\n`);
+      return { driverTestsPassed: 183 };
+    }
+  }), /device policy.*changed/i);
 });
 
 test('requires successful current runtime evidence, not compile-only or stale reports', async (t) => {

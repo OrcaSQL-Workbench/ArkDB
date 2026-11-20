@@ -46,8 +46,13 @@ export function currentDeviceEvidenceBinding(): DeviceEvidenceIdentity {
 }
 
 export async function buildDeviceHarness({
-  sampleDirectory, artifactBytes, bindingSource, hapPath
+  sampleDirectory, artifactBytes, artifactFileName, bindingSource, hapPath
 }, dependencies) {
+  if (typeof artifactFileName !== 'string' ||
+    !/^[a-z][a-z0-9-]*\.har$/.test(artifactFileName) ||
+    basename(artifactFileName) !== artifactFileName) {
+    throw new Error('The isolated device harness requires the selected driver HAR filename.');
+  }
   const generated = new Set([
     'build', '.hvigor', '.test', 'oh_modules', 'node_modules', 'dependency',
     'BuildProfile.ets', 'oh-package-lock.json5', '.ohpmrc', '.npmrc', 'local.properties'
@@ -61,7 +66,7 @@ export async function buildDeviceHarness({
   await writeFile(bindingPath, bindingSource);
   const dependencyDirectory = join(sampleDirectory, 'dependency');
   await mkdir(dependencyDirectory);
-  const artifactPath = join(dependencyDirectory, 'mysql.har');
+  const artifactPath = join(dependencyDirectory, artifactFileName);
   await writeFile(artifactPath, artifactBytes, { flag: 'wx' });
   if (sha256(await readFile(artifactPath)) !== sha256(artifactBytes)) {
     throw new Error('The isolated device harness received different HAR bytes.');

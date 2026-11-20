@@ -27,6 +27,12 @@ export interface DeviceDelay {
   wait(milliseconds: number): Promise<void>;
 }
 
+export class DeviceCaseCleanupTimeoutError extends Error {
+  constructor() {
+    super('Cancellation cleanup timed out.');
+  }
+}
+
 export class DeviceCaseCleanupError extends Error {
   operationError: Error;
   cleanupError: Error;
@@ -156,7 +162,7 @@ export class DeviceAcceptanceCases {
     });
     let timer: number = 0;
     const timeout = new Promise<Error>((resolve): void => {
-      timer = setTimeout((): void => resolve(new Error('Cancellation cleanup timed out.')),
+      timer = setTimeout((): void => resolve(new DeviceCaseCleanupTimeoutError()),
         CANCELLATION_CLEANUP_TIMEOUT_MS);
     });
     const cleanupError = await Promise.race<Error | null>([cleanupSettlement, timeout]);

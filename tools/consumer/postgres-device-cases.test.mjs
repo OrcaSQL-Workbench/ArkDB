@@ -116,7 +116,8 @@ test('cancellation verifies interruption and stops before further work when the 
     calls.push('wait');
     allowed = false;
   } }, () => { if (!allowed) throw new Error('inactive'); });
-  await assert.rejects(() => stopped.verifyCancellation(connection), /inactive/);
+  await assert.rejects(() => stopped.verifyCancellation(connection),
+    (error) => error.operationError?.message === 'inactive');
   assert.deepEqual(calls, ['query', 'wait', 'close']);
 });
 
@@ -151,19 +152,20 @@ test('failed cancellation closes and settles the outstanding query', async () =>
     close: async () => { calls.push('close'); rejectQuery(new Error('closed')); },
     ping: async () => { calls.push('ping'); }
   };
-  await assert.rejects(() => cases.verifyCancellation(connection), /cancel failed/);
+  await assert.rejects(() => cases.verifyCancellation(connection), (error) =>
+    error.operationError?.message === 'cancel failed' && error.queryError?.message === 'closed');
   assert.deepEqual(calls, ['close']);
 });
 
 test('a cancellation that was not requested closes the query and fails the case', async () => {
   const Cases = loadCases();
-  let rejectQuery;
+  let resolveQuery;
   let closed = false;
   const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
   const connection = {
-    query: () => new Promise((_, reject) => { rejectQuery = reject; }),
+    query: () => new Promise((resolve) => { resolveQuery = resolve; }),
     cancel: async () => ({ outcome: 'not-requested' }),
-    close: async () => { closed = true; rejectQuery(new Error('closed')); }
+    close: async () => { closed = true; resolveQuery({ rows: [] }); }
   };
   assert.equal(await cases.verifyCancellation(connection), false);
   assert.equal(closed, true);
@@ -185,7 +187,8 @@ test('cancellation does not pass when the guard closes during ping', async () =>
     ping: async () => { active = false; },
     close: async () => { closed = true; }
   };
-  await assert.rejects(() => cases.verifyCancellation(connection), /inactive/);
+  await assert.rejects(() => cases.verifyCancellation(connection),
+    (error) => error.operationError?.message === 'inactive');
   assert.equal(closed, true);
 });
 
@@ -214,21 +217,92 @@ test('cancellation closes a pending query if the guard closes during cancel', as
     rejectQuery(new Error('test released pending query'));
     await operation;
   }
-  assert.match(error?.message ?? '', /inactive/);
+  assert.equal(error?.operationError?.message, 'inactive');
   assert.equal(closed, true);
 });
 
 test('cleanup failure preserves both cancellation and cleanup errors', async () => {
   const Cases = loadCases();
   const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
+  let rejectQuery;
   const connection = {
-    query: () => new Promise(() => {}),
+    query: () => new Promise((_, reject) => { rejectQuery = reject; }),
     cancel: async () => { throw new Error('cancel failed'); },
     close: async () => { throw new Error('close failed'); }
   };
-  await assert.rejects(() => cases.verifyCancellation(connection), (error) => {
-    assert.equal(error.operationError.message, 'cancel failed');
-    assert.equal(error.cleanupError.message, 'close failed');
-    return true;
+  const error = await cases.verifyCancellation(connection).catch((failure) => failure);
+  assert.equal(error.operationError.message, 'cancel failed');
+  assert.equal(error.cleanupError.message, 'close failed');
+  assert.equal(typeof error.querySettlement?.then, 'function');
+  rejectQuery(new Error('query cleanup failed'));
+  assert.equal((await error.querySettlement).message, 'query cleanup failed');
+});
+
+test('unexpected query failures survive cancellation cleanup', async () => {
+  const Cases = loadCases();
+  const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
+  const queryError = new ArkDbError('57014');
+  let rejectQuery;
+  let closed = false;
+  const connection = {
+    query: () => new Promise((_, reject) => { rejectQuery = reject; }),
+    cancel: async () => { rejectQuery(queryError); return { outcome: 'requested' }; },
+    isInterruptionError: () => false,
+    close: async () => { closed = true; }
+  };
+  await assert.rejects(() => cases.verifyCancellation(connection), (error) => error === queryError);
+  assert.equal(closed, true);
+});
+
+test('not-requested cancellation keeps the query handle if cleanup fails', async () => {
+  const Cases = loadCases();
+  const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
+  let rejectQuery;
+  const connection = {
+    query: () => new Promise((_, reject) => { rejectQuery = reject; }),
+    cancel: async () => ({ outcome: 'not-requested' }),
+    close: async () => { throw new Error('close failed'); }
+  };
+  const error = await cases.verifyCancellation(connection).catch((failure) => failure);
+  assert.match(error.operationError.message, /not requested/);
+  assert.equal(error.cleanupError.message, 'close failed');
+  rejectQuery(new Error('query failed'));
+  assert.equal((await error.querySettlement).message, 'query failed');
+});
+
+test('guard closure during not-requested cancellation cleanup prevents a verdict', async () => {
+  const Cases = loadCases();
+  let active = true;
+  let resolveQuery;
+  const cases = new Cases('id', 'value', { wait: async () => {} }, () => {
+    if (!active) throw new Error('inactive');
   });
+  const connection = {
+    query: () => new Promise((resolve) => { resolveQuery = resolve; }),
+    cancel: async () => ({ outcome: 'not-requested' }),
+    close: async () => { active = false; resolveQuery({ rows: [] }); }
+  };
+  await assert.rejects(() => cases.verifyCancellation(connection), /inactive/);
+});
+
+test('a query failure during cleanup is never discarded', async () => {
+  const Cases = loadCases();
+  for (const cancelFails of [false, true]) {
+    let rejectQuery;
+    const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
+    const connection = {
+      query: () => new Promise((_, reject) => { rejectQuery = reject; }),
+      cancel: async () => {
+        if (cancelFails) throw new Error('cancel failed');
+        return { outcome: 'not-requested' };
+      },
+      close: async () => { rejectQuery(new Error('query cleanup failed')); }
+    };
+    await assert.rejects(() => cases.verifyCancellation(connection), (error) => {
+      assert.equal(cancelFails ? error.operationError?.message : undefined,
+        cancelFails ? 'cancel failed' : undefined);
+      assert.equal(cancelFails ? error.queryError?.message : error.message, 'query cleanup failed');
+      return true;
+    });
+  }
 });

@@ -26,19 +26,28 @@ export interface DeviceDelay {
   wait(milliseconds: number): Promise<void>;
 }
 
-class QueryObservation {
-  completed: boolean = false;
-  failure: Object | null = null;
-}
-
-class DeviceCaseCleanupError extends Error {
+export class DeviceCaseCleanupError extends Error {
   operationError: Error;
   cleanupError: Error;
+  // The connection must not be reused; this tracks its outstanding query.
+  querySettlement: Promise<Error | null>;
 
-  constructor(operationError: Error, cleanupError: Error) {
+  constructor(operationError: Error, cleanupError: Error, querySettlement: Promise<Error | null>) {
     super('Cancellation and connection cleanup both failed.');
     this.operationError = operationError;
     this.cleanupError = cleanupError;
+    this.querySettlement = querySettlement;
+  }
+}
+
+export class DeviceCaseSettlementError extends Error {
+  operationError: Error;
+  queryError: Error;
+
+  constructor(operationError: Error, queryError: Error) {
+    super('Cancellation and query settlement both failed.');
+    this.operationError = operationError;
+    this.queryError = queryError;
   }
 }
 
@@ -103,39 +112,53 @@ export class DeviceAcceptanceCases {
 
   async verifyCancellation(connection: DeviceAcceptanceConnection): Promise<boolean> {
     this.requireActive();
-    const observation = new QueryObservation();
     const query = connection.query(CANCELLATION_SQL).then(
-      (): void => { observation.completed = true; },
-      (error: Object): void => { observation.failure = error; }
+      (): Error | null => null,
+      (error: Object): Error | null => error instanceof Error ? error :
+        new Error('Cancellation query failed with a non-error value.')
     );
+    let operationError: Error | null = null;
     try {
       await this.delay.wait(250);
       this.requireActive();
       const result = await connection.cancel();
       this.requireActive();
       if (result.outcome === CancellationOutcome.Requested) {
-        await query;
+        const queryError = await query;
         this.requireActive();
-        if (observation.completed || !(observation.failure instanceof ArkDbError) ||
-          !connection.isInterruptionError(observation.failure)) return false;
+        if (queryError === null) return false;
+        if (!(queryError instanceof ArkDbError) ||
+          !connection.isInterruptionError(queryError)) throw queryError;
         await connection.ping();
         this.requireActive();
         return connection.state === ConnectionState.Ready;
       }
     } catch (error) {
-      const operationError = error instanceof Error ? error :
+      operationError = error instanceof Error ? error :
         new Error('Cancellation failed with a non-error value.');
-      try {
-        await connection.close();
-      } catch (cleanupError) {
-        throw new DeviceCaseCleanupError(operationError, cleanupError instanceof Error ? cleanupError :
-          new Error('Connection cleanup failed with a non-error value.'));
-      }
-      await query;
-      throw operationError;
     }
-    await connection.close();
-    await query;
+    try {
+      await connection.close();
+    } catch (cleanupError) {
+      throw new DeviceCaseCleanupError(
+        operationError ?? new Error('Cancellation was not requested.'),
+        cleanupError instanceof Error ? cleanupError :
+          new Error('Connection cleanup failed with a non-error value.'), query);
+    }
+    const queryError = await query;
+    if (operationError === null) {
+      try {
+        this.requireActive();
+      } catch (error) {
+        operationError = error instanceof Error ? error :
+          new Error('Cancellation guard failed with a non-error value.');
+      }
+    }
+    if (queryError !== null && queryError !== operationError) {
+      if (operationError !== null) throw new DeviceCaseSettlementError(operationError, queryError);
+      throw queryError;
+    }
+    if (operationError !== null) throw operationError;
     return false;
   }
 }

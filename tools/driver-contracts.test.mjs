@@ -51,7 +51,10 @@ test('dual-HAR consumer is isolated and imports both package identities', async 
   assert.equal(typeof entryPackage.name, 'string');
   assert.equal(typeof entryPackage.version, 'string');
   assert.deepEqual(hvigorConfig.dependencies, {});
-  assert.deepEqual(profile.buildOption?.sourceOption?.workers ?? [], []);
+  assert.deepEqual(profile.buildOption?.sourceOption?.workers, [
+    './src/main/ets/workers/mysql.worker.ets',
+    './src/main/ets/workers/postgres.worker.ets'
+  ]);
   assert.deepEqual([...new Set(project.externalImports.map((entry) => entry.specifier)
     .filter((specifier) => specifier.startsWith('@arkdb/')))].sort(),
   ['@arkdb/mysql', '@arkdb/postgres']);

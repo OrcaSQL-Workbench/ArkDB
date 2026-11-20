@@ -180,6 +180,52 @@ test('a cancellation that was not requested closes the query and fails the case'
   assert.equal(closed, true);
 });
 
+test('requested cancellation bounds a silent query and closes the disposable connection', async () => {
+  const Cases = loadCases();
+  const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
+  let rejectQuery;
+  let closed = false;
+  const connection = {
+    query: () => new Promise((_, reject) => { rejectQuery = reject; }),
+    cancel: async () => ({ outcome: 'requested' }),
+    close: async () => { closed = true; rejectQuery(new Error('closed')); },
+    isInterruptionError: () => true
+  };
+  const operation = cases.verifyCancellation(withTimeoutSetup(connection)).then(
+    () => null, (error) => error
+  );
+  let timer;
+  const error = await Promise.race([
+    operation, new Promise((resolve) => { timer = setTimeout(() => resolve(null), 3000); })
+  ]);
+  clearTimeout(timer);
+  if (error === null) {
+    rejectQuery(new Error('test released pending query'));
+    await operation;
+  }
+  assert.ok(error, 'requested cancellation must not wait indefinitely');
+  assert.match(error.operationError?.message ?? '', /timed out/i);
+  assert.equal(closed, true);
+});
+
+test('requested cancellation retains a query that remains unsettled after close', async () => {
+  const Cases = loadCases();
+  const cases = new Cases('id', 'value', { wait: async () => {} }, () => {});
+  let rejectQuery;
+  const connection = {
+    query: () => new Promise((_, reject) => { rejectQuery = reject; }),
+    cancel: async () => ({ outcome: 'requested' }),
+    close: async () => {},
+    isInterruptionError: () => true
+  };
+  const failure = await cases.verifyCancellation(withTimeoutSetup(connection)).catch((error) => error);
+  assert.match(failure.operationError?.message ?? '', /query settlement timed out/i);
+  assert.match(failure.cleanupError?.message ?? '', /cleanup timed out/i);
+  rejectQuery(new Error('late query failure'));
+  assert.equal((await failure.querySettlement).message, 'late query failure');
+  assert.equal(await failure.cleanupSettlement, null);
+});
+
 test('cancellation does not pass when the guard closes during ping', async () => {
   const Cases = loadCases();
   let active = true;

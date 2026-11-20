@@ -6,7 +6,7 @@ import { createDefaultPostgresStartupRunner } from '../../../main/ets/pgsql/comm
 import { PostgresLifecycleTransport } from '../../../main/ets/pgsql/connection/PostgresConnectionLifecycle';
 import { applyPostgresParameterStatus, postgresErrorFromResponse } from '../../../main/ets/pgsql/execution/PostgresSettlements';
 import { PostgresConnectionConfig, PostgresSslConfig, PostgresSslMode } from '../../../main/ets/pgsql/model/PostgresConnectionConfig';
-import { PostgresError, PostgresServerInfo, PostgresTransactionState } from '../../../main/ets/pgsql/model/PostgresModels';
+import { PostgresAuthMethod, PostgresError, PostgresServerInfo, PostgresTransactionState } from '../../../main/ets/pgsql/model/PostgresModels';
 import { PostgresDiagnosticFields, PostgresErrorResponse, PostgresParameterStatus } from '../../../main/ets/pgsql/protocol/PostgresMessageChannel';
 import { PostgresTcpSocket, PostgresTcpSocketFactory, PostgresTcpTransport, PostgresTlsSocket } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 const RFC_NONCE: string = 'rOprNGfwEbeRWgbNEkqO';
@@ -30,7 +30,7 @@ export default function postgresStartupTest(): void {
         conn.serverInfo.productName === 'PostgreSQL' && conn.serverInfo.version === '16.4 (Harmony)' && conn.serverInfo.serverEncoding === 'UTF8' &&
         conn.serverInfo.defaultEncoding === 'UTF8' && !conn.serverInfo.integerDatetimes && conn.serverInfo.dateStyle === 'ISO, MDY' &&
         conn.serverInfo.timeZone === 'UTC' && conn.serverInfo.backendProcessId === 4242 && conn.serverInfo.connectionHandle === '4242' &&
-        conn.serverInfo.authPlugin.length === 0 &&
+        conn.serverInfo.authPlugin === PostgresAuthMethod.NotReported &&
         conn.sessionStatus.known && conn.sessionStatus.autocommit && !conn.sessionStatus.inTransaction &&
         conn.sessionStatus.transactionState === PostgresTransactionState.Idle && !socket.tlsUpgraded).assertTrue();
       assertBytes(socket.tcpWrites[0], expectedStartupFrame('alice', 'alice', 'arkdb'));
@@ -55,7 +55,7 @@ export default function postgresStartupTest(): void {
       const conn = new PostgresConnection(cfg, 'pencil', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(socket), scramRunner);
       await expectOk((): Promise<void> => conn.connect());
       expect(conn.state === ConnectionState.Ready && conn.serverInfo.tlsActive && socket.tlsUpgraded && socket.peerVerified &&
-        conn.serverInfo.authPlugin === 'scram-sha-256' && conn.sessionStatus.inTransaction &&
+        conn.serverInfo.authPlugin === PostgresAuthMethod.ScramSha256 && conn.sessionStatus.inTransaction &&
         conn.sessionStatus.transactionState === PostgresTransactionState.InTransaction).assertTrue();
       assertBytes(socket.tcpWrites[0], [0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f]);
       assertBytes(socket.tlsWrites[0], expectedStartupFrame('user', 'appdb', 'arkdb'));
@@ -98,7 +98,7 @@ export default function postgresStartupTest(): void {
       const md5Cfg = baseConfig(PostgresSslMode.DISABLED); md5Cfg.user = 'user';
       const md5Conn = new PostgresConnection(md5Cfg, 'password', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(md5Sock), md5Runner);
       await expectOk((): Promise<void> => md5Conn.connect());
-      expect(md5Conn.serverInfo.authPlugin).assertEqual('md5');
+      expect(md5Conn.serverInfo.authPlugin).assertEqual(PostgresAuthMethod.Md5);
       const expectedMd5Frame = new Uint8Array(41);
       expectedMd5Frame[0] = 0x70; new DataView(expectedMd5Frame.buffer).setInt32(1, 40, false);
       expectedMd5Frame.set(strictUtf8Encode('md5d6f407104ca5ba8553d598fed7df90e0'), 5); expectedMd5Frame[40] = 0x00;
@@ -127,7 +127,7 @@ export default function postgresStartupTest(): void {
       const conn = new PostgresConnection(cfg, 's3cr3t', new PassiveTimers(), (): PostgresLifecycleTransport => wrapTcp(socket));
       await expectOk((): Promise<void> => conn.connect());
       expect(conn.state === ConnectionState.Ready && conn.serverInfo.tlsActive && socket.tlsUpgraded &&
-        socket.peerVerified && conn.serverInfo.authPlugin === 'cleartext-password').assertTrue();
+        socket.peerVerified && conn.serverInfo.authPlugin === PostgresAuthMethod.CleartextPassword).assertTrue();
       assertBytes(socket.tcpWrites[0], [0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f]);
       assertBytes(socket.tlsWrites[0], expectedStartupFrame('carol', 'analytics', ''));
       assertBytes(socket.tlsWrites[1], [0x70, 0x00, 0x00, 0x00, 0x0b, 0x73, 0x33, 0x63, 0x72, 0x33, 0x74, 0x00]);

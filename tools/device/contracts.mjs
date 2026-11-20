@@ -59,7 +59,8 @@ export function parseDeviceEvidencePolicy(bytes, expectedDriver) {
   }
   stringList(policy.serverFamilies, 'Device policy server families');
   if (!Array.isArray(policy.features) || policy.features.length > 64 ||
-    policy.features.some((feature) => !/^[a-z][a-z0-9-]{0,63}$/.test(feature)) ||
+    policy.features.some((feature) => typeof feature !== 'string' ||
+      !/^[a-z][a-z0-9-]{0,63}$/.test(feature)) ||
     new Set(policy.features).size !== policy.features.length) {
     throw new Error('Device policy features are invalid.');
   }
@@ -72,7 +73,8 @@ export function parseDeviceEvidencePolicy(bytes, expectedDriver) {
   }
   for (const profile of policy.profiles) {
     exactKeys(profile, ['id', 'features', 'authPlugins'], 'Device policy profile');
-    if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(profile.id) ||
+    if (typeof profile.id !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(profile.id) ||
       !Array.isArray(profile.features) ||
       profile.features.some((feature) => !policy.features.includes(feature)) ||
       new Set(profile.features).size !== profile.features.length ||

@@ -167,6 +167,26 @@ test('resolves policy from registered driver consumers and rejects cross-driver 
   );
 });
 
+test('rejects non-string policy features and profile IDs', async () => {
+  const { policyBytes } = await deviceContracts.readDeviceEvidenceContract(
+    process.cwd(), 'mysql');
+  const nonStringFeature = JSON.parse(policyBytes.toString('utf8'));
+  nonStringFeature.features[0] = null;
+  assert.throws(
+    () => deviceContracts.parseDeviceEvidencePolicy(
+      Buffer.from(JSON.stringify(nonStringFeature)), 'mysql'),
+    /Device policy features are invalid/
+  );
+
+  const nonStringProfileId = JSON.parse(policyBytes.toString('utf8'));
+  nonStringProfileId.profiles[0].id = 1;
+  assert.throws(
+    () => deviceContracts.parseDeviceEvidencePolicy(
+      Buffer.from(JSON.stringify(nonStringProfileId)), 'mysql'),
+    /Device policy profile selection is invalid/
+  );
+});
+
 test('prepares digest-less legacy MySQL evidence when its policy file is absent', async (t) => {
   const f = await deviceFixture(t, { legacyWithoutPolicy: true });
   assert.equal(f.bundle.releaseSet.verification.deviceEvidencePolicySha256, undefined);

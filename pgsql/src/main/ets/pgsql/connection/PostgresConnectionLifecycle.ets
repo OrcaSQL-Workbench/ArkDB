@@ -820,6 +820,7 @@ function commitServerInfo(src: PostgresServerInfo, dst: PostgresServerInfo): voi
   dst.backendProcessId = src.backendProcessId; dst.protocolMajor = src.protocolMajor;
   dst.protocolMinor = src.protocolMinor; dst.serverEncoding = src.serverEncoding;
   dst.integerDatetimes = src.integerDatetimes; dst.dateStyle = src.dateStyle; dst.timeZone = src.timeZone;
+  dst.authPlugin = src.authPlugin;
 }
 function safeDisposeDeadline(deadline: ConnectionDeadline | null): ArkDbError | null {
   if (deadline === null) return null;

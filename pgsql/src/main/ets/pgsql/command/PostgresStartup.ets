@@ -48,6 +48,7 @@ export async function runPostgresStartup(context: PostgresStartupSession,
             if (authExchangeStarted) throw duplicateAuthChallenge();
             authExchangeStarted = true;
             if (!offersMechanism(msg.mechanisms, SCRAM_SHA_256)) throw ArkDbError.unsupported('PostgreSQL server does not offer SCRAM-SHA-256.');
+            context.serverInfo.authPlugin = 'scram-sha-256';
             const pw = context.readPassword();
             if (pw.length === 0) throw ArkDbError.validation('Password is required for PostgreSQL SCRAM authentication.');
             const activeScram = new PostgresScramClient(context.config.user, pw, scramPortFactory(authPlatform));
@@ -67,14 +68,14 @@ export async function runPostgresStartup(context: PostgresStartupSession,
           }
           if (msg instanceof PostgresAuthenticationMd5Password) {
             if (authExchangeStarted) throw duplicateAuthChallenge();
-            authExchangeStarted = true; const pw = context.readPassword();
+            authExchangeStarted = true; context.serverInfo.authPlugin = 'md5'; const pw = context.readPassword();
             if (pw.length === 0) throw ArkDbError.validation('Password is required for PostgreSQL MD5 authentication.');
             const payload = await runSensitiveBytesStep(context, (): Promise<Uint8Array> => buildPostgresMd5PasswordResponse(pw, context.config.user, msg.salt, authPlatform));
             await writeSensitivePasswordPayload(context, payload); continue;
           }
           if (msg instanceof PostgresAuthenticationCleartextPassword) {
             if (authExchangeStarted) throw duplicateAuthChallenge();
-            authExchangeStarted = true; const pw = context.readPassword();
+            authExchangeStarted = true; context.serverInfo.authPlugin = 'cleartext-password'; const pw = context.readPassword();
             if (context.config.allowCleartextPassword && context.serverInfo.tlsActive && context.config.ssl.mode === PostgresSslMode.VERIFY_FULL && pw.length === 0) {
               throw ArkDbError.validation('Password is required for PostgreSQL cleartext password authentication.');
             }

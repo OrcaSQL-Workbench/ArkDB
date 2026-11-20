@@ -37,6 +37,7 @@ export class PostgresServerInfo extends ServerInfo {
   integerDatetimes: boolean = true;
   dateStyle: string = '';
   timeZone: string = '';
+  authPlugin: string = '';
 }
 
 export class PostgresDatabaseSessionStatus extends DatabaseSessionStatus {

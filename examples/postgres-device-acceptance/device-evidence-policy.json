@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "driver": "pgsql",
+  "caseManifestFile": "device-acceptance-cases.json",
+  "suiteId": "arkdb.postgresql.device-acceptance",
+  "serverFamilies": ["PostgreSQL"],
+  "features": [],
+  "authPlugins": ["scram-sha-256"],
+  "tlsModes": ["verify_full"],
+  "profiles": [
+    { "id": "P15", "features": [], "authPlugins": ["scram-sha-256"], "serverVersionPrefix": "15." },
+    { "id": "P16", "features": [], "authPlugins": ["scram-sha-256"], "serverVersionPrefix": "16." },
+    { "id": "P17", "features": [], "authPlugins": ["scram-sha-256"], "serverVersionPrefix": "17." },
+    { "id": "P18", "features": [], "authPlugins": ["scram-sha-256"], "serverVersionPrefix": "18." }
+  ]
+}

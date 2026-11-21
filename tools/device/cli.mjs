@@ -15,7 +15,7 @@ export function deviceEvidenceArguments(argv) {
         typeof argv[index + 1] === 'string' && argv[index + 1].length > 0) {
         options[flag === '--bundle' ? 'bundleDirectory' : 'driver'] = argv[++index];
       } else {
-        throw new Error('Usage: prepare --driver mysql --bundle DIRECTORY');
+        throw new Error('Usage: prepare [--driver DRIVER] --bundle DIRECTORY');
       }
     }
     if (!/^[a-z][a-z0-9_-]*$/.test(options.driver) ||

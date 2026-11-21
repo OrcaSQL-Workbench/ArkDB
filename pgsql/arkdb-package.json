@@ -2,6 +2,7 @@
   "kind": "driver",
   "verification": {
     "consumer": "examples/postgres-client",
+    "deviceConsumer": "examples/postgres-device-acceptance",
     "nativeModules": ["core", "pgsql"],
     "requiresInternet": true
   }

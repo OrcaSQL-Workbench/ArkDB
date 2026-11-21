@@ -33,10 +33,12 @@ test('core is a real independent shared HAR, not an extra database driver', () =
   const postgresVerification = driverVerification(ROOT, 'pgsql');
   assert.deepEqual(postgresVerification.nativeModules, ['core', 'pgsql']);
   assert.equal(postgresVerification.consumer, 'examples/postgres-client');
-  assert.equal(postgresVerification.deviceConsumer, undefined);
+  assert.equal(postgresVerification.deviceConsumer, 'examples/postgres-device-acceptance');
   assert.equal(postgresVerification.requiresInternet, true);
   assert.equal(postgresVerification.consumerDirectory,
     join(ROOT, 'examples', 'postgres-client'));
+  assert.equal(postgresVerification.deviceConsumerDirectory,
+    join(ROOT, 'examples', 'postgres-device-acceptance'));
 });
 
 test('dual-HAR consumer is isolated and imports both package identities', async () => {

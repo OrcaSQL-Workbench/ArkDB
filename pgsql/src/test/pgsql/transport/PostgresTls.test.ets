@@ -10,7 +10,8 @@ import {
   PostgresPlatformX509Cert, PostgresPlatformX509CertFactory,
   PostgresTlsFilePort, postgresCertificateHasSubjectAlternativeName,
   postgresCertificateMatchesHost, postgresDnsNameMatchesHost,
-  postgresIpAddressBytes, postgresParseCertificateSubjectCommonNames
+  postgresIpAddressBytes, postgresParseCertificateSubjectCommonNames,
+  postgresWrapPlatformFailure
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 import {
   PostgresCertificateStructure, PostgresCertificateSubjectAlternativeName,
@@ -99,6 +100,19 @@ export default function postgresTlsTest(): void {
       files.failedMessage = 'client certificate file must be between 1 byte and 1 MiB';
       expectOptionsFailure(config, files, 1000,
         'Could not read client certificate file: ' + files.failedMessage);
+      files.failedError = postgresWrapPlatformFailure({
+        code: 13900002, message: 'No such file or directory'
+      } as CodedTlsFixtureError as Object);
+      let codedFileFailure: ArkDbError | null = null;
+      try {
+        buildPostgresTlsConnectOptions('db.example.com', 5432, config, 1000, files);
+      } catch (error) {
+        codedFileFailure = error as ArkDbError;
+      }
+      expect(codedFileFailure instanceof ArkDbError).assertTrue();
+      expect(codedFileFailure!.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(codedFileFailure!.code).assertEqual(13900002);
+      expect(codedFileFailure!.nativeCode).assertEqual(13900002);
     });
     it('parsesBoundedCertificateStructureAndOptionalFields', 0, () => {
       expect(postgresParseCertificateStructure(
@@ -1196,6 +1210,23 @@ export default function postgresTlsTest(): void {
         new NetworkKitPostgresPeerCertificateFactory(mutatingLoader))
         .verify(mutatingRaw, 'db.example.com');
       expect(mutatingLoader.calls).assertEqual(1);
+      const codedCertLoader = new MockPlatformX509CertFactory(
+        new MockPlatformX509Cert());
+      codedCertLoader.onCreate = (): void => {
+        throw postgresWrapPlatformFailure({
+          code: 19030001, message: 'X509 decode failed'
+        } as CodedTlsFixtureError as Object);
+      };
+      const codedVerifyFailure = await failure((): Promise<void> =>
+        createDefaultPostgresTlsIdentityVerifier(
+          new NetworkKitPostgresPeerCertificateFactory(codedCertLoader))
+          .verify({
+            encodingFormat: platformCert.EncodingFormat.FORMAT_DER,
+            data: copyBytes(validHostDer)
+          }, 'db.example.com'));
+      expect(codedVerifyFailure.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(codedVerifyFailure.code).assertEqual(19030001);
+      expect(codedVerifyFailure.nativeCode).assertEqual(19030001);
     });
     it('verifiesDerSubjectCommonNamesWithoutPlatformOnelineHazards', 0, async () => {
       const ipAndUriSan = sanEntry([
@@ -1440,15 +1471,23 @@ class MockPeerCertificateFactory implements PostgresPeerCertificateFactory {
     return this.peer;
   }
 }
+interface CodedTlsFixtureError {
+  code: number;
+  message: string;
+}
 class MockTlsFiles implements PostgresTlsFilePort {
   maximumBytes: number = 0;
   readPaths: string[] = [];
   failedPath: string = '';
   failedMessage: string = '';
+  failedError: Error | null = null;
   read(path: string, maximumBytes: number, label: string): string {
     this.maximumBytes = maximumBytes;
     this.readPaths.push(path);
-    if (path === this.failedPath) throw new Error(this.failedMessage);
+    if (path === this.failedPath) {
+      if (this.failedError !== null) throw this.failedError;
+      throw new Error(this.failedMessage);
+    }
     if (path === 'ca.pem') return 'CA';
     if (path === 'client.pem') return 'CERT';
     if (path === 'key.pem') return 'KEY';

@@ -498,18 +498,19 @@ together in one app, with package-specific factories. Its required offline
 Hypium case exercises each package's factory, result/error identity and
 unconnected-query failure. This establishes only compilation and offline
 package-identity behavior for those artifacts and this local toolchain.
-P27B's fresh API-24 emulator run is intended to verify Worker message delivery
+The app's runtime page separately exercises Worker message delivery
 and package-local errors, state isolation, replacement, and acknowledged
-shutdown. Unexpected and late messages remain fatal, and shutdown cleanup waits
+shutdown on an API-24 target. Unexpected and late messages remain fatal, and shutdown cleanup waits
 for every Worker exit; if forced exit cannot be confirmed, the example blocks
-retries until restart. Until that run is captured from the exact digest-bound HAP,
-compilation and offline package-identity checks do not establish runtime Worker
-behavior. No check establishes system-wide constructor identity or live
+retries until restart. Compilation and offline package-identity checks alone
+do not establish runtime Worker behavior. No check establishes system-wide constructor identity or live
 server/device compatibility. Source composition includes core once for all
 selected adapters. Native codes may
 be numeric or textual in `nativeCode`, and SQLSTATE is independent. The numeric
 `code` compatibility field is retained on the same error constructor. MySQL
-preserves its numeric error codes and SQLSTATE. Unsupported operations use an explicit missing
+preserves its numeric server error codes, SQLSTATE, and `'TLS_HOSTNAME_MISMATCH'`;
+PostgreSQL preserves server SQLSTATEs, driver TLS/cancellation identifiers, and
+TCP/TLS/certificate platform error codes. Unsupported operations use an explicit missing
 feature or `Unsupported` error, never a success-shaped no-op.
 
 Generic metrics are named gauge/counter measurements with units, exact values

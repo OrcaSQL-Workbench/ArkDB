@@ -28,12 +28,13 @@ Install the selected HAR in the application and import from
 its Worker and lifecycle; the driver does not create or manage a Worker.
 The [independent sample](../examples/postgres-client/README.md) compiles
 against the exact HAR and uses a host-owned Worker. The dedicated
-[dual-HAR consumer](../examples/dual-har-client/README.md) verifies that the
-exact local MySQL and PostgreSQL HARs compile and run deterministic offline
-package-identity tests. Worker integration, dispatch and lifecycle-isolation
-verification are deferred to the next unit; this check is not Worker runtime proof.
+[dual-HAR consumer](../examples/dual-har-client/README.md) compiles the exact
+local MySQL and PostgreSQL HARs together, runs deterministic offline
+package-identity tests, and provides a dual-Worker isolation harness. The
+standalone [device acceptance harness](../examples/postgres-device-acceptance/README.md)
+defines the release-bound PostgreSQL acceptance suite.
 Each HAR embeds its own core constructors, so constructor identity is
-package-local; this does not establish live server or device compatibility.
+package-local; offline checks do not establish live server or physical-device compatibility.
 
 ## Connect and query
 
@@ -150,8 +151,11 @@ export async function runReadOnly(connection: PostgresConnection): Promise<void>
   `VERIFY_CA` verifies the chain without hostname verification; `REQUIRED`
   encrypts without authenticating the server; `DISABLED` is plaintext. There
   is no silent TLS downgrade. Client certificate and key must be supplied
-  together. Cleartext-password authentication requires explicit opt-in and
-  active `VERIFY_FULL` TLS; use trusted credentials and avoid logging them.
+  together. TCP/TLS and certificate-file failures preserve platform codes in
+  `nativeCode` (and `code` when numeric); peer hostname mismatches set
+  `nativeCode` to `'TLS_HOSTNAME_MISMATCH'`. Cleartext-password authentication
+  requires explicit opt-in and active `VERIFY_FULL` TLS; use trusted
+  credentials and avoid logging them.
 - Simple query and prepared execution return PostgreSQL-native results and
   columns. `int8` values are `bigint`, `numeric` and temporal values remain
   text, and `bytea` is bytes. Multiple simple-query results appear in

@@ -1,3 +1,5 @@
+'use shared';
+
 @Sendable
 export class DeviceAcceptanceRequest {
   operation: string = 'acceptance';
@@ -26,4 +28,9 @@ export class DeviceAcceptanceResponse {
   failures: number = 0;
   errors: number = 0;
   ignored: number = 0;
+}
+
+@Sendable
+export class DeviceShutdownResponse {
+  ok: boolean = false;
 }

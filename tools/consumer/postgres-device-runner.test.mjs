@@ -308,8 +308,11 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.equal(result.errorKind, 'device-cleanup');
       const later = await runner.run(Object.assign(new DeviceAcceptanceRequest(), request));
       assert.equal(later.errorKind, 'validation');
+      const quiescence = observeSettlement(runner.waitForQuiescence());
+      await new Promise(setImmediate);
+      assert.equal(quiescence.settled, false, 'quiescence must retain the stalled close');
       resolveClose();
-      await assert.rejects(runner.stop(), /timed out/);
+      assert.match((await quiescence.result).message, /timed out/);
       await new Promise(setImmediate);
       await runner.stop();
       return;
@@ -355,6 +358,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     }
     if (scenario === 'signing overlap and stop') {
       await signingStarted;
+      await assert.rejects(runner.waitForQuiescence(), /still active/);
       const another = Object.assign(new DeviceAcceptanceRequest(), request, { password: 'another-password' });
       const overlapping = runner.run(another);
       await new Promise(setImmediate);
@@ -386,8 +390,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.match((await stopping).message, /timed out/);
       const cleanup = runner.closeTask;
       assert.ok(cleanup, 'the timed-out signing operation must retain its cleanup owner');
-      cleanup.sealRegistration();
-      const quiescence = observeSettlement(cleanup.quiescence);
+      const quiescence = observeSettlement(runner.waitForQuiescence());
       await new Promise(setImmediate);
       assert.equal(quiescence.settled, false);
       for (const resolve of signingWaiters) resolve();
@@ -401,13 +404,12 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.equal(result.receiptJson, '');
       const cleanup = runner.closeTask;
       assert.ok(cleanup);
-      cleanup.sealRegistration();
-      const quiescence = observeSettlement(cleanup.quiescence);
+      const quiescence = observeSettlement(runner.waitForQuiescence());
       await new Promise(setImmediate);
       const premature = quiescence.settled;
       for (const resolve of signingWaiters) resolve();
       assert.equal(premature, false, 'expiry must track the pending signer');
-      assert.equal(await quiescence.result, null);
+      assert.match((await quiescence.result).message, /timed out/);
       return;
     }
     const result = await running;
@@ -432,6 +434,17 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     }
     const mismatchFailed = scenario === 'valid mismatch host' || scenario === 'mismatch authentication failure';
     assertDeviceRunnerReceipt(result, { publicKey, spki, pkcs8, password: passwords[0], sha, manifest, mismatchFailed });
+    if (scenario === 'success') {
+      await Promise.all([runner.waitForQuiescence(), runner.waitForQuiescence(), runner.stop()]);
+      await runner.waitForQuiescence();
+      await runner.stop();
+      const requestAfterShutdown = validDeviceRunnerRequest(DeviceAcceptanceRequest, sha, 'secret');
+      const rejected = await runner.run(requestAfterShutdown);
+      assert.equal(rejected.errorKind, 'validation');
+      assert.match(rejected.text, /busy or stopping/);
+      assert.equal(requestAfterShutdown.password, '');
+      assert.equal(created.length, 2, 'quiescence must prevent new connections');
+    }
     });
   }
 });

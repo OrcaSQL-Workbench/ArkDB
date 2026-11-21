@@ -278,6 +278,17 @@ export class DeviceAcceptanceRunner {
     if (error !== null) throw error;
   }
 
+  async waitForQuiescence(): Promise<void> {
+    if (this.busy) throw new Error('The device run is still active.');
+    this.stopping = true;
+    const cleanup = this.closeActive();
+    const cleanupError = await this.waitForCleanup();
+    cleanup.sealRegistration();
+    const error = await cleanup.quiescence;
+    if (error !== null) throw error;
+    if (cleanupError !== null) throw cleanupError;
+  }
+
   private requireActive(): void {
     if (this.stopping || !this.challengeActive()) {
       throw new Error('The device run is no longer active.');

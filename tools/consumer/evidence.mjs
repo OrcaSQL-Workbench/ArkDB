@@ -32,7 +32,7 @@ export function parseDeviceEvidencePolicy(bytes, expectedDriver) {
     'schemaVersion', 'driver', 'caseManifestFile', 'suiteId', 'serverFamilies',
     'features', 'authPlugins', 'tlsModes', 'profiles'
   ], 'Device evidence policy');
-  if (policy.schemaVersion !== 1 || policy.driver !== expectedDriver ||
+  if (![1, 2].includes(policy.schemaVersion) || policy.driver !== expectedDriver ||
     policy.caseManifestFile !== 'device-acceptance-cases.json' ||
     !/^[a-z][a-z0-9_-]*$/.test(expectedDriver) ||
     !safePolicyLabel(policy.suiteId)) {
@@ -53,9 +53,15 @@ export function parseDeviceEvidencePolicy(bytes, expectedDriver) {
     throw new Error('Device policy profiles are invalid.');
   }
   for (const profile of policy.profiles) {
-    exactKeys(profile, ['id', 'features', 'authPlugins'], 'Device policy profile');
+    exactKeys(profile, [
+      'id', 'features', 'authPlugins', ...(policy.schemaVersion === 2 ? ['serverVersionPrefix'] : [])
+    ], 'Device policy profile');
     if (typeof profile.id !== 'string' ||
       !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(profile.id) ||
+      (policy.schemaVersion === 2 && (typeof profile.serverVersionPrefix !== 'string' ||
+        profile.serverVersionPrefix.length > 64 ||
+        !/^[A-Za-z0-9]/.test(profile.serverVersionPrefix) ||
+        /[^A-Za-z0-9._+-]/.test(profile.serverVersionPrefix))) ||
       !Array.isArray(profile.features) ||
       profile.features.some((feature) => !policy.features.includes(feature)) ||
       new Set(profile.features).size !== profile.features.length ||

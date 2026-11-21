@@ -5,6 +5,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { link, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
+import ts from 'typescript';
 import { prepareHarRelease, readReleaseBundle } from '../prepare-har-release.mjs';
 import { releaseFixture } from '../test-fixtures/har-release.mjs';
 import { sha256 } from '../package-har.mjs';
@@ -157,14 +158,124 @@ test('resolves policy from registered driver consumers and rejects cross-driver 
   const legacy = await deviceContracts.loadSealedDeviceEvidenceContract(
     process.cwd(), 'mysql', undefined);
   assert.deepEqual(legacy.policy, mysql.policy);
-  await assert.rejects(
-    deviceContracts.readDeviceEvidenceContract(process.cwd(), 'pgsql'),
-    /no device acceptance consumer/i
-  );
+  const postgres = await deviceContracts.readDeviceEvidenceContract(process.cwd(), 'pgsql');
+  assert.equal(postgres.policy.schemaVersion, 2);
+  assert.equal(postgres.policy.driver, 'pgsql');
+  assert.equal(postgres.policy.suiteId, 'arkdb.postgresql.device-acceptance');
+  assert.deepEqual(postgres.policy.serverFamilies, ['PostgreSQL']);
+  assert.deepEqual(postgres.policy.authPlugins, ['scram-sha-256']);
+  assert.deepEqual(postgres.policy.tlsModes, ['verify_full']);
+  assert.deepEqual(postgres.policy.profiles.map((profile) => profile.id),
+    ['P15', 'P16', 'P17', 'P18']);
+  assert.deepEqual(postgres.policy.profiles.map((profile) => profile.serverVersionPrefix),
+    ['15.', '16.', '17.', '18.']);
+  assert.deepEqual(postgres.cases.caseIds, [
+    'tls_identity', 'tls_hostname_mismatch', 'server_error', 'prepared_values',
+    'authorized_schema', 'cancellation', 'cleanup'
+  ]);
+  assert.throws(() => deviceContracts.parseDeviceEvidencePolicy(postgres.policyBytes, 'mysql'),
+    /registered driver/i);
   await assert.rejects(
     deviceContracts.loadSealedDeviceEvidenceContract(process.cwd(), 'pgsql', undefined),
-    /no device acceptance consumer/i
+    /has no compatible device evidence policy/i
   );
+  const sealed = await deviceContracts.loadSealedDeviceEvidenceContract(
+    process.cwd(), 'pgsql', postgres.policySha256);
+  assert.deepEqual(sealed.policy, postgres.policy);
+  await assert.rejects(
+    deviceContracts.loadSealedDeviceEvidenceContract(process.cwd(), 'pgsql', 'a'.repeat(64)),
+    /differs from the sealed release/i
+  );
+});
+
+test('validates signed PostgreSQL receipts against the registered device policy', async () => {
+  const contract = await deviceContracts.readDeviceEvidenceContract(process.cwd(), 'pgsql');
+  const keyPair = generateKeyPairSync('ed25519');
+  const publicKeySpki = Buffer.from(keyPair.publicKey.export({ format: 'der', type: 'spki' }));
+  const createdAt = '2026-11-01T00:00:00.000Z';
+  const expiresAt = '2026-11-02T00:00:00.000Z';
+  const completedAt = '2026-11-01T00:00:02.000Z';
+  const challenge = {
+    schemaVersion: 2,
+    publicKeySpkiBase64: publicKeySpki.toString('base64'),
+    publicKeySpkiSha256: sha256(publicKeySpki),
+    challengeId: '1'.repeat(32),
+    sourceCommit: '2'.repeat(40),
+    artifactSha256: '3'.repeat(64),
+    consumerFingerprint: '4'.repeat(64),
+    acceptanceFingerprint: '5'.repeat(64),
+    caseIds: contract.cases.caseIds,
+    createdAt,
+    expiresAt
+  };
+  const receipt = {
+    schemaVersion: 2,
+    profile: 'P17',
+    features: [],
+    runId: challenge.challengeId,
+    sourceCommit: challenge.sourceCommit,
+    sourceClean: true,
+    harSha256: challenge.artifactSha256,
+    consumerFingerprint: challenge.consumerFingerprint,
+    acceptanceFingerprint: challenge.acceptanceFingerprint,
+    hapSha256: '6'.repeat(64),
+    apiVersion: 24,
+    deviceClass: 'tablet',
+    serverVersion: '17.12',
+    tlsMode: 'verify_full',
+    authPlugin: 'scram-sha-256',
+    challengeIssuedAt: createdAt,
+    challengeExpiresAt: expiresAt,
+    startedAt: '2026-11-01T00:00:01.000Z',
+    completedAt,
+    operatorEvidenceId: 'P29-device-test',
+    cases: contract.cases.caseIds.map((id) => ({ id, status: 'pass', durationMs: 1 }))
+  };
+  const validate = (value) => {
+    const payload = JSON.stringify(value);
+    const envelope = {
+      schemaVersion: 1,
+      kind: 'arkdb-device-acceptance-envelope',
+      payload,
+      signature: {
+        algorithm: 'Ed25519',
+        publicKeySpkiBase64: publicKeySpki.toString('base64'),
+        valueBase64: signPayload(null, Buffer.from(payload, 'utf8'), keyPair.privateKey)
+          .toString('base64')
+      }
+    };
+    return deviceContracts.validateReceipt(envelope, value, challenge, contract.cases,
+      new Date(completedAt), contract.policy);
+  };
+  assert.doesNotThrow(() => validate(receipt));
+  for (const [profile, serverVersion] of [
+    ['P15', '15.20'], ['P16', '16.16'], ['P17', '17.12'], ['P18', '18.7']
+  ]) {
+    assert.doesNotThrow(() => validate({ ...receipt, profile, serverVersion }));
+    assert.throws(() => validate({ ...receipt, profile, serverVersion: '19.0' }), /binding/i);
+  }
+  assert.throws(() => validate({ ...receipt, profile: 'P19' }), /binding/i);
+  assert.throws(() => validate({ ...receipt, serverVersion: '15.20' }), /binding/i);
+  assert.throws(() => validate({ ...receipt, tlsMode: 'required' }), /binding/i);
+  assert.throws(() => validate({ ...receipt, authPlugin: 'cleartext' }), /binding/i);
+});
+
+test('keeps the PostgreSQL runtime manifest aligned with the registered policy', async () => {
+  const contract = await deviceContracts.readDeviceEvidenceContract(process.cwd(), 'pgsql');
+  const source = await readFile(join(contract.deviceConsumerDirectory, 'entry', 'src',
+    'main', 'ets', 'sample', 'DeviceAcceptanceManifest.ets'), 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+  }).outputText;
+  const module = { exports: {} };
+  new Function('module', 'exports', compiled)(module, module.exports);
+  const runtime = module.exports;
+  assert.equal(runtime.DEVICE_ACCEPTANCE_SUITE_ID, contract.cases.suiteId);
+  assert.deepEqual(runtime.DEVICE_ACCEPTANCE_CASE_IDS, contract.cases.caseIds);
+  assert.deepEqual(runtime.DEVICE_ACCEPTANCE_DEVICE_TYPES, contract.cases.runtime.deviceTypes);
+  assert.equal(runtime.DEVICE_ACCEPTANCE_MINIMUM_SDK, contract.cases.runtime.minimumSdkApiVersion);
+  assert.deepEqual(runtime.DEVICE_ACCEPTANCE_PROFILES,
+    contract.policy.profiles.map((profile) => profile.id));
 });
 
 test('rejects non-string policy features and profile IDs', async () => {
@@ -185,6 +296,24 @@ test('rejects non-string policy features and profile IDs', async () => {
       Buffer.from(JSON.stringify(nonStringProfileId)), 'mysql'),
     /Device policy profile selection is invalid/
   );
+});
+
+test('requires bounded server-version prefixes in version 2 policy profiles', async () => {
+  const { policyBytes } = await deviceContracts.readDeviceEvidenceContract(process.cwd(), 'pgsql');
+  for (const prefix of ['', null, '17.*', '17\n', 17]) {
+    const policy = JSON.parse(policyBytes.toString('utf8'));
+    policy.profiles[2].serverVersionPrefix = prefix;
+    assert.throws(() => deviceContracts.parseDeviceEvidencePolicy(
+      Buffer.from(JSON.stringify(policy)), 'pgsql'), /Device policy profile selection is invalid/);
+  }
+  const missing = JSON.parse(policyBytes.toString('utf8'));
+  delete missing.profiles[2].serverVersionPrefix;
+  assert.throws(() => deviceContracts.parseDeviceEvidencePolicy(
+    Buffer.from(JSON.stringify(missing)), 'pgsql'), /Device policy profile has an invalid property set/);
+  const legacy = JSON.parse(policyBytes.toString('utf8'));
+  legacy.schemaVersion = 1;
+  assert.throws(() => deviceContracts.parseDeviceEvidencePolicy(
+    Buffer.from(JSON.stringify(legacy)), 'pgsql'), /Device policy profile has an invalid property set/);
 });
 
 test('prepares digest-less legacy MySQL evidence when its policy file is absent', async (t) => {
@@ -1518,6 +1647,13 @@ test('binds the case manifest only into the device acceptance fingerprint', asyn
 });
 
 test('parses only explicit preparation and artifact-validation commands', () => {
+  assert.deepEqual(deviceEvidenceArguments([
+    'prepare', '--driver', 'pgsql', '--bundle', 'dist\\pgsql-v1.0.0'
+  ]), {
+    command: 'prepare', driver: 'pgsql', bundleDirectory: 'dist\\pgsql-v1.0.0'
+  });
+  assert.throws(() => deviceEvidenceArguments(['prepare', '--driver', 'pgsql', '--invalid']),
+    /Usage: prepare \[--driver DRIVER\] --bundle DIRECTORY/);
   assert.deepEqual(deviceEvidenceArguments([
     'prepare', '--driver', 'mysql', '--bundle', 'dist\\mysql-v1.0.2'
   ]), {

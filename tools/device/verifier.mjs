@@ -522,7 +522,8 @@ export async function verifyDeviceEvidenceArtifacts({
     consumer.sampleFingerprint !== receiptConsumerFingerprint ||
     parsed.payload.profile !== profile ||
     JSON.stringify(parsed.payload.features) !== JSON.stringify(features) ||
-    !supportedDeviceSelection(profile, features, parsed.payload.authPlugin, deviceContract.policy) ||
+    !supportedDeviceSelection(profile, features, parsed.payload.authPlugin, deviceContract.policy,
+      parsed.payload.serverVersion) ||
     parsed.payload.hapSha256 !== actualHapSha256 ||
     challenge.preparedUnsignedHapContentSha256 !== actualHapContentSha256) {
     throw new Error('Receipt, sealed release, consumer evidence, or actual signed HAP identity differs.');

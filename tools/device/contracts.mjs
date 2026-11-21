@@ -150,11 +150,13 @@ function safePublicLabel(value) {
     /^[A-Za-z0-9][A-Za-z0-9 ._()+/-]{0,127}$/.test(value);
 }
 
-export function supportedDeviceSelection(profile, features, authPlugin, policy) {
+export function supportedDeviceSelection(profile, features, authPlugin, policy, serverVersion) {
   const selection = policy.profiles.find((entry) => entry.id === profile &&
     JSON.stringify(entry.features) === JSON.stringify(features));
   return selection !== undefined &&
-    (authPlugin === undefined || selection.authPlugins.includes(authPlugin));
+    (authPlugin === undefined || selection.authPlugins.includes(authPlugin)) &&
+    (selection.serverVersionPrefix === undefined ||
+      (typeof serverVersion === 'string' && serverVersion.startsWith(selection.serverVersionPrefix)));
 }
 
 export function validateChallenge(challenge, set, bundle, cases, caseBytes, root, policy) {
@@ -289,7 +291,8 @@ export function validateReceipt(envelope, receipt, challenge, cases, now, policy
     receipt.features.some((feature) => !policy.features.includes(feature)) ||
     new Set(receipt.features).size !== receipt.features.length ||
     JSON.stringify([...receipt.features].sort()) !== JSON.stringify(receipt.features) ||
-    !supportedDeviceSelection(receipt.profile, receipt.features, receipt.authPlugin, policy) ||
+    !supportedDeviceSelection(receipt.profile, receipt.features, receipt.authPlugin, policy,
+      receipt.serverVersion) ||
     receipt.runId !== challenge.challengeId ||
     receipt.sourceCommit !== challenge.sourceCommit || receipt.sourceClean !== true ||
     receipt.harSha256 !== challenge.artifactSha256 ||

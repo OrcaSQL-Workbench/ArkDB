@@ -1,4 +1,5 @@
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { createSampleLoader } from './postgres-device-test-loader.mjs';
@@ -44,6 +45,34 @@ export function stallRunnerClose(connection, register) {
   return new Promise((resolve) => {
     register(() => { connection.state = State.Closed; resolve(); });
   });
+}
+
+export function assertDeviceRunnerReceipt(result, { publicKey, spki, pkcs8, password, sha, manifest,
+  mismatchFailed }) {
+  assert.equal(result.ok, !mismatchFailed);
+  const envelope = JSON.parse(result.receiptJson);
+  assert.equal(envelope.schemaVersion, 1);
+  assert.equal(envelope.kind, 'arkdb-device-acceptance-envelope');
+  assert.equal(envelope.signature.algorithm, 'Ed25519');
+  assert.equal(envelope.signature.publicKeySpkiBase64, spki);
+  assert.ok(verify(null, Buffer.from(envelope.payload), publicKey, Buffer.from(envelope.signature.valueBase64, 'base64')));
+  const payload = JSON.parse(envelope.payload);
+  assert.equal(payload.schemaVersion, 2);
+  assert.deepEqual(payload.cases.map(({ id }) => id), manifest.caseIds);
+  for (const { id, status } of payload.cases) {
+    assert.equal(status, id === 'tls_hostname_mismatch' && mismatchFailed ? 'fail' : 'pass', id);
+  }
+  assert.equal(payload.authPlugin, 'scram-sha-256');
+  assert.equal(payload.profile, 'P17');
+  assert.equal(payload.hapSha256, sha);
+  assert.equal(payload.operatorEvidenceId, 'operator-1');
+  assert.doesNotMatch(result.receiptJson, /Sensitive|not-for-a-receipt/);
+  for (const secret of [pkcs8, password]) {
+    assert.ok(typeof secret === 'string' && secret.length > 0, 'Expected a non-empty fixture secret.');
+    const encoded = JSON.stringify(secret).slice(1, -1);
+    assert.ok(!envelope.payload.includes(encoded) && !result.receiptJson.includes(encoded),
+      'Receipt contains a fixture secret.');
+  }
 }
 
 export function deviceSampleLoader(samples, clock = Date, uptime = () => 1) {

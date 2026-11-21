@@ -1,0 +1,9 @@
+{
+  "name": "arkdb-postgres-device-acceptance",
+  "version": "1.0.0",
+  "description": "Bound PostgreSQL device acceptance application",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@arkdb/postgres": "file:../dependency/postgres.har"
+  }
+}

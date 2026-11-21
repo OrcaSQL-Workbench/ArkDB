@@ -12,8 +12,11 @@ import { DeviceAcceptanceRequest, DeviceAcceptanceResponse } from './Messages';
 import { DeviceAcceptanceRequestSnapshot } from './DeviceAcceptanceRequestSnapshot';
 import { DeviceReceiptSigner, Ed25519DeviceReceiptSigner } from './DeviceReceiptSigner';
 import { createDeviceReceipt, DeviceCaseResult, DeviceReceiptRun } from './DeviceAcceptanceReceipt';
-import { DeviceRunOperation } from './DeviceRunOperation';
-import { DeviceConnectionCleanup, closeDeviceConnections, cleanupDeviceRun } from './DeviceRunCleanup';
+import { DeviceOperationCleanupError, DeviceRunOperation } from './DeviceRunOperation';
+import {
+  DeviceConnectionCleanup, DeviceConnectionCleanupError, DeviceOperationsCleanupError,
+  DeviceQueryCleanupError, DeviceRunCleanupTimeoutError, closeDeviceConnections, cleanupDeviceRun
+} from './DeviceRunCleanup';
 import {
   DeviceAcceptanceCases, DeviceAcceptanceConnection, DeviceCaseCleanupError, DeviceDelay
 } from './DeviceAcceptanceCases';
@@ -23,6 +26,53 @@ import {
 } from './DeviceAcceptanceRuntime';
 
 const NO_OPERATION_SETTLEMENT: Promise<Error | null> = Promise.resolve(null);
+
+class DeviceQuiescenceFailure extends Error {
+  timeout: DeviceRunCleanupTimeoutError;
+  failure: Error;
+
+  constructor(timeout: DeviceRunCleanupTimeoutError, failure: Error) {
+    super('Device cleanup timed out and failed.');
+    this.timeout = timeout;
+    this.failure = failure;
+  }
+}
+
+function failureNotInTimeout(timeout: DeviceRunCleanupTimeoutError, error: Error): Error | null {
+  if (error === timeout || error === timeout.operationError || timeout.cleanupErrors.includes(error)) return null;
+  if (error instanceof DeviceQueryCleanupError) {
+    const query = failureNotInTimeout(timeout, error.queryError);
+    if (error.caseError === timeout.operationError) return query;
+    for (const observed of timeout.cleanupErrors) {
+      if (observed === error.caseError) return query;
+    }
+    if (query === null) return error.caseError;
+    return query === error.queryError ? error : new DeviceQueryCleanupError(error.caseError, query);
+  }
+  if (error instanceof DeviceOperationCleanupError) {
+    const operation = failureNotInTimeout(timeout, error.operationError);
+    const cleanup = failureNotInTimeout(timeout, error.cleanupError);
+    if (operation === error.operationError && cleanup === error.cleanupError) return error;
+    if (operation === null) return cleanup;
+    if (cleanup === null) return operation;
+    return new DeviceOperationCleanupError(operation, cleanup);
+  }
+  if (error instanceof DeviceConnectionCleanupError || error instanceof DeviceOperationsCleanupError) {
+    const remaining: Error[] = [];
+    let unchanged: boolean = true;
+    for (const entry of error.errors) {
+      const failure = failureNotInTimeout(timeout, entry);
+      if (failure !== entry) unchanged = false;
+      if (failure !== null) remaining.push(failure);
+    }
+    if (unchanged) return error;
+    if (remaining.length === 0) return null;
+    if (remaining.length === 1) return remaining[0];
+    if (error instanceof DeviceConnectionCleanupError) return new DeviceConnectionCleanupError(remaining);
+    return new DeviceOperationsCleanupError(remaining);
+  }
+  return error;
+}
 
 export class DeviceAcceptanceRunner {
   private factory: DeviceAcceptanceFactory;
@@ -36,6 +86,7 @@ export class DeviceAcceptanceRunner {
   private interrupted: Promise<void> | null = null;
   private interruptRun: (() => void) | null = null;
   private closeTask: DeviceConnectionCleanup | null = null;
+  private cleanupTimeout: DeviceRunCleanupTimeoutError | null = null;
   private querySettlement: Promise<Error | null> | null = null;
   private cleanupSettlement: Promise<Error | null> | null = null;
   private activeOperation: Promise<Error | null> | null = null;
@@ -285,6 +336,13 @@ export class DeviceAcceptanceRunner {
     const cleanupError = await this.waitForCleanup();
     cleanup.sealRegistration();
     const error = await cleanup.quiescence;
+    if (this.cleanupTimeout !== null) {
+      const failure = error === null ? null : failureNotInTimeout(this.cleanupTimeout, error);
+      if (failure !== null) {
+        throw new DeviceQuiescenceFailure(this.cleanupTimeout, failure);
+      }
+      throw this.cleanupTimeout;
+    }
     if (error !== null) throw error;
     if (cleanupError !== null) throw cleanupError;
   }
@@ -338,7 +396,11 @@ export class DeviceAcceptanceRunner {
   }
 
   private async waitForCleanup(): Promise<Error | null> {
-    return cleanupDeviceRun(this.closeActive(), this.activeOperation ?? NO_OPERATION_SETTLEMENT);
+    const error = await cleanupDeviceRun(this.closeActive(), this.activeOperation ?? NO_OPERATION_SETTLEMENT);
+    if (error instanceof DeviceRunCleanupTimeoutError && this.cleanupTimeout === null) {
+      this.cleanupTimeout = error;
+    }
+    return error;
   }
 
   private async executeCase(cases: DeviceCaseResult[], id: string,

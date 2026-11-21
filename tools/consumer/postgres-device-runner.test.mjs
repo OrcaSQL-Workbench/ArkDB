@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { verify } from 'node:crypto';
 import test from 'node:test';
 import { observeSettlement } from './postgres-device-test-loader.mjs';
 import { ArkDbError, Kind, State, deviceRunnerFixture, deviceRunnerRuntime,
-  deviceRunnerPreparedFeatures, validDeviceRunnerRequest, stallRunnerClose } from './postgres-device-runner-fixtures.mjs';
+  deviceRunnerPreparedFeatures, validDeviceRunnerRequest, stallRunnerClose,
+  assertDeviceRunnerReceipt } from './postgres-device-runner-fixtures.mjs';
 
 test('unbound source refuses a connection and erases the supplied password', async () => {
   const { DeviceAcceptanceRunner, DeviceAcceptanceRequest, DeviceEvidenceIdentity } = deviceRunnerRuntime();
@@ -31,6 +31,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     'schema changes before use', 'expires during signing', 'clock reverses during signing',
     'expires during mismatch', 'valid mismatch host', 'mismatch authentication failure',
     'signing overlap and stop', 'late signing failure after stop',
+    'stop after signer settlement before receipt publication',
     'signing expires while pending',
     'stalled context at expiry',
     'stalled context after clock jump', 'late query cleanup failure after stop', 'stalled cleanup',
@@ -65,6 +66,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     let notifyCancellation;
     let resolveConnect;
     let stoppingDuringConnect;
+    let stopAfterSigning;
     let stoppedDuringConnect = false;
     let reentered = false;
     let reentrantRun;
@@ -176,6 +178,11 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     { wait: async () => {} }, {
       async sign(payload) {
         const envelope = await signer.sign(payload);
+        if (scenario === 'stop after signer settlement before receipt publication') {
+          runner.activeOperation.then(() => {
+            queueMicrotask(() => queueMicrotask(() => { stopAfterSigning = runner.stop(); }));
+          });
+        }
         if (scenario === 'signing overlap and stop' || scenario === 'late signing failure after stop' ||
           scenario === 'signing expires while pending') {
           notifySigning();
@@ -364,6 +371,13 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.equal(first.receiptJson, '', 'stop must suppress a still-pending receipt');
       return;
     }
+    if (scenario === 'stop after signer settlement before receipt publication') {
+      const result = await running;
+      await assert.doesNotReject(stopAfterSigning);
+      assert.equal(result.receiptJson, '', 'stop must suppress a receipt not yet published');
+      assert.equal(result.ok, false);
+      return;
+    }
     if (scenario === 'late signing failure after stop') {
       await signingStarted;
       const stopping = runner.stop().catch((error) => error);
@@ -417,21 +431,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       return;
     }
     const mismatchFailed = scenario === 'valid mismatch host' || scenario === 'mismatch authentication failure';
-    assert.equal(result.ok, !mismatchFailed);
-    const envelope = JSON.parse(result.receiptJson);
-    assert.equal(envelope.kind, 'arkdb-device-acceptance-envelope');
-    assert.equal(envelope.signature.publicKeySpkiBase64, spki);
-    assert.ok(verify(null, Buffer.from(envelope.payload), publicKey, Buffer.from(envelope.signature.valueBase64, 'base64')));
-    const payload = JSON.parse(envelope.payload);
-    assert.deepEqual(payload.cases.map(({ id }) => id), manifest.caseIds);
-    assert.equal(payload.cases.find(({ id }) => id === 'tls_hostname_mismatch').status,
-      mismatchFailed ? 'fail' : 'pass');
-    assert.equal(payload.cases.find(({ id }) => id === 'cleanup').status, failCleanup ? 'fail' : 'pass');
-    assert.equal(payload.authPlugin, 'scram-sha-256');
-    assert.equal(payload.profile, 'P17');
-    assert.equal(payload.hapSha256, sha);
-    assert.equal(payload.operatorEvidenceId, 'operator-1');
-    assert.doesNotMatch(result.receiptJson, /Sensitive|not-for-a-receipt/);
+    assertDeviceRunnerReceipt(result, { publicKey, spki, pkcs8, password: passwords[0], sha, manifest, mismatchFailed });
     });
   }
 });

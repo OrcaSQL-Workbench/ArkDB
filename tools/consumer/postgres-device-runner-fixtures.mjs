@@ -122,8 +122,8 @@ export function deviceRuntime(samples, moduleNames, clock = Date, uptime = () =>
 const acceptanceRoot = new URL('../../examples/postgres-device-acceptance/', import.meta.url);
 const runnerSamples = new URL('entry/src/main/ets/sample/', acceptanceRoot);
 const runnerModules = [
-  './DeviceAcceptanceRunner', './DeviceAcceptanceValidation', './DeviceEvidenceIdentity',
-  './DeviceReceiptSigner', './Messages'
+  './DeviceAcceptanceValidation', './DeviceEvidenceIdentity', './DeviceReceiptSigner', './Messages',
+  './DeviceAcceptanceRunner'
 ];
 
 export function deviceRunnerRuntime(clock = Date, uptime = () => 1, moduleNames = runnerModules) {

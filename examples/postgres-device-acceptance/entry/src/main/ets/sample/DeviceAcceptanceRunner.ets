@@ -239,9 +239,10 @@ export class DeviceAcceptanceRunner {
     try {
       const signed = await this.waitActive((): Promise<string> => this.signer.sign(JSON.stringify(payload)));
       const signedAt = new Date().getTime();
-      if (signedAt < completedAt.getTime() || signedAt > Date.parse(this.binding.expiresAt)) {
+      if (this.stopping || !this.challengeActive() || signedAt < completedAt.getTime() ||
+        signedAt > Date.parse(this.binding.expiresAt)) {
         response.errorKind = ArkDbErrorKind.Validation;
-        response.text = 'The device run finished outside the challenge window.';
+        response.text = 'The device run is no longer active or the clock is invalid.';
         return response;
       }
       response.receiptJson = signed;

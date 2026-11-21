@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, sign as signPayload } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { link, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
@@ -21,7 +21,8 @@ const LEGACY_CASE_MANIFEST_SHA256 =
   '11d13bcd0c5677228342da2e95b894122627bda7fcc8e1dab16a26b6acf3705b';
 
 async function deviceFixture(t, overrides = {}) {
-  const fixture = await releaseFixture(t);
+  const driver = overrides.driver ?? 'mysql';
+  const fixture = await releaseFixture(t, driver);
   if (overrides.legacyWithoutPolicy) {
     await rm(join(fixture.root, 'examples', 'mysql-device-acceptance',
       'device-evidence-policy.json'));
@@ -49,7 +50,7 @@ async function deviceFixture(t, overrides = {}) {
     async buildHarness(options) {
       assert.equal(sha256(options.artifactBytes), fixture.identity.sha256);
       assert.equal(options.artifactBytes.length, fixture.identity.byteLength);
-      assert.equal(options.artifactFileName, 'mysql.har');
+      assert.equal(options.artifactFileName, driver === 'pgsql' ? 'postgres.har' : 'mysql.har');
       assert.equal(options.bindingSource.includes(privateKeyPkcs8.toString('base64')), true);
       assert.match(options.bindingSource, /privateKeyPkcs8Base64/);
       assert.match(options.bindingSource, /consumerFingerprint/);
@@ -59,7 +60,7 @@ async function deviceFixture(t, overrides = {}) {
     ...overrides.dependencies
   };
   const prepared = await prepareDeviceEvidence({
-    root: fixture.root, driver: 'mysql', bundleDirectory: bundle.bundleDirectory
+    root: fixture.root, driver, bundleDirectory: bundle.bundleDirectory
   }, dependencies);
   return { fixture, bundle, keyPair, publicKeySpki, privateKeyPkcs8, hapBytes, prepared };
 }
@@ -1691,6 +1692,111 @@ test('parses only explicit preparation and artifact-validation commands', () => 
     ['prepare', '--bundle', 'dist', '--bundle', 'other']
   ]) assert.throws(() => deviceEvidenceArguments(argv),
     /Usage|explicit|repeated|driver|profile|feature/i);
+});
+
+// Synthetic HAR and receipt, with mocked build and HAP signature; no device or server is exercised.
+test('verifies a sealed PostgreSQL policy and signed receipt before consuming its challenge', async (t) => {
+  const hapBytes = readFileSync(join(import.meta.dirname, '..', 'test-fixtures', 'mysql-client-real.hap'));
+  let stagedHar;
+  let builds = 0;
+  const f = await deviceFixture(t, {
+    driver: 'pgsql', hapBytes,
+    dependencies: {
+      buildHarness: undefined,
+      runOhpm(args, { cwd }) {
+        assert.deepEqual(args, ['install', '--all']);
+        stagedHar = readFileSync(join(cwd, 'dependency', 'postgres.har'));
+        assert.equal(existsSync(join(cwd, 'dependency', 'mysql.har')), false);
+        return { status: 0, output: '' };
+      },
+      runHvigor(args, { cwd }) {
+        builds++;
+        const output = join(cwd, 'entry', 'build', 'default', 'outputs', 'default');
+        mkdirSync(output, { recursive: true });
+        writeFileSync(join(output, 'entry-default-unsigned.hap'), hapBytes);
+        return { status: 0, output: 'BUILD SUCCESSFUL' };
+      }
+    }
+  });
+  assert.equal(builds, 1);
+  assert.equal(sha256(stagedHar), f.fixture.identity.sha256);
+  assert.equal(stagedHar.length, f.fixture.identity.byteLength);
+  const challenge = f.prepared.challenge;
+  const policyPath = join(f.fixture.root, 'examples', 'postgres-device-acceptance',
+    'device-evidence-policy.json');
+  const policyBytes = await readFile(policyPath);
+  assert.equal(JSON.parse(policyBytes).schemaVersion, 2);
+  assert.equal(f.bundle.releaseSet.driver, 'pgsql');
+  assert.equal(f.bundle.releaseSet.verification.deviceEvidencePolicySha256, sha256(policyBytes));
+  assert.equal(challenge.state, 'issued');
+  assert.equal(challenge.artifactSha256, f.fixture.identity.sha256);
+  assert.equal(challenge.acceptanceFingerprint, deviceSampleFingerprint(f.fixture.root, 'pgsql'));
+
+  const hapPath = join(f.fixture.root, 'synthetic-signed-entry.hap');
+  await writeFile(hapPath, f.hapBytes);
+  const receiptPath = join(f.fixture.root, 'postgres-receipt.json');
+  const envelope = specEnvelope(challenge, f.keyPair.privateKey, sha256(f.hapBytes), 'P17');
+  const receipt = {
+    ...JSON.parse(envelope.payload),
+    serverVersion: '17.12',
+    tlsMode: 'verify_full',
+    authPlugin: 'scram-sha-256'
+  };
+  const writeReceipt = async (serverVersion) => {
+    resign(envelope, { ...receipt, serverVersion }, f.keyPair.privateKey);
+    await writeFile(receiptPath, `${JSON.stringify(envelope)}\n`);
+  };
+  const options = {
+    root: f.fixture.root, receiptPath,
+    manifestPath: join(f.bundle.bundleDirectory, 'arkdb-postgres-1.0.0.manifest.json'),
+    consumerPath: join(f.bundle.bundleDirectory, 'arkdb-postgres-1.0.0.consumer.json'),
+    hapPath, profile: 'P17', features: [],
+    outPath: join(f.fixture.root, 'postgres-verified.json')
+  };
+  let signatureChecks = 0;
+  const dependencies = artifactDependencies({
+    now: () => new Date('2026-11-01T01:00:00.000Z'),
+    async verifyHapSignature() {
+      signatureChecks++;
+      return { certificateSha256: 'a'.repeat(64), profileSha256: 'b'.repeat(64) };
+    }
+  });
+  const stateDirectory = dirname(f.prepared.challengePath);
+  const acceptedPath = join(stateDirectory, `${challenge.challengeId}.accepted.json`);
+  const assertUnconsumed = () => {
+    assert.equal(existsSync(f.prepared.challengePath), true);
+    for (const suffix of ['verifying', 'accepted', 'rejected', 'claim']) {
+      assert.equal(existsSync(join(stateDirectory, `${challenge.challengeId}.${suffix}.json`)), false);
+    }
+    assert.equal(existsSync(f.prepared.workDirectory), true);
+    assert.equal(existsSync(options.outPath), false);
+  };
+  await writeReceipt('17.12');
+  await writeFile(policyPath, Buffer.concat([policyBytes, Buffer.from('\n')]));
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, dependencies),
+    /differs from the sealed release/i);
+  assertUnconsumed();
+  await writeFile(policyPath, policyBytes);
+
+  await writeReceipt('15.20');
+  await assert.rejects(deviceEvidence.verifyDeviceEvidenceArtifacts(options, dependencies), /identity differs/i);
+  assertUnconsumed();
+  assert.equal(signatureChecks, 0);
+
+  await writeReceipt('17.12');
+  const verified = await deviceEvidence.verifyDeviceEvidenceArtifacts(options, dependencies);
+  assert.equal(signatureChecks, 1);
+  assert.equal(verified.record.hapSha256, sha256(f.hapBytes));
+  assert.equal(verified.record.hapSigningCertificateSha256, 'a'.repeat(64));
+  assert.equal(verified.record.hapSigningProfileSha256, 'b'.repeat(64));
+  assert.equal(verified.record.hardwareAttested, false);
+  assert.equal(verified.record.physicalDeviceAttestedByOperator, false);
+  assert.equal(verified.record.authorizedSchemaAttestedByOperator, false);
+  assert.deepEqual(JSON.parse(await readFile(options.outPath, 'utf8')), verified.record);
+  assert.equal(existsSync(f.prepared.challengePath), false);
+  assert.equal(existsSync(acceptedPath), true);
+  assert.equal(JSON.parse(await readFile(acceptedPath, 'utf8')).challenge.challengeId, challenge.challengeId);
+  assert.equal(existsSync(f.prepared.workDirectory), false);
 });
 
 test('validates the actual signed HAP and complete receipt provenance before external evidence', async (t) => {

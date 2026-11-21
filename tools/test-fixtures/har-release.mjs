@@ -8,6 +8,7 @@ import { sha256, sourceFingerprint } from '../package-har.mjs';
 import { sampleFingerprint } from '../test-consumer.mjs';
 import { localOutputPaths } from '../driver-packages.mjs';
 import { deliveryPlan } from '../delivery-workspace.mjs';
+import { extractExamples } from '../lib/doc-examples.mjs';
 
 export const COMMIT = 'a'.repeat(40);
 export const TAG_OBJECT = 'b'.repeat(40);
@@ -16,45 +17,50 @@ export const STEM = 'arkdb-mysql-1.0.0';
 export const LOCAL_STEM = 'arkdb-mysql-1.0.0-local';
 export const REPO = 'OrcaSQL-Workbench/ArkDB';
 
-export async function releaseFixture(t) {
+export async function releaseFixture(t, driver = 'mysql') {
+  const packageName = driver === 'pgsql' ? '@arkdb/postgres' : '@arkdb/mysql';
+  const stem = `${packageName.slice(1).replace('/', '-')}-1.0.0`;
+  const localStem = `${stem}-local`;
+  const tag = `${driver}-v1.0.0`;
   const root = await mkdtemp(join(tmpdir(), 'arkdb-release-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const ignored = new Set(['build', '.test', '.hvigor', 'oh_modules', 'node_modules', 'dependency',
     'BuildProfile.ets', 'oh-package-lock.json5', '.ohpmrc', '.npmrc', 'local.properties']);
-  for (const name of ['mysql', 'examples', 'hvigor', 'AppScope', 'build-profile.json5',
+  for (const name of [driver, 'examples', 'hvigor', 'AppScope', 'build-profile.json5',
     'hvigorfile.ts', 'oh-package.json5', 'LICENSE']) {
     await cp(join(ROOT, name), join(root, name), { recursive: true, filter: (file) => !ignored.has(basename(file)) });
   }
 
-  const fixtureManifestPath = join(root, 'mysql', 'oh-package.json5');
+  const fixtureManifestPath = join(root, driver, 'oh-package.json5');
   const fixtureManifest = JSON5.parse(await readFile(fixtureManifestPath, 'utf8'));
   fixtureManifest.version = '1.0.0';
   fixtureManifest.dependencies = {};
-  const declarationPath = join(root, 'mysql', 'arkdb-package.json');
+  const declarationPath = join(root, driver, 'arkdb-package.json');
   const declaration = JSON5.parse(await readFile(declarationPath, 'utf8'));
-  declaration.verification.nativeModules = ['mysql'];
+  declaration.verification.nativeModules = [driver];
   declaration.testOwnership = 'fixture';
   await writeFile(declarationPath, JSON.stringify(declaration));
   await writeFile(fixtureManifestPath, `${JSON.stringify(fixtureManifest, null, 2)}\n`);
   // A synthetic legacy, single-HAR source layout, not the current core-dependent implementation.
   const profilePath = join(root, 'build-profile.json5');
   const profile = JSON5.parse(await readFile(profilePath, 'utf8'));
-  profile.modules = profile.modules.filter((entry) => entry.name === 'mysql');
+  profile.modules = profile.modules.filter((entry) => entry.name === driver);
   await writeFile(profilePath, JSON.stringify(profile));
-  await rm(join(root, 'mysql', 'src'), { recursive: true });
-  await mkdir(join(root, 'mysql', 'src', 'main', 'ets'), { recursive: true });
-  await mkdir(join(root, 'mysql', 'src', 'test'), { recursive: true });
-  await writeFile(join(root, 'mysql', 'src', 'main', 'module.json5'), JSON.stringify({
-    module: { name: 'mysql', type: 'har', requestPermissions: [{ name: 'ohos.permission.INTERNET' }] }
+  await rm(join(root, driver, 'src'), { recursive: true });
+  await mkdir(join(root, driver, 'src', 'main', 'ets'), { recursive: true });
+  await mkdir(join(root, driver, 'src', 'test'), { recursive: true });
+  await writeFile(join(root, driver, 'src', 'main', 'module.json5'), JSON.stringify({
+    module: { name: driver, type: 'har', requestPermissions: [{ name: 'ohos.permission.INTERNET' }] }
   }));
-  await writeFile(join(root, 'mysql', 'src', 'main', 'ets', 'Public.ets'),
+  await writeFile(join(root, driver, 'src', 'main', 'ets', 'Public.ets'),
     'export class SyntheticDeclaration {}\n');
-  await writeFile(join(root, 'mysql', 'Index.ets'), "export { SyntheticDeclaration } from './src/main/ets/Public';\n");
-  await writeFile(join(root, 'mysql', 'src', 'test', 'List.test.ets'),
+  await writeFile(join(root, driver, 'Index.ets'), "export { SyntheticDeclaration } from './src/main/ets/Public';\n");
+  await writeFile(join(root, driver, 'src', 'test', 'List.test.ets'),
     "import suite from './Synthetic.test';\nexport default function tests(): void { suite(); }\n");
-  await writeFile(join(root, 'mysql', 'src', 'test', 'Synthetic.test.ets'),
+  await writeFile(join(root, driver, 'src', 'test', 'Synthetic.test.ets'),
     'export default function suite(): void {}\n');
-  const { manifest, exports, driver } = checkPackage(root);
+  const checked = checkPackage(root, driver);
+  const { manifest, exports } = checked;
   const staging = join(root, 'build', 'fixture');
   const files = {
     'oh-package.json5': JSON.stringify({
@@ -63,40 +69,42 @@ export async function releaseFixture(t) {
     }),
     'Index.d.ets': `export { ${exports.join(', ')} } from './public';\n`,
     'public.d.ets': 'export declare class SyntheticDeclaration {}\n',
-    'src/main/module.json': JSON.stringify({ module: driver.definition }),
+    'src/main/module.json': JSON.stringify({ module: checked.driver.definition }),
     'ets/modules.abc': 'Synthetic test bytecode, never executed.'
   };
   for (const name of ['README.md', 'CHANGELOG.md', 'LICENSE', 'README.OpenSource']) {
-    files[name] = await readFile(join(root, 'mysql', name));
+    files[name] = await readFile(join(root, driver, name));
   }
   for (const [name, content] of Object.entries(files)) {
     const path = join(staging, 'package', name);
     await mkdir(join(path, '..'), { recursive: true });
     await writeFile(path, content);
   }
-  const paths = localOutputPaths(root, 'mysql');
+  const paths = localOutputPaths(root, driver);
   const dist = paths.artifacts;
   const evidence = paths.evidence;
   await mkdir(dist, { recursive: true });
   await mkdir(evidence, { recursive: true });
   await mkdir(join(root, 'dist'), { recursive: true });
-  await create({ file: join(dist, `${LOCAL_STEM}.har`), cwd: staging, gzip: true, portable: true }, ['package']);
-  const bytes = await readFile(join(dist, `${LOCAL_STEM}.har`));
-  const fingerprint = sourceFingerprint(root);
-  const sample = sampleFingerprint(root);
+  await create({ file: join(dist, `${localStem}.har`), cwd: staging, gzip: true, portable: true }, ['package']);
+  const bytes = await readFile(join(dist, `${localStem}.har`));
+  const fingerprint = sourceFingerprint(root, driver);
+  const sample = sampleFingerprint(root, driver);
   const identity = {
-    schemaVersion: 1, packageName: '@arkdb/mysql', version: '1.0.0', driver: 'mysql', modulePath: 'mysql',
+    schemaVersion: 1, packageName, version: '1.0.0', driver, modulePath: driver,
     sourceCommit: COMMIT, checkoutHead: COMMIT, sourceClean: true,
-    artifactChannel: 'local', file: `${LOCAL_STEM}.har`,
+    artifactChannel: 'local', file: `${localStem}.har`,
     sha256: sha256(bytes), byteLength: bytes.length, sourceFingerprint: fingerprint,
     format: 'bytecode-har', compatibleSdkVersion: 24, compatibleSdkType: 'HarmonyOS',
     useNormalizedOHMUrl: true, buildMode: 'release', published: false
   };
   const consumer = {
-    schemaVersion: 3, packageName: '@arkdb/mysql', version: '1.0.0', artifactSha256: identity.sha256,
+    schemaVersion: 3, packageName, version: '1.0.0', artifactSha256: identity.sha256,
     consumerProfile: 'current',
     sourceFingerprint: fingerprint, sampleFingerprint: sample, check: 'isolated-release-hap-and-local-tests',
-    documentedExamples: 8, sampleHapCompiled: true, localTestsExecuted: true, localSampleCases: 6,
+    documentedExamples: driver === 'mysql' ? 8 :
+      extractExamples(await readFile(join(root, driver, 'README.md'), 'utf8')).length,
+    sampleHapCompiled: true, localTestsExecuted: true, localSampleCases: 6,
     sampleHapSha256: 'f'.repeat(64), sampleHapByteLength: 12345,
     sampleHapContentSha256: 'e'.repeat(64),
     verifiedAt: '2026-10-22T00:00:00.000Z', registryAcquisitionVerified: false, liveNetworkingVerified: false
@@ -106,28 +114,28 @@ export async function releaseFixture(t) {
     publisherScopeOwnershipVerified: false
   };
   for (const [name, value] of Object.entries({ manifest: identity, consumer, readiness })) {
-    await writeFile(join(name === 'manifest' ? dist : evidence, `${LOCAL_STEM}.${name}.json`),
+    await writeFile(join(name === 'manifest' ? dist : evidence, `${localStem}.${name}.json`),
       `${JSON.stringify(value, null, 2)}\n`);
   }
-  await writeFile(join(dist, `${LOCAL_STEM}.har.sha256`), `${identity.sha256}  ${LOCAL_STEM}.har\n`);
+  await writeFile(join(dist, `${localStem}.har.sha256`), `${identity.sha256}  ${localStem}.har\n`);
   const state = { dirty: false, head: COMMIT, tagCommit: COMMIT, tagObject: TAG_OBJECT, tagType: 'tag' };
   function git(args) {
     const command = args.join(' ');
     if (command === 'rev-parse --show-toplevel') return root;
     if (command === 'remote get-url origin') return `https://github.com/${REPO}.git`;
-    if (command === 'status --porcelain --untracked-files=all') return state.dirty ? ' M mysql/README.md\n' : '';
+    if (command === 'status --porcelain --untracked-files=all') return state.dirty ? ` M ${driver}/README.md\n` : '';
     if (command === 'rev-parse --verify HEAD') return state.head;
-    if (command === `cat-file -t refs/tags/${TAG}`) return state.tagType;
-    if (command === `rev-parse --verify refs/tags/${TAG}`) return state.tagObject;
-    if (command === `rev-parse --verify refs/tags/${TAG}^{commit}`) return state.tagCommit;
+    if (command === `cat-file -t refs/tags/${tag}`) return state.tagType;
+    if (command === `rev-parse --verify refs/tags/${tag}`) return state.tagObject;
+    if (command === `rev-parse --verify refs/tags/${tag}^{commit}`) return state.tagCommit;
     throw new Error(`Unexpected fixture Git read: ${command}`);
   }
   return {
-    root, dist, evidence, localStem: LOCAL_STEM, identity, consumer, readiness, state, git,
-    options: { root, driver: 'mysql', tag: TAG },
+    root, dist, evidence, localStem, identity, consumer, readiness, state, git,
+    options: { root, driver, tag },
     dependencies: { git, verify: async () => ({ driverTestsPassed: 183 }) },
     changeRecord: async (name, overrides) => {
-      const file = join(name === 'manifest' ? dist : evidence, `${LOCAL_STEM}.${name}.json`);
+      const file = join(name === 'manifest' ? dist : evidence, `${localStem}.${name}.json`);
       await writeFile(file, `${JSON.stringify({ ...JSON.parse(await readFile(file, 'utf8')), ...overrides })}\n`);
     }
   };

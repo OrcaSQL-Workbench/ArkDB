@@ -1,10 +1,15 @@
+import { socket } from '@kit.NetworkKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { describe, expect, it } from '@ohos/hypium';
 import {
   ArkDbError, ArkDbErrorKind, ConnectionTimerPort
 } from '@arkdb/core';
 import {
+  NetworkKitPostgresTcpSocket, NetworkKitPostgresTlsSocket,
+  PostgresPlatformTcpSocket, PostgresPlatformTlsSocket,
   PostgresTcpSocket, PostgresTcpSocketFactory, PostgresTcpTransport,
-  PostgresTlsSocket, postgresTransportNativeCode, postgresWrapPlatformFailure
+  PostgresTlsIdentityVerifier, PostgresTlsSocket,
+  postgresTransportNativeCode, postgresWrapPlatformFailure
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 import {
   PostgresSslConfig, PostgresSslMode
@@ -627,9 +632,184 @@ export default function postgresTcpTransportTest(): void {
       expect(closeErr.code).assertEqual(2301009);
       expect(closeErr.nativeCode).assertEqual(2301009);
     });
+    it('preservesCodesAndScrubsSendCopiesInPlatformSocketAdapters', 0, async () => {
+      const verifier = new PassThroughTlsVerifier();
+
+      const isolatedTcpRaw = new MockPlatformSocket();
+      const isolatedTcpAdapter = new NetworkKitPostgresTcpSocket(verifier, isolatedTcpRaw);
+      const isolatedTcpCaller = new Uint8Array([0x51, 0x52, 0x53]);
+      const isolatedTcpDeferred = new Deferred();
+      isolatedTcpRaw.sendPromise = isolatedTcpDeferred.wait();
+      const isolatedTcpSend = isolatedTcpAdapter.send(isolatedTcpCaller);
+      expect(isolatedTcpRaw.retainedBuffer !== null).assertTrue();
+      assertBytes(new Uint8Array(isolatedTcpRaw.retainedBuffer!), [0x51, 0x52, 0x53]);
+      isolatedTcpDeferred.failWith({
+        code: 2301032, message: 'Broken pipe'
+      } as CodedMessageFailure as Object);
+      let isolatedTcpError: Object | null = null;
+      try {
+        await isolatedTcpSend;
+      } catch (error) {
+        isolatedTcpError = error as Object;
+      }
+      assertBytes(new Uint8Array(isolatedTcpRaw.retainedBuffer!), [0, 0, 0]);
+      assertBytes(isolatedTcpCaller, [0x51, 0x52, 0x53]);
+      expect(postgresTransportNativeCode(isolatedTcpError)).assertEqual(2301032);
+
+      const isolatedTlsRaw = new MockPlatformSocket();
+      const isolatedTlsAdapter = new NetworkKitPostgresTlsSocket(isolatedTlsRaw, verifier);
+      const isolatedTlsCaller = new Uint8Array([0x61, 0x62, 0x63, 0x64]);
+      const isolatedTlsDeferred = new Deferred();
+      isolatedTlsRaw.sendPromise = isolatedTlsDeferred.wait();
+      const isolatedTlsSend = isolatedTlsAdapter.send(isolatedTlsCaller);
+      expect(isolatedTlsRaw.retainedBuffer !== null).assertTrue();
+      assertBytes(new Uint8Array(isolatedTlsRaw.retainedBuffer!), [0x61, 0x62, 0x63, 0x64]);
+      isolatedTlsDeferred.failWith({
+        code: 2303503, message: 'TLS write failed'
+      } as CodedMessageFailure as Object);
+      let isolatedTlsError: Object | null = null;
+      try {
+        await isolatedTlsSend;
+      } catch (error) {
+        isolatedTlsError = error as Object;
+      }
+      assertBytes(new Uint8Array(isolatedTlsRaw.retainedBuffer!), [0, 0, 0, 0]);
+      assertBytes(isolatedTlsCaller, [0x61, 0x62, 0x63, 0x64]);
+      expect(postgresTransportNativeCode(isolatedTlsError)).assertEqual(2303503);
+
+      const rawTcp = new MockPlatformSocket();
+      const rawTls = new MockPlatformSocket();
+      rawTcp.upgraded = rawTls;
+      const transport = new PostgresTcpTransport(
+        new MockTcpSocketFactory(new NetworkKitPostgresTcpSocket(verifier, rawTcp)),
+        8, new MockTimers());
+      await transport.connect('db.example.com', 5432, 1000);
+
+      const tcpCallerBytes = new Uint8Array([0xaa, 0xbb, 0xcc]);
+      const tcpSendDeferred = new Deferred();
+      rawTcp.sendPromise = tcpSendDeferred.wait();
+      const pendingTcpWrite = failure(async (): Promise<void> => {
+        await transport.write(tcpCallerBytes);
+      });
+      await nextTask();
+      expect(rawTcp.retainedBuffer !== null).assertTrue();
+      assertBytes(new Uint8Array(rawTcp.retainedBuffer!), [0xaa, 0xbb, 0xcc]);
+      tcpSendDeferred.failWith({
+        code: 2301032, message: 'Broken pipe'
+      } as CodedMessageFailure as Object);
+      const tcpWriteErr = await pendingTcpWrite;
+      expect(tcpWriteErr.kind).assertEqual(ArkDbErrorKind.Network);
+      expect(tcpWriteErr.code).assertEqual(2301032);
+      expect(tcpWriteErr.nativeCode).assertEqual(2301032);
+      assertBytes(new Uint8Array(rawTcp.retainedBuffer!), [0, 0, 0]);
+      assertBytes(tcpCallerBytes, [0xaa, 0xbb, 0xcc]);
+
+      const tlsBaseTcp = new MockPlatformSocket();
+      const tlsBase = new MockPlatformSocket();
+      tlsBaseTcp.upgraded = tlsBase;
+      const tlsTransport = new PostgresTcpTransport(
+        new MockTcpSocketFactory(new NetworkKitPostgresTcpSocket(verifier, tlsBaseTcp)),
+        8, new MockTimers());
+      await tlsTransport.connect('db.example.com', 5432, 1000);
+      tlsTransport.prepareTlsUpgrade();
+      await tlsTransport.upgradeToTls('db.example.com', 5432, verifiedTls(), 1000);
+
+      const tlsCallerBytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+      const tlsSendDeferred = new Deferred();
+      tlsBase.sendPromise = tlsSendDeferred.wait();
+      const pendingTlsWrite = failure(async (): Promise<void> => {
+        await tlsTransport.write(tlsCallerBytes);
+      });
+      await nextTask();
+      expect(tlsBase.retainedBuffer !== null).assertTrue();
+      assertBytes(new Uint8Array(tlsBase.retainedBuffer!), [0xde, 0xad, 0xbe, 0xef]);
+      tlsSendDeferred.failWith({
+        code: 2303503, message: 'TLS write failed'
+      } as CodedMessageFailure as Object);
+      const tlsWriteErr = await pendingTlsWrite;
+      expect(tlsWriteErr.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(tlsWriteErr.code).assertEqual(2303503);
+      expect(tlsWriteErr.nativeCode).assertEqual(2303503);
+      assertBytes(new Uint8Array(tlsBase.retainedBuffer!), [0, 0, 0, 0]);
+      assertBytes(tlsCallerBytes, [0xde, 0xad, 0xbe, 0xef]);
+
+      const directTcpRaw = new MockPlatformSocket();
+      directTcpRaw.syncSendError = {
+        code: 2301009, message: 'TCP sync send error'
+      } as CodedMessageFailure as Object;
+      const directTcpAdapter = new NetworkKitPostgresTcpSocket(verifier, directTcpRaw);
+      const syncTcpCaller = new Uint8Array([0x33, 0x44]);
+      const syncTcpPromise = directTcpAdapter.send(syncTcpCaller);
+      expect(directTcpRaw.retainedBuffer !== null).assertTrue();
+      assertBytes(new Uint8Array(directTcpRaw.retainedBuffer!), [0, 0]);
+      assertBytes(syncTcpCaller, [0x33, 0x44]);
+      let syncTcpRejected: Object | null = null;
+      try {
+        await syncTcpPromise;
+      } catch (error) {
+        syncTcpRejected = error as Object;
+      }
+      expect(postgresTransportNativeCode(syncTcpRejected)).assertEqual(2301009);
+
+      const directTlsRaw = new MockPlatformSocket();
+      directTlsRaw.syncSendError = {
+        code: 2303501, message: 'SSL sync send error'
+      } as CodedMessageFailure as Object;
+      const directTlsAdapter = new NetworkKitPostgresTlsSocket(directTlsRaw, verifier);
+      const syncCaller = new Uint8Array([0x11, 0x22]);
+      const syncTlsPromise = directTlsAdapter.send(syncCaller);
+      expect(directTlsRaw.retainedBuffer !== null).assertTrue();
+      assertBytes(new Uint8Array(directTlsRaw.retainedBuffer!), [0, 0]);
+      assertBytes(syncCaller, [0x11, 0x22]);
+      let syncRejected: Object | null = null;
+      try {
+        await syncTlsPromise;
+      } catch (error) {
+        syncRejected = error as Object;
+      }
+      expect(postgresTransportNativeCode(syncRejected)).assertEqual(2303501);
+    });
   });
 }
 
+class PassThroughTlsVerifier implements PostgresTlsIdentityVerifier {
+  async verify(_certificate: socket.X509CertRawData, _host: string): Promise<void> {}
+}
+class MockPlatformSocket implements PostgresPlatformTcpSocket, PostgresPlatformTlsSocket {
+  upgraded: PostgresPlatformTlsSocket | null = null;
+  retainedBuffer: ArrayBuffer | null = null;
+  sendPromise: Promise<void> | null = null;
+  syncSendError: Object | null = null;
+  onMessage(_callback: (info: socket.SocketMessageInfo) => void): void {}
+  onClose(_callback: () => void): void {}
+  onError(_callback: (failure: BusinessError) => void): void {}
+  offMessage(): void {}
+  offClose(): void {}
+  offError(): void {}
+  connect(_options: socket.TCPConnectOptions | socket.TLSConnectOptions): Promise<void> {
+    return Promise.resolve();
+  }
+  getRemoteCertificate(): Promise<socket.X509CertRawData> {
+    return Promise.resolve({
+      data: new Uint8Array([0x30, 0x00]),
+      encodingFormat: 1
+    } as socket.X509CertRawData);
+  }
+  send(payload: socket.TCPSendOptions | ArrayBuffer): Promise<void> {
+    if (payload instanceof ArrayBuffer) {
+      this.retainedBuffer = payload;
+    } else {
+      this.retainedBuffer = (payload as socket.TCPSendOptions).data as ArrayBuffer;
+    }
+    if (this.syncSendError !== null) throw this.syncSendError as Error;
+    return this.sendPromise === null ? Promise.resolve() : this.sendPromise;
+  }
+  close(): Promise<void> { return Promise.resolve(); }
+  upgradeToTls(): PostgresPlatformTlsSocket {
+    if (this.upgraded === null) throw new Error('Missing upgraded TLS fixture');
+    return this.upgraded;
+  }
+}
 class MockTcpSocketFactory implements PostgresTcpSocketFactory {
   private readonly peer: PostgresTcpSocket;
   constructor(peer: PostgresTcpSocket) { this.peer = peer; }

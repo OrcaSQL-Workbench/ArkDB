@@ -49,22 +49,122 @@ export interface PostgresTlsSocket extends PostgresStreamSocket {
 export interface PostgresTcpSocketFactory {
   create(): PostgresTcpSocket;
 }
-class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
+export interface PostgresPlatformTcpSocket {
+  onMessage(callback: (info: socket.SocketMessageInfo) => void): void;
+  onClose(callback: () => void): void;
+  onError(callback: (failure: BusinessError) => void): void;
+  offMessage(): void;
+  offClose(): void;
+  offError(): void;
+  connect(options: socket.TCPConnectOptions): Promise<void>;
+  send(options: socket.TCPSendOptions): Promise<void>;
+  close(): Promise<void>;
+  upgradeToTls(): PostgresPlatformTlsSocket;
+}
+export interface PostgresPlatformTlsSocket {
+  onMessage(callback: (info: socket.SocketMessageInfo) => void): void;
+  onClose(callback: () => void): void;
+  onError(callback: (failure: BusinessError) => void): void;
+  offMessage(): void;
+  offClose(): void;
+  offError(): void;
+  connect(options: socket.TLSConnectOptions): Promise<void>;
+  getRemoteCertificate(): Promise<socket.X509CertRawData>;
+  send(data: ArrayBuffer): Promise<void>;
+  close(): Promise<void>;
+}
+class DevicePostgresPlatformTlsSocket implements PostgresPlatformTlsSocket {
+  private readonly tls: socket.TLSSocket;
+  constructor(tls: socket.TLSSocket) { this.tls = tls; }
+  onMessage(callback: (info: socket.SocketMessageInfo) => void): void {
+    this.tls.on('message', callback);
+  }
+  onClose(callback: () => void): void { this.tls.on('close', callback); }
+  onError(callback: (failure: BusinessError) => void): void {
+    this.tls.on('error', callback);
+  }
+  offMessage(): void { this.tls.off('message'); }
+  offClose(): void { this.tls.off('close'); }
+  offError(): void { this.tls.off('error'); }
+  connect(options: socket.TLSConnectOptions): Promise<void> {
+    try { return this.tls.connect(options); } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+  getRemoteCertificate(): Promise<socket.X509CertRawData> {
+    try { return this.tls.getRemoteCertificate(); } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+  send(data: ArrayBuffer): Promise<void> {
+    try { return this.tls.send(data); } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+  close(): Promise<void> {
+    try { return this.tls.close(); } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+}
+class DevicePostgresPlatformTcpSocket implements PostgresPlatformTcpSocket {
   private readonly tcp: socket.TCPSocket;
+  constructor() {
+    try { this.tcp = socket.constructTCPSocketInstance(); } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+  onMessage(callback: (info: socket.SocketMessageInfo) => void): void {
+    this.tcp.on('message', callback);
+  }
+  onClose(callback: () => void): void { this.tcp.on('close', callback); }
+  onError(callback: (failure: BusinessError) => void): void {
+    this.tcp.on('error', callback);
+  }
+  offMessage(): void { this.tcp.off('message'); }
+  offClose(): void { this.tcp.off('close'); }
+  offError(): void { this.tcp.off('error'); }
+  connect(options: socket.TCPConnectOptions): Promise<void> {
+    try { return this.tcp.connect(options); } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+  send(options: socket.TCPSendOptions): Promise<void> {
+    try { return this.tcp.send(options); } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+  close(): Promise<void> {
+    try { return this.tcp.close(); } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+  upgradeToTls(): PostgresPlatformTlsSocket {
+    try {
+      return new DevicePostgresPlatformTlsSocket(
+        socket.constructTLSSocketInstance(this.tcp));
+    } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
+  }
+}
+export class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
+  private readonly tcp: PostgresPlatformTcpSocket;
   private readonly verifier: PostgresTlsIdentityVerifier;
   private readonly pendingCopies: Set<Uint8Array> = new Set<Uint8Array>();
-  constructor(verifier: PostgresTlsIdentityVerifier) {
-    this.tcp = socket.constructTCPSocketInstance();
+  constructor(verifier: PostgresTlsIdentityVerifier,
+    tcp: PostgresPlatformTcpSocket = new DevicePostgresPlatformTcpSocket()) {
+    this.tcp = tcp;
     this.verifier = verifier;
   }
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void {
-    this.tcp.on('message', (info: socket.SocketMessageInfo): void => {
+    this.tcp.onMessage((info: socket.SocketMessageInfo): void => {
       const data = new Uint8Array(info.message);
       try { message(data); } finally { data.fill(0); }
     });
-    this.tcp.on('close', close);
-    this.tcp.on('error', (failure: BusinessError): void => {
+    this.tcp.onClose(close);
+    this.tcp.onError((failure: BusinessError): void => {
       error(failure);
     });
   }
@@ -103,7 +203,7 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
   }
   prepareUpgrade(): void {
     try {
-      this.tcp.off('message');
+      this.tcp.offMessage();
     } catch (error) {
       throw postgresWrapPlatformFailure(error as Object);
     }
@@ -112,28 +212,29 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
     try {
       clearNetworkKitListeners(this.tcp);
       return new NetworkKitPostgresTlsSocket(
-        socket.constructTLSSocketInstance(this.tcp), this.verifier);
+        this.tcp.upgradeToTls(), this.verifier);
     } catch (error) {
       throw postgresWrapPlatformFailure(error as Object);
     }
   }
 }
-class NetworkKitPostgresTlsSocket implements PostgresTlsSocket {
-  private readonly tls: socket.TLSSocket;
+export class NetworkKitPostgresTlsSocket implements PostgresTlsSocket {
+  private readonly tls: PostgresPlatformTlsSocket;
   private readonly verifier: PostgresTlsIdentityVerifier;
   private readonly pendingCopies: Set<Uint8Array> = new Set<Uint8Array>();
-  constructor(tls: socket.TLSSocket, verifier: PostgresTlsIdentityVerifier) {
+  constructor(tls: PostgresPlatformTlsSocket,
+    verifier: PostgresTlsIdentityVerifier) {
     this.tls = tls;
     this.verifier = verifier;
   }
   listen(message: (data: Uint8Array) => void, close: () => void,
     error: (failure: Object) => void): void {
-    this.tls.on('message', (info: socket.SocketMessageInfo): void => {
+    this.tls.onMessage((info: socket.SocketMessageInfo): void => {
       const data = new Uint8Array(info.message);
       try { message(data); } finally { data.fill(0); }
     });
-    this.tls.on('close', close);
-    this.tls.on('error', (failure: BusinessError): void => error(failure));
+    this.tls.onClose(close);
+    this.tls.onError((failure: BusinessError): void => error(failure));
   }
   clearListeners(): void {
     clearNetworkKitListeners(this.tls);
@@ -616,20 +717,20 @@ export class PostgresTcpTransport implements PostgresByteTransport {
   }
 }
 function clearNetworkKitListeners(
-  active: socket.TCPSocket | socket.TLSSocket): void {
+  active: PostgresPlatformTcpSocket | PostgresPlatformTlsSocket): void {
   let firstFailure: Object | null = null;
   try {
-    active.off('message');
+    active.offMessage();
   } catch (error) {
     firstFailure = error as Object;
   }
   try {
-    active.off('close');
+    active.offClose();
   } catch (error) {
     if (firstFailure === null) firstFailure = error as Object;
   }
   try {
-    active.off('error');
+    active.offError();
   } catch (error) {
     if (firstFailure === null) firstFailure = error as Object;
   }

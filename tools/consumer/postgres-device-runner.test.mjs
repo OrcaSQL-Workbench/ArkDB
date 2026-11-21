@@ -26,7 +26,8 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     class extends Date { constructor(value = time) { super(value); } }, () => uptime
   );
   for (const scenario of [
-    'success', 'normalized probe password', 'cleanup failure', 'expired', 'not issued', 'expires during run',
+    'success', 'normalized probe password', 'cleanup failure', 'multiple cleanup failures',
+    'expired', 'not issued', 'expires during run',
     'expires during platform read', 'expires between connections', 'request changes during run',
     'schema changes before use', 'expires during signing', 'clock reverses during signing',
     'expires during mismatch', 'valid mismatch host', 'mismatch authentication failure',
@@ -35,7 +36,12 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     'signing expires while pending',
     'stalled context at expiry',
     'stalled context after clock jump', 'late query cleanup failure after stop', 'stalled cleanup',
+    'stalled cleanup settled before wait', 'stalled cleanup fails late',
+    'stalled cleanup fails late after early close failure',
+    'cleanup timeout with observed operation failure', 'cleanup timeout with observed operation and close failures',
+    'cleanup timeout with observed operation and early and late close failures',
     'second factory fails', 'stalled context after rollback', 'stalled cancellation cleanup',
+    'case timeout with late query failure',
     'late settlement failure after stop', 'unsettled cancellation after stop', 'reentrant stop during dispatch',
     'failed cancellation close with pending query', 'reentrant stop during first factory',
     'reentrant stop during second factory', 'reentrant run during platform read',
@@ -43,7 +49,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     'platform read failure', 'invalid platform'
   ]) {
     await t.test(scenario, async () => {
-    const failCleanup = scenario === 'cleanup failure';
+    const failCleanup = scenario === 'cleanup failure' || scenario === 'multiple cleanup failures';
     const expiry = Date.parse(binding.expiresAt);
     uptime = 0;
     time = scenario === 'stalled context at expiry' || scenario === 'stalled context after rollback' ? expiry - 100 :
@@ -61,7 +67,9 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       scenario === 'normalized probe password' ? 'arkdb\u00ad-tls-probe' : 'not-for-a-receipt');
     let rejectQuery;
     let rejectContext;
+    let rejectConnect;
     let resolveClose;
+    let rejectClose;
     let rejectCancellation;
     let notifyCancellation;
     let resolveConnect;
@@ -72,6 +80,8 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     let reentrantRun;
     let reentrantRequest;
     let platformReads = 0;
+    let notifyConnect;
+    const connectionStarted = new Promise((resolve) => { notifyConnect = resolve; });
     const cancellationStarted = new Promise((resolve) => { notifyCancellation = resolve; });
     const signer = new Ed25519DeviceReceiptSigner(spki, pkcs8);
     const runner = new DeviceAcceptanceRunner({ createConnection(config, password) {
@@ -95,6 +105,11 @@ test('signs fixed acceptance results only within the active run', async (t) => {
         postgresFeatures: deviceRunnerPreparedFeatures(sha),
         async connect() {
           connected.push(config.host);
+          if (scenario.startsWith('cleanup timeout with observed operation') && config.host === 'db.test') {
+            notifyConnect();
+            await new Promise((_, reject) => { rejectConnect = reject; });
+            return;
+          }
           if (scenario === 'reentrant stop during dispatch' && config.host === 'db.test') {
             stoppingDuringConnect = runner.stop().then(() => { stoppedDuringConnect = true; });
             await new Promise((resolve) => { resolveConnect = resolve; });
@@ -114,7 +129,23 @@ test('signs fixed acceptance results only within the active run', async (t) => {
           closed.push(config.host);
           if (rejectContext) { rejectContext(new Error('closed')); rejectContext = undefined; }
           if (scenario === 'expires during run') time = expiry + 1;
+          if (config.host === 'db.test' &&
+            scenario === 'cleanup timeout with observed operation and early and late close failures') {
+            return new Promise((_, reject) => { rejectClose = reject; });
+          }
+          if (config.host === 'db.test' && scenario.startsWith('cleanup timeout with observed operation')) {
+            return stallRunnerClose(this, (resolve) => { resolveClose = resolve; });
+          }
+          if (config.host === 'wrong.test' && (scenario === 'cleanup timeout with observed operation and close failures' ||
+            scenario === 'cleanup timeout with observed operation and early and late close failures' ||
+            scenario === 'stalled cleanup fails late after early close failure')) {
+            throw new Error('early close failure');
+          }
+          if (config.host === 'db.test' && scenario.startsWith('stalled cleanup fails late')) {
+            return new Promise((_, reject) => { rejectClose = reject; });
+          }
           if (config.host === 'db.test' && (scenario === 'stalled cleanup' ||
+            scenario === 'stalled cleanup settled before wait' ||
             (scenario === 'stalled cancellation cleanup' && !resolveClose))) {
             return stallRunnerClose(this, (resolve) => { resolveClose = resolve; });
           }
@@ -122,6 +153,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
             scenario === 'failed cancellation close with pending query') && config.host === 'db.test') {
             throw new Error('cleanup failed');
           }
+          if (scenario === 'multiple cleanup failures') throw new Error('close failure: ' + config.host);
           if (failCleanup && config.host === 'db.test') throw new Error('Sensitive cleanup detail');
           this.state = State.Closed;
         },
@@ -144,7 +176,8 @@ test('signs fixed acceptance results only within the active run', async (t) => {
           throw new ArkDbError(Kind.Server, '42P01');
         },
         async cancel() {
-          if (scenario === 'stalled cancellation cleanup' || scenario === 'failed cancellation close with pending query') {
+          if (scenario === 'stalled cancellation cleanup' || scenario === 'failed cancellation close with pending query' ||
+            scenario === 'case timeout with late query failure') {
             notifyCancellation();
             throw new Error('cancel failed');
           }
@@ -252,6 +285,17 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.equal(result.receiptJson, '');
       return;
     }
+    if (scenario === 'case timeout with late query failure') {
+      const result = await running;
+      assert.equal(result.errorKind, 'device-cleanup');
+      rejectQuery(new Error('late query failure'));
+      await new Promise(setImmediate);
+      const error = await runner.waitForQuiescence().catch((failure) => failure);
+      assert.match(error.timeout.message, /timed out/);
+      assert.match(error.timeout.operationError.cleanupError.message, /timed out/);
+      assert.equal(error.failure.message, 'late query failure');
+      return;
+    }
     if (scenario === 'late settlement failure after stop') {
       await cancellationStarted;
       const stopping = observeSettlement(runner.stop());
@@ -301,17 +345,71 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.deepEqual(connected, []);
       return;
     }
-    if (scenario === 'stalled cleanup') {
+    if (scenario === 'stalled cleanup' || scenario === 'stalled cleanup settled before wait') {
       const result = await running;
       assert.equal(result.ok, false);
       assert.equal(result.receiptJson, '');
       assert.equal(result.errorKind, 'device-cleanup');
       const later = await runner.run(Object.assign(new DeviceAcceptanceRequest(), request));
       assert.equal(later.errorKind, 'validation');
-      resolveClose();
-      await assert.rejects(runner.stop(), /timed out/);
+      if (scenario === 'stalled cleanup') {
+        const quiescence = observeSettlement(runner.waitForQuiescence());
+        await new Promise(setImmediate);
+        assert.equal(quiescence.settled, false, 'quiescence must retain the stalled close');
+        resolveClose();
+        assert.match((await quiescence.result).message, /timed out/);
+      } else {
+        resolveClose();
+      }
       await new Promise(setImmediate);
+      await assert.rejects(runner.waitForQuiescence(), /timed out/,
+        'quiescence must retain the earlier cleanup timeout');
       await runner.stop();
+      return;
+    }
+    if (scenario.startsWith('stalled cleanup fails late')) {
+      const result = await running;
+      assert.equal(result.errorKind, 'device-cleanup');
+      rejectClose(new Error('late close failure'));
+      await new Promise(setImmediate);
+      const error = await runner.waitForQuiescence().catch((failure) => failure);
+      assert.equal(error.message, 'Device cleanup timed out and failed.');
+      assert.match(error.timeout.message, /timed out/);
+      assert.equal(error.failure.message, 'late close failure');
+      if (scenario === 'stalled cleanup fails late after early close failure') {
+        assert.equal(error.timeout.cleanupErrors[0].message, 'early close failure');
+      }
+      return;
+    }
+    if (scenario.startsWith('cleanup timeout with observed operation')) {
+      await connectionStarted;
+      const stopping = runner.stop().catch((error) => error);
+      rejectConnect(new Error('connection failed'));
+      const [result, timeout] = await Promise.all([running, stopping]);
+      assert.equal(result.receiptJson, '');
+      assert.match(timeout.message, /timed out/);
+      assert.equal(timeout.operationError.message, 'connection failed');
+      if (scenario !== 'cleanup timeout with observed operation failure') {
+        assert.equal(timeout.cleanupErrors[0].message, 'early close failure');
+      }
+      if (scenario === 'cleanup timeout with observed operation and early and late close failures') {
+        rejectClose(new Error('late close failure'));
+      } else {
+        resolveClose();
+      }
+      await new Promise(setImmediate);
+      const error = await runner.waitForQuiescence().catch((failure) => failure);
+      assert.match(error.message, /timed out/);
+      if (scenario === 'cleanup timeout with observed operation and early and late close failures') {
+        assert.equal(error.timeout.operationError.message, 'connection failed');
+        assert.equal(error.timeout.cleanupErrors[0].message, 'early close failure');
+        assert.equal(error.failure.message, 'late close failure');
+      } else {
+        assert.equal(error.operationError.message, 'connection failed');
+      }
+      if (scenario === 'cleanup timeout with observed operation and close failures') {
+        assert.equal(error.cleanupErrors[0].message, 'early close failure');
+      }
       return;
     }
     if (scenario === 'late query cleanup failure after stop') {
@@ -355,6 +453,7 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     }
     if (scenario === 'signing overlap and stop') {
       await signingStarted;
+      await assert.rejects(runner.waitForQuiescence(), /still active/);
       const another = Object.assign(new DeviceAcceptanceRequest(), request, { password: 'another-password' });
       const overlapping = runner.run(another);
       await new Promise(setImmediate);
@@ -386,12 +485,16 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.match((await stopping).message, /timed out/);
       const cleanup = runner.closeTask;
       assert.ok(cleanup, 'the timed-out signing operation must retain its cleanup owner');
-      cleanup.sealRegistration();
-      const quiescence = observeSettlement(cleanup.quiescence);
+      const quiescence = observeSettlement(runner.waitForQuiescence());
       await new Promise(setImmediate);
       assert.equal(quiescence.settled, false);
       for (const resolve of signingWaiters) resolve();
-      assert.equal((await quiescence.result).message, 'late signing failure');
+      const error = await quiescence.result;
+      assert.equal(error.message, 'Device cleanup timed out and failed.');
+      assert.ok(error.failure, 'quiescence must retain the late signing error');
+      assert.ok(error.timeout, 'quiescence must retain the earlier cleanup timeout');
+      assert.equal(error.failure.message, 'late signing failure');
+      assert.match(error.timeout.message, /timed out/);
       return;
     }
     if (scenario === 'signing expires while pending') {
@@ -401,13 +504,12 @@ test('signs fixed acceptance results only within the active run', async (t) => {
       assert.equal(result.receiptJson, '');
       const cleanup = runner.closeTask;
       assert.ok(cleanup);
-      cleanup.sealRegistration();
-      const quiescence = observeSettlement(cleanup.quiescence);
+      const quiescence = observeSettlement(runner.waitForQuiescence());
       await new Promise(setImmediate);
       const premature = quiescence.settled;
       for (const resolve of signingWaiters) resolve();
       assert.equal(premature, false, 'expiry must track the pending signer');
-      assert.equal(await quiescence.result, null);
+      assert.match((await quiescence.result).message, /timed out/);
       return;
     }
     const result = await running;
@@ -416,6 +518,12 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     }
     if (scenario === 'expires during mismatch') {
       assert.equal(contextChanges, 0, 'expired challenge must not start more database operations');
+    }
+    if (scenario === 'multiple cleanup failures') {
+      const error = await runner.waitForQuiescence().catch((failure) => failure);
+      assert.equal(error.message, 'Multiple connections failed to close.');
+      assert.deepEqual(error.errors.map((failure) => failure.message),
+        ['close failure: db.test', 'close failure: wrong.test']);
     }
     const invalidAtStart = scenario === 'expired' || scenario === 'not issued';
     const invalidBeforeCreation = invalidAtStart || scenario === 'expires during platform read';
@@ -432,6 +540,17 @@ test('signs fixed acceptance results only within the active run', async (t) => {
     }
     const mismatchFailed = scenario === 'valid mismatch host' || scenario === 'mismatch authentication failure';
     assertDeviceRunnerReceipt(result, { publicKey, spki, pkcs8, password: passwords[0], sha, manifest, mismatchFailed });
+    if (scenario === 'success') {
+      await Promise.all([runner.waitForQuiescence(), runner.waitForQuiescence(), runner.stop()]);
+      await runner.waitForQuiescence();
+      await runner.stop();
+      const requestAfterShutdown = validDeviceRunnerRequest(DeviceAcceptanceRequest, sha, 'secret');
+      const rejected = await runner.run(requestAfterShutdown);
+      assert.equal(rejected.errorKind, 'validation');
+      assert.match(rejected.text, /busy or stopping/);
+      assert.equal(requestAfterShutdown.password, '');
+      assert.equal(created.length, 2, 'quiescence must prevent new connections');
+    }
     });
   }
 });

@@ -4,7 +4,7 @@ import test from 'node:test';
 import { observeSettlement } from './postgres-device-test-loader.mjs';
 import {
   ArkDbError, Kind, State, deviceRuntime, deviceSampleLoader, deviceRunnerFixture, signingKeys,
-  deviceRunnerPreparedFeatures, validDeviceRunnerRequest, stallRunnerClose
+  deviceRunnerPreparedFeatures, validDeviceRunnerRequest, stallRunnerClose, assertDeviceRunnerReceipt
 } from './postgres-device-runner-fixtures.mjs';
 
 const samples = new URL('../../examples/postgres-device-acceptance/entry/src/main/ets/sample/', import.meta.url);
@@ -112,4 +112,67 @@ test('runner fixture lets a pending close settle explicitly', async () => {
   release();
   await close;
   assert.equal(connection.state, State.Closed);
+});
+
+test('receipt assertion checks signature, case verdicts, metadata and secrecy', async () => {
+  const { publicKey, spki, pkcs8, binding, manifest, sha, createDeviceReceipt, DeviceReceiptRun,
+    Ed25519DeviceReceiptSigner } = deviceRunnerFixture(Date.UTC(2026, 10, 20), Date, () => 1,
+    ['./DeviceAcceptanceReceipt', './DeviceReceiptSigner', './DeviceEvidenceIdentity']);
+  const key = createPrivateKey({ key: Buffer.from(pkcs8, 'base64'), type: 'pkcs8', format: 'der' });
+  const password = 'actual-"test-password';
+  const expected = { publicKey, spki, pkcs8, password, sha, manifest, mismatchFailed: false };
+  const run = Object.assign(new DeviceReceiptRun(), { authPlugin: 'scram-sha-256', profile: 'P17',
+    signedHapSha256: sha, operatorEvidenceId: 'operator-1' });
+  const payload = createDeviceReceipt(binding, { sdkApiVersion: 24, deviceType: 'tablet' }, run,
+    manifest.caseIds.map((id) => ({ id, status: 'pass' })));
+  const resultFor = (value) => {
+    const text = JSON.stringify(value);
+    return { ok: true, receiptJson: JSON.stringify({
+      schemaVersion: 1, kind: 'arkdb-device-acceptance-envelope', payload: text,
+      signature: { algorithm: 'Ed25519', publicKeySpkiBase64: spki,
+        valueBase64: sign(null, Buffer.from(text), key).toString('base64') }
+    }) };
+  };
+  const valid = { ok: true, receiptJson: await new Ed25519DeviceReceiptSigner(spki, pkcs8)
+    .sign(JSON.stringify(payload)) };
+  assert.doesNotThrow(() => assertDeviceRunnerReceipt(valid, expected));
+  const failedMismatch = resultFor({ ...payload,
+    cases: payload.cases.map((entry) => entry.id === 'tls_hostname_mismatch' ? { ...entry, status: 'fail' } : entry) });
+  failedMismatch.ok = false;
+  assert.doesNotThrow(() => assertDeviceRunnerReceipt(failedMismatch, { ...expected, mismatchFailed: true }));
+  assert.throws(() => assertDeviceRunnerReceipt({ ...valid, ok: false }, expected));
+  const badSignature = JSON.parse(valid.receiptJson);
+  badSignature.payload += ' ';
+  assert.throws(() => assertDeviceRunnerReceipt({ ...valid, receiptJson: JSON.stringify(badSignature) }, expected));
+  const badKey = JSON.parse(valid.receiptJson);
+  badKey.signature.publicKeySpkiBase64 = 'wrong-key';
+  assert.throws(() => assertDeviceRunnerReceipt({ ...valid, receiptJson: JSON.stringify(badKey) }, expected));
+  const badKind = JSON.parse(valid.receiptJson);
+  badKind.kind = 'other-envelope';
+  assert.throws(() => assertDeviceRunnerReceipt({ ...valid, receiptJson: JSON.stringify(badKind) }, expected));
+  for (const change of [{ schemaVersion: 99 }, { signature: { ...badKind.signature, algorithm: 'RSA' } }]) {
+    assert.throws(() => assertDeviceRunnerReceipt(
+      { ...valid, receiptJson: JSON.stringify({ ...JSON.parse(valid.receiptJson), ...change }) }, expected));
+  }
+  for (const id of manifest.caseIds) {
+    assert.throws(() => assertDeviceRunnerReceipt(resultFor({ ...payload,
+      cases: payload.cases.map((entry) => entry.id === id ? { ...entry, status: 'fail' } : entry) }), expected));
+  }
+  const mismatchAndCleanupFailed = resultFor({ ...payload, cases: payload.cases.map((entry) =>
+    ['tls_hostname_mismatch', 'cleanup'].includes(entry.id) ? { ...entry, status: 'fail' } : entry) });
+  mismatchAndCleanupFailed.ok = false;
+  assert.throws(() => assertDeviceRunnerReceipt(mismatchAndCleanupFailed, { ...expected, mismatchFailed: true }));
+  for (const invalid of [
+    { ...payload, profile: 'P18' },
+    { ...payload, authPlugin: 'md5' },
+    { ...payload, hapSha256: 'b'.repeat(64) },
+    { ...payload, operatorEvidenceId: 'other' },
+    { ...payload, cases: payload.cases.slice().reverse() },
+    { ...payload, extra: password },
+    { ...payload, extra: pkcs8 },
+    { ...payload, extra: 'not-for-a-receipt' },
+    { ...payload, extra: 'Sensitive' }
+  ]) {
+    assert.throws(() => assertDeviceRunnerReceipt(resultFor(invalid), expected));
+  }
 });

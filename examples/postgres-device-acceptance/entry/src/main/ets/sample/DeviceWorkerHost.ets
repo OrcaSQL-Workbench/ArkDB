@@ -48,6 +48,7 @@ export class DeviceWorkerHost {
     });
     this.instance.onmessage = (event: MessageEvents): void => this.receive(event.data);
     this.instance.onerror = (_error: ErrorEvent): void => this.fail('Worker execution failed.');
+    this.instance.onAllErrors = (_error: ErrorEvent): void => this.fail('Worker execution failed.');
     this.instance.onmessageerror = (): void => this.fail('Worker message could not be decoded.');
   }
 

@@ -183,17 +183,19 @@ test('acknowledgement before stop, early exit and failed cleanup never publish r
   }
 });
 
-test('worker onerror is sanitized and shutdown is requested', async () => {
-  const f = fixture();
-  const result = observe(new f.DeviceWorkerHost().run(new DeviceAcceptanceRequest()));
-  const instance = f.instances[0];
-  assert.equal(typeof instance.onerror, 'function');
-  instance.onerror({ message: 'secret error detail' });
-  await flush();
-  assert.equal(instance.messages.at(-1).operation, 'stop');
-  instance.onmessage({ data: new DeviceShutdownResponse(true) });
-  instance.onexit(0);
-  assert.doesNotMatch((await result.promise).error.message, /secret/);
+test('worker lifetime and onmessage errors are sanitized and shutdown is requested', async () => {
+  for (const event of ['onAllErrors', 'onerror']) {
+    const f = fixture();
+    const result = observe(new f.DeviceWorkerHost().run(new DeviceAcceptanceRequest()));
+    const instance = f.instances[0];
+    assert.equal(typeof instance[event], 'function', event);
+    instance[event]({ message: 'secret error detail' });
+    await flush();
+    assert.equal(instance.messages.at(-1).operation, 'stop');
+    instance.onmessage({ data: new DeviceShutdownResponse(true) });
+    instance.onexit(0);
+    assert.doesNotMatch((await result.promise).error.message, /secret/);
+  }
 });
 
 test('silent Worker triggers bounded shutdown and cannot publish a late receipt', async () => {

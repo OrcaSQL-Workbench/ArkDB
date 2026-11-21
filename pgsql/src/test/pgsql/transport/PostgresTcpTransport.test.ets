@@ -4,12 +4,16 @@ import {
 } from '@arkdb/core';
 import {
   PostgresTcpSocket, PostgresTcpSocketFactory, PostgresTcpTransport,
-  PostgresTlsSocket
+  PostgresTlsSocket, postgresTransportNativeCode, postgresWrapPlatformFailure
 } from '../../../main/ets/pgsql/transport/PostgresTcpTransport';
 import {
   PostgresSslConfig, PostgresSslMode
 } from '../../../main/ets/pgsql/model/PostgresConnectionConfig';
 interface MessageFailure {
+  message: string;
+}
+interface CodedMessageFailure {
+  code?: number | string;
   message: string;
 }
 export default function postgresTcpTransportTest(): void {
@@ -489,6 +493,140 @@ export default function postgresTcpTransportTest(): void {
       })).assertEqual(operationFailure);
       expect(peer.closeCalls).assertEqual(1);
     });
+    it('preservesPlatformNativeCodesAcrossTcpAndTlsFailures', 0, async () => {
+      const tlsHandshakeError: CodedMessageFailure = {
+        code: 2303501, message: 'SSL handshake error'
+      };
+      const wrapped = postgresWrapPlatformFailure(tlsHandshakeError as Object);
+      expect(wrapped.message).assertEqual('SSL handshake error');
+      expect(postgresTransportNativeCode(wrapped)).assertEqual(2303501);
+      const customCode: CodedMessageFailure = {
+        code: 'TLS_CUSTOM', message: 'Custom TLS failure'
+      };
+      expect(postgresTransportNativeCode(
+        postgresWrapPlatformFailure(customCode as Object))).assertEqual('TLS_CUSTOM');
+      for (const invalidCode of [
+        Number.NaN, Number.POSITIVE_INFINITY, 1.5, ''
+      ]) {
+        const malformed: CodedMessageFailure = {
+          code: invalidCode, message: 'Uncoded failure'
+        };
+        expect(postgresTransportNativeCode(
+          postgresWrapPlatformFailure(malformed as Object)) === undefined).assertTrue();
+      }
+      const typedTls = ArkDbError.tls('Hostname mismatch', 'TLS_HOSTNAME_MISMATCH');
+      expect(postgresWrapPlatformFailure(typedTls)).assertEqual(typedTls);
+      expect(postgresTransportNativeCode(typedTls)).assertEqual('TLS_HOSTNAME_MISMATCH');
+
+      const connectPeer = new MockTcpSocket();
+      connectPeer.connectFailure = postgresWrapPlatformFailure({
+        code: 2301111, message: 'Connection refused'
+      } as CodedMessageFailure as Object);
+      const connectErr = await failure((): Promise<void> =>
+        createTransport(connectPeer, 8).connect('db.invalid', 5432, 1000));
+      expect(connectErr.kind).assertEqual(ArkDbErrorKind.Network);
+      expect(connectErr.code).assertEqual(2301111);
+      expect(connectErr.nativeCode).assertEqual(2301111);
+
+      const tcpErrorPeer = new MockTcpSocket();
+      const tcpErrorTransport = createTransport(tcpErrorPeer, 8);
+      await tcpErrorTransport.connect('db.invalid', 5432, 1000);
+      const pendingTcpRead = failure(async (): Promise<void> => {
+        await tcpErrorTransport.read(1);
+      });
+      tcpErrorPeer.emitCodedError(2301104, 'Connection reset by peer');
+      const tcpSocketErr = await pendingTcpRead;
+      expect(tcpSocketErr.kind).assertEqual(ArkDbErrorKind.Network);
+      expect(tcpSocketErr.code).assertEqual(2301104);
+      expect(tcpSocketErr.nativeCode).assertEqual(2301104);
+
+      const tcpSendPeer = new MockTcpSocket();
+      const tcpSendTransport = createTransport(tcpSendPeer, 8);
+      await tcpSendTransport.connect('db.invalid', 5432, 1000);
+      tcpSendPeer.sendFailure = postgresWrapPlatformFailure({
+        code: 2301032, message: 'Broken pipe'
+      } as CodedMessageFailure as Object);
+      const tcpSendErr = await failure(async (): Promise<void> => {
+        await tcpSendTransport.write(new Uint8Array([1]));
+      });
+      expect(tcpSendErr.kind).assertEqual(ArkDbErrorKind.Network);
+      expect(tcpSendErr.code).assertEqual(2301032);
+      expect(tcpSendErr.nativeCode).assertEqual(2301032);
+
+      const preparePeer = new MockTcpSocket();
+      preparePeer.prepareUpgradeFailure = postgresWrapPlatformFailure({
+        code: 2303601, message: 'Invalid socket FD'
+      } as CodedMessageFailure as Object);
+      const prepareTransport = createTransport(preparePeer, 8);
+      await prepareTransport.connect('db.invalid', 5432, 1000);
+      const prepareErr = syncFailure((): void => prepareTransport.prepareTlsUpgrade());
+      expect(prepareErr.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(prepareErr.code).assertEqual(2303601);
+      expect(prepareErr.nativeCode).assertEqual(2303601);
+
+      for (let mode = 0; mode < 3; mode += 1) {
+        const tcp = new MockTcpSocket();
+        const tls = new MockTcpSocket();
+        tcp.upgradeResult = tls;
+        const expectedCode = mode === 0 ? 2303602 : (mode === 1 ? 2303501 : 2303505);
+        if (mode === 0) {
+          tcp.upgradeFailure = postgresWrapPlatformFailure({
+            code: expectedCode, message: 'Socket is not connected'
+          } as CodedMessageFailure as Object);
+        } else if (mode === 1) {
+          tls.tlsConnectFailure = postgresWrapPlatformFailure({
+            code: expectedCode, message: 'SSL verification failed'
+          } as CodedMessageFailure as Object);
+        } else {
+          const deferred = new Deferred();
+          tls.tlsConnectResult = deferred.wait();
+        }
+        const transport = createTransport(tcp, 8);
+        await transport.connect('db.invalid', 5432, 1000);
+        transport.prepareTlsUpgrade();
+        const upgrading = failure((): Promise<void> =>
+          transport.upgradeToTls('db.example.com', 5432, verifiedTls(), 1000));
+        if (mode === 2) {
+          await nextTask();
+          tls.emitCodedError(expectedCode, 'TLS system call error');
+        }
+        const tlsErr = await upgrading;
+        expect(tlsErr.kind).assertEqual(ArkDbErrorKind.Tls);
+        expect(tlsErr.code).assertEqual(expectedCode);
+        expect(tlsErr.nativeCode).assertEqual(expectedCode);
+      }
+
+      const tlsWriteTcp = new MockTcpSocket();
+      const tlsWriteSock = new MockTcpSocket();
+      tlsWriteTcp.upgradeResult = tlsWriteSock;
+      const tlsWriteTransport = createTransport(tlsWriteTcp, 8);
+      await tlsWriteTransport.connect('db.invalid', 5432, 1000);
+      tlsWriteTransport.prepareTlsUpgrade();
+      await tlsWriteTransport.upgradeToTls('db.example.com', 5432, verifiedTls(), 1000);
+      tlsWriteSock.sendFailure = postgresWrapPlatformFailure({
+        code: 2303503, message: 'TLS write failed'
+      } as CodedMessageFailure as Object);
+      const tlsSendErr = await failure(async (): Promise<void> => {
+        await tlsWriteTransport.write(new Uint8Array([9]));
+      });
+      expect(tlsSendErr.kind).assertEqual(ArkDbErrorKind.Tls);
+      expect(tlsSendErr.code).assertEqual(2303503);
+      expect(tlsSendErr.nativeCode).assertEqual(2303503);
+
+      const closeFailPeer = new MockTcpSocket();
+      const closeFailDeferred = new Deferred();
+      closeFailPeer.closeResult = closeFailDeferred.wait();
+      const closeFailTransport = createTransport(closeFailPeer, 8);
+      await closeFailTransport.connect('db.invalid', 5432, 1000);
+      const closing = failure((): Promise<void> => closeFailTransport.close());
+      closeFailDeferred.failWith(postgresWrapPlatformFailure({
+        code: 2301009, message: 'Bad file descriptor'
+      } as CodedMessageFailure as Object));
+      const closeErr = await closing;
+      expect(closeErr.kind).assertEqual(ArkDbErrorKind.Network);
+      expect(closeErr.code).assertEqual(2301009);
+      expect(closeErr.nativeCode).assertEqual(2301009);
+    });
   });
 }
 
@@ -601,6 +739,12 @@ class MockTcpSocket implements PostgresTcpSocket, PostgresTlsSocket {
     const failure: MessageFailure = { message: 'Synthetic socket failure' };
     if (listener !== null) listener(failure);
   }
+  emitCodedError(code: number | string, message: string): void {
+    if (this.errorListener !== null) {
+      const failure: CodedMessageFailure = { code: code, message: message };
+      this.errorListener(failure);
+    }
+  }
 }
 class MockTimers implements ConnectionTimerPort {
   lastTimeoutMs: number = 0;
@@ -630,6 +774,10 @@ class Deferred {
   fail(): void {
     const reject = this.reject; this.reject = null;
     if (reject !== null) reject(new Error('Synthetic late connect failure'));
+  }
+  failWith(reason: Object): void {
+    const reject = this.reject; this.reject = null;
+    if (reject !== null) reject(reason);
   }
 }
 function createTransport(peer: MockTcpSocket, maximumReceiveBytes: number): PostgresTcpTransport {

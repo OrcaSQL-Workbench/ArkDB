@@ -116,7 +116,9 @@ See [release and verification requirements](docs/releasing.md) before publishing
 | `docs/` | Release guidance and extraction/upstream provenance |
 | `examples/mysql-client/` | A runnable Stage-model HAP/Worker sample consuming the actual HAR, with offline lifecycle tests |
 | `examples/postgres-client/` | An independent exact-HAR Stage-model HAP with a host-owned Worker and offline tests |
-| `examples/mysql-device-acceptance/` | A dedicated release-bound device acceptance HAP/Worker harness, excluded from the ordinary consumer fingerprint |
+| `examples/dual-har-client/` | A standalone Stage-model HAP verifying dual MySQL/PostgreSQL HAR coexistence and Worker isolation |
+| `examples/mysql-device-acceptance/` | A dedicated release-bound MySQL device acceptance HAP/Worker harness, excluded from the ordinary consumer fingerprint |
+| `examples/postgres-device-acceptance/` | A dedicated release-bound PostgreSQL device acceptance HAP/Worker harness, excluded from the ordinary consumer fingerprint |
 | `tools/` | Maintainer-only launchers, checks, and packaging; not driver runtime dependencies |
 
 `dist/`, `.hvigor/`, module `build/` and `.test/` directories, generated `BuildProfile.ets` files, `node_modules/`, and `oh_modules/` are generated and ignored. Root npm dependencies support maintenance. Development source imports core; the emitted MySQL HAR embeds that source and has no external core dependency. Root and module build manifests have different roles: source-workspace orchestration versus delivery compilation.

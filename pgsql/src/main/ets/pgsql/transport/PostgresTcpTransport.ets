@@ -3,7 +3,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { cert } from '@kit.DeviceCertificateKit';
 import {
-  ArkDbError, ConnectionTimerPort, SystemConnectionTimerPort
+  ArkDbError, ArkDbErrorKind, ConnectionTimerPort, SystemConnectionTimerPort
 } from '@arkdb/core';
 import { PostgresByteTransport } from '../protocol/PostgresMessageChannel';
 import { MAX_POSTGRES_MESSAGE_BYTES } from '../protocol/PostgresProtocolConstants';
@@ -80,27 +80,33 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
     try {
       await this.tcp.connect(options);
     } catch (error) {
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
   send(data: Uint8Array): Promise<void> {
     const copy = new ArrayBuffer(data.length); const bytes = new Uint8Array(copy); bytes.set(data); this.pendingCopies.add(bytes);
     const scrub = (): void => { this.pendingCopies.delete(bytes); bytes.fill(0); };
     let raw: Promise<void>;
-    try { raw = this.tcp.send({ data: copy }); } catch (error) { scrub(); return Promise.reject<void>(new Error(asMessage(error as Object))); }
-    raw.then(scrub, scrub);
-    return raw;
+    try { raw = this.tcp.send({ data: copy }); } catch (error) { scrub(); return Promise.reject<void>(postgresWrapPlatformFailure(error as Object)); }
+    return raw.then((): void => { scrub(); }, (error: Object): Promise<void> => {
+      scrub();
+      return Promise.reject<void>(postgresWrapPlatformFailure(error));
+    });
   }
   scrubPending(): void { for (const b of this.pendingCopies) b.fill(0); this.pendingCopies.clear(); }
   async close(): Promise<void> {
     try {
       await this.tcp.close();
     } catch (error) {
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
   prepareUpgrade(): void {
-    this.tcp.off('message');
+    try {
+      this.tcp.off('message');
+    } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
   }
   upgrade(): PostgresTlsSocket {
     try {
@@ -108,8 +114,7 @@ class NetworkKitPostgresTcpSocket implements PostgresTcpSocket {
       return new NetworkKitPostgresTlsSocket(
         socket.constructTLSSocketInstance(this.tcp), this.verifier);
     } catch (error) {
-      if (error instanceof ArkDbError) throw error;
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
 }
@@ -139,8 +144,7 @@ class NetworkKitPostgresTlsSocket implements PostgresTlsSocket {
       await this.tls.connect(
         buildPostgresTlsConnectOptions(host, port, config, timeoutMs));
     } catch (error) {
-      if (error instanceof ArkDbError) throw error;
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
   async verifyPeerIdentity(host: string): Promise<void> {
@@ -148,24 +152,25 @@ class NetworkKitPostgresTlsSocket implements PostgresTlsSocket {
       await this.verifier.verify(
         await this.tls.getRemoteCertificate(), host);
     } catch (error) {
-      if (error instanceof ArkDbError) throw error;
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
   send(data: Uint8Array): Promise<void> {
     const copy = new ArrayBuffer(data.length); const bytes = new Uint8Array(copy); bytes.set(data); this.pendingCopies.add(bytes);
     const scrub = (): void => { this.pendingCopies.delete(bytes); bytes.fill(0); };
     let raw: Promise<void>;
-    try { raw = this.tls.send(copy); } catch (error) { scrub(); return Promise.reject<void>(new Error(asMessage(error as Object))); }
-    raw.then(scrub, scrub);
-    return raw;
+    try { raw = this.tls.send(copy); } catch (error) { scrub(); return Promise.reject<void>(postgresWrapPlatformFailure(error as Object)); }
+    return raw.then((): void => { scrub(); }, (error: Object): Promise<void> => {
+      scrub();
+      return Promise.reject<void>(postgresWrapPlatformFailure(error));
+    });
   }
   scrubPending(): void { for (const b of this.pendingCopies) b.fill(0); this.pendingCopies.clear(); }
   async close(): Promise<void> {
     try {
       await this.tls.close();
     } catch (error) {
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
 }
@@ -234,7 +239,9 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       this.throwIfFailed();
     } catch (error) {
       const failure = error instanceof ArkDbError ? error :
-        ArkDbError.network('PostgreSQL TCP connect failed: ' + asMessage(error));
+        postgresNetworkError(
+          'PostgreSQL TCP connect failed: ' + asMessage(error as Object),
+          postgresTransportNativeCode(error as Object));
       this.fail(failure);
       await this.closeTask;
       throw this.fatal!;
@@ -258,7 +265,8 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     } catch (error) {
       const failure = error instanceof ArkDbError ? error :
         ArkDbError.tls('PostgreSQL TLS listener handoff failed: ' +
-          asMessage(error as Object));
+          asMessage(error as Object),
+          postgresTransportNativeCode(error as Object));
       this.fail(failure);
       throw failure;
     }
@@ -289,7 +297,8 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     } catch (error) {
       const failure = error instanceof ArkDbError ? error :
         ArkDbError.tls('PostgreSQL TLS socket construction failed: ' +
-          asMessage(error as Object));
+          asMessage(error as Object),
+          postgresTransportNativeCode(error as Object));
       this.fail(failure);
       await this.closeTask;
       throw this.fatal!;
@@ -324,7 +333,8 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     } catch (error) {
       const failure = error instanceof ArkDbError ? error :
         ArkDbError.tls('PostgreSQL TLS ' + phase + ' failed: ' +
-          asMessage(error as Object));
+          asMessage(error as Object),
+          postgresTransportNativeCode(error as Object));
       this.fail(failure);
       await this.closeTask;
       throw this.fatal!;
@@ -384,12 +394,13 @@ export class PostgresTcpTransport implements PostgresByteTransport {
       if (this.fatal !== null) throw this.fatal;
     } catch (error) {
       if (sendPending) { this.pendingSends -= 1; sendPending = false; } if (counted) { this.unwindingSends -= 1; counted = false; }
+      const code = postgresTransportNativeCode(error as Object);
       const failure = error instanceof ArkDbError ? error :
         isTls ?
           ArkDbError.tls(
-            'PostgreSQL TLS send failed: ' + asMessage(error)) :
-          ArkDbError.network(
-            'PostgreSQL socket send failed: ' + asMessage(error));
+            'PostgreSQL TLS send failed: ' + asMessage(error as Object), code) :
+          postgresNetworkError(
+            'PostgreSQL socket send failed: ' + asMessage(error as Object), code);
       this.fail(failure);
       await this.closeTask;
       throw this.fatal!;
@@ -472,11 +483,12 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     this.fail(mode === 2 ? ArkDbError.tls('PostgreSQL TLS socket closed by server') : ArkDbError.network('PostgreSQL socket closed by server'), true);
   }
   private onError(error: Object, tls: boolean): void {
+    const code = postgresTransportNativeCode(error);
     this.fail(tls ?
       ArkDbError.tls(
-        'PostgreSQL TLS socket error: ' + asMessage(error)) :
-      ArkDbError.network(
-        'PostgreSQL socket error: ' + asMessage(error)));
+        'PostgreSQL TLS socket error: ' + asMessage(error), code) :
+      postgresNetworkError(
+        'PostgreSQL socket error: ' + asMessage(error), code));
   }
   private tryResolve(): void {
     const pending = this.pending;
@@ -564,8 +576,10 @@ export class PostgresTcpTransport implements PostgresByteTransport {
     try {
       current.clearListeners();
     } catch (error) {
-      cleanupFailure = ArkDbError.network(
-        'PostgreSQL socket listener cleanup failed: ' + asMessage(error));
+      cleanupFailure = postgresNetworkError(
+        'PostgreSQL socket listener cleanup failed: ' +
+        asMessage(error as Object),
+        postgresTransportNativeCode(error as Object));
     }
     if (alreadyClosed) {
       if (current.scrubPending !== undefined) current.scrubPending();
@@ -584,7 +598,9 @@ export class PostgresTcpTransport implements PostgresByteTransport {
         resolve();
       };
       const failed = (error: Object): void => {
-        finish(ArkDbError.network('PostgreSQL socket close failed: ' + asMessage(error)));
+        finish(postgresNetworkError(
+          'PostgreSQL socket close failed: ' + asMessage(error),
+          postgresTransportNativeCode(error)));
       };
       try { current.close().then((): void => finish(null), failed); } catch (error) { failed(error as Object); return; }
       if (!settled) { try { const id = this.timers.schedule((): void => { timerId = 0; finish(ArkDbError.network('PostgreSQL socket close timed out')); }, SOCKET_CLOSE_TIMEOUT_MS); if (!settled) timerId = id; } catch (error) { failed(error as Object); } }
@@ -617,7 +633,36 @@ function clearNetworkKitListeners(
   } catch (error) {
     if (firstFailure === null) firstFailure = error as Object;
   }
-  if (firstFailure !== null) throw new Error(asMessage(firstFailure));
+  if (firstFailure !== null) throw postgresWrapPlatformFailure(firstFailure);
+}
+interface CodedPlatformFailure {
+  code?: number | string;
+  nativeCode?: number | string;
+  message?: string;
+}
+class PostgresPlatformError extends Error {
+  readonly code?: number | string;
+  readonly nativeCode?: number | string;
+  constructor(message: string, code?: number | string) {
+    super(message);
+    this.name = 'PostgresPlatformError';
+    this.code = code;
+    this.nativeCode = code;
+  }
+}
+function normalizeNativeCode(
+  value: number | string | undefined): number | string | undefined {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) ? value : undefined;
+  }
+  if (typeof value === 'string') {
+    return value.length > 0 ? value : undefined;
+  }
+  return undefined;
+}
+function postgresNetworkError(message: string,
+  code?: number | string): ArkDbError {
+  return new ArkDbError(ArkDbErrorKind.Network, message, code);
 }
 function asMessage(error: Object): string {
   if (error instanceof Error && error.message.length > 0) return error.message;
@@ -625,6 +670,30 @@ function asMessage(error: Object): string {
   if (failure !== null && failure !== undefined &&
     typeof failure.message === 'string' && failure.message.length > 0) return failure.message;
   return String(error);
+}
+export function postgresTransportNativeCode(
+  error: Object | null | undefined): number | string | undefined {
+  if (error === null || error === undefined || typeof error !== 'object') {
+    return undefined;
+  }
+  if (error instanceof ArkDbError) {
+    return normalizeNativeCode(error.nativeCode);
+  }
+  if (error instanceof PostgresPlatformError) {
+    return normalizeNativeCode(error.nativeCode);
+  }
+  const coded = error as CodedPlatformFailure;
+  const nativeCode = normalizeNativeCode(coded.nativeCode);
+  if (nativeCode !== undefined) return nativeCode;
+  return normalizeNativeCode(coded.code);
+}
+export function postgresWrapPlatformFailure(error: Object): Error {
+  if (error instanceof ArkDbError || error instanceof PostgresPlatformError) {
+    return error;
+  }
+  const code = postgresTransportNativeCode(error);
+  if (error instanceof Error && code === undefined) return error;
+  return new PostgresPlatformError(asMessage(error), code);
 }
 export interface PostgresTlsFilePort {
   read(path: string, maximumBytes: number, label: string): string;
@@ -665,8 +734,7 @@ class DevicePostgresPlatformX509Cert implements PostgresPlatformX509Cert {
       }
       return extensions.getEntry(valueType, oid);
     } catch (error) {
-      if (error instanceof Error) throw error;
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
   getSubjectDistinguishedNames(type: string): Array<string> {
@@ -679,8 +747,7 @@ class DevicePostgresPlatformX509Cert implements PostgresPlatformX509Cert {
       }
       return subject.getName(type);
     } catch (error) {
-      if (error instanceof Error) throw error;
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
 }
@@ -688,8 +755,12 @@ class DevicePostgresPlatformX509CertFactory
 implements PostgresPlatformX509CertFactory {
   async create(encoded: socket.X509CertRawData):
   Promise<PostgresPlatformX509Cert> {
-    const certificate: cert.X509Cert | null | undefined =
-      await cert.createX509Cert(encoded);
+    let certificate: cert.X509Cert | null | undefined;
+    try {
+      certificate = await cert.createX509Cert(encoded);
+    } catch (error) {
+      throw postgresWrapPlatformFailure(error as Object);
+    }
     if (certificate === null || certificate === undefined ||
       typeof certificate !== 'object') {
       throw new Error('PostgreSQL TLS peer certificate is invalid');
@@ -816,7 +887,8 @@ implements PostgresTlsIdentityVerifier {
       if (error instanceof ArkDbError) throw error;
       throw ArkDbError.tls(
         'Could not verify PostgreSQL TLS server identity: ' +
-        asMessage(error as Object));
+        asMessage(error as Object),
+        postgresTransportNativeCode(error as Object));
     }
   }
 }
@@ -1232,8 +1304,7 @@ class SystemPostgresTlsFilePort implements PostgresTlsFilePort {
         encoding: 'utf-8'
       });
     } catch (error) {
-      if (error instanceof Error) throw error;
-      throw new Error(asMessage(error as Object));
+      throw postgresWrapPlatformFailure(error as Object);
     }
   }
 }
@@ -1298,7 +1369,8 @@ function readTlsText(files: PostgresTlsFilePort, path: string,
   } catch (error) {
     if (error instanceof ArkDbError) throw error;
     throw ArkDbError.tls('Could not read ' + label + ' file: ' +
-      asMessage(error as Object));
+      asMessage(error as Object),
+      postgresTransportNativeCode(error as Object));
   }
 }
 
